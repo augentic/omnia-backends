@@ -80,17 +80,23 @@ impl WasiModelCtx for Client {
                 approve_mcps: !selected.is_empty(),
             };
 
-            tracing::info!(model = spawn.model, ?format, "cursor completion");
+            log_completion(spawn.model, format);
 
             for attempt in 1..=MAX_ATTEMPTS {
                 let last = attempt == MAX_ATTEMPTS;
                 let AgentOutput { result, transcript } = spawn_agent(&prompt, &spawn).await?;
-                tracing::debug!(attempt, result = result.len(), "cursor-agent answer");
+                tracing::debug!(attempt, result_len = result.len(), "cursor-agent answer");
+                tracing::trace!(answer = %single_line(&result), "cursor-agent answer body");
 
                 match format.parse(&result) {
                     Ok(value) => match format.check(&value) {
                         Err(reason) if !last => {
-                            tracing::debug!(attempt, %reason, "repairing cursor-agent answer");
+                            tracing::debug!(
+                                attempt,
+                                %reason,
+                                answer = %single_line(&result),
+                                "repairing cursor-agent answer"
+                            );
                             prompt = append_repair(&prompt, &result, &reason, format);
                         }
                         _ => {
@@ -108,7 +114,12 @@ impl WasiModelCtx for Client {
                         );
                     }
                     Err(reason) => {
-                        tracing::debug!(attempt, %reason, "repairing cursor-agent answer");
+                        tracing::debug!(
+                            attempt,
+                            %reason,
+                            answer = %single_line(&result),
+                            "repairing cursor-agent answer"
+                        );
                         prompt = append_repair(&prompt, &result, &reason, format);
                     }
                 }
@@ -288,6 +299,39 @@ fn append_repair(prompt: &str, answer: &str, reason: &str, format: &Format) -> S
     format!("{prompt}\n\nYour previous answer was:\n{answer}\n\n{}", format.repair(reason))
 }
 
+/// One-line INFO for the completion, with schema JSON on a paired DEBUG line.
+fn log_completion(model: Option<&str>, format: &Format) {
+    match format {
+        Format::Text => {
+            tracing::info!(model, format = "text", "cursor completion");
+        }
+        Format::Json => {
+            tracing::info!(model, format = "json", "cursor completion");
+        }
+        Format::Schema(spec) => {
+            tracing::info!(
+                model,
+                format = "schema",
+                schema_name = %spec.name,
+                "cursor completion"
+            );
+            tracing::debug!(
+                schema_name = %spec.name,
+                schema = %single_line(&spec.schema),
+                "cursor completion schema"
+            );
+        }
+    }
+}
+
+/// Compact JSON when parseable; otherwise collapse whitespace so a log field stays one line.
+fn single_line(text: &str) -> String {
+    serde_json::from_str::<Value>(text.trim()).map_or_else(
+        |_| text.split_whitespace().collect::<Vec<_>>().join(" "),
+        |value| value.to_string(),
+    )
+}
+
 /// The subset of `cursor-agent` stream events the backend consumes. `result`
 /// and `tool_call` drive the answer; `assistant` and `thinking` are parsed
 /// only to be logged. Everything else parses to `Other` without building a
@@ -362,7 +406,11 @@ impl OutputParser {
         let event = match serde_json::from_str::<Event>(line) {
             Ok(event) => event,
             Err(error) => {
-                tracing::debug!(%error, line, "skipping unparsable cursor-agent event");
+                tracing::debug!(
+                    %error,
+                    line = %single_line(line),
+                    "skipping unparsable cursor-agent event"
+                );
                 return Ok(());
             }
         };
@@ -393,17 +441,17 @@ impl OutputParser {
             Event::Assistant { message } => {
                 let text = message.as_ref().map(AssistantMessage::text).unwrap_or_default();
                 tracing::debug!(text_len = text.len(), "cursor-agent assistant message");
-                tracing::trace!(%text, "cursor-agent assistant text");
+                tracing::trace!(text = %single_line(&text), "cursor-agent assistant text");
             }
             Event::Thinking { subtype, text } => {
                 tracing::trace!(
                     ?subtype,
-                    text = text.as_deref().unwrap_or_default(),
+                    text = %single_line(text.as_deref().unwrap_or_default()),
                     "cursor-agent thinking"
                 );
             }
             Event::Other => {
-                tracing::trace!(line, "cursor-agent other event");
+                tracing::trace!(line = %single_line(line), "cursor-agent other event");
             }
         }
         Ok(())
@@ -503,8 +551,19 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{AgentOutput, MAX_INLINE_SIZE, OutputParser, into_prompt_file};
+    use super::{AgentOutput, MAX_INLINE_SIZE, OutputParser, into_prompt_file, single_line};
     use crate::Client;
+
+    #[test]
+    fn single_line_compacts_json() {
+        let pretty = "{\n  \"verdict\": \"pass\"\n}";
+        assert_eq!(single_line(pretty), r#"{"verdict":"pass"}"#);
+    }
+
+    #[test]
+    fn single_line_collapses_non_json() {
+        assert_eq!(single_line("hello\n  world"), "hello world");
+    }
 
     fn parse_output(stdout: &[u8]) -> anyhow::Result<AgentOutput> {
         let text = std::str::from_utf8(stdout).expect("test payloads are UTF-8");

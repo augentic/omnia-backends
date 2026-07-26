@@ -326,10 +326,10 @@ fn log_completion(model: Option<&str>, format: &Format) {
 
 /// Compact JSON when parseable; otherwise collapse whitespace so a log field stays one line.
 fn single_line(text: &str) -> String {
-    match serde_json::from_str::<Value>(text.trim()) {
-        Ok(value) => value.to_string(),
-        Err(_) => text.split_whitespace().collect::<Vec<_>>().join(" "),
-    }
+    serde_json::from_str::<Value>(text.trim()).map_or_else(
+        |_| text.split_whitespace().collect::<Vec<_>>().join(" "),
+        |value| value.to_string(),
+    )
 }
 
 /// The subset of `cursor-agent` stream events the backend consumes. `result`

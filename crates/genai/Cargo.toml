@@ -21,9 +21,7 @@ all-features = true
 [dependencies]
 anyhow.workspace = true
 futures.workspace = true
-genai = "=0.6.0-beta.5"
-# Pinned to the local omnia 0.35.0 line via the workspace `[patch.crates-io]`
-# override (the host→guest `resolve` API is unreleased on crates.io).
+genai = "0.6.5"
 omnia.workspace = true
 omnia-wasi-model.workspace = true
 serde_json.workspace = true

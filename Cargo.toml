@@ -90,31 +90,31 @@ wrpc-transport = "0.29.0"
 wrpc-wasmtime = "0.1.0"
 
 [patch.crates-io]
-# omnia = { git = "https://github.com/augentic/omnia.git" }
-# omnia-guest = { git = "https://github.com/augentic/omnia.git" }
-# omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia.git" }
-# omnia-wasi-docstore = { git = "https://github.com/augentic/omnia.git" }
-# omnia-wasi-http = { git = "https://github.com/augentic/omnia.git" }
-# omnia-wasi-identity = { git = "https://github.com/augentic/omnia.git" }
-# omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia.git" }
-# omnia-wasi-messaging = { git = "https://github.com/augentic/omnia.git" }
-# omnia-wasi-model = { git = "https://github.com/augentic/omnia.git" }
-# omnia-wasi-otel = { git = "https://github.com/augentic/omnia.git" }
-# omnia-wasi-sql = { git = "https://github.com/augentic/omnia.git" }
-# omnia-wasi-vault = { git = "https://github.com/augentic/omnia.git" }
+omnia = { git = "https://github.com/augentic/omnia.git" }
+omnia-guest = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-docstore = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-http = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-identity = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-messaging = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-model = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-otel = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-sql = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-vault = { git = "https://github.com/augentic/omnia.git" }
 
-omnia = { path = "../omnia/crates/omnia" }
-omnia-guest = { path = "../omnia/crates/omnia-guest" }
-omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
-omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
-omnia-wasi-http = { path = "../omnia/crates/wasi-http" }
-omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }
-omnia-wasi-keyvalue = { path = "../omnia/crates/wasi-keyvalue" }
-omnia-wasi-messaging = { path = "../omnia/crates/wasi-messaging" }
-omnia-wasi-model = { path = "../omnia/crates/wasi-model" }
-omnia-wasi-otel = { path = "../omnia/crates/wasi-otel" }
-omnia-wasi-sql = { path = "../omnia/crates/wasi-sql" }
-omnia-wasi-vault = { path = "../omnia/crates/wasi-vault" }
+# omnia = { path = "../omnia/crates/omnia" }
+# omnia-guest = { path = "../omnia/crates/omnia-guest" }
+# omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
+# omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
+# omnia-wasi-http = { path = "../omnia/crates/wasi-http" }
+# omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }
+# omnia-wasi-keyvalue = { path = "../omnia/crates/wasi-keyvalue" }
+# omnia-wasi-messaging = { path = "../omnia/crates/wasi-messaging" }
+# omnia-wasi-model = { path = "../omnia/crates/wasi-model" }
+# omnia-wasi-otel = { path = "../omnia/crates/wasi-otel" }
+# omnia-wasi-sql = { path = "../omnia/crates/wasi-sql" }
+# omnia-wasi-vault = { path = "../omnia/crates/wasi-vault" }
 
 # Pin wrpc to a rev on wasmtime 47 (matches omnia's lockfile).
 wrpc-transport = { git = "https://github.com/bytecodealliance/wrpc" }

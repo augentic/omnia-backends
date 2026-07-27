@@ -1,5 +1,5 @@
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use omnia_wasi_model::{
-    Answer, Format, FutureResult, Request, Role, Tool, ToolHost, ToolTurn, Transcript, WasiModelCtx,
+    Answer, Format, FutureResult, Mcp, Request, ToolHost, ToolTurn, Transcript, WasiModelCtx,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -20,13 +20,6 @@ use crate::{CURSOR_AGENT_BIN, Client, mcp};
 
 const MAX_ATTEMPTS: usize = 2;
 const MAX_INLINE_SIZE: usize = 128_000;
-
-// A prompt-granted MCP server and the endpoint URL the guest supplied for it.
-struct McpServer {
-    name: String,
-    url: String,
-    tools: Vec<String>,
-}
 
 struct SpawnOptions<'a> {
     model: Option<&'a str>,
@@ -50,12 +43,12 @@ impl WasiModelCtx for Client {
 
         Box::pin(async move {
             let format = &request.format;
-            let mut prompt = build_prompt(&request);
+            let mut prompt = request.to_string();
 
             let Some(workspace) = workspace else {
                 bail!("no local tree on this node");
             };
-            std::fs::create_dir_all(&workspace)
+            fs::create_dir_all(&workspace)
                 .with_context(|| format!("creating {}", workspace.display()))?;
             let workspace = workspace
                 .canonicalize()
@@ -63,13 +56,13 @@ impl WasiModelCtx for Client {
 
             // Per-prompt MCP grants carry their own endpoint URL.
             // No grant means no MCP wiring (MCP is opt-in per completion).
-            let selected = select_mcp_servers(&request);
-            let _mcp_guard = if selected.is_empty() {
+            let mcp_servers = request.mcp_servers();
+            let mcp_guard = if mcp_servers.is_empty() {
                 None
             } else {
-                prompt = format!("{}\n\n{prompt}", mcp_hint(&selected));
+                prompt = format!("{}\n\n{prompt}", mcp_hint(&mcp_servers));
                 let map: BTreeMap<String, String> =
-                    selected.iter().map(|s| (s.name.clone(), s.url.clone())).collect();
+                    mcp_servers.iter().map(|s| (s.name.clone(), s.url.clone())).collect();
                 Some(mcp::McpGuard::install(&workspace, &map)?)
             };
 
@@ -77,7 +70,7 @@ impl WasiModelCtx for Client {
                 model: request.model.as_deref(),
                 workspace: &workspace,
                 timeout,
-                approve_mcps: !selected.is_empty(),
+                approve_mcps: mcp_guard.is_some(),
             };
 
             log_completion(spawn.model, format);
@@ -85,22 +78,19 @@ impl WasiModelCtx for Client {
             for attempt in 1..=MAX_ATTEMPTS {
                 let last = attempt == MAX_ATTEMPTS;
                 let AgentOutput { result, transcript } = spawn_agent(&prompt, &spawn).await?;
-                tracing::debug!(attempt, result_len = result.len(), "cursor-agent answer");
+                tracing::debug!(
+                    attempt,
+                    result_len = result.len(),
+                    tool_calls = transcript.as_ref().map_or(0, |t| t.turns.len()),
+                    "cursor-agent answer"
+                );
                 tracing::trace!(answer = %single_line(&result), "cursor-agent answer body");
 
-                match format.parse(&result) {
+                let reason = match format.parse(&result) {
                     Ok(value) => match format.check(&value) {
-                        Err(reason) if !last => {
-                            tracing::debug!(
-                                attempt,
-                                %reason,
-                                answer = %single_line(&result),
-                                "repairing cursor-agent answer"
-                            );
-                            prompt = append_repair(&prompt, &result, &reason, format);
-                        }
+                        Err(reason) if !last => reason,
+                        // the wrong shape is better than no answer on the last attempt
                         _ => {
-                            // the wrong shape is better than no answer on the last attempt
                             return Ok(Answer {
                                 value,
                                 usage: None,
@@ -113,16 +103,16 @@ impl WasiModelCtx for Client {
                             "cursor-agent did not return an answer after {MAX_ATTEMPTS} attempts: {reason}"
                         );
                     }
-                    Err(reason) => {
-                        tracing::debug!(
-                            attempt,
-                            %reason,
-                            answer = %single_line(&result),
-                            "repairing cursor-agent answer"
-                        );
-                        prompt = append_repair(&prompt, &result, &reason, format);
-                    }
-                }
+                    Err(reason) => reason,
+                };
+
+                tracing::debug!(
+                    attempt,
+                    %reason,
+                    answer = %single_line(&result),
+                    "repairing cursor-agent answer"
+                );
+                prompt = append_repair(&prompt, &result, &reason, format);
             }
 
             bail!("cursor-agent did not return an answer after {MAX_ATTEMPTS} attempts");
@@ -130,41 +120,56 @@ impl WasiModelCtx for Client {
     }
 }
 
-fn build_prompt(request: &Request) -> String {
-    let mut parts: Vec<Cow<'_, str>> = Vec::new();
-    if let Some(system) = &request.system {
-        parts.push(Cow::Borrowed(system.as_str()));
-    }
-    for message in &request.messages {
-        parts.push(match message.role {
-            Role::User => Cow::Borrowed(message.content.as_str()),
-            Role::System => Cow::Owned(format!("[system]\n{}", message.content)),
-            Role::Assistant => Cow::Owned(format!("[assistant]\n{}", message.content)),
-        });
-    }
-    parts.push(Cow::Owned(request.format.instruction()));
-    parts.join("\n\n")
+/// The prompt in CLI-argument form: inline text, or a pointer to a spilled
+/// file that lives exactly as long as this value.
+enum Prompt<'a> {
+    Inline(&'a str),
+    Spilled { arg: String, _guard: PromptFile },
 }
 
-// Collect the prompt's MCP grants, each carrying its own endpoint URL.
-fn select_mcp_servers(request: &Request) -> Vec<McpServer> {
-    request
-        .tools
-        .iter()
-        .filter_map(|tool| match tool {
-            Tool::Mcp(grant) => Some(McpServer {
-                name: grant.name.clone(),
-                url: grant.url.clone(),
-                tools: grant.tools.clone(),
-            }),
-            Tool::Function(_) => None,
+impl Prompt<'_> {
+    fn as_arg(&self) -> &str {
+        match self {
+            Self::Inline(text) => text,
+            Self::Spilled { arg, .. } => arg,
+        }
+    }
+}
+
+impl<'a> TryFrom<(&'a str, &Path)> for Prompt<'a> {
+    type Error = anyhow::Error;
+
+    fn try_from((prompt, workspace): (&'a str, &Path)) -> Result<Self> {
+        if prompt.len() <= MAX_INLINE_SIZE {
+            return Ok(Self::Inline(prompt));
+        }
+
+        let cursor_dir = workspace.join(".cursor");
+        fs::create_dir_all(&cursor_dir)
+            .with_context(|| format!("creating {}", cursor_dir.display()))?;
+
+        // The name carries the pid: concurrent host processes may lend the same workspace.
+        let id = PROMPT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = cursor_dir.join(format!("omnia-prompt-{}-{id}.txt", std::process::id()));
+        fs::write(&path, prompt)
+            .with_context(|| format!("writing prompt file {}", path.display()))?;
+
+        let arg = format!(
+            "Follow every instruction in the file at `{}`. When you are done, reply exactly as \
+             that file instructs.",
+            path.display()
+        );
+
+        Ok(Self::Spilled {
+            arg,
+            _guard: PromptFile { path },
         })
-        .collect()
+    }
 }
 
 // A natural-language hint naming the granted MCP servers and any tool allowlist,
 // prepended so the spawned agent prefers them over assumptions.
-fn mcp_hint(servers: &[McpServer]) -> String {
+fn mcp_hint(servers: &[&Mcp]) -> String {
     let lines: Vec<String> = servers
         .iter()
         .map(|server| {
@@ -183,22 +188,10 @@ fn mcp_hint(servers: &[McpServer]) -> String {
     )
 }
 
-#[instrument(
-    skip(prompt, options),
-    fields(
-        model = options.model,
-        workspace = %options.workspace.display(),
-        approve_mcps = options.approve_mcps,
-    )
-)]
+#[instrument(skip(prompt, options), fields(model = options.model))]
 async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOutput> {
-    // if the prompt is too large, spill it to a file and pass the file path to the agent
-    let (prompt, _file): (Cow<'_, str>, Option<PromptFile>) = if prompt.len() <= MAX_INLINE_SIZE {
-        (Cow::Borrowed(prompt), None)
-    } else {
-        let (arg, file) = into_prompt_file(prompt, options.workspace)?;
-        (Cow::Owned(arg), Some(file))
-    };
+    // oversized prompts spill to a file that outlives the spawn
+    let prompt = Prompt::try_from((prompt, options.workspace))?;
 
     let mut cmd = Command::new(CURSOR_AGENT_BIN);
     cmd.kill_on_drop(true)
@@ -218,7 +211,7 @@ async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOu
     if let Some(model) = options.model {
         cmd.arg("--model").arg(model);
     }
-    cmd.arg(prompt.as_ref());
+    cmd.arg(prompt.as_arg());
 
     let mut child = cmd.spawn().with_context(|| format!("spawning `{CURSOR_AGENT_BIN}`"))?;
     let stdout = child.stdout.take().context("child stdout is piped")?;
@@ -268,38 +261,16 @@ struct PromptFile {
 
 impl Drop for PromptFile {
     fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_file(&self.path) {
+        if let Err(error) = fs::remove_file(&self.path) {
             tracing::warn!(path = %self.path.display(), %error, "failed to remove prompt file");
         }
     }
 }
-
-// Write oversized prompts to the workspace and return a short CLI argument.
-fn into_prompt_file(prompt: &str, workspace: &Path) -> Result<(String, PromptFile)> {
-    let cursor_dir = workspace.join(".cursor");
-    std::fs::create_dir_all(&cursor_dir)
-        .with_context(|| format!("creating {}", cursor_dir.display()))?;
-
-    // The name carries the pid: concurrent host processes may lend the same workspace.
-    let id = PROMPT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = cursor_dir.join(format!("omnia-prompt-{}-{id}.txt", std::process::id()));
-    std::fs::write(&path, prompt)
-        .with_context(|| format!("writing prompt file {}", path.display()))?;
-
-    let arg = format!(
-        "Follow every instruction in the file at `{}`. When you are done, reply exactly as that \
-         file instructs.",
-        path.display()
-    );
-
-    Ok((arg, PromptFile { path }))
-}
-
 fn append_repair(prompt: &str, answer: &str, reason: &str, format: &Format) -> String {
     format!("{prompt}\n\nYour previous answer was:\n{answer}\n\n{}", format.repair(reason))
 }
 
-/// One-line INFO for the completion, with schema JSON on a paired DEBUG line.
+/// One-line INFO for the completion, with schema JSON on a paired TRACE line.
 fn log_completion(model: Option<&str>, format: &Format) {
     match format {
         Format::Text => {
@@ -315,7 +286,7 @@ fn log_completion(model: Option<&str>, format: &Format) {
                 schema_name = %spec.name,
                 "cursor completion"
             );
-            tracing::debug!(
+            tracing::trace!(
                 schema_name = %spec.name,
                 schema = %single_line(&spec.schema),
                 "cursor completion schema"
@@ -424,10 +395,6 @@ impl OutputParser {
                     );
                 }
                 if result.is_some() {
-                    tracing::debug!(
-                        result_len = result.as_deref().map_or(0, str::len),
-                        "cursor-agent result"
-                    );
                     self.result = result;
                 }
             }
@@ -440,8 +407,11 @@ impl OutputParser {
             }
             Event::Assistant { message } => {
                 let text = message.as_ref().map(AssistantMessage::text).unwrap_or_default();
-                tracing::debug!(text_len = text.len(), "cursor-agent assistant message");
-                tracing::trace!(text = %single_line(&text), "cursor-agent assistant text");
+                tracing::trace!(
+                    text_len = text.len(),
+                    text = %single_line(&text),
+                    "cursor-agent assistant text"
+                );
             }
             Event::Thinking { subtype, text } => {
                 tracing::trace!(
@@ -463,7 +433,7 @@ impl OutputParser {
                 if let (Some(call_id), Some(identity)) =
                     (call_id, tool_call.as_ref().and_then(tool_call_identity))
                 {
-                    tracing::debug!(subtype, %call_id, tool = %identity.0, "cursor-agent tool call");
+                    tracing::trace!(subtype, %call_id, tool = %identity.0, "cursor-agent tool call");
                     self.pending_tools.insert(call_id, identity);
                 }
             }
@@ -473,7 +443,7 @@ impl OutputParser {
                         tool_call_identity(&tool_call)
                             .unwrap_or_else(|| ("unknown".to_owned(), Value::Null))
                     });
-                    tracing::debug!(subtype, %call_id, %tool, "cursor-agent tool call");
+                    tracing::trace!(subtype, %call_id, %tool, "cursor-agent tool call");
 
                     let result = tool_call.as_object().map_or_else(
                         || Value::Null,
@@ -542,6 +512,7 @@ fn tool_call_identity(tool_call: &Value) -> Option<(String, Value)> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -551,7 +522,7 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{AgentOutput, MAX_INLINE_SIZE, OutputParser, into_prompt_file, single_line};
+    use super::{AgentOutput, MAX_INLINE_SIZE, OutputParser, Prompt, single_line};
     use crate::Client;
 
     #[test]
@@ -654,17 +625,20 @@ mod tests {
     fn spill_large_prompt() {
         let workspace =
             std::env::temp_dir().join(format!("omnia-cursor-prompt-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&workspace);
-        std::fs::create_dir_all(&workspace).expect("temp workspace");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).expect("temp workspace");
 
         let large = "x".repeat(MAX_INLINE_SIZE + 1);
-        let (arg, spill) = into_prompt_file(&large, &workspace).expect("spill prompt");
+        let prompt = Prompt::try_from((large.as_str(), workspace.as_path())).expect("spill prompt");
+        let Prompt::Spilled { arg, _guard: spill } = prompt else {
+            panic!("an oversized prompt must spill to a file");
+        };
         assert!(arg.contains("omnia-prompt-"), "arg references prompt file: {arg}");
         assert!(spill.path.exists(), "the prompt file is on disk while the guard lives");
         let path = spill.path.clone();
         drop(spill);
         assert!(!path.exists(), "the prompt file is removed on drop");
-        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&workspace);
     }
 
     #[derive(Debug)]

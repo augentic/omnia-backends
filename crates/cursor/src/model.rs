@@ -34,8 +34,6 @@ struct AgentOutput {
     transcript: Option<Transcript>,
 }
 
-static PROMPT_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let workspace = tool_host.local_path().map(Path::to_path_buf);
@@ -127,6 +125,19 @@ enum Prompt<'a> {
     Spilled { arg: String, _guard: PromptFile },
 }
 
+// Removes a spill-to-disk prompt file when the spawn finishes.
+struct PromptFile {
+    path: PathBuf,
+}
+
+impl Drop for PromptFile {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.path) {
+            tracing::warn!(path = %self.path.display(), %error, "failed to remove prompt file");
+        }
+    }
+}
+
 impl Prompt<'_> {
     fn as_arg(&self) -> &str {
         match self {
@@ -135,6 +146,8 @@ impl Prompt<'_> {
         }
     }
 }
+
+static PROMPT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl<'a> TryFrom<(&'a str, &Path)> for Prompt<'a> {
     type Error = anyhow::Error;
@@ -198,12 +211,7 @@ async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOu
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .arg("--print")
-        .arg("--force")
-        .arg("--trust")
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("--workspace")
+        .args(["--print", "--force", "--trust", "--output-format", "stream-json", "--workspace"])
         .arg(options.workspace);
     if options.approve_mcps {
         cmd.arg("--approve-mcps");
@@ -254,18 +262,6 @@ async fn drain(mut stream: impl AsyncRead + Unpin) -> Vec<u8> {
     buffer
 }
 
-// Removes a spill-to-disk prompt file when the spawn finishes.
-struct PromptFile {
-    path: PathBuf,
-}
-
-impl Drop for PromptFile {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.path) {
-            tracing::warn!(path = %self.path.display(), %error, "failed to remove prompt file");
-        }
-    }
-}
 fn append_repair(prompt: &str, answer: &str, reason: &str, format: &Format) -> String {
     format!("{prompt}\n\nYour previous answer was:\n{answer}\n\n{}", format.repair(reason))
 }
@@ -430,11 +426,11 @@ impl OutputParser {
     fn tool_call(&mut self, subtype: &str, call_id: Option<String>, tool_call: Option<Value>) {
         match subtype {
             "started" => {
-                if let (Some(call_id), Some(identity)) =
+                if let (Some(call_id), Some((tool, args))) =
                     (call_id, tool_call.as_ref().and_then(tool_call_identity))
                 {
-                    tracing::trace!(subtype, %call_id, tool = %identity.0, "cursor-agent tool call");
-                    self.pending_tools.insert(call_id, identity);
+                    tracing::trace!(subtype, %call_id, %tool, "cursor-agent tool call");
+                    self.pending_tools.insert(call_id, (tool, args));
                 }
             }
             "completed" => {
@@ -445,12 +441,10 @@ impl OutputParser {
                     });
                     tracing::trace!(subtype, %call_id, %tool, "cursor-agent tool call");
 
-                    let result = tool_call.as_object().map_or_else(
-                        || Value::Null,
-                        |map| {
-                            map.values().find_map(|v| v.get("result").cloned()).unwrap_or_default()
-                        },
-                    );
+                    let result = tool_call
+                        .as_object()
+                        .and_then(|map| map.values().find_map(|v| v.get("result").cloned()))
+                        .unwrap_or_default();
 
                     self.turns.push(ToolTurn { tool, args, result });
                 }
@@ -496,10 +490,9 @@ impl OutputParser {
 fn tool_call_identity(tool_call: &Value) -> Option<(String, Value)> {
     let object = tool_call.as_object()?;
     for (key, value) in object {
-        if key.ends_with("ToolCall") {
-            let tool = key.strip_suffix("ToolCall")?.to_owned();
+        if let Some(tool) = key.strip_suffix("ToolCall") {
             let args = value.get("args").cloned().unwrap_or_else(|| value.clone());
-            return Some((tool, args));
+            return Some((tool.to_owned(), args));
         }
         if key == "function" {
             let name = value.get("name").and_then(Value::as_str).unwrap_or("function").to_owned();

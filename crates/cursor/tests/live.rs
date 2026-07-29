@@ -68,7 +68,9 @@ async fn live_cursor_completes() -> Result<()> {
 
     let client = Client::connect_with(ConnectOptions {
         timeout_secs: 120,
-    }).await?;
+        model: None,
+    })
+    .await?;
 
     let answer: Answer =
         client.complete(verdict_request(), local_path_tool_host(workspace)).await.map_err(|e| {
@@ -134,7 +136,11 @@ async fn live_cursor_uses_mcp() -> Result<()> {
         std::env::temp_dir().join(format!("omnia-cursor-mcp-live-{}", std::process::id()));
     std::fs::create_dir_all(&workspace)?;
 
-    let client = Client::connect_with(ConnectOptions { timeout_secs: 120 }).await?;
+    let client = Client::connect_with(ConnectOptions {
+        timeout_secs: 120,
+        model: None,
+    })
+    .await?;
 
     let answer: Answer = client
         .complete(

@@ -7,22 +7,21 @@ mod model;
 use std::fmt::Debug;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use omnia::Backend;
-use tokio::process::Command;
 use tracing::instrument;
-
-const CURSOR_BIN: &str = "cursor-agent";
 
 /// Spawned, filesystem-capable `cursor-agent` model backend.
 #[derive(Clone)]
 pub struct Client {
     timeout: Duration,
+    /// Default model id when a request leaves `model` unset.
+    model: Option<String>,
 }
 
 impl Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CursorClient").finish()
+        f.debug_struct("Client").finish_non_exhaustive()
     }
 }
 
@@ -31,22 +30,11 @@ impl Backend for Client {
 
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        let output = Command::new(CURSOR_BIN)
-            .arg("--version")
-            .output()
-            .await
-            .context("cursor-agent not found on PATH")?;
-
-        if !output.status.success() {
-            bail!(
-                "`{CURSOR_BIN} --version` failed ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
+        model::check_cursor().await?;
 
         Ok(Self {
             timeout: Duration::from_secs(options.timeout_secs),
+            model: options.model.filter(|id| !id.trim().is_empty()),
         })
     }
 }
@@ -66,6 +54,10 @@ mod config {
         /// processes are killed on timeout.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
         pub timeout_secs: u64,
+        /// Default model id when a request leaves `model` unset; omitted means
+        /// `cursor-agent` chooses.
+        #[env(from = "CURSOR_MODEL")]
+        pub model: Option<String>,
     }
 }
 pub use config::ConnectOptions;

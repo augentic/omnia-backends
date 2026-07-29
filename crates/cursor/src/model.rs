@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use omnia_wasi_model::{
     Answer, Format, FutureResult, Mcp, Request, ToolHost, ToolTurn, Transcript, WasiModelCtx,
 };
@@ -16,10 +16,22 @@ use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, BufReader};
 use tokio::process::Command;
 use tracing::instrument;
 
-use crate::{CURSOR_BIN, Client, mcp};
+use crate::{Client, mcp};
 
-const MAX_ATTEMPTS: usize = 2;
-const MAX_INLINE_SIZE: usize = 128_000;
+const CURSOR_BIN: &str = "cursor-agent";
+const PROMPT_PREVIEW_CHARS: usize = 500;
+const TEXT_PREVIEW_CHARS: usize = 300;
+
+/// Verify `cursor-agent` is on `PATH` and responds to `--version`.
+pub async fn check_cursor() -> Result<()> {
+    let status = Command::new(CURSOR_BIN)
+        .arg("--version")
+        .status()
+        .await
+        .context("cursor-agent not found")?;
+    ensure!(status.success(), "`{CURSOR_BIN} --version` failed ({status})");
+    Ok(())
+}
 
 struct SpawnOptions<'a> {
     model: Option<&'a str>,
@@ -38,6 +50,7 @@ impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let workspace = tool_host.local_path().map(Path::to_path_buf);
         let timeout = self.timeout;
+        let default_model = self.model.clone();
 
         Box::pin(async move {
             let format = &request.format;
@@ -55,6 +68,7 @@ impl WasiModelCtx for Client {
             // Per-prompt MCP grants carry their own endpoint URL.
             // No grant means no MCP wiring (MCP is opt-in per completion).
             let mcp_servers = request.mcp_servers();
+            let mcp_names: Vec<&str> = mcp_servers.iter().map(|s| s.name.as_str()).collect();
             let mcp_guard = if mcp_servers.is_empty() {
                 None
             } else {
@@ -64,65 +78,99 @@ impl WasiModelCtx for Client {
                 Some(mcp::McpGuard::install(&workspace, &map)?)
             };
 
+            // Guest-supplied request.model wins; else CURSOR_MODEL; else
+            // cursor-agent chooses.
             let spawn = SpawnOptions {
-                model: request.model.as_deref(),
+                model: request.model.as_deref().or(default_model.as_deref()),
                 workspace: &workspace,
                 timeout,
                 approve_mcps: mcp_guard.is_some(),
             };
 
-            log_completion(spawn.model, format);
+            log_completion(
+                spawn.model,
+                format,
+                prompt.len(),
+                &mcp_names,
+                request.grants.references.is_some(),
+            );
 
-            for attempt in 1..=MAX_ATTEMPTS {
-                let last = attempt == MAX_ATTEMPTS;
-                let AgentOutput { result, transcript } = spawn_agent(&prompt, &spawn).await?;
-                tracing::debug!(
-                    attempt,
-                    result_len = result.len(),
-                    tool_calls = transcript.as_ref().map_or(0, |t| t.turns.len()),
-                    "cursor-agent answer"
-                );
-                tracing::trace!(answer = %single_line(&result), "cursor-agent answer body");
-
-                let reason = match format.parse(&result) {
-                    Ok(value) => match format.check(&value) {
-                        Err(reason) if !last => reason,
-                        // the wrong shape is better than no answer on the last attempt
-                        _ => {
-                            return Ok(Answer {
-                                value,
-                                usage: None,
-                                transcript,
-                            });
-                        }
-                    },
-                    Err(reason) if last => {
-                        bail!(
-                            "cursor-agent did not return an answer after {MAX_ATTEMPTS} attempts: {reason}"
-                        );
-                    }
-                    Err(reason) => reason,
-                };
-
-                tracing::debug!(
-                    attempt,
-                    %reason,
-                    answer = %single_line(&result),
-                    "repairing cursor-agent answer"
-                );
-                prompt = append_repair(&prompt, &result, &reason, format);
+            let AgentOutput { result, transcript } = spawn_agent(&prompt, &spawn).await?;
+            log_attempt(1, &result, transcript.as_ref());
+            match take_answer(format, result, transcript, false) {
+                Outcome::Done(answer) => return Ok(answer),
+                Outcome::Repair { result, reason } => {
+                    tracing::debug!(attempt = 1, %reason, "repairing cursor-agent answer");
+                    prompt = append_repair(&prompt, &result, &reason, format);
+                }
             }
 
-            bail!("cursor-agent did not return an answer after {MAX_ATTEMPTS} attempts");
+            let AgentOutput { result, transcript } = spawn_agent(&prompt, &spawn).await?;
+            log_attempt(2, &result, transcript.as_ref());
+            match take_answer(format, result, transcript, true) {
+                Outcome::Done(answer) => Ok(answer),
+                Outcome::Repair { reason, .. } => {
+                    bail!("cursor-agent did not return an answer after 2 attempts: {reason}");
+                }
+            }
         })
     }
 }
 
-/// The prompt in CLI-argument form: inline text, or a pointer to a spilled
-/// file that lives exactly as long as this value.
-enum Prompt<'a> {
-    Inline(&'a str),
-    Spilled { arg: String, _guard: PromptFile },
+enum Outcome {
+    Done(Answer),
+    Repair { result: String, reason: String },
+}
+
+fn take_answer(
+    format: &Format, result: String, transcript: Option<Transcript>, last: bool,
+) -> Outcome {
+    match format.parse(&result) {
+        Ok(value) => match format.check(&value) {
+            Err(reason) if !last => Outcome::Repair { result, reason },
+            // Wrong shape is better than no answer on the last attempt.
+            _ => Outcome::Done(Answer {
+                value,
+                usage: None,
+                transcript,
+            }),
+        },
+        Err(reason) => Outcome::Repair { result, reason },
+    }
+}
+
+fn log_attempt(attempt: u32, result: &str, transcript: Option<&Transcript>) {
+    let (interesting_tools, noisy_tools) = tool_counts(transcript);
+    tracing::debug!(
+        attempt,
+        result_len = result.len(),
+        interesting_tools,
+        noisy_tools,
+        "cursor-agent answer"
+    );
+}
+
+fn tool_counts(transcript: Option<&Transcript>) -> (usize, usize) {
+    let Some(transcript) = transcript else {
+        return (0, 0);
+    };
+    let mut interesting = 0;
+    let mut noisy = 0;
+    for turn in &transcript.turns {
+        if is_noisy_tool(&turn.tool) {
+            noisy += 1;
+        } else {
+            interesting += 1;
+        }
+    }
+    (interesting, noisy)
+}
+
+/// Spilled prompt file: CLI arg points at a path that lives as long as this value.
+struct Prompt {
+    arg: String,
+    path: PathBuf,
+    _guard: PromptFile,
 }
 
 // Removes a spill-to-disk prompt file when the spawn finishes.
@@ -138,25 +186,10 @@ impl Drop for PromptFile {
     }
 }
 
-impl Prompt<'_> {
-    fn as_arg(&self) -> &str {
-        match self {
-            Self::Inline(text) => text,
-            Self::Spilled { arg, .. } => arg,
-        }
-    }
-}
-
 static PROMPT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-impl<'a> TryFrom<(&'a str, &Path)> for Prompt<'a> {
-    type Error = anyhow::Error;
-
-    fn try_from((prompt, workspace): (&'a str, &Path)) -> Result<Self> {
-        if prompt.len() <= MAX_INLINE_SIZE {
-            return Ok(Self::Inline(prompt));
-        }
-
+impl Prompt {
+    fn spill(prompt: &str, workspace: &Path) -> Result<Self> {
         let cursor_dir = workspace.join(".cursor");
         fs::create_dir_all(&cursor_dir)
             .with_context(|| format!("creating {}", cursor_dir.display()))?;
@@ -173,8 +206,9 @@ impl<'a> TryFrom<(&'a str, &Path)> for Prompt<'a> {
             path.display()
         );
 
-        Ok(Self::Spilled {
+        Ok(Self {
             arg,
+            path: path.clone(),
             _guard: PromptFile { path },
         })
     }
@@ -203,8 +237,13 @@ fn mcp_hint(servers: &[&Mcp]) -> String {
 
 #[instrument(skip(prompt, options), fields(model = options.model))]
 async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOutput> {
-    // oversized prompts spill to a file that outlives the spawn
-    let prompt = Prompt::try_from((prompt, options.workspace))?;
+    let spilled = Prompt::spill(prompt, options.workspace)?;
+    tracing::debug!(
+        prompt_path = %spilled.path.display(),
+        prompt_len = prompt.len(),
+        preview = %truncate(prompt, PROMPT_PREVIEW_CHARS),
+        "cursor-agent prompt"
+    );
 
     let mut cmd = Command::new(CURSOR_BIN);
     cmd.kill_on_drop(true)
@@ -219,7 +258,7 @@ async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOu
     if let Some(model) = options.model {
         cmd.arg("--model").arg(model);
     }
-    cmd.arg(prompt.as_arg());
+    cmd.arg(&spilled.arg);
 
     let mut child = cmd.spawn().with_context(|| format!("spawning `{CURSOR_BIN}`"))?;
     let stdout = child.stdout.take().context("child stdout is piped")?;
@@ -265,25 +304,45 @@ fn append_repair(prompt: &str, answer: &str, reason: &str, format: &Format) -> S
     format!("{prompt}\n\nYour previous answer was:\n{answer}\n\n{}", format.repair(reason))
 }
 
-/// One-line INFO for the completion, with schema JSON on a paired TRACE line.
-fn log_completion(model: Option<&str>, format: &Format) {
+/// One-line INFO for the completion start.
+fn log_completion(
+    model: Option<&str>, format: &Format, prompt_len: usize, mcp_servers: &[&str],
+    has_references: bool,
+) {
     match format {
         Format::Text => {
-            tracing::info!(model, format = "text", "cursor completion");
+            tracing::info!(
+                model,
+                format = "text",
+                prompt_len,
+                ?mcp_servers,
+                has_references,
+                "cursor completion"
+            );
         }
         Format::Json => {
-            tracing::info!(model, format = "json", "cursor completion");
+            tracing::info!(
+                model,
+                format = "json",
+                prompt_len,
+                ?mcp_servers,
+                has_references,
+                "cursor completion"
+            );
         }
         Format::Schema(spec) => {
             tracing::info!(
                 model,
                 format = "schema",
                 schema_name = %spec.name,
+                prompt_len,
+                ?mcp_servers,
+                has_references,
                 "cursor completion"
             );
             tracing::trace!(
                 schema_name = %spec.name,
-                schema = %single_line(&spec.schema),
+                schema = %truncate(&spec.schema, PROMPT_PREVIEW_CHARS),
                 "cursor completion schema"
             );
         }
@@ -298,9 +357,49 @@ fn single_line(text: &str) -> String {
     )
 }
 
+fn truncate(text: &str, max: usize) -> String {
+    let collapsed = single_line(text);
+    let mut chars = collapsed.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() { format!("{head}…") } else { head }
+}
+
+fn is_noisy_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read"
+            | "write"
+            | "shell"
+            | "grep"
+            | "glob"
+            | "edit"
+            | "delete"
+            | "listDir"
+            | "searchReplace"
+            | "ls"
+            | "SemSearch"
+            | "ReadLints"
+            | "AwaitShell"
+            | "TodoWrite"
+    )
+}
+
+fn args_summary(args: &Value) -> String {
+    if let Some(path) = args.get("path").and_then(Value::as_str) {
+        return truncate(path, TEXT_PREVIEW_CHARS);
+    }
+    if let Some(url) = args.get("url").and_then(Value::as_str) {
+        return truncate(url, TEXT_PREVIEW_CHARS);
+    }
+    if let Some(query) = args.get("query").and_then(Value::as_str) {
+        return truncate(query, TEXT_PREVIEW_CHARS);
+    }
+    truncate(&args.to_string(), TEXT_PREVIEW_CHARS)
+}
+
 /// The subset of `cursor-agent` stream events the backend consumes. `result`
 /// and `tool_call` drive the answer; `assistant` and `thinking` are parsed
-/// only to be logged. Everything else parses to `Other` without building a
+/// for DEBUG visibility. Everything else parses to `Other` without building a
 /// JSON tree.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -340,21 +439,16 @@ struct ContentPart {
 }
 
 impl AssistantMessage {
-    /// Concatenated text across the message's content parts.
     fn text(&self) -> String {
         self.content.iter().filter_map(|part| part.text.as_deref()).collect()
     }
 }
 
-// Incremental parser for `stream-json` NDJSON (with a fallback for a legacy
-// single-line `json` payload).
 #[derive(Default)]
 struct OutputParser {
     result: Option<String>,
     pending_tools: HashMap<String, (String, Value)>,
     turns: Vec<ToolTurn>,
-    lines: u32,
-    first_line: Option<String>,
 }
 
 impl OutputParser {
@@ -363,10 +457,6 @@ impl OutputParser {
         if line.is_empty() {
             return Ok(());
         }
-        self.lines += 1;
-        if self.lines == 1 {
-            self.first_line = Some(line.to_owned());
-        }
 
         // One garbled line must not cost an otherwise-successful answer.
         let event = match serde_json::from_str::<Event>(line) {
@@ -374,7 +464,7 @@ impl OutputParser {
             Err(error) => {
                 tracing::debug!(
                     %error,
-                    line = %single_line(line),
+                    line = %truncate(line, TEXT_PREVIEW_CHARS),
                     "skipping unparsable cursor-agent event"
                 );
                 return Ok(());
@@ -402,21 +492,23 @@ impl OutputParser {
             }
             Event::Assistant { message } => {
                 let text = message.as_ref().map(AssistantMessage::text).unwrap_or_default();
-                tracing::trace!(
+                tracing::debug!(
                     text_len = text.len(),
-                    text = %single_line(&text),
+                    text = %truncate(&text, TEXT_PREVIEW_CHARS),
                     "cursor-agent assistant text"
                 );
             }
             Event::Thinking { subtype, text } => {
-                tracing::trace!(
+                let text = text.as_deref().unwrap_or_default();
+                tracing::debug!(
                     ?subtype,
-                    text = %single_line(text.as_deref().unwrap_or_default()),
+                    text_len = text.len(),
+                    text = %truncate(text, TEXT_PREVIEW_CHARS),
                     "cursor-agent thinking"
                 );
             }
             Event::Other => {
-                tracing::trace!(line = %single_line(line), "cursor-agent other event");
+                tracing::trace!(line = %truncate(line, TEXT_PREVIEW_CHARS), "cursor-agent other event");
             }
         }
         Ok(())
@@ -428,7 +520,9 @@ impl OutputParser {
                 if let (Some(call_id), Some((tool, args))) =
                     (call_id, tool_call.as_ref().and_then(tool_call_identity))
                 {
-                    tracing::trace!(subtype, %call_id, %tool, "cursor-agent tool call");
+                    if is_noisy_tool(&tool) {
+                        tracing::trace!(subtype, %call_id, %tool, "cursor-agent tool call");
+                    }
                     self.pending_tools.insert(call_id, (tool, args));
                 }
             }
@@ -438,7 +532,16 @@ impl OutputParser {
                         tool_call_identity(&tool_call)
                             .unwrap_or_else(|| ("unknown".to_owned(), Value::Null))
                     });
-                    tracing::trace!(subtype, %call_id, %tool, "cursor-agent tool call");
+
+                    if is_noisy_tool(&tool) {
+                        tracing::trace!(subtype, %call_id, %tool, "cursor-agent tool call");
+                    } else {
+                        tracing::debug!(
+                            %tool,
+                            args = %args_summary(&args),
+                            "cursor-agent tool"
+                        );
+                    }
 
                     let result = tool_call
                         .as_object()
@@ -453,50 +556,22 @@ impl OutputParser {
     }
 
     fn finish(self) -> Result<AgentOutput> {
-        if let Some(result) = self.result {
-            let transcript =
-                if self.turns.is_empty() { None } else { Some(Transcript { turns: self.turns }) };
-            return Ok(AgentOutput { result, transcript });
-        }
-
-        // legacy output format
-        if self.lines == 1
-            && let Some(line) = &self.first_line
-        {
-            // extract the result
-            let envelope: Value = serde_json::from_str(line).context("no JSON envelope")?;
-            let result = envelope
-                .get("result")
-                .and_then(Value::as_str)
-                .context("JSON output has no `result`")?;
-
-            // check if the agent reported an error
-            if envelope.get("is_error").and_then(Value::as_bool) == Some(true) {
-                bail!("cursor-agent reported an error: {result}");
-            }
-
-            return Ok(AgentOutput {
-                result: result.to_string(),
-                transcript: None,
-            });
-        }
-
-        bail!("cursor-agent did not emit a terminal result event");
+        let Some(result) = self.result else {
+            bail!("cursor-agent did not emit a terminal result event");
+        };
+        let transcript =
+            if self.turns.is_empty() { None } else { Some(Transcript { turns: self.turns }) };
+        Ok(AgentOutput { result, transcript })
     }
 }
 
-// Extract the tool name and arguments from a tool call.
+// Extract the tool name and arguments from a `*ToolCall` envelope.
 fn tool_call_identity(tool_call: &Value) -> Option<(String, Value)> {
     let object = tool_call.as_object()?;
     for (key, value) in object {
         if let Some(tool) = key.strip_suffix("ToolCall") {
             let args = value.get("args").cloned().unwrap_or_else(|| value.clone());
             return Some((tool.to_owned(), args));
-        }
-        if key == "function" {
-            let name = value.get("name").and_then(Value::as_str).unwrap_or("function").to_owned();
-            let args = value.get("arguments").cloned().unwrap_or_else(|| value.clone());
-            return Some((name, args));
         }
     }
     None
@@ -505,6 +580,7 @@ fn tool_call_identity(tool_call: &Value) -> Option<(String, Value)> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -514,7 +590,7 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{AgentOutput, MAX_INLINE_SIZE, OutputParser, Prompt, single_line};
+    use super::{AgentOutput, OutputParser, Prompt, single_line, truncate};
     use crate::Client;
 
     #[test]
@@ -526,6 +602,12 @@ mod tests {
     #[test]
     fn single_line_collapses_non_json() {
         assert_eq!(single_line("hello\n  world"), "hello world");
+    }
+
+    #[test]
+    fn truncate_appends_ellipsis() {
+        assert_eq!(truncate("abcdef", 3), "abc…");
+        assert_eq!(truncate("ab", 3), "ab");
     }
 
     fn parse_output(stdout: &[u8]) -> anyhow::Result<AgentOutput> {
@@ -567,7 +649,7 @@ mod tests {
     #[tokio::test]
     async fn no_local_tree() {
         let err = client()
-            .complete(schema_request(), Arc::new(NoopToolHost))
+            .complete(schema_request(), Arc::new(StubToolHost { path: None }))
             .await
             .expect_err("a backend with no local tree must fail");
         assert!(err.to_string().contains("no local tree on this node"), "unexpected error: {err}");
@@ -614,29 +696,28 @@ mod tests {
     }
 
     #[test]
-    fn spill_large_prompt() {
+    fn spills_prompt() {
         let workspace =
             std::env::temp_dir().join(format!("omnia-cursor-prompt-{}", std::process::id()));
         let _ = fs::remove_dir_all(&workspace);
         fs::create_dir_all(&workspace).expect("temp workspace");
 
-        let large = "x".repeat(MAX_INLINE_SIZE + 1);
-        let prompt = Prompt::try_from((large.as_str(), workspace.as_path())).expect("spill prompt");
-        let Prompt::Spilled { arg, _guard: spill } = prompt else {
-            panic!("an oversized prompt must spill to a file");
-        };
-        assert!(arg.contains("omnia-prompt-"), "arg references prompt file: {arg}");
-        assert!(spill.path.exists(), "the prompt file is on disk while the guard lives");
-        let path = spill.path.clone();
-        drop(spill);
+        let prompt = Prompt::spill("hello", workspace.as_path()).expect("spill prompt");
+        assert!(prompt.arg.contains("omnia-prompt-"), "arg references prompt file: {}", prompt.arg);
+        assert!(prompt.path.exists(), "the prompt file is on disk while the guard lives");
+        let path = prompt.path.clone();
+        drop(prompt);
         assert!(!path.exists(), "the prompt file is removed on drop");
         let _ = fs::remove_dir_all(&workspace);
     }
 
+    /// Shared stub: unit tests use `path: None`; the shape matches live support.
     #[derive(Debug)]
-    pub struct NoopToolHost;
+    pub struct StubToolHost {
+        pub path: Option<PathBuf>,
+    }
 
-    impl ToolHost for NoopToolHost {
+    impl ToolHost for StubToolHost {
         fn resolve(&self, _reference: Reference) -> FutureResult<Vec<u8>> {
             Box::pin(async { Err(anyhow::anyhow!("cursor ignores the tool host")) })
         }
@@ -656,12 +737,17 @@ mod tests {
         fn verify(&self, _check: String) -> FutureResult<VerifyReport> {
             Box::pin(async { Err(anyhow::anyhow!("cursor ignores the tool host")) })
         }
+
+        fn local_path(&self) -> Option<&std::path::Path> {
+            self.path.as_deref()
+        }
     }
 
     /// Build a [`Client`] directly, bypassing `connect_with` (and its `PATH` check).
     pub fn client() -> Client {
         Client {
             timeout: Duration::from_secs(1),
+            model: None,
         }
     }
 }

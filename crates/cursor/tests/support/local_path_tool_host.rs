@@ -1,18 +1,18 @@
-//! A [`ToolHost`] that lends a fixed node-local workspace path.
+//! A [`ToolHost`] stub that optionally lends a node-local workspace path.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use omnia_wasi_model::{DirEntry, FutureResult, Reference, ToolHost, VerifyReport};
 
-/// Tool host that resolves the lent workspace to a fixed path; cursor ignores
+/// Tool host that resolves the lent workspace to an optional path; cursor ignores
 /// every other capability.
 #[derive(Debug)]
-pub struct LocalPathToolHost {
-    path: PathBuf,
+pub struct StubToolHost {
+    path: Option<PathBuf>,
 }
 
-impl ToolHost for LocalPathToolHost {
+impl ToolHost for StubToolHost {
     fn resolve(&self, _reference: Reference) -> FutureResult<Vec<u8>> {
         Box::pin(async { Err(anyhow::anyhow!("cursor ignores the tool host")) })
     }
@@ -34,11 +34,11 @@ impl ToolHost for LocalPathToolHost {
     }
 
     fn local_path(&self) -> Option<&Path> {
-        Some(&self.path)
+        self.path.as_deref()
     }
 }
 
 /// A tool host that lends `path` as the completion's node-local workspace.
 pub fn local_path_tool_host(path: PathBuf) -> Arc<dyn ToolHost> {
-    Arc::new(LocalPathToolHost { path })
+    Arc::new(StubToolHost { path: Some(path) })
 }

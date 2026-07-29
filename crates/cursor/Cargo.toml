@@ -20,6 +20,7 @@ all-features = true
 
 [dependencies]
 anyhow.workspace = true
+fromenv.workspace = true
 # Pinned to the local omnia 0.35.0 line via the workspace `[patch.crates-io]`
 # override (the `omnia-wasi-model` host crate is unreleased on crates.io).
 omnia.workspace = true

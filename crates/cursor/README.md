@@ -30,30 +30,29 @@ host (`ToolHost::local_path`). A completion with no lent workspace yields
 `error::backend("no local tree on this node")`, preserving the capability
 signal.
 
-The model id is taken from each request (`request.model`); an unset value lets
-`cursor-agent` choose. Each spawn is bounded by `ConnectOptions.timeout`
-(default 120s). `Client::connect()` / `FromEnv` reads optional
-`CURSOR_TIMEOUT_SECS`; callers that need a different ceiling pass
-`ConnectOptions { timeout: Duration::from_secs(n) }` to `connect_with`. MCP
+The model id is taken from each request (`request.model`); an unset value and
+no `CURSOR_MODEL` lets `cursor-agent` choose. Each spawn is bounded by
+`ConnectOptions.timeout_secs` (default 600s). `Client::connect()` / `FromEnv`
+reads optional `CURSOR_TIMEOUT_SECS` and `CURSOR_MODEL`; callers that need a
+different ceiling or default model pass
+`ConnectOptions { timeout_secs: n, model: Some(…) }` to `connect_with`. MCP
 servers are supplied per-request: a prompt's `mcp` grant carries the endpoint
 `url` directly (merged into `<workspace>/.cursor/mcp.json` for the spawn).
 
 ## Usage
 
 ```rust,ignore
-use std::time::Duration;
-
 use omnia::Backend;
 use omnia_cursor::{Client, ConnectOptions};
 
-// CURSOR_TIMEOUT_SECS when set, otherwise 120s.
+// CURSOR_TIMEOUT_SECS / CURSOR_MODEL when set; else 600s and agent-chosen model.
 let client = Client::connect().await?;
 
-// Explicit ceiling for long-running judgment legs.
+// Explicit ceiling and default model for long-running judgment legs.
 let client = Client::connect_with(ConnectOptions {
-    timeout: Duration::from_secs(300),
-})
-.await?;
+    timeout_secs: 300,
+    model: Some("composer-2".into()),
+}).await?;
 ```
 
 ## End-to-end example

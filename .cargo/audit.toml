@@ -1,0 +1,8 @@
+# https://docs.rs/cargo-audit/latest/cargo_audit/#configuration
+
+[advisories]
+ignore = [
+  # Unmaintained proc-macro pulled in by genai 0.6.x; no upgrade path until genai
+  # drops `paste` (0.7 betas already have). Informational only — no CVE.
+  "RUSTSEC-2024-0436",
+]

@@ -3349,6 +3349,7 @@ name = "omnia-cursor"
 version = "0.29.0"
 dependencies = [
  "anyhow",
+ "fromenv",
  "omnia",
  "omnia-wasi-model",
  "serde",

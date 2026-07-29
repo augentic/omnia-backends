@@ -16,7 +16,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, BufReader};
 use tokio::process::Command;
 use tracing::instrument;
 
-use crate::{CURSOR_AGENT_BIN, Client, mcp};
+use crate::{CURSOR_BIN, Client, mcp};
 
 const MAX_ATTEMPTS: usize = 2;
 const MAX_INLINE_SIZE: usize = 128_000;
@@ -206,7 +206,7 @@ async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOu
     // oversized prompts spill to a file that outlives the spawn
     let prompt = Prompt::try_from((prompt, options.workspace))?;
 
-    let mut cmd = Command::new(CURSOR_AGENT_BIN);
+    let mut cmd = Command::new(CURSOR_BIN);
     cmd.kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -221,7 +221,7 @@ async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOu
     }
     cmd.arg(prompt.as_arg());
 
-    let mut child = cmd.spawn().with_context(|| format!("spawning `{CURSOR_AGENT_BIN}`"))?;
+    let mut child = cmd.spawn().with_context(|| format!("spawning `{CURSOR_BIN}`"))?;
     let stdout = child.stdout.take().context("child stdout is piped")?;
     let stderr = child.stderr.take().context("child stderr is piped")?;
 
@@ -229,8 +229,7 @@ async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOu
     // drain stderr concurrently so the child can never block on a full pipe.
     let drive = async {
         let (parsed, stderr) = tokio::join!(parse_stream(stdout), drain(stderr));
-        let status =
-            child.wait().await.with_context(|| format!("waiting on `{CURSOR_AGENT_BIN}`"))?;
+        let status = child.wait().await.with_context(|| format!("waiting on `{CURSOR_BIN}`"))?;
         anyhow::Ok((parsed, stderr, status))
     };
 

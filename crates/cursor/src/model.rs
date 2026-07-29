@@ -21,6 +21,8 @@ use crate::{Client, mcp};
 const CURSOR_BIN: &str = "cursor-agent";
 const PROMPT_PREVIEW_CHARS: usize = 500;
 const TEXT_PREVIEW_CHARS: usize = 300;
+/// Coalesced thinking blocks stay readable; flush when a turn grows past this.
+const THINKING_PREVIEW_CHARS: usize = 2_000;
 
 /// Verify `cursor-agent` is on `PATH` and responds to `--version`.
 pub async fn check_cursor() -> Result<()> {
@@ -399,8 +401,9 @@ fn args_summary(args: &Value) -> String {
 
 /// The subset of `cursor-agent` stream events the backend consumes. `result`
 /// and `tool_call` drive the answer; `assistant` and `thinking` are parsed
-/// for DEBUG visibility. Everything else parses to `Other` without building a
-/// JSON tree.
+/// for DEBUG visibility. Thinking `delta` chunks are coalesced into one log
+/// line per turn (`completed`, a size backstop, or the next non-thinking
+/// event). Everything else parses to `Other` without building a JSON tree.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Event {
@@ -444,11 +447,50 @@ impl AssistantMessage {
     }
 }
 
+/// Coalesces stream-json thinking deltas into turn-sized blocks for DEBUG logs.
+#[derive(Default)]
+struct ThinkingBuf(String);
+
+impl ThinkingBuf {
+    /// Apply one thinking event; return text ready to log, if any.
+    fn event(&mut self, subtype: Option<&str>, text: &str) -> Option<String> {
+        match subtype {
+            Some("completed") => self.take(),
+            Some("delta") | None => {
+                if text.is_empty() {
+                    return None;
+                }
+                self.0.push_str(text);
+                if self.0.chars().count() >= THINKING_PREVIEW_CHARS {
+                    return self.take();
+                }
+                None
+            }
+            // Full-payload subtypes (e.g. `extended`): one shot.
+            _ => {
+                if !text.is_empty() {
+                    self.0.push_str(text);
+                }
+                self.take()
+            }
+        }
+    }
+
+    fn take(&mut self) -> Option<String> {
+        if self.0.is_empty() { None } else { Some(std::mem::take(&mut self.0)) }
+    }
+}
+
+fn log_thinking(text: &str) {
+    tracing::debug!("thinking: {}", truncate(text, THINKING_PREVIEW_CHARS));
+}
+
 #[derive(Default)]
 struct OutputParser {
     result: Option<String>,
     pending_tools: HashMap<String, (String, Value)>,
     turns: Vec<ToolTurn>,
+    thinking: ThinkingBuf,
 }
 
 impl OutputParser {
@@ -473,6 +515,7 @@ impl OutputParser {
 
         match event {
             Event::Result { is_error, result } => {
+                self.flush_thinking();
                 if is_error == Some(true) {
                     bail!(
                         "cursor-agent reported an error: {}",
@@ -488,30 +531,37 @@ impl OutputParser {
                 call_id,
                 tool_call,
             } => {
+                self.flush_thinking();
                 self.tool_call(&subtype, call_id, tool_call);
             }
             Event::Assistant { message } => {
+                self.flush_thinking();
                 let text = message.as_ref().map(AssistantMessage::text).unwrap_or_default();
-                tracing::debug!(
-                    text_len = text.len(),
-                    text = %truncate(&text, TEXT_PREVIEW_CHARS),
-                    "cursor-agent assistant text"
-                );
+                if !text.is_empty() {
+                    tracing::debug!(
+                        text = %truncate(&text, TEXT_PREVIEW_CHARS),
+                        "cursor-agent assistant text"
+                    );
+                }
             }
             Event::Thinking { subtype, text } => {
-                let text = text.as_deref().unwrap_or_default();
-                tracing::debug!(
-                    ?subtype,
-                    text_len = text.len(),
-                    text = %truncate(text, TEXT_PREVIEW_CHARS),
-                    "cursor-agent thinking"
-                );
+                if let Some(text) =
+                    self.thinking.event(subtype.as_deref(), text.as_deref().unwrap_or_default())
+                {
+                    log_thinking(&text);
+                }
             }
             Event::Other => {
                 tracing::trace!(line = %truncate(line, TEXT_PREVIEW_CHARS), "cursor-agent other event");
             }
         }
         Ok(())
+    }
+
+    fn flush_thinking(&mut self) {
+        if let Some(text) = self.thinking.take() {
+            log_thinking(&text);
+        }
     }
 
     fn tool_call(&mut self, subtype: &str, call_id: Option<String>, tool_call: Option<Value>) {
@@ -555,7 +605,8 @@ impl OutputParser {
         }
     }
 
-    fn finish(self) -> Result<AgentOutput> {
+    fn finish(mut self) -> Result<AgentOutput> {
+        self.flush_thinking();
         let Some(result) = self.result else {
             bail!("cursor-agent did not emit a terminal result event");
         };
@@ -590,7 +641,7 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{AgentOutput, OutputParser, Prompt, single_line, truncate};
+    use super::{AgentOutput, OutputParser, Prompt, ThinkingBuf, single_line, truncate};
     use crate::Client;
 
     #[test]
@@ -608,6 +659,34 @@ mod tests {
     fn truncate_appends_ellipsis() {
         assert_eq!(truncate("abcdef", 3), "abc…");
         assert_eq!(truncate("ab", 3), "ab");
+    }
+
+    #[test]
+    fn thinking_buf_coalesces_deltas() {
+        let mut buf = ThinkingBuf::default();
+        assert!(buf.event(Some("delta"), "line 22, the canc").is_none());
+        assert!(buf.event(Some("delta"), "ellation constraint").is_none());
+        assert_eq!(
+            buf.event(Some("completed"), "").as_deref(),
+            Some("line 22, the cancellation constraint")
+        );
+        assert!(buf.take().is_none(), "completed clears the buffer");
+    }
+
+    #[test]
+    fn thinking_buf_extended_is_one_shot() {
+        let mut buf = ThinkingBuf::default();
+        assert_eq!(
+            buf.event(Some("extended"), "weighing the verdict").as_deref(),
+            Some("weighing the verdict")
+        );
+    }
+
+    #[test]
+    fn thinking_buf_flushes_before_lost_tail() {
+        let mut buf = ThinkingBuf::default();
+        assert!(buf.event(Some("delta"), "partial thought").is_none());
+        assert_eq!(buf.take().as_deref(), Some("partial thought"));
     }
 
     fn parse_output(stdout: &[u8]) -> anyhow::Result<AgentOutput> {
@@ -676,6 +755,17 @@ mod tests {
         assert_eq!(transcript.turns.len(), 1);
         assert_eq!(transcript.turns[0].tool, "read");
         assert_eq!(transcript.turns[0].args, json!({ "path": "README.md" }));
+    }
+
+    #[test]
+    fn parse_thinking_deltas_then_result() {
+        let stdout = br#"{"type":"thinking","subtype":"delta","text":"line 22, the canc"}
+{"type":"thinking","subtype":"delta","text":"ellation constraint"}
+{"type":"thinking","subtype":"completed","text":""}
+{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#;
+        let AgentOutput { result, transcript } = parse_output(stdout).expect("parse deltas");
+        assert_eq!(result, "ok");
+        assert!(transcript.is_none());
     }
 
     #[test]

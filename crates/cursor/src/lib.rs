@@ -53,6 +53,10 @@ mod config {
     /// tool host.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
+        /// Default model id when a request leaves `model` unset; omitted means
+        /// `cursor-agent` chooses.
+        #[env(from = "CURSOR_MODEL")]
+        pub model: Option<String>,
         /// Absolute wall-clock cap in seconds on one `cursor-agent` spawn;
         /// orphaned processes are killed on timeout.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
@@ -62,10 +66,6 @@ mod config {
         /// is still streaming survives up to the absolute cap.
         #[env(from = "CURSOR_INACTIVITY_SECS", default = "120")]
         pub inactivity_secs: u64,
-        /// Default model id when a request leaves `model` unset; omitted means
-        /// `cursor-agent` chooses.
-        #[env(from = "CURSOR_MODEL")]
-        pub model: Option<String>,
     }
 }
 pub use config::ConnectOptions;

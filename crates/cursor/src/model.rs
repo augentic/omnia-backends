@@ -39,9 +39,7 @@ pub async fn check_cursor() -> Result<()> {
 struct SpawnOptions<'a> {
     model: Option<&'a str>,
     workspace: &'a Path,
-    /// Absolute wall-clock cap on one spawn.
     timeout: Duration,
-    /// Kill the spawn after this long with no stream-json events.
     inactivity: Duration,
     approve_mcps: bool,
 }

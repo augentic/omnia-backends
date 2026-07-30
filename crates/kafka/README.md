@@ -13,7 +13,7 @@ MSRV: Rust 1.95
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `COMPONENT` | yes | | Client ID prefix |
+| `COMPONENT` | no | `omnia` | Client ID prefix; set it for a meaningful per-deployment client ID |
 | `KAFKA_BROKERS` | yes | | Comma-separated broker addresses |
 | `KAFKA_USERNAME` | no | | SASL username (enables `SASL_SSL`) |
 | `KAFKA_PASSWORD` | no | | SASL password |

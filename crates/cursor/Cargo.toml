@@ -34,4 +34,4 @@ tracing.workspace = true
 # dependencies, so the ones the live run-3 test (`tests/live.rs`) drives are
 # repeated here.
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "test-util", "time"] }

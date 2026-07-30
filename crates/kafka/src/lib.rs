@@ -82,8 +82,10 @@ mod config {
     /// Connection options for the Kafka backend.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
-        /// Client identifier prefix (suffixed with a random number).
-        #[env(from = "COMPONENT")]
+        /// Client identifier prefix (suffixed with a random number). The
+        /// runtime no longer writes `COMPONENT` into the process environment,
+        /// so set it explicitly for per-deployment client ids.
+        #[env(from = "COMPONENT", default = "omnia")]
         pub client_id: String,
         /// Comma-separated broker addresses.
         #[env(from = "KAFKA_BROKERS")]

@@ -68,6 +68,7 @@ async fn live_cursor_completes() -> Result<()> {
 
     let client = Client::connect_with(ConnectOptions {
         timeout_secs: 120,
+        inactivity_secs: 120,
         model: None,
     })
     .await?;
@@ -138,6 +139,7 @@ async fn live_cursor_uses_mcp() -> Result<()> {
 
     let client = Client::connect_with(ConnectOptions {
         timeout_secs: 120,
+        inactivity_secs: 120,
         model: None,
     })
     .await?;

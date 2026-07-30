@@ -12,6 +12,15 @@ then returns a validated answer through the same boundary as `omnia-genai`. The
 guest only ever sees the validated answer string; the model id, the API key, and
 the agent protocol stay inside this crate.
 
+When the first attempt's answer fails the format gate, the second (and last)
+attempt resumes that attempt's session (`--resume=<session_id>`, captured from
+the stream-json `init` event) and sends only the format-repair instruction —
+the session already carries the prompt and the failed answer, so the provider's
+prompt cache stays warm. Session scope is strictly one `complete` call: a
+session is never reused across completions. If no session id was observed, the
+repair falls back to a cold spawn whose prompt keeps the original as a
+byte-identical prefix with the failed answer and repair instruction appended.
+
 MSRV: Rust 1.95
 
 ## Requirements
@@ -31,13 +40,18 @@ host (`ToolHost::local_path`). A completion with no lent workspace yields
 signal.
 
 The model id is taken from each request (`request.model`); an unset value and
-no `CURSOR_MODEL` lets `cursor-agent` choose. Each spawn is bounded by
-`ConnectOptions.timeout_secs` (default 600s). `Client::connect()` / `FromEnv`
-reads optional `CURSOR_TIMEOUT_SECS` and `CURSOR_MODEL`; callers that need a
-different ceiling or default model pass
-`ConnectOptions { timeout_secs: n, model: Some(…) }` to `connect_with`. MCP
-servers are supplied per-request: a prompt's `mcp` grant carries the endpoint
-`url` directly (merged into `<workspace>/.cursor/mcp.json` for the spawn).
+no `CURSOR_MODEL` lets `cursor-agent` choose. Each spawn is bounded twice: an
+inactivity window (`CURSOR_INACTIVITY_SECS`, default 120s) kills an agent that
+has stopped emitting stream-json events, while the absolute wall-clock cap
+(`CURSOR_TIMEOUT_SECS`, default 600s) backstops an agent that streams forever.
+A stalled agent dies fast; one that is still streaming survives up to the cap.
+The two kill errors are distinct (`inactive for Ns` vs `timed out after Ns
+(absolute cap …)`). `Client::connect()` / `FromEnv` reads the optional
+`CURSOR_TIMEOUT_SECS`, `CURSOR_INACTIVITY_SECS`, and `CURSOR_MODEL`; callers
+that need different bounds or a default model pass `ConnectOptions` to
+`connect_with`. MCP servers are supplied per-request: a prompt's `mcp` grant
+carries the endpoint `url` directly (merged into `<workspace>/.cursor/mcp.json`
+for the spawn).
 
 ## Usage
 
@@ -45,12 +59,14 @@ servers are supplied per-request: a prompt's `mcp` grant carries the endpoint
 use omnia::Backend;
 use omnia_cursor::{Client, ConnectOptions};
 
-// CURSOR_TIMEOUT_SECS / CURSOR_MODEL when set; else 600s and agent-chosen model.
+// CURSOR_TIMEOUT_SECS / CURSOR_INACTIVITY_SECS / CURSOR_MODEL when set;
+// else a 600s cap, a 120s inactivity window, and an agent-chosen model.
 let client = Client::connect().await?;
 
-// Explicit ceiling and default model for long-running judgment legs.
+// Explicit bounds and default model for long-running judgment legs.
 let client = Client::connect_with(ConnectOptions {
-    timeout_secs: 300,
+    timeout_secs: 1800,
+    inactivity_secs: 120,
     model: Some("composer-2".into()),
 }).await?;
 ```

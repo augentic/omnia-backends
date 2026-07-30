@@ -15,6 +15,8 @@ use tracing::instrument;
 #[derive(Clone)]
 pub struct Client {
     timeout: Duration,
+    /// Kill a spawn after this long with no stream-json events.
+    inactivity: Duration,
     /// Default model id when a request leaves `model` unset.
     model: Option<String>,
 }
@@ -34,6 +36,7 @@ impl Backend for Client {
 
         Ok(Self {
             timeout: Duration::from_secs(options.timeout_secs),
+            inactivity: Duration::from_secs(options.inactivity_secs),
             model: options.model.filter(|id| !id.trim().is_empty()),
         })
     }
@@ -50,10 +53,15 @@ mod config {
     /// tool host.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
-        /// Wall-clock bound in seconds on one `cursor-agent` spawn; orphaned
-        /// processes are killed on timeout.
+        /// Absolute wall-clock cap in seconds on one `cursor-agent` spawn;
+        /// orphaned processes are killed on timeout.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
         pub timeout_secs: u64,
+        /// Inactivity bound in seconds: a spawn is killed after this long with
+        /// no stream-json events, so a stalled agent dies fast while one that
+        /// is still streaming survives up to the absolute cap.
+        #[env(from = "CURSOR_INACTIVITY_SECS", default = "120")]
+        pub inactivity_secs: u64,
         /// Default model id when a request leaves `model` unset; omitted means
         /// `cursor-agent` chooses.
         #[env(from = "CURSOR_MODEL")]

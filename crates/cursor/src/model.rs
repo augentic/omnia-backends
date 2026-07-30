@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, BufReader};
 use tokio::process::Command;
+use tokio::time::Instant;
 use tracing::instrument;
 
 use crate::{Client, mcp};
@@ -38,7 +39,10 @@ pub async fn check_cursor() -> Result<()> {
 struct SpawnOptions<'a> {
     model: Option<&'a str>,
     workspace: &'a Path,
+    /// Absolute wall-clock cap on one spawn.
     timeout: Duration,
+    /// Kill the spawn after this long with no stream-json events.
+    inactivity: Duration,
     approve_mcps: bool,
 }
 
@@ -46,12 +50,15 @@ struct SpawnOptions<'a> {
 struct AgentOutput {
     result: String,
     transcript: Option<Transcript>,
+    /// The spawn's `session_id` from the stream, for `--resume` repairs.
+    session_id: Option<String>,
 }
 
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let workspace = tool_host.local_path().map(Path::to_path_buf);
         let timeout = self.timeout;
+        let inactivity = self.inactivity;
         let default_model = self.model.clone();
 
         Box::pin(async move {
@@ -86,6 +93,7 @@ impl WasiModelCtx for Client {
                 model: request.model.as_deref().or(default_model.as_deref()),
                 workspace: &workspace,
                 timeout,
+                inactivity,
                 approve_mcps: mcp_guard.is_some(),
             };
 
@@ -97,17 +105,29 @@ impl WasiModelCtx for Client {
                 request.grants.references.is_some(),
             );
 
-            let AgentOutput { result, transcript } = spawn_agent(&prompt, &spawn).await?;
+            let AgentOutput {
+                result,
+                transcript,
+                session_id,
+            } = spawn_agent(&prompt, &spawn, None).await?;
             log_attempt(1, &result, transcript.as_ref());
+            let resume;
             match take_answer(format, result, transcript, false) {
                 Outcome::Done(answer) => return Ok(answer),
                 Outcome::Repair { result, reason } => {
-                    tracing::debug!(attempt = 1, %reason, "repairing cursor-agent answer");
-                    prompt = append_repair(&prompt, &result, &reason, format);
+                    tracing::debug!(
+                        attempt = 1,
+                        %reason,
+                        resumes = session_id.is_some(),
+                        "repairing cursor-agent answer"
+                    );
+                    (prompt, resume) = repair_plan(&prompt, &result, &reason, format, session_id);
                 }
             }
 
-            let AgentOutput { result, transcript } = spawn_agent(&prompt, &spawn).await?;
+            let AgentOutput {
+                result, transcript, ..
+            } = spawn_agent(&prompt, &spawn, resume.as_deref()).await?;
             log_attempt(2, &result, transcript.as_ref());
             match take_answer(format, result, transcript, true) {
                 Outcome::Done(answer) => Ok(answer),
@@ -117,6 +137,23 @@ impl WasiModelCtx for Client {
             }
         })
     }
+}
+
+/// The second attempt's prompt and the session to resume, if any.
+///
+/// With a session id from the first spawn, the repair resumes that session and
+/// sends only the format-repair instruction (the reason is embedded; the
+/// session already carries the failed answer). Without one, it falls back to a
+/// cold spawn whose prompt keeps the original as a byte-identical prefix — so
+/// provider-side prompt caching stays warm — with the failed answer and the
+/// repair instruction appended.
+fn repair_plan(
+    prompt: &str, answer: &str, reason: &str, format: &Format, session_id: Option<String>,
+) -> (String, Option<String>) {
+    session_id.map_or_else(
+        || (append_repair(prompt, answer, reason, format), None),
+        |id| (format.repair(reason), Some(id)),
+    )
 }
 
 enum Outcome {
@@ -237,16 +274,9 @@ fn mcp_hint(servers: &[&Mcp]) -> String {
     )
 }
 
-#[instrument(skip(prompt, options), fields(model = options.model))]
-async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOutput> {
-    let spilled = Prompt::spill(prompt, options.workspace)?;
-    tracing::debug!(
-        prompt_path = %spilled.path.display(),
-        prompt_len = prompt.len(),
-        preview = %truncate(prompt, PROMPT_PREVIEW_CHARS),
-        "cursor-agent prompt"
-    );
-
+/// The `cursor-agent` invocation for one spawn; `resume` re-enters the named
+/// session instead of starting a fresh one.
+fn agent_command(options: &SpawnOptions<'_>, resume: Option<&str>, prompt_arg: &str) -> Command {
     let mut cmd = Command::new(CURSOR_BIN);
     cmd.kill_on_drop(true)
         .stdin(Stdio::null())
@@ -260,25 +290,52 @@ async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOu
     if let Some(model) = options.model {
         cmd.arg("--model").arg(model);
     }
-    cmd.arg(&spilled.arg);
+    if let Some(session_id) = resume {
+        // `--resume` takes an optional value; the attached form keeps the
+        // session id from being read as the prompt.
+        cmd.arg(format!("--resume={session_id}"));
+    }
+    cmd.arg(prompt_arg);
+    cmd
+}
 
-    let mut child = cmd.spawn().with_context(|| format!("spawning `{CURSOR_BIN}`"))?;
+#[instrument(skip(prompt, options, resume), fields(model = options.model))]
+async fn spawn_agent(
+    prompt: &str, options: &SpawnOptions<'_>, resume: Option<&str>,
+) -> Result<AgentOutput> {
+    let spilled = Prompt::spill(prompt, options.workspace)?;
+    tracing::debug!(
+        prompt_path = %spilled.path.display(),
+        prompt_len = prompt.len(),
+        resume,
+        preview = %truncate(prompt, PROMPT_PREVIEW_CHARS),
+        "cursor-agent prompt"
+    );
+
+    let mut child = agent_command(options, resume, &spilled.arg)
+        .spawn()
+        .with_context(|| format!("spawning `{CURSOR_BIN}`"))?;
     let stdout = child.stdout.take().context("child stdout is piped")?;
     let stderr = child.stderr.take().context("child stderr is piped")?;
 
     // Parse stdout as it streams so memory stays bounded on chatty runs, and
     // drain stderr concurrently so the child can never block on a full pipe.
+    let activity = Activity::now();
     let drive = async {
-        let (parsed, stderr) = tokio::join!(parse_stream(stdout), drain(stderr));
+        let (parsed, stderr) = tokio::join!(parse_stream(stdout, &activity), drain(stderr));
         let status = child.wait().await.with_context(|| format!("waiting on `{CURSOR_BIN}`"))?;
         anyhow::Ok((parsed, stderr, status))
     };
 
     // On timeout `drive` is dropped, and `kill_on_drop` reaps the orphaned agent.
-    let (parsed, stderr, status) =
-        tokio::time::timeout(options.timeout, drive).await.map_err(|_elapsed| {
-            anyhow!("cursor-agent timed out after {}s", options.timeout.as_secs())
-        })??;
+    let deadlines = Deadlines {
+        inactivity: options.inactivity,
+        cap: options.timeout,
+    };
+    let (parsed, stderr, status) = tokio::select! {
+        driven = drive => driven?,
+        error = watchdog(&activity, &deadlines) => return Err(error),
+    };
 
     if !status.success() {
         bail!("cursor-agent exited with {status}: {}", String::from_utf8_lossy(&stderr).trim());
@@ -287,10 +344,64 @@ async fn spawn_agent(prompt: &str, options: &SpawnOptions<'_>) -> Result<AgentOu
     parsed
 }
 
-async fn parse_stream(stdout: impl AsyncRead + Unpin) -> Result<AgentOutput> {
+/// Last-seen stream progress; every stdout line from the agent counts.
+struct Activity(std::sync::Mutex<Instant>);
+
+impl Activity {
+    fn now() -> Self {
+        Self(std::sync::Mutex::new(Instant::now()))
+    }
+
+    fn touch(&self) {
+        *self.0.lock().expect("activity lock is never poisoned") = Instant::now();
+    }
+
+    fn last(&self) -> Instant {
+        *self.0.lock().expect("activity lock is never poisoned")
+    }
+}
+
+/// The two spawn bounds: a short inactivity window over stream events and a
+/// generous absolute wall-clock cap.
+struct Deadlines {
+    inactivity: Duration,
+    cap: Duration,
+}
+
+/// Resolves when a spawn breaches either bound; the error names which one, so
+/// "stalled agent" and "agent that outlived the cap" stay distinguishable.
+async fn watchdog(activity: &Activity, deadlines: &Deadlines) -> anyhow::Error {
+    let start = Instant::now();
+    loop {
+        let now = Instant::now();
+        let idle = now.saturating_duration_since(activity.last());
+        if idle >= deadlines.inactivity {
+            return anyhow!(
+                "cursor-agent inactive for {}s (no stream events; inactivity limit {}s, absolute \
+                 cap {}s)",
+                idle.as_secs(),
+                deadlines.inactivity.as_secs(),
+                deadlines.cap.as_secs()
+            );
+        }
+        let elapsed = now.saturating_duration_since(start);
+        if elapsed >= deadlines.cap {
+            return anyhow!(
+                "cursor-agent timed out after {}s (absolute cap exceeded while still active)",
+                deadlines.cap.as_secs()
+            );
+        }
+        let next_check =
+            deadlines.inactivity.saturating_sub(idle).min(deadlines.cap.saturating_sub(elapsed));
+        tokio::time::sleep(next_check).await;
+    }
+}
+
+async fn parse_stream(stdout: impl AsyncRead + Unpin, activity: &Activity) -> Result<AgentOutput> {
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = OutputParser::default();
     while let Some(line) = lines.next_line().await? {
+        activity.touch();
         parser.line(&line)?;
     }
     parser.finish()
@@ -400,16 +511,22 @@ fn args_summary(args: &Value) -> String {
 }
 
 /// The subset of `cursor-agent` stream events the backend consumes. `result`
-/// and `tool_call` drive the answer; `assistant` and `thinking` are parsed
-/// for DEBUG visibility. Thinking `delta` chunks are coalesced into one log
-/// line per turn (`completed`, a size backstop, or the next non-thinking
-/// event). Everything else parses to `Other` without building a JSON tree.
+/// and `tool_call` drive the answer; `system` (the `init` event) and `result`
+/// carry the `session_id` used to resume the session on a repair attempt;
+/// `assistant` and `thinking` are parsed for DEBUG visibility. Thinking
+/// `delta` chunks are coalesced into one log line per turn (`completed`, a
+/// size backstop, or the next non-thinking event). Everything else parses to
+/// `Other` without building a JSON tree.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Event {
+    System {
+        session_id: Option<String>,
+    },
     Result {
         is_error: Option<bool>,
         result: Option<String>,
+        session_id: Option<String>,
     },
     ToolCall {
         subtype: String,
@@ -488,6 +605,7 @@ fn log_thinking(text: &str) {
 #[derive(Default)]
 struct OutputParser {
     result: Option<String>,
+    session_id: Option<String>,
     pending_tools: HashMap<String, (String, Value)>,
     turns: Vec<ToolTurn>,
     thinking: ThinkingBuf,
@@ -514,8 +632,16 @@ impl OutputParser {
         };
 
         match event {
-            Event::Result { is_error, result } => {
+            Event::System { session_id } => {
+                self.session(session_id);
+            }
+            Event::Result {
+                is_error,
+                result,
+                session_id,
+            } => {
                 self.flush_thinking();
+                self.session(session_id);
                 if is_error == Some(true) {
                     bail!(
                         "cursor-agent reported an error: {}",
@@ -561,6 +687,14 @@ impl OutputParser {
     fn flush_thinking(&mut self) {
         if let Some(text) = self.thinking.take() {
             log_thinking(&text);
+        }
+    }
+
+    /// Keep the first `session_id` seen (the `init` event's; the terminal
+    /// `result` event repeats it as a fallback).
+    fn session(&mut self, session_id: Option<String>) {
+        if self.session_id.is_none() {
+            self.session_id = session_id;
         }
     }
 
@@ -612,7 +746,11 @@ impl OutputParser {
         };
         let transcript =
             if self.turns.is_empty() { None } else { Some(Transcript { turns: self.turns }) };
-        Ok(AgentOutput { result, transcript })
+        Ok(AgentOutput {
+            result,
+            transcript,
+            session_id: self.session_id,
+        })
     }
 }
 
@@ -641,7 +779,10 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{AgentOutput, OutputParser, Prompt, ThinkingBuf, single_line, truncate};
+    use super::{
+        Activity, AgentOutput, Deadlines, OutputParser, Prompt, SpawnOptions, ThinkingBuf,
+        agent_command, repair_plan, single_line, truncate, watchdog,
+    };
     use crate::Client;
 
     #[test]
@@ -749,7 +890,9 @@ mod tests {
 {"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"readToolCall":{"args":{"path":"README.md"},"result":{"success":{"content":"hi"}}}}}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Deciding now"}]}}
 {"type":"result","subtype":"success","is_error":false,"result":"{\"verdict\":\"pass\"}"}"#;
-        let AgentOutput { result, transcript } = parse_output(stdout).expect("parse stream");
+        let AgentOutput {
+            result, transcript, ..
+        } = parse_output(stdout).expect("parse stream");
         assert_eq!(result, r#"{"verdict":"pass"}"#);
         let transcript = transcript.expect("tool transcript");
         assert_eq!(transcript.turns.len(), 1);
@@ -758,12 +901,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_session_id_from_init() {
+        let stdout =
+            br#"{"type":"system","subtype":"init","cwd":"/ws","session_id":"s-init","model":"m"}
+{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s-later"}"#;
+        let output = parse_output(stdout).expect("parse stream");
+        assert_eq!(output.session_id.as_deref(), Some("s-init"), "the init event's id wins");
+    }
+
+    #[test]
+    fn parse_session_id_from_result_fallback() {
+        let stdout =
+            br#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s-result"}"#;
+        let output = parse_output(stdout).expect("parse stream");
+        assert_eq!(output.session_id.as_deref(), Some("s-result"));
+    }
+
+    #[test]
+    fn parse_without_session_id() {
+        let stdout = br#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#;
+        let output = parse_output(stdout).expect("parse stream");
+        assert!(output.session_id.is_none());
+    }
+
+    #[test]
     fn parse_thinking_deltas_then_result() {
         let stdout = br#"{"type":"thinking","subtype":"delta","text":"line 22, the canc"}
 {"type":"thinking","subtype":"delta","text":"ellation constraint"}
 {"type":"thinking","subtype":"completed","text":""}
 {"type":"result","subtype":"success","is_error":false,"result":"ok"}"#;
-        let AgentOutput { result, transcript } = parse_output(stdout).expect("parse deltas");
+        let AgentOutput {
+            result, transcript, ..
+        } = parse_output(stdout).expect("parse deltas");
         assert_eq!(result, "ok");
         assert!(transcript.is_none());
     }
@@ -772,7 +941,9 @@ mod tests {
     fn assistant_prefix_reaches_result() {
         let stdout = br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working on it"}]}}
 {"type":"result","subtype":"success","is_error":false,"result":"ok"}"#;
-        let AgentOutput { result, transcript } = parse_output(stdout).expect("parse stream");
+        let AgentOutput {
+            result, transcript, ..
+        } = parse_output(stdout).expect("parse stream");
         assert_eq!(result, "ok");
         assert!(transcript.is_none(), "no tool turns means no transcript");
     }
@@ -837,7 +1008,155 @@ mod tests {
     pub fn client() -> Client {
         Client {
             timeout: Duration::from_secs(1),
+            inactivity: Duration::from_secs(1),
             model: None,
+        }
+    }
+
+    mod repair {
+        use super::*;
+
+        #[test]
+        fn resumes_with_findings_only() {
+            let (prompt, resume) = repair_plan(
+                "the original prompt",
+                "not json",
+                "answer is not valid JSON",
+                &Format::Json,
+                Some("s-1".to_owned()),
+            );
+            assert_eq!(resume.as_deref(), Some("s-1"));
+            assert!(
+                !prompt.contains("the original prompt"),
+                "a resumed repair must not re-send the original prompt: {prompt}"
+            );
+            assert!(
+                !prompt.contains("not json"),
+                "the session already carries the failed answer: {prompt}"
+            );
+            assert!(prompt.contains("answer is not valid JSON"), "findings ride along: {prompt}");
+        }
+
+        #[test]
+        fn cold_fallback_keeps_prompt_prefix() {
+            let (prompt, resume) = repair_plan(
+                "the original prompt",
+                "not json",
+                "answer is not valid JSON",
+                &Format::Json,
+                None,
+            );
+            assert!(resume.is_none());
+            assert!(
+                prompt.starts_with("the original prompt"),
+                "the fallback keeps a byte-identical prompt prefix for provider caching: {prompt}"
+            );
+            assert!(prompt.contains("not json"), "the failed answer is appended: {prompt}");
+            assert!(prompt.contains("answer is not valid JSON"), "findings ride along: {prompt}");
+        }
+    }
+
+    mod spawn_args {
+        use super::*;
+
+        fn options(workspace: &std::path::Path) -> SpawnOptions<'_> {
+            SpawnOptions {
+                model: None,
+                workspace,
+                timeout: Duration::from_mins(10),
+                inactivity: Duration::from_mins(2),
+                approve_mcps: false,
+            }
+        }
+
+        fn args(cmd: &tokio::process::Command) -> Vec<String> {
+            cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+        }
+
+        #[test]
+        fn resume_uses_attached_form() {
+            let workspace = std::env::temp_dir();
+            let cmd = agent_command(&options(&workspace), Some("s-1"), "the prompt");
+            let args = args(&cmd);
+            assert!(args.contains(&"--resume=s-1".to_owned()), "args: {args:?}");
+            assert_eq!(args.last().map(String::as_str), Some("the prompt"));
+        }
+
+        #[test]
+        fn fresh_spawn_has_no_resume() {
+            let workspace = std::env::temp_dir();
+            let cmd = agent_command(&options(&workspace), None, "the prompt");
+            let args = args(&cmd);
+            assert!(!args.iter().any(|a| a.starts_with("--resume")), "args: {args:?}");
+        }
+    }
+
+    mod timeouts {
+        use tokio::time::{Duration, sleep};
+
+        use super::{Activity, Deadlines, watchdog};
+
+        const DEADLINES: Deadlines = Deadlines {
+            inactivity: Duration::from_mins(2),
+            cap: Duration::from_mins(10),
+        };
+
+        #[tokio::test(start_paused = true)]
+        async fn silent_stream_dies_at_inactivity_window() {
+            let activity = Activity::now();
+            let started = tokio::time::Instant::now();
+            let error = watchdog(&activity, &DEADLINES).await;
+            assert_eq!(started.elapsed(), Duration::from_mins(2));
+            assert!(
+                error.to_string().contains("inactive for 120s"),
+                "the inactivity kill names the idle span: {error}"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn steady_activity_survives_to_absolute_cap() {
+            let activity = Activity::now();
+            let started = tokio::time::Instant::now();
+            let toucher = async {
+                loop {
+                    sleep(Duration::from_mins(1)).await;
+                    activity.touch();
+                }
+            };
+            let error = tokio::select! {
+                error = watchdog(&activity, &DEADLINES) => error,
+                () = toucher => unreachable!("the toucher never finishes"),
+            };
+            assert_eq!(started.elapsed(), Duration::from_mins(10));
+            assert!(
+                error.to_string().contains("timed out after 600s"),
+                "the cap kill names the absolute bound: {error}"
+            );
+            assert!(
+                error.to_string().contains("absolute cap"),
+                "the cap kill is distinguishable from inactivity: {error}"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn late_activity_defers_the_inactivity_kill() {
+            let activity = Activity::now();
+            let started = tokio::time::Instant::now();
+            let toucher = async {
+                sleep(Duration::from_secs(100)).await;
+                activity.touch();
+                std::future::pending::<()>().await;
+            };
+            let error = tokio::select! {
+                error = watchdog(&activity, &DEADLINES) => error,
+                () = toucher => unreachable!("the toucher never finishes"),
+            };
+            assert_eq!(
+                started.elapsed(),
+                Duration::from_secs(220),
+                "one touch at 100s moves the kill to 100s + the 120s window"
+            );
+            assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
         }
     }
 }

@@ -31,8 +31,7 @@ logged or recorded.
 use omnia::Backend;
 use omnia_genai::Client;
 
-let options = omnia_genai::ConnectOptions::from_env()?;
-let client = Client::connect_with(options).await?;
+let client = Client::connect().await?;
 ```
 
 ## Live tests

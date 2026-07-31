@@ -1,5 +1,5 @@
 name: Checkout omnia
-description: Check out the local omnia dependency used by [patch.crates-io] (requires backends checkout first)
+description: Check out the local omnia dependency used by [patch.crates-io] (requires omnia-backends checkout first)
 
 runs:
   using: composite

@@ -9,7 +9,7 @@ edition = "2024"
 homepage = "https://augentic.io"
 keywords = ["wasi", "wasm", "backend", "runtime", "omnia"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/augentic/backends"
+repository = "https://github.com/augentic/omnia-backends"
 rust-version = "1.97"
 version = "0.29.0"
 

@@ -19,7 +19,7 @@ use omnia::Backend as _;
 use omnia_genai::Client;
 use omnia_wasi_model::{
     Answer, DirEntry, Format, FutureResult, Grants, Message, Reference, Request, Role, ToolHost,
-    VerifyReport, WasiModelCtx,
+    WasiModelCtx,
 };
 use serde_json::Value;
 
@@ -46,10 +46,6 @@ impl ToolHost for LiveShelf {
     fn write(&self, _path: String, _bytes: Vec<u8>) -> FutureResult<()> {
         async { Err(anyhow::anyhow!("write is unused in this test")) }.boxed()
     }
-
-    fn verify(&self, _check: String) -> FutureResult<VerifyReport> {
-        async { Err(anyhow::anyhow!("verify is unused in this test")) }.boxed()
-    }
 }
 
 /// A prompt that forces a `resolve` tool call (a reference target is granted, so
@@ -75,7 +71,6 @@ fn resolve_request() -> Request {
         grants: Grants {
             references: Some("shelf".to_owned()),
             workspace: None,
-            verify: vec![],
         },
     }
 }

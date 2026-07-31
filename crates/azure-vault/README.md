@@ -23,10 +23,10 @@ When no service principal credentials are set, `DeveloperToolsCredential` is use
 ## Usage
 
 ```rust,ignore
-use omnia::Backend;
+use omnia::{Backend, FromEnv};
 use omnia_azure_vault::Client;
 
-let options = omnia_azure_vault::ConnectOptions::from_env()?;
+let options = omnia_azure_vault::ConnectOptions::load_env()?;
 let client = Client::connect_with(options).await?;
 ```
 

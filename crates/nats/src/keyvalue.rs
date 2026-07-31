@@ -45,10 +45,6 @@ impl WasiKeyValueCtx for Client {
 pub struct KvBucket(pub kv::Store);
 
 impl Bucket for KvBucket {
-    fn name(&self) -> &'static str {
-        Box::leak(self.0.name.clone().into_boxed_str())
-    }
-
     fn get(&self, key: String) -> FutureResult<Option<Vec<u8>>> {
         tracing::trace!("getting key: {key}");
         let store = self.0.clone();

@@ -18,10 +18,10 @@ MSRV: Rust 1.95
 ## Usage
 
 ```rust,ignore
-use omnia::Backend;
+use omnia::{Backend, FromEnv};
 use omnia_mongodb::Client;
 
-let options = omnia_mongodb::ConnectOptions::from_env()?;
+let options = omnia_mongodb::ConnectOptions::load_env()?;
 let client = Client::connect_with(options).await?;
 ```
 

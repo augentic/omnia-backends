@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use omnia_wasi_model::{DirEntry, FutureResult, Reference, ToolHost, VerifyReport};
+use omnia_wasi_model::{DirEntry, FutureResult, Reference, ToolHost};
 
 /// Tool host that resolves the lent workspace to an optional path; cursor ignores
 /// every other capability.
@@ -26,10 +26,6 @@ impl ToolHost for StubToolHost {
     }
 
     fn write(&self, _path: String, _bytes: Vec<u8>) -> FutureResult<()> {
-        Box::pin(async { Err(anyhow::anyhow!("cursor ignores the tool host")) })
-    }
-
-    fn verify(&self, _check: String) -> FutureResult<VerifyReport> {
         Box::pin(async { Err(anyhow::anyhow!("cursor ignores the tool host")) })
     }
 

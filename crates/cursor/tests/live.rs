@@ -54,7 +54,6 @@ fn verdict_request() -> Request {
         grants: Grants {
             references: None,
             workspace: None,
-            verify: vec![],
         },
     }
 }
@@ -121,7 +120,6 @@ fn secret_request(url: String) -> Request {
         grants: Grants {
             references: None,
             workspace: None,
-            verify: vec![],
         },
     }
 }

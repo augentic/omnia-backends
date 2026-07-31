@@ -90,19 +90,19 @@ wrpc-transport = "0.29.0"
 wrpc-wasmtime = "0.1.0"
 
 [patch.crates-io]
-# Track omnia's `refactor` branch until `load_env` / `NoOptions` land on main.
-omnia = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-guest = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-wasi-docstore = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-wasi-http = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-wasi-identity = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-wasi-messaging = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-wasi-model = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-wasi-otel = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-wasi-sql = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
-omnia-wasi-vault = { git = "https://github.com/augentic/omnia.git", branch = "refactor" }
+# Track omnia main until the 0.35.0 line is published to crates.io.
+omnia = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-guest = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-wasi-docstore = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-wasi-http = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-wasi-identity = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-wasi-messaging = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-wasi-model = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-wasi-otel = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-wasi-sql = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia-wasi-vault = { git = "https://github.com/augentic/omnia.git", branch = "main" }
 
 # omnia = { path = "../omnia/crates/omnia" }
 # omnia-guest = { path = "../omnia/crates/omnia-guest" }

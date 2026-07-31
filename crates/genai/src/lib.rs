@@ -25,7 +25,9 @@ impl Debug for Client {
 }
 
 impl Backend for Client {
-    type ConnectOptions = ConnectOptions;
+    // The model id is carried per-request, so nothing is read from the
+    // environment.
+    type ConnectOptions = omnia::NoOptions;
 
     #[instrument(name = "GenAi::connect_with", skip_all)]
     async fn connect_with(_options: Self::ConnectOptions) -> Result<Self> {
@@ -35,16 +37,5 @@ impl Backend for Client {
         let inner = genai::Client::default();
         tracing::info!("configured genai backend");
         Ok(Self { inner })
-    }
-}
-
-/// Connection options for the generative-AI backend. The model id is carried
-/// per-request, so nothing is read from the environment.
-#[derive(Debug, Clone)]
-pub struct ConnectOptions;
-
-impl omnia::FromEnv for ConnectOptions {
-    fn from_env() -> Result<Self> {
-        Ok(Self)
     }
 }

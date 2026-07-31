@@ -122,7 +122,7 @@ mod config {
 pub use config::ConnectOptions;
 
 impl omnia::FromEnv for ConnectOptions {
-    fn from_env() -> Result<Self> {
+    fn load_env() -> Result<Self> {
         // default pool (required)
         let default_uri = std::env::var("POSTGRES_URL").context("POSTGRES_URL must be set");
         let default_size =

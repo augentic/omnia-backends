@@ -2,7 +2,7 @@
 
 ## Overview
 
-`backends` provides production backend implementations of the Omnia WASI host
+`omnia-backends` provides production backend implementations of the Omnia WASI host
 interfaces (Azure Blob/Table/Vault/Identity, Postgres, Redis, NATS, Kafka,
 MongoDB, OpenTelemetry, and the `genai`/`cursor` model backends). Each crate
 implements the corresponding `omnia` `WasiXxxCtx` trait against a real service.

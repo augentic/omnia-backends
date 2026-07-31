@@ -1,6 +1,6 @@
 # Contribution Guide
 
-Augentic welcomes community contributions to the backends library.
+Augentic welcomes community contributions to omnia-backends.
 
 Since the project is still unstable, there are specific priorities for development. Pull requests
 that do not address these priorities will not be accepted until Augentic is production ready.

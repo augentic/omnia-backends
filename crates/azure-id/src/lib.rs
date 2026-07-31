@@ -33,7 +33,7 @@ impl Backend for Client {
 pub struct ConnectOptions;
 
 impl omnia::FromEnv for ConnectOptions {
-    fn from_env() -> Result<Self> {
+    fn load_env() -> Result<Self> {
         Ok(Self)
     }
 }

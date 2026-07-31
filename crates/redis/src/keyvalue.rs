@@ -48,10 +48,6 @@ pub struct RedisBucket {
 }
 
 impl Bucket for RedisBucket {
-    fn name(&self) -> &'static str {
-        Box::leak(self.identifier.clone().into_boxed_str())
-    }
-
     fn get(&self, key: String) -> FutureResult<Option<Vec<u8>>> {
         let key = format!("{}:{key}", self.identifier);
         let mut conn = self.conn.0.clone();

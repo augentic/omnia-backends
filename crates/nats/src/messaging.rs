@@ -30,11 +30,7 @@ fn from_nats(msg: async_nats::Message) -> Message {
     let mut message = Message::new(msg.payload.to_vec());
     message.topic = msg.subject.to_string();
     message.metadata = metadata;
-    message.description = msg.description;
-    message.reply = msg.reply.map(|r| Reply {
-        client_name: String::new(),
-        topic: r.to_string(),
-    });
+    message.reply = msg.reply.map(|r| Reply { topic: r.to_string() });
     message
 }
 

@@ -44,10 +44,6 @@ impl Debug for AzLocker {
 }
 
 impl Locker for AzLocker {
-    fn identifier(&self) -> String {
-        self.identifier.clone()
-    }
-
     fn get(&self, secret_id: String) -> FutureResult<Option<Vec<u8>>> {
         tracing::debug!("getting secret: {secret_id}");
         let vault = Arc::clone(&self.vault);

@@ -88,7 +88,7 @@ mod config {
 pub use config::{ConnectOptions, CredentialOptions};
 
 impl omnia::FromEnv for ConnectOptions {
-    fn from_env() -> Result<Self> {
+    fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }
 }

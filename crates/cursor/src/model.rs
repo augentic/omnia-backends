@@ -773,7 +773,7 @@ mod tests {
 
     use omnia_wasi_model::{
         DirEntry, Format, FutureResult, Grants, Message, Reference, Request, Role, Schema,
-        ToolHost, VerifyReport, WasiModelCtx as _,
+        ToolHost, WasiModelCtx as _,
     };
     use serde_json::json;
 
@@ -859,7 +859,6 @@ mod tests {
             grants: Grants {
                 references: None,
                 workspace: None,
-                verify: vec![],
             },
         }
     }
@@ -990,10 +989,6 @@ mod tests {
         }
 
         fn write(&self, _path: String, _bytes: Vec<u8>) -> FutureResult<()> {
-            Box::pin(async { Err(anyhow::anyhow!("cursor ignores the tool host")) })
-        }
-
-        fn verify(&self, _check: String) -> FutureResult<VerifyReport> {
             Box::pin(async { Err(anyhow::anyhow!("cursor ignores the tool host")) })
         }
 

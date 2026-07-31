@@ -129,10 +129,10 @@ values:
 ## Usage
 
 ```rust,ignore
-use omnia::Backend;
+use omnia::{Backend, FromEnv};
 use omnia_azure_table::Client;
 
-let options = omnia_azure_table::ConnectOptions::from_env()?;
+let options = omnia_azure_table::ConnectOptions::load_env()?;
 let client = Client::connect_with(options).await?;
 
 // Create the table if needed (admin helper, not part of wasi-docstore)

@@ -17,10 +17,10 @@ Managed Identity.
 ## Usage
 
 ```rust,ignore
-use omnia::Backend;
+use omnia::{Backend, FromEnv};
 use omnia_azure_id::Client;
 
-let options = omnia_azure_id::ConnectOptions::from_env()?;
+let options = omnia_azure_id::ConnectOptions::load_env()?;
 let client = Client::connect_with(options).await?;
 ```
 

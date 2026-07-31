@@ -35,12 +35,10 @@ fn from_kafka(msg: &OwnedMessage, payload: Vec<u8>) -> Message {
         }
         Metadata { inner: md }
     });
-    let description = metadata.as_ref().and_then(|md| md.get("description").cloned());
 
     let mut message = Message::new(payload);
     message.topic = msg.topic().to_string();
     message.metadata = metadata;
-    message.description = description;
     message
 }
 

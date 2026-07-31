@@ -99,7 +99,7 @@ mod config {
 pub use config::ConnectOptions;
 
 impl omnia::FromEnv for ConnectOptions {
-    fn from_env() -> anyhow::Result<Self> {
+    fn load_env() -> anyhow::Result<Self> {
         Self::from_env().finalize().context("issue loading azure table connection options")
     }
 }

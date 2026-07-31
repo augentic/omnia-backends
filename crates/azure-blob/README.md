@@ -25,10 +25,10 @@ Azure Developer CLI (`azd auth login`).
 ## Usage
 
 ```rust,ignore
-use omnia::Backend;
+use omnia::{Backend, FromEnv};
 use omnia_azure_blob::Client;
 
-let options = omnia_azure_blob::ConnectOptions::from_env()?;
+let options = omnia_azure_blob::ConnectOptions::load_env()?;
 let client = Client::connect_with(options).await?;
 ```
 

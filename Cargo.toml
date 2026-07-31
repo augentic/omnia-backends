@@ -91,18 +91,18 @@ wrpc-wasmtime = "0.1.0"
 
 [patch.crates-io]
 # Track omnia main until the 0.35.0 line is published to crates.io.
-omnia = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-guest = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-wasi-docstore = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-wasi-http = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-wasi-identity = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-wasi-messaging = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-wasi-model = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-wasi-otel = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-wasi-sql = { git = "https://github.com/augentic/omnia.git", branch = "main" }
-omnia-wasi-vault = { git = "https://github.com/augentic/omnia.git", branch = "main" }
+omnia = { git = "https://github.com/augentic/omnia.git" }
+omnia-guest = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-docstore = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-http = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-identity = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-messaging = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-model = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-otel = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-sql = { git = "https://github.com/augentic/omnia.git" }
+omnia-wasi-vault = { git = "https://github.com/augentic/omnia.git" }
 
 # omnia = { path = "../omnia/crates/omnia" }
 # omnia-guest = { path = "../omnia/crates/omnia-guest" }

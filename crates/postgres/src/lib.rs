@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use anyhow::{Context as _, Result, anyhow};
 use deadpool_postgres::{Pool, PoolConfig, Runtime};
 use omnia::Backend;
-use rustls::crypto::ring;
+use rustls::crypto::{CryptoProvider, ring};
 use rustls::{ClientConfig, RootCertStore};
 use tokio_postgres::config::SslMode;
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -48,9 +48,12 @@ impl Backend for Client {
                 let factory = if let Some(f) = &tls_factory {
                     f.clone()
                 } else {
-                    ring::default_provider()
-                        .install_default()
-                        .map_err(|_e| anyhow!("Failed to install rustls crypto provider"))?;
+                    // Another backend (e.g. omnia-wasi-http's default impl) may
+                    // have installed the process provider first; both install
+                    // ring, so an already-set default is fine.
+                    if CryptoProvider::get_default().is_none() {
+                        let _ = ring::default_provider().install_default();
+                    }
 
                     let mut cert_store = RootCertStore::empty();
                     cert_store.extend(TLS_SERVER_ROOTS.iter().cloned());

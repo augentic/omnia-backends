@@ -75,12 +75,14 @@ omnia = "0.35.0"
 omnia-wasi-blobstore = "0.35.0"
 omnia-wasi-docstore = "0.35.0"
 omnia-wasi-http = "0.35.0"
-omnia-wasi-identity = "0.35.0"
+# Backend crates supply their own ctx impls, so the omnia default backends
+# (bundled SQLite, oauth2) are dead weight: leave their default features off.
+omnia-wasi-identity = { version = "0.35.0", default-features = false }
 omnia-wasi-keyvalue = "0.35.0"
 omnia-wasi-messaging = "0.35.0"
 omnia-wasi-model = "0.35.0"
 omnia-wasi-otel = "0.35.0"
-omnia-wasi-sql = "0.35.0"
+omnia-wasi-sql = { version = "0.35.0", default-features = false }
 omnia-wasi-vault = "0.35.0"
 
 # `wrpc-wasmtime` 0.1.0 is unpublished (the crate was renamed from

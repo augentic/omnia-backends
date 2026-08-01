@@ -1043,7 +1043,7 @@ version = "4.10.0+2.12.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.redis]]
-version = "1.4.1"
+version = "1.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.redox_syscall]]
@@ -1087,7 +1087,7 @@ version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]
-version = "0.23.42"
+version = "0.23.43"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-native-certs]]

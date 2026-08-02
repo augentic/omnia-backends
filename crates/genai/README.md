@@ -19,7 +19,7 @@ MSRV: Rust 1.97
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `OPENAI_API_KEY` | per provider | | OpenAI API key, read by genai from the ambient environment |
+| `OPENAI_API_KEY` | per provider | | `OpenAI` API key, read by genai from the ambient environment |
 | `ANTHROPIC_API_KEY` | per provider | | Anthropic API key |
 | `GEMINI_API_KEY` | per provider | | Gemini API key |
 | (other provider keys) | per provider | | Any key the [`genai`](https://crates.io/crates/genai) SDK supports (Groq, Ollama, …) |

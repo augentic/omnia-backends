@@ -186,6 +186,9 @@ fn insert_typed_property(
     Ok(())
 }
 
+// Unit tests cover the pure codec and rejection paths only. The happy-path
+// flatten/annotation mappings (Edm.Int64/Double, nulls, nested-as-string) are
+// proven against the real service by `tests/live.rs::edm_type_round_trip`.
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -219,54 +222,6 @@ mod tests {
     // ── flatten ──────────────────────────────────────────────────────
 
     #[test]
-    fn flatten_keys_and_fields() {
-        let doc = Document {
-            id: encode_id("pk1", "r1"),
-            data: serde_json::to_vec(&json!({"Name": "Alice", "Points": 42})).unwrap(),
-        };
-        let entity = flatten(&doc).unwrap();
-        let obj = entity.as_object().unwrap();
-        assert_eq!(obj["PartitionKey"], "pk1");
-        assert_eq!(obj["RowKey"], "r1");
-        assert_eq!(obj["Name"], "Alice");
-        assert_eq!(obj["Points"], 42);
-    }
-
-    #[test]
-    fn flatten_large_int() {
-        let doc = Document {
-            id: encode_id("pk1", "r1"),
-            data: serde_json::to_vec(&json!({"big": 9_223_372_036_854_775_807_i64})).unwrap(),
-        };
-        let entity = flatten(&doc).unwrap();
-        let obj = entity.as_object().unwrap();
-        assert_eq!(obj["big@odata.type"], "Edm.Int64");
-    }
-
-    #[test]
-    fn flatten_null_fields() {
-        let doc = Document {
-            id: encode_id("pk1", "r1"),
-            data: serde_json::to_vec(&json!({"a": null, "b": "ok"})).unwrap(),
-        };
-        let entity = flatten(&doc).unwrap();
-        let obj = entity.as_object().unwrap();
-        assert!(!obj.contains_key("a"));
-        assert_eq!(obj["b"], "ok");
-    }
-
-    #[test]
-    fn flatten_nested_objects() {
-        let doc = Document {
-            id: encode_id("pk1", "r1"),
-            data: serde_json::to_vec(&json!({"nested": {"x": 1}})).unwrap(),
-        };
-        let entity = flatten(&doc).unwrap();
-        let obj = entity.as_object().unwrap();
-        assert_eq!(obj["nested"].as_str().unwrap(), r#"{"x":1}"#);
-    }
-
-    #[test]
     fn flatten_reserved_keys() {
         let doc = Document {
             id: encode_id("pk1", "r1"),
@@ -286,15 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn flatten_u64() {
-        let val: u64 = (i32::MAX as u64) + 1;
+    fn flatten_u64_overflow_rejected() {
         let doc = Document {
             id: encode_id("pk1", "r1"),
-            data: serde_json::to_vec(&json!({ "bigU": val })).unwrap(),
+            data: serde_json::to_vec(&json!({ "bigU": u64::MAX })).unwrap(),
         };
-        let entity = flatten(&doc).unwrap();
-        let obj = entity.as_object().unwrap();
-        assert_eq!(obj["bigU@odata.type"], "Edm.Int64");
+        let err = flatten(&doc).unwrap_err().to_string();
+        assert!(err.contains("exceeds Azure Table integer range"), "{err}");
     }
 
     #[test]
@@ -368,21 +321,5 @@ mod tests {
         });
         let err = unflatten(&entity).unwrap_err().to_string();
         assert!(err.contains("missing PartitionKey"), "{err}");
-    }
-
-    // ── round-trip ───────────────────────────────────────────────────
-
-    #[test]
-    fn nested_objects() {
-        let doc = Document {
-            id: encode_id("pk1", "r1"),
-            data: serde_json::to_vec(&json!({"tags": ["a", "b"], "meta": {"x": 1}})).unwrap(),
-        };
-        let entity = flatten(&doc).unwrap();
-        let roundtripped = unflatten(&entity).unwrap();
-        assert_eq!(roundtripped.id, doc.id);
-        let body: Value = serde_json::from_slice(&roundtripped.data).unwrap();
-        assert_eq!(body["tags"].as_str().unwrap(), r#"["a","b"]"#);
-        assert_eq!(body["meta"].as_str().unwrap(), r#"{"x":1}"#);
     }
 }

@@ -764,6 +764,10 @@ fn tool_call_identity(tool_call: &Value) -> Option<(String, Value)> {
     None
 }
 
+// Deliberate unit tests: pure stream-parse and prompt-build logic (CI floor).
+// The edge variants (thinking deltas, session-id fallback, garbled lines)
+// cannot be induced deterministically from a real agent; `tests/live.rs` is
+// the acceptance gate proving a real cursor-agent stream parses end-to-end.
 #[cfg(test)]
 mod tests {
     use std::fs;

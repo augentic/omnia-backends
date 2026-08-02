@@ -32,11 +32,15 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-sql` boundary against a real
-database — the acceptance gate for `into_wasi_row`, which cannot be unit-tested.
-It is `#[ignore]`d so it never runs in CI; run it explicitly:
+database — the acceptance gate for the `into_param` / `into_wasi_row` mapping
+pair: scalar, temporal, JSON, binary, and null round-trips, uint64 overflow
+rejection, and `exec` affected counts. The tests are `#[ignore]`d so they never
+run in CI; run them explicitly:
 
 ```bash
-POSTGRES_URL=postgresql://user:pass@localhost:5432/mydb \
+docker run -d --name postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:17
+
+POSTGRES_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable' \
   cargo nextest run -p omnia-postgres --run-ignored all
 ```
 

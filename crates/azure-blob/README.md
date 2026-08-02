@@ -35,8 +35,10 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-blobstore` boundary against
-a real storage account (or Azurite). It is `#[ignore]`d so it never runs in CI;
-run it explicitly:
+a real storage account (or Azurite): write/read/list/metadata round-trips plus
+the ranged-read cases mirroring the `range_options` unit vectors. The tests are
+`#[ignore]`d so they never run in CI; run them explicitly (authentication is
+Entra ID only — service principal or developer tools):
 
 ```bash
 AZURE_BLOB_ENDPOINT=https://<account>.blob.core.windows.net \

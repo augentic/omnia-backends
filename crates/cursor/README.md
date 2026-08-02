@@ -21,7 +21,7 @@ session is never reused across completions. If no session id was observed, the
 repair falls back to a cold spawn whose prompt keeps the original as a
 byte-identical prefix with the failed answer and repair instruction appended.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Requirements
 
@@ -54,6 +54,22 @@ carries the endpoint `url` directly (merged into `<workspace>/.cursor/mcp.json`
 for the spawn).
 
 ## Usage
+
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_cursor::Client as Cursor;
+use omnia_wasi_model::WasiModel;
+
+omnia::runtime!({
+    hosts: {
+        WasiModel: Cursor,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia::Backend;

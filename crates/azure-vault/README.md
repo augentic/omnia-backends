@@ -7,7 +7,7 @@ Azure Key Vault secrets backend for the Omnia WASI runtime, implementing the `wa
 
 Manages secrets in Azure Key Vault using the official `azure_security_keyvault_secrets` SDK. Secrets are base64url-encoded and namespaced per locker identifier.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Configuration
 
@@ -21,6 +21,22 @@ MSRV: Rust 1.95
 When no service principal credentials are set, `DeveloperToolsCredential` is used as a fallback.
 
 ## Usage
+
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_azure_vault::Client as AzureVault;
+use omnia_wasi_vault::WasiVault;
+
+omnia::runtime!({
+    hosts: {
+        WasiVault: AzureVault,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia::{Backend, FromEnv};

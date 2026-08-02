@@ -7,7 +7,7 @@
 
 Uses `deadpool-postgres` connection pooling with optional TLS via `rustls`. Supports multiple named pools for connecting to several databases from a single runtime.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Configuration
 
@@ -20,6 +20,22 @@ MSRV: Rust 1.95
 | `POSTGRES_POOL_SIZE__<NAME>` | no | inherited | Pool size for named pool |
 
 ## Usage
+
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_postgres::Client as Postgres;
+use omnia_wasi_sql::WasiSql;
+
+omnia::runtime!({
+    hosts: {
+        WasiSql: Postgres,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia::{Backend, FromEnv};

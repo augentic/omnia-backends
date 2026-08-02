@@ -7,7 +7,7 @@ Kafka messaging backend for the Omnia WASI runtime, implementing the `wasi-messa
 
 Provides a Kafka producer and consumer backed by `rdkafka`, with optional Confluent Schema Registry integration and custom partitioning.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Configuration
 
@@ -26,6 +26,22 @@ MSRV: Rust 1.95
 | `KAFKA_REGISTRY_CACHE_TTL` | no | `3600` | Schema cache TTL in seconds |
 
 ## Usage
+
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_kafka::Client as Kafka;
+use omnia_wasi_messaging::WasiMessaging;
+
+omnia::runtime!({
+    hosts: {
+        WasiMessaging: Kafka,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia::{Backend, FromEnv};

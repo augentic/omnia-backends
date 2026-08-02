@@ -7,7 +7,7 @@ Azure Blob Storage blobstore backend for the Omnia WASI runtime, implementing th
 
 Maps blobstore containers to Azure Blob containers and blobs to block blobs using the official `azure_storage_blob` SDK.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Configuration
 
@@ -23,6 +23,22 @@ When service principal credentials are not provided, the backend falls back to
 Azure Developer CLI (`azd auth login`).
 
 ## Usage
+
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_azure_blob::Client as AzureBlob;
+use omnia_wasi_blobstore::WasiBlobstore;
+
+omnia::runtime!({
+    hosts: {
+        WasiBlobstore: AzureBlob,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia::{Backend, FromEnv};

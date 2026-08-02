@@ -2,6 +2,8 @@
 
 Unreleased
 
+Pairs with omnia 0.35.x.
+
 ### Added
 
 ### Changed

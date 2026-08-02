@@ -13,19 +13,39 @@ in-process tool loop is driven to completion, and the runtime core's
 `resolve` tool is dispatched into the guest's `references` shelf via the lent
 `ToolHost`. The guest only ever sees the validated answer string.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Configuration
 
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OPENAI_API_KEY` | per provider | | OpenAI API key, read by genai from the ambient environment |
+| `ANTHROPIC_API_KEY` | per provider | | Anthropic API key |
+| `GEMINI_API_KEY` | per provider | | Gemini API key |
+| (other provider keys) | per provider | | Any key the [`genai`](https://crates.io/crates/genai) SDK supports (Groq, Ollama, …) |
+
 The provider model id is carried per-request (`request.model`); when a request
 leaves it unset the backend falls back to `gpt-5.5`. genai routes to the
-provider by the model id's prefix.
-
-Provider API keys are read by genai from the ambient environment
-(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …) and are never
-logged or recorded.
+provider by the model id's prefix. Only the key for the provider a request
+routes to is required, and keys are never logged or recorded.
 
 ## Usage
+
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_genai::Client as GenAi;
+use omnia_wasi_model::WasiModel;
+
+omnia::runtime!({
+    hosts: {
+        WasiModel: GenAi,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia::Backend;

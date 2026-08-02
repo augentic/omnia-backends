@@ -7,7 +7,7 @@ Azure Identity backend for the Omnia WASI runtime, implementing the `wasi-identi
 
 Acquires Azure AD access tokens via Managed Identity credentials using the official `azure_identity` SDK.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Configuration
 
@@ -15,6 +15,22 @@ No environment variables are required; the backend always authenticates via
 Managed Identity.
 
 ## Usage
+
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_azure_id::Client as AzureId;
+use omnia_wasi_identity::WasiIdentity;
+
+omnia::runtime!({
+    hosts: {
+        WasiIdentity: AzureId,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia::{Backend, FromEnv};

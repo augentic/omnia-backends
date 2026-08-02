@@ -7,7 +7,7 @@ Azure Table Storage backend for the Omnia WASI runtime, implementing the `wasi-d
 
 Azure Table Storage is a `NoSQL` key-value store. This crate maps the document store model onto Azure Table entities: top-level JSON fields are flattened into entity properties so that server-side `OData` `$filter` queries work, while nested objects are serialized as JSON string properties.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Key Mapping
 
@@ -127,6 +127,22 @@ values:
 - **Azure sovereign cloud**: the appropriate `table.core.*` URL for your region
 
 ## Usage
+
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_azure_table::Client as AzureTable;
+use omnia_wasi_docstore::WasiDocStore;
+
+omnia::runtime!({
+    hosts: {
+        WasiDocStore: AzureTable,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia::{Backend, FromEnv};

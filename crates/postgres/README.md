@@ -7,7 +7,7 @@
 
 Uses `deadpool-postgres` connection pooling with optional TLS via `rustls`. Supports multiple named pools for connecting to several databases from a single runtime.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Configuration
 
@@ -21,6 +21,22 @@ MSRV: Rust 1.95
 
 ## Usage
 
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_postgres::Client as Postgres;
+use omnia_wasi_sql::WasiSql;
+
+omnia::runtime!({
+    hosts: {
+        WasiSql: Postgres,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
+
 ```rust,ignore
 use omnia::{Backend, FromEnv};
 use omnia_postgres::Client;
@@ -32,11 +48,15 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-sql` boundary against a real
-database — the acceptance gate for `into_wasi_row`, which cannot be unit-tested.
-It is `#[ignore]`d so it never runs in CI; run it explicitly:
+database — the acceptance gate for the `into_param` / `into_wasi_row` mapping
+pair: scalar, temporal, JSON, binary, and null round-trips, uint64 overflow
+rejection, and `exec` affected counts. The tests are `#[ignore]`d so they never
+run in CI; run them explicitly:
 
 ```bash
-POSTGRES_URL=postgresql://user:pass@localhost:5432/mydb \
+docker run -d --name postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:17
+
+POSTGRES_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable' \
   cargo nextest run -p omnia-postgres --run-ignored all
 ```
 

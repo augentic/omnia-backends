@@ -126,13 +126,13 @@ mod config {
         pub url: String,
         /// Schema Registry API key.
         #[env(from = "KAFKA_REGISTRY_API_KEY")]
-        pub(crate) api_key: String,
+        pub api_key: String,
         /// Schema Registry API secret.
         #[env(from = "KAFKA_REGISTRY_API_SECRET")]
-        pub(crate) api_secret: String,
+        pub api_secret: String,
         /// Schema cache TTL in seconds.
         #[env(from = "KAFKA_REGISTRY_CACHE_TTL", default = "3600")]
-        pub(crate) cache_ttl_secs: u64,
+        pub cache_ttl_secs: u64,
     }
 
     // The `FromEnv` `with =` hook requires a `ParseResult` return type.

@@ -2,7 +2,7 @@
 
 Production backend implementations for the [Omnia](https://github.com/augentic/omnia) WASI runtime. Each crate bridges a WASI interface to a concrete service (database, message broker, vault, model provider, etc.), so the same guest `.wasm` that runs against Omnia's in-memory defaults runs unchanged against real infrastructure.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97. Each release line pairs with a specific omnia line — the current 0.29.x line pairs with omnia 0.35.x (see [RELEASES.md](RELEASES.md)).
 
 ## Crates
 

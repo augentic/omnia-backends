@@ -7,7 +7,7 @@ Kafka messaging backend for the Omnia WASI runtime, implementing the `wasi-messa
 
 Provides a Kafka producer and consumer backed by `rdkafka`, with optional Confluent Schema Registry integration and custom partitioning.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Configuration
 
@@ -27,6 +27,22 @@ MSRV: Rust 1.95
 
 ## Usage
 
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_kafka::Client as Kafka;
+use omnia_wasi_messaging::WasiMessaging;
+
+omnia::runtime!({
+    hosts: {
+        WasiMessaging: Kafka,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
+
 ```rust,ignore
 use omnia::{Backend, FromEnv};
 use omnia_kafka::Client;
@@ -38,10 +54,20 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging` boundary against a
-real broker. It is `#[ignore]`d so it never runs in CI; run it explicitly:
+real broker: keyed sends must land on the partitions the KafkaJS-compatible
+partitioner predicts, and (when a Schema Registry is reachable) sends must
+carry the Confluent wire format and decode back through `subscribe`. The tests
+are `#[ignore]`d so they never run in CI; run them explicitly:
 
 ```bash
-COMPONENT=omnia-live KAFKA_BROKERS=localhost:9092 \
+# One container provides both the broker and a schema registry:
+docker run -d --name redpanda -p 9092:9092 -p 8081:8081 \
+  redpandadata/redpanda:latest redpanda start --mode dev-container --smp 1 \
+  --kafka-addr PLAINTEXT://0.0.0.0:9092 \
+  --advertise-kafka-addr PLAINTEXT://localhost:9092 \
+  --schema-registry-addr 0.0.0.0:8081
+
+KAFKA_BROKERS=localhost:9092 KAFKA_REGISTRY_URL=http://localhost:8081 \
   cargo nextest run -p omnia-kafka --run-ignored all
 ```
 

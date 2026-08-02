@@ -38,3 +38,47 @@ async fn write_read_delete() -> Result<()> {
     client.delete_container(container).await?;
     Ok(())
 }
+
+/// Live counterpart of the `range_options` unit cases: the service must honor
+/// the HTTP `Range` each (start, end) pair translates to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
+async fn ranged_reads() -> Result<()> {
+    let client = <Client as Backend>::connect().await?;
+
+    let container = format!("omnia-live-range-{}", std::process::id());
+    let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
+
+    let object = "ranged".to_owned();
+    let payload = b"0123456789abcdefghij"; // 20 bytes
+    store.write_data(object.clone(), payload.to_vec().into()).await?;
+
+    // (start, end, expected slice); end is inclusive, 0/u64::MAX mean unbounded.
+    let cases: &[(u64, u64, &[u8])] = &[
+        (0, 0, payload),               // full read
+        (0, u64::MAX, payload),        // full read
+        (10, 14, b"abcde"),            // bounded, inclusive end
+        (5, 5, b"5"),                  // single byte
+        (10, 0, b"abcdefghij"),        // offset with unbounded end
+        (10, u64::MAX, b"abcdefghij"), // offset with unbounded end
+        (15, 1_000, b"fghij"),         // end past EOF clamps to object size
+    ];
+    for (start, end, expected) in cases {
+        let data = store.get_data(object.clone(), *start, *end).await?;
+        assert_eq!(
+            data.as_deref(),
+            Some(*expected),
+            "get_data({start}, {end}) returns the ranged slice"
+        );
+    }
+
+    let err = store
+        .get_data(object.clone(), 10, 5)
+        .await
+        .expect_err("inverted range is rejected before hitting the service");
+    assert!(err.to_string().contains("end (5) < start (10)"), "rejection surfaces: {err}");
+
+    store.delete_object(object).await?;
+    client.delete_container(container).await?;
+    Ok(())
+}

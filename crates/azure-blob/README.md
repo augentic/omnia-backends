@@ -7,7 +7,7 @@ Azure Blob Storage blobstore backend for the Omnia WASI runtime, implementing th
 
 Maps blobstore containers to Azure Blob containers and blobs to block blobs using the official `azure_storage_blob` SDK.
 
-MSRV: Rust 1.95
+MSRV: Rust 1.97
 
 ## Configuration
 
@@ -24,6 +24,22 @@ Azure Developer CLI (`azd auth login`).
 
 ## Usage
 
+Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
+(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+
+```rust,ignore
+use omnia_azure_blob::Client as AzureBlob;
+use omnia_wasi_blobstore::WasiBlobstore;
+
+omnia::runtime!({
+    hosts: {
+        WasiBlobstore: AzureBlob,
+    }
+});
+```
+
+For direct or embedded use, connect it yourself:
+
 ```rust,ignore
 use omnia::{Backend, FromEnv};
 use omnia_azure_blob::Client;
@@ -35,8 +51,10 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-blobstore` boundary against
-a real storage account (or Azurite). It is `#[ignore]`d so it never runs in CI;
-run it explicitly:
+a real storage account (or Azurite): write/read/list/metadata round-trips plus
+the ranged-read cases mirroring the `range_options` unit vectors. The tests are
+`#[ignore]`d so they never run in CI; run them explicitly (authentication is
+Entra ID only — service principal or developer tools):
 
 ```bash
 AZURE_BLOB_ENDPOINT=https://<account>.blob.core.windows.net \

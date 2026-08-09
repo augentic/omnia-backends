@@ -1,0 +1,33 @@
+[package]
+name = "omnia-filesystem"
+description = "Filesystem provider for blobstore"
+readme = "README.md"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+anyhow.workspace = true
+fromenv.workspace = true
+futures.workspace = true
+omnia.workspace = true
+omnia-wasi-blobstore.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+
+# Container operations are futures; the test suite needs a runtime.
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

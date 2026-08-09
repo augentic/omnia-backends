@@ -3359,6 +3359,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnia-filesystem"
+version = "0.29.0"
+dependencies = [
+ "anyhow",
+ "fromenv",
+ "futures",
+ "omnia",
+ "omnia-wasi-blobstore",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "omnia-genai"
 version = "0.29.0"
 dependencies = [

@@ -1,6 +1,6 @@
 [package]
-name = "omnia-kafka"
-description = "Kafka messaging resource"
+name = "omnia-filesystem"
+description = "Filesystem provider for blobstore"
 readme = "README.md"
 authors.workspace = true
 categories.workspace = true
@@ -20,21 +20,14 @@ all-features = true
 
 [dependencies]
 anyhow.workspace = true
-chrono.workspace = true
 fromenv.workspace = true
 futures.workspace = true
-http.workspace = true
-jsonschema = { version = "0.49.8", default-features = false }
 omnia.workspace = true
-omnia-wasi-messaging.workspace = true
-rand = "0.10.2"
-rdkafka = { version = "0.39.0", features = ["cmake-build", "curl", "ssl-vendored", "tokio"] }
-schema-registry-client = "0.4.2"
-serde_json.workspace = true
-tokio.workspace = true
+omnia-wasi-blobstore.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 
+# Container operations are futures; the test suite needs a runtime.
 [dev-dependencies]
-csv = "1.4.0"
-serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

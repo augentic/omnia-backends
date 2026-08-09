@@ -53,7 +53,10 @@ async fn write_read_round_trip() {
     assert_eq!(data, Some(payload.clone()));
 
     // Overwrite replaces atomically (last rename wins).
-    container.write_data("ab/cdef".to_string(), Bytes::from_static(b"second")).await.expect("rewrite");
+    container
+        .write_data("ab/cdef".to_string(), Bytes::from_static(b"second"))
+        .await
+        .expect("rewrite");
     let data = container.get_data("ab/cdef".to_string(), 0, u64::MAX).await.expect("get");
     assert_eq!(data, Some(Bytes::from_static(b"second")));
 
@@ -72,7 +75,10 @@ async fn range_reads() {
     let root = TempDir::new().expect("tempdir");
     let client = client(&root);
     let container = snapshots(&client).await;
-    container.write_data("obj".to_string(), Bytes::from_static(b"0123456789")).await.expect("write");
+    container
+        .write_data("obj".to_string(), Bytes::from_static(b"0123456789"))
+        .await
+        .expect("write");
 
     // `end` is inclusive; 0 and u64::MAX read to the end; bounds clamp.
     let slice = container.get_data("obj".to_string(), 2, 4).await.expect("get");

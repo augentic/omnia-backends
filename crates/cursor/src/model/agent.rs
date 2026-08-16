@@ -16,6 +16,11 @@ use crate::{Deadlines, mcp};
 
 const CURSOR_BIN: &str = "cursor-agent";
 
+/// Retry budget for empty spawns — clean exits whose stream carried no
+/// terminal result event, so the agent did no work and a retry is cheap.
+/// Crashes and timeout kills are errors and are never retried here.
+const EMPTY_SPAWN_RETRIES: u32 = 2;
+
 /// Verify `cursor-agent` is on `PATH` and responds to `--version`.
 ///
 /// # Errors
@@ -31,11 +36,11 @@ pub async fn check_cursor() -> Result<()> {
     Ok(())
 }
 
-pub(super) struct SpawnOptions<'a> {
-    pub(super) model: Option<&'a str>,
-    pub(super) workspace: &'a Path,
-    pub(super) deadlines: Deadlines,
-    pub(super) approve_mcps: bool,
+pub struct SpawnOptions<'a> {
+    pub model: Option<&'a str>,
+    pub workspace: &'a Path,
+    pub deadlines: Deadlines,
+    pub approve_mcps: bool,
 }
 
 /// Spilled prompt file: CLI arg points at a path that lives as long as this value.
@@ -70,17 +75,37 @@ impl Prompt {
 }
 
 impl SpawnOptions<'_> {
-    #[instrument(skip(self, prompt, resume), fields(model = self.model))]
-    pub(super) async fn run_agent(
+    /// One agent run: spawn, re-spawning empty spawns (a clean exit with no
+    /// terminal result event — a session the service dropped before any work
+    /// happened) until the retry budget runs out.
+    pub async fn run_agent(
         &self, prompt: &str, resume: Option<&str>,
     ) -> Result<AgentOutput> {
+        for retry in 1..=EMPTY_SPAWN_RETRIES {
+            if let Some(output) = self.spawn_once(prompt, resume).await? {
+                return Ok(output);
+            }
+            tracing::warn!(retry, of = EMPTY_SPAWN_RETRIES, "no result event; retrying the spawn");
+        }
+        self.spawn_once(prompt, resume).await?.with_context(|| {
+            format!(
+                "cursor-agent did not emit a terminal result event in {} spawns",
+                EMPTY_SPAWN_RETRIES + 1
+            )
+        })
+    }
+
+    /// `None` is an empty spawn: a clean exit whose stream had no terminal
+    /// result event.
+    #[instrument(skip(self, prompt, resume), fields(model = self.model))]
+    async fn spawn_once(&self, prompt: &str, resume: Option<&str>) -> Result<Option<AgentOutput>> {
         let spilled = Prompt::spill(prompt, self.workspace)?;
         tracing::debug!(
             prompt_path = %spilled.file.path().display(),
             prompt_len = prompt.len(),
             resume,
             preview = %truncate(prompt, PROMPT_PREVIEW_CHARS),
-            "cursor-agent prompt"
+            "prompt"
         );
 
         let mut child = self
@@ -212,14 +237,14 @@ impl Deadlines {
 
 async fn parse_stream(
     stdout: impl AsyncRead + Unpin, activity: watch::Sender<Instant>,
-) -> Result<AgentOutput> {
+) -> Result<Option<AgentOutput>> {
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = OutputParser::default();
     while let Some(line) = lines.next_line().await? {
         activity.send_replace(Instant::now());
         parser.line(&line)?;
     }
-    parser.finish()
+    Ok(parser.finish())
 }
 
 async fn drain(mut stream: impl AsyncRead + Unpin) -> Vec<u8> {

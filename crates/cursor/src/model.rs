@@ -1,20 +1,19 @@
+mod agent;
+mod stream;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use agent::SpawnOptions;
+pub use agent::check_cursor;
 use anyhow::{Context, Result, bail};
 use omnia_wasi_model::{
     Answer, Format, FutureResult, Mcp, Request, ToolHost, Transcript, WasiModelCtx,
 };
+use stream::{PROMPT_PREVIEW_CHARS, truncate};
 
 use crate::{Client, mcp};
-
-mod agent;
-mod stream;
-
-use agent::SpawnOptions;
-pub use agent::check_cursor;
-use stream::{PROMPT_PREVIEW_CHARS, truncate};
 
 #[derive(Debug)]
 struct AgentOutput {
@@ -203,7 +202,7 @@ fn log_completion(
         prompt_len,
         ?mcp_servers,
         has_references,
-        "cursor completion"
+        "completion"
     );
 }
 

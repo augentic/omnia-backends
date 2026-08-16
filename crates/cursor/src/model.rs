@@ -62,18 +62,18 @@ impl WasiModelCtx for Client {
         Box::pin(async move {
             let format = &request.format;
             let mut prompt = request.to_string();
-
             let Some(workspace) = workspace else {
                 bail!("no local tree on this node");
             };
+
+            // create the workspace directory if it doesn't exist
             fs::create_dir_all(&workspace)
                 .with_context(|| format!("creating {}", workspace.display()))?;
             let workspace = workspace
                 .canonicalize()
                 .with_context(|| format!("canonicalizing {}", workspace.display()))?;
 
-            // Per-prompt MCP grants carry their own endpoint URL.
-            // No grant means no MCP wiring (MCP is opt-in per completion).
+            // MCP grants have their callback URLs, no grants = no MCP
             let mcp_servers = request.mcp_servers();
             let mcp_names: Vec<&str> = mcp_servers.iter().map(|s| s.name.as_str()).collect();
             let mcp_guard = if mcp_servers.is_empty() {
@@ -104,31 +104,26 @@ impl WasiModelCtx for Client {
                 request.grants.references.is_some(),
             );
 
-            let AgentOutput {
-                result,
-                transcript,
-                session_id,
-            } = spawn_agent(&prompt, &spawn, None).await?;
-            log_attempt(1, &result, transcript.as_ref());
+            let output = spawn.agent(&prompt, None).await?;
+            output.log(1);
             let resume;
-            match take_answer(format, result, transcript, false) {
+            match take_answer(format, output.result, output.transcript, false) {
                 Outcome::Done(answer) => return Ok(answer),
                 Outcome::Repair { result, reason } => {
                     tracing::debug!(
                         attempt = 1,
                         %reason,
-                        resumes = session_id.is_some(),
-                        "repairing cursor-agent answer"
+                        resumes = output.session_id.is_some(),
+                        "repairing answer"
                     );
-                    (prompt, resume) = repair_plan(&prompt, &result, &reason, format, session_id);
+                    (prompt, resume) =
+                        repair_plan(&prompt, &result, &reason, format, output.session_id);
                 }
             }
 
-            let AgentOutput {
-                result, transcript, ..
-            } = spawn_agent(&prompt, &spawn, resume.as_deref()).await?;
-            log_attempt(2, &result, transcript.as_ref());
-            match take_answer(format, result, transcript, true) {
+            let output = spawn.agent(&prompt, resume.as_deref()).await?;
+            output.log(2);
+            match take_answer(format, output.result, output.transcript, true) {
                 Outcome::Done(answer) => Ok(answer),
                 Outcome::Repair { reason, .. } => {
                     bail!("cursor-agent did not return an answer after 2 attempts: {reason}");
@@ -177,31 +172,33 @@ fn take_answer(
     }
 }
 
-fn log_attempt(attempt: u32, result: &str, transcript: Option<&Transcript>) {
-    let (interesting_tools, noisy_tools) = tool_counts(transcript);
-    tracing::debug!(
-        attempt,
-        result_len = result.len(),
-        interesting_tools,
-        noisy_tools,
-        "cursor-agent answer"
-    );
-}
-
-fn tool_counts(transcript: Option<&Transcript>) -> (usize, usize) {
-    let Some(transcript) = transcript else {
-        return (0, 0);
-    };
-    let mut interesting = 0;
-    let mut noisy = 0;
-    for turn in &transcript.turns {
-        if is_noisy_tool(&turn.tool) {
-            noisy += 1;
-        } else {
-            interesting += 1;
-        }
+impl AgentOutput {
+    fn log(&self, attempt: u32) {
+        let (interesting_tools, noisy_tools) = self.tool_counts();
+        tracing::debug!(
+            attempt,
+            result_len = self.result.len(),
+            interesting_tools,
+            noisy_tools,
+            "answer"
+        );
     }
-    (interesting, noisy)
+
+    fn tool_counts(&self) -> (usize, usize) {
+        let Some(transcript) = &self.transcript else {
+            return (0, 0);
+        };
+        let mut interesting = 0;
+        let mut noisy = 0;
+        for turn in &transcript.turns {
+            if is_noisy_tool(&turn.tool) {
+                noisy += 1;
+            } else {
+                interesting += 1;
+            }
+        }
+        (interesting, noisy)
+    }
 }
 
 /// Spilled prompt file: CLI arg points at a path that lives as long as this value.
@@ -273,79 +270,89 @@ fn mcp_hint(servers: &[&Mcp]) -> String {
     )
 }
 
-/// The `cursor-agent` invocation for one spawn; `resume` re-enters the named
-/// session instead of starting a fresh one.
-fn agent_command(options: &SpawnOptions<'_>, resume: Option<&str>, prompt_arg: &str) -> Command {
-    let mut cmd = Command::new(CURSOR_BIN);
-    cmd.kill_on_drop(true)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .args(["--print", "--force", "--trust", "--output-format", "stream-json", "--workspace"])
-        .arg(options.workspace);
-    // Same strip as `ensure_git`: a leaked GIT_DIR would make the agent
-    // discover the host checkout and miss `<workspace>/.cursor/mcp.json`.
-    for var in mcp::GIT_IDENTITY {
-        cmd.env_remove(var);
-    }
-    if options.approve_mcps {
-        cmd.arg("--approve-mcps");
-    }
-    if let Some(model) = options.model {
-        cmd.arg("--model").arg(model);
-    }
-    if let Some(session_id) = resume {
-        // `--resume` takes an optional value; the attached form keeps the
-        // session id from being read as the prompt.
-        cmd.arg(format!("--resume={session_id}"));
-    }
-    cmd.arg(prompt_arg);
-    cmd
-}
+impl SpawnOptions<'_> {
+    #[instrument(skip(self, prompt, resume), fields(model = self.model))]
+    async fn agent(&self, prompt: &str, resume: Option<&str>) -> Result<AgentOutput> {
+        let spilled = Prompt::spill(prompt, self.workspace)?;
+        tracing::debug!(
+            prompt_path = %spilled.path.display(),
+            prompt_len = prompt.len(),
+            resume,
+            preview = %truncate(prompt, PROMPT_PREVIEW_CHARS),
+            "prompt"
+        );
 
-#[instrument(skip(prompt, options, resume), fields(model = options.model))]
-async fn spawn_agent(
-    prompt: &str, options: &SpawnOptions<'_>, resume: Option<&str>,
-) -> Result<AgentOutput> {
-    let spilled = Prompt::spill(prompt, options.workspace)?;
-    tracing::debug!(
-        prompt_path = %spilled.path.display(),
-        prompt_len = prompt.len(),
-        resume,
-        preview = %truncate(prompt, PROMPT_PREVIEW_CHARS),
-        "cursor-agent prompt"
-    );
+        let mut child = self
+            .command(&spilled.arg, resume)
+            .spawn()
+            .with_context(|| format!("spawning `{CURSOR_BIN}`"))?;
+        let stdout = child.stdout.take().context("child stdout is piped")?;
+        let stderr = child.stderr.take().context("child stderr is piped")?;
 
-    let mut child = agent_command(options, resume, &spilled.arg)
-        .spawn()
-        .with_context(|| format!("spawning `{CURSOR_BIN}`"))?;
-    let stdout = child.stdout.take().context("child stdout is piped")?;
-    let stderr = child.stderr.take().context("child stderr is piped")?;
+        // Parse stdout as it streams so memory stays bounded on chatty runs, and
+        // drain stderr concurrently so the child can never block on a full pipe.
+        let activity = Activity::now();
+        let drive = async {
+            let (parsed, stderr) = tokio::join!(parse_stream(stdout, &activity), drain(stderr));
+            let status =
+                child.wait().await.with_context(|| format!("waiting on `{CURSOR_BIN}`"))?;
+            anyhow::Ok((parsed, stderr, status))
+        };
 
-    // Parse stdout as it streams so memory stays bounded on chatty runs, and
-    // drain stderr concurrently so the child can never block on a full pipe.
-    let activity = Activity::now();
-    let drive = async {
-        let (parsed, stderr) = tokio::join!(parse_stream(stdout, &activity), drain(stderr));
-        let status = child.wait().await.with_context(|| format!("waiting on `{CURSOR_BIN}`"))?;
-        anyhow::Ok((parsed, stderr, status))
-    };
+        // On timeout `drive` is dropped, and `kill_on_drop` reaps the orphaned agent.
+        let deadlines = Deadlines {
+            inactivity: self.inactivity,
+            cap: self.timeout,
+        };
+        let (parsed, stderr, status) = tokio::select! {
+            driven = drive => driven?,
+            error = deadlines.watch(&activity) => return Err(error),
+        };
 
-    // On timeout `drive` is dropped, and `kill_on_drop` reaps the orphaned agent.
-    let deadlines = Deadlines {
-        inactivity: options.inactivity,
-        cap: options.timeout,
-    };
-    let (parsed, stderr, status) = tokio::select! {
-        driven = drive => driven?,
-        error = watchdog(&activity, &deadlines) => return Err(error),
-    };
+        if !status.success() {
+            bail!("cursor-agent exited with {status}: {}", String::from_utf8_lossy(&stderr).trim());
+        }
 
-    if !status.success() {
-        bail!("cursor-agent exited with {status}: {}", String::from_utf8_lossy(&stderr).trim());
+        parsed
     }
 
-    parsed
+    /// The `cursor-agent` invocation for one spawn; `resume` re-enters the named
+    /// session instead of starting a fresh one.
+    fn command(&self, prompt_arg: &str, resume: Option<&str>) -> Command {
+        let mut cmd = Command::new(CURSOR_BIN);
+        cmd.kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // In-process store: no macOS keychain and no ~/.cursor/auth.json.
+            .env("AGENT_CLI_CREDENTIAL_STORE", "memory")
+            .args([
+                "--print",
+                "--force",
+                "--trust",
+                "--output-format",
+                "stream-json",
+                "--workspace",
+            ])
+            .arg(self.workspace);
+
+        // prevent the agent from discovering the host checkout and missing the MCP config
+        for var in mcp::GIT_IDENTITY {
+            cmd.env_remove(var);
+        }
+        if self.approve_mcps {
+            cmd.arg("--approve-mcps");
+        }
+        if let Some(model) = self.model {
+            cmd.arg("--model").arg(model);
+        }
+        if let Some(session_id) = resume {
+            cmd.arg(format!("--resume={session_id}"));
+        }
+
+        cmd.arg(prompt_arg);
+        cmd
+    }
 }
 
 /// Last-seen stream progress; every stdout line from the agent counts.
@@ -372,32 +379,34 @@ struct Deadlines {
     cap: Duration,
 }
 
-/// Resolves when a spawn breaches either bound; the error names which one, so
-/// "stalled agent" and "agent that outlived the cap" stay distinguishable.
-async fn watchdog(activity: &Activity, deadlines: &Deadlines) -> anyhow::Error {
-    let start = Instant::now();
-    loop {
-        let now = Instant::now();
-        let idle = now.saturating_duration_since(activity.last());
-        if idle >= deadlines.inactivity {
-            return anyhow!(
-                "cursor-agent inactive for {}s (no stream events; inactivity limit {}s, absolute \
-                 cap {}s)",
-                idle.as_secs(),
-                deadlines.inactivity.as_secs(),
-                deadlines.cap.as_secs()
-            );
+impl Deadlines {
+    /// Resolves when a spawn breaches either bound; the error names which one, so
+    /// "stalled agent" and "agent that outlived the cap" stay distinguishable.
+    async fn watch(&self, activity: &Activity) -> anyhow::Error {
+        let start = Instant::now();
+        loop {
+            let now = Instant::now();
+            let idle = now.saturating_duration_since(activity.last());
+            if idle >= self.inactivity {
+                return anyhow!(
+                    "cursor-agent inactive for {}s (no stream events; inactivity limit {}s, \
+                     absolute cap {}s)",
+                    idle.as_secs(),
+                    self.inactivity.as_secs(),
+                    self.cap.as_secs()
+                );
+            }
+            let elapsed = now.saturating_duration_since(start);
+            if elapsed >= self.cap {
+                return anyhow!(
+                    "cursor-agent timed out after {}s (absolute cap exceeded while still active)",
+                    self.cap.as_secs()
+                );
+            }
+            let next_check =
+                self.inactivity.saturating_sub(idle).min(self.cap.saturating_sub(elapsed));
+            tokio::time::sleep(next_check).await;
         }
-        let elapsed = now.saturating_duration_since(start);
-        if elapsed >= deadlines.cap {
-            return anyhow!(
-                "cursor-agent timed out after {}s (absolute cap exceeded while still active)",
-                deadlines.cap.as_secs()
-            );
-        }
-        let next_check =
-            deadlines.inactivity.saturating_sub(idle).min(deadlines.cap.saturating_sub(elapsed));
-        tokio::time::sleep(next_check).await;
     }
 }
 
@@ -434,7 +443,7 @@ fn log_completion(
                 prompt_len,
                 ?mcp_servers,
                 has_references,
-                "cursor completion"
+                "completion"
             );
         }
         Format::Json => {
@@ -444,7 +453,7 @@ fn log_completion(
                 prompt_len,
                 ?mcp_servers,
                 has_references,
-                "cursor completion"
+                "completion"
             );
         }
         Format::Schema(spec) => {
@@ -455,12 +464,12 @@ fn log_completion(
                 prompt_len,
                 ?mcp_servers,
                 has_references,
-                "cursor completion"
+                "completion"
             );
             tracing::trace!(
                 schema_name = %spec.name,
                 schema = %truncate(&spec.schema, PROMPT_PREVIEW_CHARS),
-                "cursor completion schema"
+                "completion schema"
             );
         }
     }
@@ -603,7 +612,7 @@ impl ThinkingBuf {
 }
 
 fn log_thinking(text: &str) {
-    tracing::debug!("thinking: {}", truncate(text, THINKING_PREVIEW_CHARS));
+    tracing::debug!(text = %truncate(text, THINKING_PREVIEW_CHARS), "thinking");
 }
 
 #[derive(Default)]
@@ -629,7 +638,7 @@ impl OutputParser {
                 tracing::debug!(
                     %error,
                     line = %truncate(line, TEXT_PREVIEW_CHARS),
-                    "skipping unparsable cursor-agent event"
+                    "skipping unparsable event"
                 );
                 return Ok(());
             }
@@ -670,7 +679,7 @@ impl OutputParser {
                 if !text.is_empty() {
                     tracing::debug!(
                         text = %truncate(&text, TEXT_PREVIEW_CHARS),
-                        "cursor-agent assistant text"
+                        "assistant text"
                     );
                 }
             }
@@ -682,7 +691,7 @@ impl OutputParser {
                 }
             }
             Event::Other => {
-                tracing::trace!(line = %truncate(line, TEXT_PREVIEW_CHARS), "cursor-agent other event");
+                tracing::trace!(line = %truncate(line, TEXT_PREVIEW_CHARS), "other event");
             }
         }
         Ok(())
@@ -709,7 +718,7 @@ impl OutputParser {
                     (call_id, tool_call.as_ref().and_then(tool_call_identity))
                 {
                     if is_noisy_tool(&tool) {
-                        tracing::trace!(subtype, %call_id, %tool, "cursor-agent tool call");
+                        tracing::trace!(subtype, %call_id, %tool, "tool call");
                     }
                     self.pending_tools.insert(call_id, (tool, args));
                 }
@@ -722,12 +731,12 @@ impl OutputParser {
                     });
 
                     if is_noisy_tool(&tool) {
-                        tracing::trace!(subtype, %call_id, %tool, "cursor-agent tool call");
+                        tracing::trace!(subtype, %call_id, %tool, "tool call");
                     } else {
                         tracing::debug!(
                             %tool,
                             args = %args_summary(&args),
-                            "cursor-agent tool"
+                            "tool"
                         );
                     }
 
@@ -789,7 +798,7 @@ mod tests {
 
     use super::{
         Activity, AgentOutput, Deadlines, OutputParser, Prompt, SpawnOptions, ThinkingBuf,
-        agent_command, repair_plan, single_line, truncate, watchdog,
+        repair_plan, single_line, truncate,
     };
     use crate::Client;
 
@@ -1073,30 +1082,59 @@ mod tests {
         }
 
         fn args(cmd: &tokio::process::Command) -> Vec<String> {
-            cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+            let mut args: Vec<String> =
+                cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            if let Some(i) = args.iter().position(|a| a == "--api-key")
+                && let Some(value) = args.get_mut(i + 1)
+            {
+                *value = "<redacted>".into();
+            }
+            args
         }
 
         #[test]
-        fn resume_uses_attached_form() {
+        fn api_key_flag() {
+            let mut cmd = tokio::process::Command::new("cursor-agent");
+            cmd.arg("--api-key").arg("secret");
+            let raw: Vec<String> =
+                cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            assert_eq!(
+                raw.windows(2).find(|w| w[0] == "--api-key").map(|w| w[1].as_str()),
+                Some("secret")
+            );
+        }
+
+        #[test]
+        fn api_key_flag_skipped() {
+            let mut cmd = tokio::process::Command::new("cursor-agent");
+            cmd.arg("--api-key").arg("");
+            cmd.arg("--api-key");
+            let raw: Vec<String> =
+                cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            assert!(!raw.iter().any(|a| a == "--api-key"), "args: {raw:?}");
+        }
+
+        #[test]
+        fn resume() {
             let workspace = std::env::temp_dir();
-            let cmd = agent_command(&options(&workspace), Some("s-1"), "the prompt");
+            let cmd = options(&workspace).command("the prompt", Some("s-1"));
             let args = args(&cmd);
             assert!(args.contains(&"--resume=s-1".to_owned()), "args: {args:?}");
             assert_eq!(args.last().map(String::as_str), Some("the prompt"));
         }
 
         #[test]
-        fn fresh_spawn_has_no_resume() {
+        fn no_resume() {
             let workspace = std::env::temp_dir();
-            let cmd = agent_command(&options(&workspace), None, "the prompt");
+            let cmd = options(&workspace).command("the prompt", None);
             let args = args(&cmd);
             assert!(!args.iter().any(|a| a.starts_with("--resume")), "args: {args:?}");
         }
 
         #[test]
-        fn strips_host_git_identity() {
+        fn no_git_identity() {
             let workspace = std::env::temp_dir();
-            let cmd = agent_command(&options(&workspace), None, "the prompt");
+            let cmd = options(&workspace).command("the prompt", None);
             let removed: Vec<_> = cmd
                 .as_std()
                 .get_envs()
@@ -1115,7 +1153,7 @@ mod tests {
     mod timeouts {
         use tokio::time::{Duration, sleep};
 
-        use super::{Activity, Deadlines, watchdog};
+        use super::{Activity, Deadlines};
 
         const DEADLINES: Deadlines = Deadlines {
             inactivity: Duration::from_mins(2),
@@ -1123,10 +1161,10 @@ mod tests {
         };
 
         #[tokio::test(start_paused = true)]
-        async fn silent_stream_dies_at_inactivity_window() {
+        async fn inactivity_window() {
             let activity = Activity::now();
             let started = tokio::time::Instant::now();
-            let error = watchdog(&activity, &DEADLINES).await;
+            let error = DEADLINES.watch(&activity).await;
             assert_eq!(started.elapsed(), Duration::from_mins(2));
             assert!(
                 error.to_string().contains("inactive for 120s"),
@@ -1135,7 +1173,7 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
-        async fn steady_activity_survives_to_absolute_cap() {
+        async fn absolute_cap() {
             let activity = Activity::now();
             let started = tokio::time::Instant::now();
             let toucher = async {
@@ -1145,7 +1183,7 @@ mod tests {
                 }
             };
             let error = tokio::select! {
-                error = watchdog(&activity, &DEADLINES) => error,
+                error = DEADLINES.watch(&activity) => error,
                 () = toucher => unreachable!("the toucher never finishes"),
             };
             assert_eq!(started.elapsed(), Duration::from_mins(10));
@@ -1160,7 +1198,7 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
-        async fn late_activity_defers_the_inactivity_kill() {
+        async fn late_activity() {
             let activity = Activity::now();
             let started = tokio::time::Instant::now();
             let toucher = async {
@@ -1169,7 +1207,7 @@ mod tests {
                 std::future::pending::<()>().await;
             };
             let error = tokio::select! {
-                error = watchdog(&activity, &DEADLINES) => error,
+                error = DEADLINES.watch(&activity) => error,
                 () = toucher => unreachable!("the toucher never finishes"),
             };
             assert_eq!(

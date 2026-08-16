@@ -2,7 +2,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::Stdio;
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, ensure};
 use tempfile::NamedTempFile;
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, BufReader};
 use tokio::process::Command;
@@ -10,12 +10,18 @@ use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 use tracing::instrument;
 
-use super::{AgentOutput, OutputParser, PROMPT_PREVIEW_CHARS, truncate};
+use super::AgentOutput;
+use super::stream::{OutputParser, PROMPT_PREVIEW_CHARS, truncate};
 use crate::{Deadlines, mcp};
 
 const CURSOR_BIN: &str = "cursor-agent";
 
-pub(super) async fn check_cursor() -> Result<()> {
+/// Verify `cursor-agent` is on `PATH` and responds to `--version`.
+///
+/// # Errors
+///
+/// Returns an error if the binary is missing or the probe exits unsuccessfully.
+pub async fn check_cursor() -> Result<()> {
     let status = Command::new(CURSOR_BIN)
         .arg("--version")
         .status()
@@ -33,13 +39,13 @@ pub(super) struct SpawnOptions<'a> {
 }
 
 /// Spilled prompt file: CLI arg points at a path that lives as long as this value.
-pub(super) struct Prompt {
-    pub(super) arg: String,
-    pub(super) file: NamedTempFile,
+struct Prompt {
+    arg: String,
+    file: NamedTempFile,
 }
 
 impl Prompt {
-    pub(super) fn spill(prompt: &str, workspace: &Path) -> Result<Self> {
+    fn spill(prompt: &str, workspace: &Path) -> Result<Self> {
         let cursor_dir = workspace.join(".cursor");
         std::fs::create_dir_all(&cursor_dir)
             .with_context(|| format!("creating {}", cursor_dir.display()))?;
@@ -109,18 +115,27 @@ impl SpawnOptions<'_> {
         if let Some(error) = timeout_error {
             return Err(error);
         }
-        let parsed = parsed?;
         let status = status.context("cursor-agent status is available after a normal exit")?;
         if !status.success() {
-            bail!("cursor-agent exited with {status}: {}", String::from_utf8_lossy(&stderr).trim());
+            let exit = format!(
+                "cursor-agent exited with {status}: {}",
+                String::from_utf8_lossy(&stderr).trim()
+            );
+            // A crash can leave the stream without a terminal result event; the
+            // exit status and stderr are the diagnostic, with any parse failure
+            // (e.g. the agent's own error event) kept as the cause.
+            return Err(match parsed {
+                Err(error) => error.context(exit),
+                Ok(_) => anyhow::anyhow!(exit),
+            });
         }
 
-        Ok(parsed)
+        parsed
     }
 
     /// The `cursor-agent` invocation for one spawn; `resume` re-enters the named
     /// session instead of starting a fresh one.
-    pub(super) fn command(&self, prompt_arg: &str, resume: Option<&str>) -> Command {
+    fn command(&self, prompt_arg: &str, resume: Option<&str>) -> Command {
         let mut cmd = Command::new(CURSOR_BIN);
         cmd.kill_on_drop(true)
             .stdin(Stdio::null())
@@ -161,7 +176,7 @@ impl SpawnOptions<'_> {
 
 impl Deadlines {
     /// Resolve when a spawn breaches its inactivity or absolute bound.
-    pub(super) async fn watch(&self, mut activity: watch::Receiver<Instant>) -> anyhow::Error {
+    async fn watch(&self, mut activity: watch::Receiver<Instant>) -> anyhow::Error {
         let cap = sleep_until(Instant::now() + self.cap);
         tokio::pin!(cap);
         let mut activity_closed = false;
@@ -211,4 +226,179 @@ async fn drain(mut stream: impl AsyncRead + Unpin) -> Vec<u8> {
     let mut buffer = Vec::new();
     let _ = stream.read_to_end(&mut buffer).await;
     buffer
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::Prompt;
+
+    #[test]
+    fn spills_prompt() {
+        let workspace = tempdir().expect("temp workspace");
+
+        let prompt = Prompt::spill("hello", workspace.path()).expect("spill prompt");
+        assert!(prompt.arg.contains("omnia-prompt-"), "arg references prompt file: {}", prompt.arg);
+        assert!(prompt.file.path().exists(), "the prompt file is on disk while the guard lives");
+        let path = prompt.file.path().to_path_buf();
+        drop(prompt);
+        assert!(!path.exists(), "the prompt file is removed on drop");
+    }
+
+    mod spawn_args {
+        use std::time::Duration;
+
+        use super::super::SpawnOptions;
+        use crate::Deadlines;
+
+        fn options(workspace: &std::path::Path) -> SpawnOptions<'_> {
+            SpawnOptions {
+                model: None,
+                workspace,
+                deadlines: Deadlines {
+                    inactivity: Duration::from_mins(2),
+                    cap: Duration::from_mins(10),
+                },
+                approve_mcps: false,
+            }
+        }
+
+        fn args(cmd: &tokio::process::Command) -> Vec<String> {
+            cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+        }
+
+        fn explicit_env(cmd: &tokio::process::Command, name: &str) -> Option<String> {
+            cmd.as_std()
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        }
+
+        #[test]
+        fn resume_id_uses_attached_flag() {
+            let workspace = std::env::temp_dir();
+            let cmd = options(&workspace).command("the prompt", Some("s-1"));
+            let args = args(&cmd);
+            assert!(args.contains(&"--resume=s-1".to_owned()), "args: {args:?}");
+            assert_eq!(args.last().map(String::as_str), Some("the prompt"));
+        }
+
+        #[test]
+        fn fresh_spawn_has_no_resume_flag() {
+            let workspace = std::env::temp_dir();
+            let cmd = options(&workspace).command("the prompt", None);
+            let args = args(&cmd);
+            assert!(!args.iter().any(|a| a.starts_with("--resume")), "args: {args:?}");
+        }
+
+        #[test]
+        fn credential_store_follows_api_key_environment() {
+            let workspace = std::env::temp_dir();
+            let cmd = options(&workspace).command("the prompt", None);
+            let expected = std::env::var_os("CURSOR_API_KEY").map(|_| "memory".to_owned());
+            assert_eq!(explicit_env(&cmd, "AGENT_CLI_CREDENTIAL_STORE"), expected);
+        }
+
+        #[test]
+        fn host_git_identity_is_removed() {
+            let workspace = std::env::temp_dir();
+            let cmd = options(&workspace).command("the prompt", None);
+            let removed: Vec<_> = cmd
+                .as_std()
+                .get_envs()
+                .filter(|(_, value)| value.is_none())
+                .map(|(key, _)| key.to_string_lossy().into_owned())
+                .collect();
+            for var in crate::mcp::GIT_IDENTITY {
+                assert!(
+                    removed.iter().any(|key| key == var),
+                    "{var} must be cleared so the agent cannot inherit the host checkout: {removed:?}"
+                );
+            }
+        }
+    }
+
+    mod timeouts {
+        use tokio::sync::watch;
+        use tokio::time::{Duration, Instant, sleep};
+
+        use crate::Deadlines;
+
+        const DEADLINES: Deadlines = Deadlines {
+            inactivity: Duration::from_mins(2),
+            cap: Duration::from_mins(10),
+        };
+
+        #[tokio::test(start_paused = true)]
+        async fn silent_stream_hits_inactivity_deadline() {
+            let (_activity, receiver) = watch::channel(Instant::now());
+            let started = Instant::now();
+            let error = DEADLINES.watch(receiver).await;
+            assert_eq!(started.elapsed(), Duration::from_mins(2));
+            assert!(
+                error.to_string().contains("inactive for 120s"),
+                "the inactivity kill names the idle span: {error}"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn steady_activity_hits_absolute_cap() {
+            let (activity, receiver) = watch::channel(Instant::now());
+            let started = Instant::now();
+            let toucher = async {
+                loop {
+                    sleep(Duration::from_mins(1)).await;
+                    activity.send_replace(Instant::now());
+                }
+            };
+            let error = tokio::select! {
+                error = DEADLINES.watch(receiver) => error,
+                () = toucher => unreachable!("the toucher never finishes"),
+            };
+            assert_eq!(started.elapsed(), Duration::from_mins(10));
+            assert!(
+                error.to_string().contains("timed out after 600s"),
+                "the cap kill names the absolute bound: {error}"
+            );
+            assert!(
+                error.to_string().contains("absolute cap"),
+                "the cap kill is distinguishable from inactivity: {error}"
+            );
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn late_activity_rearms_inactivity_deadline() {
+            let (activity, receiver) = watch::channel(Instant::now());
+            let started = Instant::now();
+            let toucher = async {
+                sleep(Duration::from_secs(100)).await;
+                activity.send_replace(Instant::now());
+                std::future::pending::<()>().await;
+            };
+            let error = tokio::select! {
+                error = DEADLINES.watch(receiver) => error,
+                () = toucher => unreachable!("the toucher never finishes"),
+            };
+            assert_eq!(
+                started.elapsed(),
+                Duration::from_secs(220),
+                "one touch at 100s moves the kill to 100s + the 120s window"
+            );
+            assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn activity_before_watch_is_not_lost() {
+            let (activity, receiver) = watch::channel(Instant::now());
+            sleep(Duration::from_secs(100)).await;
+            activity.send_replace(Instant::now());
+
+            let started = Instant::now();
+            let error = DEADLINES.watch(receiver).await;
+            assert_eq!(started.elapsed(), Duration::from_mins(2));
+            assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
+        }
+    }
 }

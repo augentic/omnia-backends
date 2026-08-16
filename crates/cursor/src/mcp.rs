@@ -69,9 +69,12 @@ pub struct McpGuard {
 impl McpGuard {
     /// Merge each `name -> url` server into `<workspace>/.cursor/mcp.json`,
     /// snapshotting the prior file content for restore on drop.
-    pub(super) async fn install<'a>(
+    pub async fn install<'a>(
         workspace: &Path, servers: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> Result<Self> {
+        // The per-workspace lock is keyed by canonical path; canonicalize here
+        // (even though completions already do) so direct callers cannot alias
+        // one workspace under two keys.
         let workspace = workspace
             .canonicalize()
             .with_context(|| format!("canonicalizing {}", workspace.display()))?;

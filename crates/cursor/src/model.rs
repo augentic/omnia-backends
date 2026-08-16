@@ -1,27 +1,19 @@
+mod agent;
+mod stream;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use agent::SpawnOptions;
+pub use agent::check_cursor;
 use anyhow::{Context, Result, bail};
 use omnia_wasi_model::{
     Answer, Format, FutureResult, Mcp, Request, ToolHost, Transcript, WasiModelCtx,
 };
+use stream::{PROMPT_PREVIEW_CHARS, truncate};
 
 use crate::{Client, mcp};
-
-mod agent;
-mod stream;
-
-use agent::SpawnOptions;
-use stream::{OutputParser, truncate};
-#[cfg(test)]
-use stream::{ThinkingBuf, single_line};
-
-const PROMPT_PREVIEW_CHARS: usize = 500;
-
-pub async fn check_cursor() -> Result<()> {
-    agent::check_cursor().await
-}
 
 #[derive(Debug)]
 struct AgentOutput {
@@ -68,40 +60,58 @@ impl WasiModelCtx for Client {
 
             let output = spawn.run_agent(&prompt, None).await?;
             output.log(1);
-            let AgentOutput {
-                result,
-                transcript,
-                session_id,
-            } = output;
-            match take_answer(format, result, transcript) {
+            let (result, reason) = match take_answer(format, output.result, output.transcript) {
+                Outcome::Done(answer) => return Ok(answer),
+                Outcome::Repair { result, reason } => (result, reason),
+            };
+
+            tracing::debug!(
+                attempt = 1,
+                %reason,
+                resumes = output.session_id.is_some(),
+                "repairing answer"
+            );
+
+            let repair = Repair::attempt(&prompt, &result, &reason, format, output.session_id);
+            let output = spawn.run_agent(&repair.prompt, repair.resume.as_deref()).await?;
+            output.log(2);
+
+            match take_answer(format, output.result, output.transcript) {
                 Outcome::Done(answer) => Ok(answer),
-                Outcome::Repair { result, reason } => {
-                    tracing::debug!(
-                        attempt = 1,
-                        %reason,
-                        resumes = session_id.is_some(),
-                        "repairing cursor-agent answer"
-                    );
-
-                    let (prompt, resume) = session_id.map_or_else(
-                        || (append_repair(&prompt, &result, &reason, format), None),
-                        |id| (format.repair(&reason), Some(id)),
-                    );
-
-                    let output = spawn.run_agent(&prompt, resume.as_deref()).await?;
-                    output.log(2);
-                    let AgentOutput {
-                        result, transcript, ..
-                    } = output;
-                    match take_answer(format, result, transcript) {
-                        Outcome::Done(answer) => Ok(answer),
-                        Outcome::Repair { reason, .. } => {
-                            bail!("no answer after 2 repair attempts: {reason}");
-                        }
-                    }
+                Outcome::Repair { reason, .. } => {
+                    bail!("no answer after 2 repair attempts: {reason}");
                 }
             }
         })
+    }
+}
+
+/// The second attempt: its prompt and the session to resume, if any.
+struct Repair {
+    prompt: String,
+    resume: Option<String>,
+}
+
+impl Repair {
+    // With a session id from the first spawn, the repair resumes that session
+    // and sends only the format-repair instruction (the reason is embedded;
+    // the session already carries the failed answer). Without one, it falls
+    // back to a cold spawn whose prompt keeps the original as a byte-identical
+    // prefix — so provider-side prompt caching stays warm — with the failed
+    // answer and the repair instruction appended.
+    fn attempt(
+        prompt: &str, answer: &str, reason: &str, format: &Format, session_id: Option<String>,
+    ) -> Self {
+        session_id.map_or_else(
+            || Self {
+                prompt: append_repair(prompt, answer, reason, format),
+                resume: None,
+            },
+            |id| Self {
+                prompt: format.repair(reason),
+                resume: Some(id),
+            },
+        )
     }
 }
 
@@ -192,14 +202,13 @@ fn log_completion(
         prompt_len,
         ?mcp_servers,
         has_references,
-        "cursor completion"
+        "completion"
     );
 }
 
-// Deliberate unit tests: pure stream-parse and prompt-build logic (CI floor).
-// The edge variants (thinking deltas, session-id fallback, garbled lines)
-// cannot be induced deterministically from a real agent; `tests/live.rs` is
-// the acceptance gate proving a real cursor-agent stream parses end-to-end.
+// Deliberate unit tests: pure prompt-build and repair-plan logic (CI floor);
+// `tests/live.rs` is the acceptance gate proving a real cursor-agent run
+// works end-to-end. Stream-parse and spawn tests live with their modules.
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -211,67 +220,9 @@ mod tests {
         ToolHost, WasiModelCtx as _,
     };
     use serde_json::json;
-    use tempfile::tempdir;
 
-    use super::agent::Prompt;
-    use super::{
-        AgentOutput, OutputParser, SpawnOptions, ThinkingBuf, append_repair, single_line, truncate,
-    };
+    use super::Repair;
     use crate::{Client, Deadlines};
-
-    #[test]
-    fn single_line_compacts_json() {
-        let pretty = "{\n  \"verdict\": \"pass\"\n}";
-        assert_eq!(single_line(pretty), r#"{"verdict":"pass"}"#);
-    }
-
-    #[test]
-    fn single_line_collapses_non_json() {
-        assert_eq!(single_line("hello\n  world"), "hello world");
-    }
-
-    #[test]
-    fn truncate_appends_ellipsis() {
-        assert_eq!(truncate("abcdef", 3), "abc…");
-        assert_eq!(truncate("ab", 3), "ab");
-    }
-
-    #[test]
-    fn thinking_buf_coalesces_deltas() {
-        let mut buf = ThinkingBuf::default();
-        assert!(buf.event(Some("delta"), "line 22, the canc").is_none());
-        assert!(buf.event(Some("delta"), "ellation constraint").is_none());
-        assert_eq!(
-            buf.event(Some("completed"), "").as_deref(),
-            Some("line 22, the cancellation constraint")
-        );
-        assert!(buf.take().is_none(), "completed clears the buffer");
-    }
-
-    #[test]
-    fn thinking_buf_extended_is_one_shot() {
-        let mut buf = ThinkingBuf::default();
-        assert_eq!(
-            buf.event(Some("extended"), "weighing the verdict").as_deref(),
-            Some("weighing the verdict")
-        );
-    }
-
-    #[test]
-    fn thinking_buf_flushes_before_lost_tail() {
-        let mut buf = ThinkingBuf::default();
-        assert!(buf.event(Some("delta"), "partial thought").is_none());
-        assert_eq!(buf.take().as_deref(), Some("partial thought"));
-    }
-
-    fn parse_output(stdout: &[u8]) -> anyhow::Result<AgentOutput> {
-        let text = std::str::from_utf8(stdout).expect("test payloads are UTF-8");
-        let mut parser = OutputParser::default();
-        for line in text.lines() {
-            parser.line(line)?;
-        }
-        parser.finish()
-    }
 
     fn schema_request() -> Request {
         Request {
@@ -306,108 +257,6 @@ mod tests {
             .await
             .expect_err("a backend with no local tree must fail");
         assert!(err.to_string().contains("no local tree on this node"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn parse_result_error() {
-        let stdout = br#"{"type":"result","is_error":true,"result":"boom"}"#;
-        let err = parse_output(stdout).expect_err("an agent error must surface");
-        assert!(err.to_string().contains("cursor-agent reported an error"), "unexpected: {err}");
-    }
-
-    #[test]
-    fn nullable_event_fields_remain_compatible() {
-        let stdout = br#"{"type":"assistant","message":null}
-{"type":"thinking","subtype":"delta","text":null}
-{"type":"result","is_error":null,"result":"ok"}"#;
-        let output = parse_output(stdout).expect("nullable protocol fields are accepted");
-        assert_eq!(output.result, "ok");
-    }
-
-    #[test]
-    fn parse_stream_json() {
-        let stdout = br#"{"type":"thinking","subtype":"extended","text":"weighing the verdict"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll read the README"}]}}
-{"type":"tool_call","subtype":"started","call_id":"c1","tool_call":{"readToolCall":{"args":{"path":"README.md"}}}}
-{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"readToolCall":{"args":{"path":"README.md"},"result":{"success":{"content":"hi"}}}}}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Deciding now"}]}}
-{"type":"result","subtype":"success","is_error":false,"result":"{\"verdict\":\"pass\"}"}"#;
-        let AgentOutput {
-            result, transcript, ..
-        } = parse_output(stdout).expect("parse stream");
-        assert_eq!(result, r#"{"verdict":"pass"}"#);
-        let transcript = transcript.expect("tool transcript");
-        assert_eq!(transcript.turns.len(), 1);
-        assert_eq!(transcript.turns[0].tool, "read");
-        assert_eq!(transcript.turns[0].args, json!({ "path": "README.md" }));
-    }
-
-    #[test]
-    fn parse_session_id_from_init() {
-        let stdout =
-            br#"{"type":"system","subtype":"init","cwd":"/ws","session_id":"s-init","model":"m"}
-{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s-later"}"#;
-        let output = parse_output(stdout).expect("parse stream");
-        assert_eq!(output.session_id.as_deref(), Some("s-init"), "the init event's id wins");
-    }
-
-    #[test]
-    fn parse_session_id_from_result_fallback() {
-        let stdout =
-            br#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s-result"}"#;
-        let output = parse_output(stdout).expect("parse stream");
-        assert_eq!(output.session_id.as_deref(), Some("s-result"));
-    }
-
-    #[test]
-    fn parse_without_session_id() {
-        let stdout = br#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#;
-        let output = parse_output(stdout).expect("parse stream");
-        assert!(output.session_id.is_none());
-    }
-
-    #[test]
-    fn parse_thinking_deltas_then_result() {
-        let stdout = br#"{"type":"thinking","subtype":"delta","text":"line 22, the canc"}
-{"type":"thinking","subtype":"delta","text":"ellation constraint"}
-{"type":"thinking","subtype":"completed","text":""}
-{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#;
-        let AgentOutput {
-            result, transcript, ..
-        } = parse_output(stdout).expect("parse deltas");
-        assert_eq!(result, "ok");
-        assert!(transcript.is_none());
-    }
-
-    #[test]
-    fn assistant_prefix_reaches_result() {
-        let stdout = br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"working on it"}]}}
-{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#;
-        let AgentOutput {
-            result, transcript, ..
-        } = parse_output(stdout).expect("parse stream");
-        assert_eq!(result, "ok");
-        assert!(transcript.is_none(), "no tool turns means no transcript");
-    }
-
-    #[test]
-    fn skip_garbled_line() {
-        let stdout =
-            b"warning: not an event\n{\"type\":\"result\",\"is_error\":false,\"result\":\"ok\"}";
-        let AgentOutput { result, .. } = parse_output(stdout).expect("garbled line is skipped");
-        assert_eq!(result, "ok");
-    }
-
-    #[test]
-    fn spills_prompt() {
-        let workspace = tempdir().expect("temp workspace");
-
-        let prompt = Prompt::spill("hello", workspace.path()).expect("spill prompt");
-        assert!(prompt.arg.contains("omnia-prompt-"), "arg references prompt file: {}", prompt.arg);
-        assert!(prompt.file.path().exists(), "the prompt file is on disk while the guard lives");
-        let path = prompt.file.path().to_path_buf();
-        drop(prompt);
-        assert!(!path.exists(), "the prompt file is removed on drop");
     }
 
     /// Shared stub: unit tests use `path: None`; the shape matches live support.
@@ -454,20 +303,12 @@ mod tests {
 
         #[test]
         fn resumes_with_findings_only() {
-            let format = Format::Json;
-            let (prompt, resume) = Some("s-1".to_owned()).map_or_else(
-                || {
-                    (
-                        append_repair(
-                            "the original prompt",
-                            "not json",
-                            "answer is not valid JSON",
-                            &format,
-                        ),
-                        None,
-                    )
-                },
-                |id| (format.repair("answer is not valid JSON"), Some(id)),
+            let Repair { prompt, resume } = Repair::attempt(
+                "the original prompt",
+                "not json",
+                "answer is not valid JSON",
+                &Format::Json,
+                Some("s-1".to_owned()),
             );
 
             assert_eq!(resume.as_deref(), Some("s-1"));
@@ -484,20 +325,12 @@ mod tests {
 
         #[test]
         fn cold_fallback_keeps_prompt_prefix() {
-            let format = Format::Json;
-            let (prompt, resume) = None::<String>.map_or_else(
-                || {
-                    (
-                        append_repair(
-                            "the original prompt",
-                            "not json",
-                            "answer is not valid JSON",
-                            &format,
-                        ),
-                        None,
-                    )
-                },
-                |id| (format.repair("answer is not valid JSON"), Some(id)),
+            let Repair { prompt, resume } = Repair::attempt(
+                "the original prompt",
+                "not json",
+                "answer is not valid JSON",
+                &Format::Json,
+                None,
             );
             assert!(resume.is_none());
             assert!(
@@ -506,159 +339,6 @@ mod tests {
             );
             assert!(prompt.contains("not json"), "the failed answer is appended: {prompt}");
             assert!(prompt.contains("answer is not valid JSON"), "findings ride along: {prompt}");
-        }
-    }
-
-    mod spawn_args {
-        use super::*;
-
-        fn options(workspace: &std::path::Path) -> SpawnOptions<'_> {
-            SpawnOptions {
-                model: None,
-                workspace,
-                deadlines: Deadlines {
-                    inactivity: Duration::from_mins(2),
-                    cap: Duration::from_mins(10),
-                },
-                approve_mcps: false,
-            }
-        }
-
-        fn args(cmd: &tokio::process::Command) -> Vec<String> {
-            cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect()
-        }
-
-        fn explicit_env(cmd: &tokio::process::Command, name: &str) -> Option<String> {
-            cmd.as_std()
-                .get_envs()
-                .find(|(key, _)| *key == name)
-                .and_then(|(_, value)| value)
-                .map(|value| value.to_string_lossy().into_owned())
-        }
-
-        #[test]
-        fn resume_id_uses_attached_flag() {
-            let workspace = std::env::temp_dir();
-            let cmd = options(&workspace).command("the prompt", Some("s-1"));
-            let args = args(&cmd);
-            assert!(args.contains(&"--resume=s-1".to_owned()), "args: {args:?}");
-            assert_eq!(args.last().map(String::as_str), Some("the prompt"));
-        }
-
-        #[test]
-        fn fresh_spawn_has_no_resume_flag() {
-            let workspace = std::env::temp_dir();
-            let cmd = options(&workspace).command("the prompt", None);
-            let args = args(&cmd);
-            assert!(!args.iter().any(|a| a.starts_with("--resume")), "args: {args:?}");
-        }
-
-        #[test]
-        fn credential_store_follows_api_key_environment() {
-            let workspace = std::env::temp_dir();
-            let cmd = options(&workspace).command("the prompt", None);
-            let expected = std::env::var_os("CURSOR_API_KEY").map(|_| "memory".to_owned());
-            assert_eq!(explicit_env(&cmd, "AGENT_CLI_CREDENTIAL_STORE"), expected);
-        }
-
-        #[test]
-        fn host_git_identity_is_removed() {
-            let workspace = std::env::temp_dir();
-            let cmd = options(&workspace).command("the prompt", None);
-            let removed: Vec<_> = cmd
-                .as_std()
-                .get_envs()
-                .filter(|(_, value)| value.is_none())
-                .map(|(key, _)| key.to_string_lossy().into_owned())
-                .collect();
-            for var in crate::mcp::GIT_IDENTITY {
-                assert!(
-                    removed.iter().any(|key| key == var),
-                    "{var} must be cleared so the agent cannot inherit the host checkout: {removed:?}"
-                );
-            }
-        }
-    }
-
-    mod timeouts {
-        use tokio::sync::watch;
-        use tokio::time::{Duration, Instant, sleep};
-
-        use super::Deadlines;
-
-        const DEADLINES: Deadlines = Deadlines {
-            inactivity: Duration::from_mins(2),
-            cap: Duration::from_mins(10),
-        };
-
-        #[tokio::test(start_paused = true)]
-        async fn silent_stream_hits_inactivity_deadline() {
-            let (_activity, receiver) = watch::channel(Instant::now());
-            let started = Instant::now();
-            let error = DEADLINES.watch(receiver).await;
-            assert_eq!(started.elapsed(), Duration::from_mins(2));
-            assert!(
-                error.to_string().contains("inactive for 120s"),
-                "the inactivity kill names the idle span: {error}"
-            );
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn steady_activity_hits_absolute_cap() {
-            let (activity, receiver) = watch::channel(Instant::now());
-            let started = Instant::now();
-            let toucher = async {
-                loop {
-                    sleep(Duration::from_mins(1)).await;
-                    activity.send_replace(Instant::now());
-                }
-            };
-            let error = tokio::select! {
-                error = DEADLINES.watch(receiver) => error,
-                () = toucher => unreachable!("the toucher never finishes"),
-            };
-            assert_eq!(started.elapsed(), Duration::from_mins(10));
-            assert!(
-                error.to_string().contains("timed out after 600s"),
-                "the cap kill names the absolute bound: {error}"
-            );
-            assert!(
-                error.to_string().contains("absolute cap"),
-                "the cap kill is distinguishable from inactivity: {error}"
-            );
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn late_activity_rearms_inactivity_deadline() {
-            let (activity, receiver) = watch::channel(Instant::now());
-            let started = Instant::now();
-            let toucher = async {
-                sleep(Duration::from_secs(100)).await;
-                activity.send_replace(Instant::now());
-                std::future::pending::<()>().await;
-            };
-            let error = tokio::select! {
-                error = DEADLINES.watch(receiver) => error,
-                () = toucher => unreachable!("the toucher never finishes"),
-            };
-            assert_eq!(
-                started.elapsed(),
-                Duration::from_secs(220),
-                "one touch at 100s moves the kill to 100s + the 120s window"
-            );
-            assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn activity_before_watch_is_not_lost() {
-            let (activity, receiver) = watch::channel(Instant::now());
-            sleep(Duration::from_secs(100)).await;
-            activity.send_replace(Instant::now());
-
-            let started = Instant::now();
-            let error = DEADLINES.watch(receiver).await;
-            assert_eq!(started.elapsed(), Duration::from_mins(2));
-            assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
         }
     }
 }

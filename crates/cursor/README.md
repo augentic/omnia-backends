@@ -53,6 +53,8 @@ that need different bounds or a default model pass `ConnectOptions` to
 carries the endpoint `url` directly (merged into `<workspace>/.cursor/mcp.json`
 for the spawn). `cursor-agent` discovers that file from the git toplevel of
 `--workspace`, so a lent tree that is not already a root is `git init`'d first.
+Host `GIT_*` identity vars are stripped from the spawn so that discovery cannot
+skip the workspace.
 
 ## Usage
 

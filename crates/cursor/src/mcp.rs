@@ -4,8 +4,10 @@
 //! `.cursor/mcp.json` at the git toplevel of `--workspace` (or `~/.cursor/mcp.json`).
 //! A lent tree inside another checkout is not itself a root, so this module
 //! `git init`s the workspace when `.git` is missing — then snapshots, merges,
-//! and restores the grant file as before. Completions are sequential per
-//! workspace; a process-wide lock only keeps two guards from interleaving a
+//! and restores the grant file as before. Host `GIT_*` identity vars are
+//! stripped from both `git init` and the `cursor-agent` spawn so discovery
+//! cannot skip the workspace. Completions are sequential per workspace; a
+//! process-wide lock only keeps two guards from interleaving a
 //! read-merge-write.
 
 use std::collections::BTreeMap;
@@ -21,6 +23,11 @@ use serde_json::{Map, Value, json};
 // Serializes install/restore so concurrent guards cannot interleave mid-write.
 static FILE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Host git-identity vars that would make `git` and `cursor-agent` ignore
+/// `--workspace` and operate on the parent checkout instead.
+pub const GIT_IDENTITY: &[&str] =
+    &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
+
 /// `git init` `workspace` when it is not already a git root.
 ///
 /// # Errors
@@ -33,16 +40,12 @@ pub fn ensure_git(workspace: &Path) -> Result<()> {
 
     // Inherit no git identity from the host process: GIT_DIR would init the
     // parent checkout instead of the lent tree.
-    let output = Command::new("git")
-        .arg("init")
-        .current_dir(workspace)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_INDEX_FILE")
-        .stdin(Stdio::null())
-        .output()
-        .context("running git init in cursor workspace")?;
+    let mut command = Command::new("git");
+    command.arg("init").current_dir(workspace).stdin(Stdio::null());
+    for var in GIT_IDENTITY {
+        command.env_remove(var);
+    }
+    let output = command.output().context("running git init in cursor workspace")?;
     ensure!(
         output.status.success(),
         "git init of {} failed ({}): {}",

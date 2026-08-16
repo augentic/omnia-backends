@@ -6,22 +6,26 @@
 //! `git init`s the workspace when `.git` is missing — then snapshots, merges,
 //! and restores the grant file as before. Host `GIT_*` identity vars are
 //! stripped from both `git init` and the `cursor-agent` spawn so discovery
-//! cannot skip the workspace. Completions are sequential per workspace; a
-//! process-wide lock only keeps two guards from interleaving a
-//! read-merge-write.
+//! cannot skip the workspace. A per-workspace lock serializes MCP-enabled
+//! completions until their original configuration has been restored.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Mutex, PoisonError};
+use std::process::Stdio;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, Weak};
 
 use anyhow::{Context as _, Result, ensure};
 use serde_json::{Map, Value, json};
+use tokio::process::Command;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
-// Serializes install/restore so concurrent guards cannot interleave mid-write.
-static FILE_LOCK: Mutex<()> = Mutex::new(());
+type WorkspaceLock = AsyncMutex<()>;
+
+// A guard holds the workspace lock until its MCP configuration is restored.
+static WORKSPACE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<WorkspaceLock>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Host git-identity vars that would make `git` and `cursor-agent` ignore
 /// `--workspace` and operate on the parent checkout instead.
@@ -32,7 +36,7 @@ pub const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"
 /// # Errors
 ///
 /// Returns an error if `git init` cannot be spawned or exits unsuccessfully.
-pub fn ensure_git(workspace: &Path) -> Result<()> {
+async fn ensure_git(workspace: &Path) -> Result<()> {
     if workspace.join(".git").exists() {
         return Ok(());
     }
@@ -44,7 +48,7 @@ pub fn ensure_git(workspace: &Path) -> Result<()> {
     for var in GIT_IDENTITY {
         command.env_remove(var);
     }
-    let output = command.output().context("running git init in cursor workspace")?;
+    let output = command.output().await.context("running git init in cursor workspace")?;
     ensure!(
         output.status.success(),
         "git init of {} failed ({}): {}",
@@ -59,15 +63,22 @@ pub fn ensure_git(workspace: &Path) -> Result<()> {
 pub struct McpGuard {
     path: PathBuf,
     original: Option<Vec<u8>>,
+    _workspace_lock: OwnedMutexGuard<()>,
 }
 
 impl McpGuard {
     /// Merge each `name -> url` server into `<workspace>/.cursor/mcp.json`,
     /// snapshotting the prior file content for restore on drop.
-    pub fn install(workspace: &Path, servers: &BTreeMap<String, String>) -> Result<Self> {
-        let path = workspace.join(".cursor").join("mcp.json");
-        let _lock = FILE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    pub(super) async fn install<'a>(
+        workspace: &Path, servers: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self> {
+        let workspace = workspace
+            .canonicalize()
+            .with_context(|| format!("canonicalizing {}", workspace.display()))?;
+        let workspace_lock = lock_workspace(&workspace).await;
+        ensure_git(&workspace).await?;
 
+        let path = workspace.join(".cursor").join("mcp.json");
         let original = match fs::read(&path) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == ErrorKind::NotFound => None,
@@ -80,20 +91,23 @@ impl McpGuard {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        fs::write(&path, merged).with_context(|| format!("writing {}", path.display()))?;
+        atomic_write(&path, &merged)?;
 
-        Ok(Self { path, original })
+        Ok(Self {
+            path,
+            original,
+            _workspace_lock: workspace_lock,
+        })
     }
 }
 
 impl Drop for McpGuard {
     fn drop(&mut self) {
-        let _lock = FILE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let restore = match self.original.take() {
-            Some(bytes) => fs::write(&self.path, bytes),
+            Some(bytes) => atomic_write(&self.path, &bytes),
             None => match fs::remove_file(&self.path) {
                 Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-                other => other,
+                other => other.with_context(|| format!("removing {}", self.path.display())),
             },
         };
         if let Err(error) = restore {
@@ -102,8 +116,47 @@ impl Drop for McpGuard {
     }
 }
 
+async fn lock_workspace(workspace: &Path) -> OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = WORKSPACE_LOCKS.lock().unwrap_or_else(PoisonError::into_inner);
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        locks.get(workspace).and_then(Weak::upgrade).unwrap_or_else(|| {
+            let lock = Arc::new(WorkspaceLock::new(()));
+            locks.insert(workspace.to_path_buf(), Arc::downgrade(&lock));
+            lock
+        })
+    };
+    lock.lock_owned().await
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("mcp.json has no parent directory")?;
+    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+
+    let mut file = tempfile::Builder::new()
+        .prefix(".mcp-")
+        .tempfile_in(parent)
+        .with_context(|| format!("creating temporary MCP config in {}", parent.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing temporary config for {}", path.display()))?;
+    file.as_file_mut()
+        .sync_all()
+        .with_context(|| format!("syncing temporary config for {}", path.display()))?;
+    if let Ok(metadata) = fs::metadata(path) {
+        file.as_file()
+            .set_permissions(metadata.permissions())
+            .with_context(|| format!("preserving permissions for {}", path.display()))?;
+    }
+    file.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
 // Merge the omnia servers into `original`, preserving any user-defined servers.
-fn merge(original: Option<&[u8]>, servers: &BTreeMap<String, String>) -> Result<Vec<u8>> {
+fn merge<'a>(
+    original: Option<&[u8]>, servers: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<Vec<u8>> {
     let mut root = match original {
         Some(bytes) => serde_json::from_slice::<Value>(bytes)
             .context("existing .cursor/mcp.json is not valid JSON")?,
@@ -115,7 +168,7 @@ fn merge(original: Option<&[u8]>, servers: &BTreeMap<String, String>) -> Result<
     let entries =
         entries.as_object_mut().context("`mcpServers` in .cursor/mcp.json is not an object")?;
     for (name, url) in servers {
-        entries.insert(name.clone(), json!({ "url": url }));
+        entries.insert(name.to_owned(), json!({ "url": url }));
     }
 
     let mut bytes = serde_json::to_vec_pretty(&root).context("serializing .cursor/mcp.json")?;
@@ -125,25 +178,19 @@ fn merge(original: Option<&[u8]>, servers: &BTreeMap<String, String>) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    use std::time::Duration;
 
     use serde_json::{Value, json};
+    use tempfile::TempDir;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
 
     use super::{McpGuard, ensure_git};
 
-    /// A fresh, empty temp directory unique to this process and `label`.
-    fn temp_workspace(label: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("omnia-cursor-mcp-{label}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("creating temp workspace");
-        dir
-    }
-
-    fn servers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(name, url)| ((*name).to_owned(), (*url).to_owned())).collect()
+    fn temp_workspace() -> TempDir {
+        tempfile::tempdir().expect("creating temp workspace")
     }
 
     fn read_servers(path: &Path) -> Value {
@@ -152,29 +199,30 @@ mod tests {
         value["mcpServers"].clone()
     }
 
-    #[test]
-    fn create_remove_absent() {
-        let workspace = temp_workspace("absent");
-        let path = workspace.join(".cursor/mcp.json");
+    #[tokio::test]
+    async fn absent_config_is_removed_after_completion() {
+        let workspace = temp_workspace();
+        let path = workspace.path().join(".cursor/mcp.json");
         let guard =
-            McpGuard::install(&workspace, &servers(&[("docs", "http://127.0.0.1:8080/mcp/docs")]))
+            McpGuard::install(workspace.path(), [("docs", "http://127.0.0.1:8080/mcp/docs")])
+                .await
                 .unwrap();
         assert_eq!(read_servers(&path)["docs"]["url"], "http://127.0.0.1:8080/mcp/docs");
         drop(guard);
         assert!(!path.exists(), "a file we created is removed on drop");
     }
 
-    #[test]
-    fn merge_restore_existing() {
-        let workspace = temp_workspace("existing");
-        let cursor_dir = workspace.join(".cursor");
+    #[tokio::test]
+    async fn existing_config_is_merged_then_restored() {
+        let workspace = temp_workspace();
+        let cursor_dir = workspace.path().join(".cursor");
         fs::create_dir_all(&cursor_dir).unwrap();
         let path = cursor_dir.join("mcp.json");
         let original = json!({ "mcpServers": { "other": { "url": "http://example" } } });
         fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
 
         let guard =
-            McpGuard::install(&workspace, &servers(&[("docs", "http://127.0.0.1:9/x")])).unwrap();
+            McpGuard::install(workspace.path(), [("docs", "http://127.0.0.1:9/x")]).await.unwrap();
         let entries = read_servers(&path);
         assert_eq!(entries["docs"]["url"], "http://127.0.0.1:9/x");
         assert_eq!(entries["other"]["url"], "http://example", "existing servers survive");
@@ -184,31 +232,69 @@ mod tests {
         assert_eq!(restored, original, "the original file is restored verbatim");
     }
 
-    #[test]
-    fn ensure_git_inits_when_absent() {
-        let workspace = temp_workspace("git-absent");
-        assert!(!workspace.join(".git").exists());
-        ensure_git(&workspace).unwrap();
-        assert!(workspace.join(".git").exists(), "git init creates a root");
+    #[tokio::test]
+    async fn overlapping_guards_are_serialized_per_workspace() {
+        let workspace = temp_workspace();
+        let path = workspace.path().join(".cursor/mcp.json");
+        let first = McpGuard::install(workspace.path(), [("first", "http://127.0.0.1/first")])
+            .await
+            .unwrap();
+
+        let workspace_path = workspace.path().to_path_buf();
+        let (acquired_tx, mut acquired_rx) = oneshot::channel();
+        let second = tokio::spawn(async move {
+            let guard = McpGuard::install(&workspace_path, [("second", "http://127.0.0.1/second")])
+                .await
+                .unwrap();
+            acquired_tx.send(()).unwrap();
+            guard
+        });
+
+        assert!(
+            timeout(Duration::from_millis(50), &mut acquired_rx).await.is_err(),
+            "the second guard must wait for the first completion"
+        );
+        assert!(read_servers(&path).get("first").is_some());
+
+        drop(first);
+        timeout(Duration::from_secs(5), &mut acquired_rx)
+            .await
+            .expect("the second guard acquires after the first drops")
+            .expect("acquisition sender remains live");
+        let second = second.await.expect("joining second guard");
+        let entries = read_servers(&path);
+        assert!(entries.get("first").is_none(), "the first grant was restored before the second");
+        assert!(entries.get("second").is_some());
+
+        drop(second);
+        assert!(!path.exists(), "the original absent config is restored");
     }
 
-    #[test]
-    fn ensure_git_leaves_existing_root() {
-        let workspace = temp_workspace("git-existing");
-        let git = workspace.join(".git");
+    #[tokio::test]
+    async fn missing_git_root_is_initialized() {
+        let workspace = temp_workspace();
+        assert!(!workspace.path().join(".git").exists());
+        ensure_git(workspace.path()).await.unwrap();
+        assert!(workspace.path().join(".git").exists(), "git init creates a root");
+    }
+
+    #[tokio::test]
+    async fn existing_git_root_is_preserved() {
+        let workspace = temp_workspace();
+        let git = workspace.path().join(".git");
         fs::create_dir_all(&git).unwrap();
         let marker = git.join("HEAD");
         fs::write(&marker, "ref: refs/heads/kept\n").unwrap();
-        ensure_git(&workspace).unwrap();
+        ensure_git(workspace.path()).await.unwrap();
         assert_eq!(fs::read_to_string(&marker).unwrap(), "ref: refs/heads/kept\n");
     }
 
-    #[test]
-    fn ensure_git_leaves_git_file() {
-        let workspace = temp_workspace("git-file");
-        let git = workspace.join(".git");
+    #[tokio::test]
+    async fn git_worktree_file_is_preserved() {
+        let workspace = temp_workspace();
+        let git = workspace.path().join(".git");
         fs::write(&git, "gitdir: /tmp/worktree\n").unwrap();
-        ensure_git(&workspace).unwrap();
+        ensure_git(workspace.path()).await.unwrap();
         assert_eq!(fs::read_to_string(&git).unwrap(), "gitdir: /tmp/worktree\n");
         assert!(git.is_file(), "a worktree .git file is not replaced by a directory");
     }

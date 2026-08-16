@@ -3455,6 +3455,7 @@ dependencies = [
  "omnia-wasi-model",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

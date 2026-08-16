@@ -127,10 +127,10 @@ impl WasiModelCtx for Client {
 fn repair_plan(
     prompt: &str, answer: &str, reason: &str, format: &Format, session_id: Option<String>,
 ) -> (String, Option<String>) {
-    match session_id {
-        Some(id) => (format.repair(reason), Some(id)),
-        None => (append_repair(prompt, answer, reason, format), None),
-    }
+    session_id.map_or_else(
+        || (append_repair(prompt, answer, reason, format), None),
+        |id| (format.repair(reason), Some(id)),
+    )
 }
 
 enum Outcome {
@@ -326,10 +326,11 @@ impl SpawnOptions<'_> {
 /// The two spawn bounds: a short inactivity window over stream events and a
 /// generous absolute wall-clock cap.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Deadlines {
+pub struct Deadlines {
     /// Kill a spawn after this long with no stream-json events.
-    pub(crate) inactivity: Duration,
-    pub(crate) cap: Duration,
+    pub inactivity: Duration,
+    /// Absolute wall-clock cap on one spawn.
+    pub cap: Duration,
 }
 
 impl Deadlines {

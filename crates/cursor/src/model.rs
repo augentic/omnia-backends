@@ -82,6 +82,7 @@ impl WasiModelCtx for Client {
                 prompt = format!("{}\n\n{prompt}", mcp_hint(&mcp_servers));
                 let map: BTreeMap<String, String> =
                     mcp_servers.iter().map(|s| (s.name.clone(), s.url.clone())).collect();
+                mcp::ensure_git(&workspace)?;
                 Some(mcp::McpGuard::install(&workspace, &map)?)
             };
 
@@ -282,6 +283,11 @@ fn agent_command(options: &SpawnOptions<'_>, resume: Option<&str>, prompt_arg: &
         .stderr(Stdio::piped())
         .args(["--print", "--force", "--trust", "--output-format", "stream-json", "--workspace"])
         .arg(options.workspace);
+    // Same strip as `ensure_git`: a leaked GIT_DIR would make the agent
+    // discover the host checkout and miss `<workspace>/.cursor/mcp.json`.
+    for var in mcp::GIT_IDENTITY {
+        cmd.env_remove(var);
+    }
     if options.approve_mcps {
         cmd.arg("--approve-mcps");
     }
@@ -1085,6 +1091,24 @@ mod tests {
             let cmd = agent_command(&options(&workspace), None, "the prompt");
             let args = args(&cmd);
             assert!(!args.iter().any(|a| a.starts_with("--resume")), "args: {args:?}");
+        }
+
+        #[test]
+        fn strips_host_git_identity() {
+            let workspace = std::env::temp_dir();
+            let cmd = agent_command(&options(&workspace), None, "the prompt");
+            let removed: Vec<_> = cmd
+                .as_std()
+                .get_envs()
+                .filter(|(_, value)| value.is_none())
+                .map(|(key, _)| key.to_string_lossy().into_owned())
+                .collect();
+            for var in crate::mcp::GIT_IDENTITY {
+                assert!(
+                    removed.iter().any(|key| key == var),
+                    "{var} must be cleared so the agent cannot inherit the host checkout: {removed:?}"
+                );
+            }
         }
     }
 

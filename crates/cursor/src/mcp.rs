@@ -1,24 +1,59 @@
 //! Manage `<workspace>/.cursor/mcp.json` around a `cursor-agent` spawn.
 //!
-//! `cursor-agent` has no `--mcp-config` flag; it discovers MCP servers only from
-//! `.cursor/mcp.json` in its workspace (or `~/.cursor/mcp.json`). To point a
-//! spawned agent at the omnia-hosted MCP servers a prompt granted, the backend
-//! snapshots the workspace file, merges the granted server entries in before
-//! the spawn, and restores the snapshot when the guard drops. Completions are
-//! sequential per workspace; a process-wide lock only keeps two guards from
-//! interleaving a read-merge-write.
+//! `cursor-agent` has no `--mcp-config` flag; it discovers MCP servers from
+//! `.cursor/mcp.json` at the git toplevel of `--workspace` (or `~/.cursor/mcp.json`).
+//! A lent tree inside another checkout is not itself a root, so this module
+//! `git init`s the workspace when `.git` is missing — then snapshots, merges,
+//! and restores the grant file as before. Host `GIT_*` identity vars are
+//! stripped from both `git init` and the `cursor-agent` spawn so discovery
+//! cannot skip the workspace. Completions are sequential per workspace; a
+//! process-wide lock only keeps two guards from interleaving a
+//! read-merge-write.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
 use serde_json::{Map, Value, json};
 
 // Serializes install/restore so concurrent guards cannot interleave mid-write.
 static FILE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Host git-identity vars that would make `git` and `cursor-agent` ignore
+/// `--workspace` and operate on the parent checkout instead.
+pub const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
+
+/// `git init` `workspace` when it is not already a git root.
+///
+/// # Errors
+///
+/// Returns an error if `git init` cannot be spawned or exits unsuccessfully.
+pub fn ensure_git(workspace: &Path) -> Result<()> {
+    if workspace.join(".git").exists() {
+        return Ok(());
+    }
+
+    // Inherit no git identity from the host process: GIT_DIR would init the
+    // parent checkout instead of the lent tree.
+    let mut command = Command::new("git");
+    command.arg("init").current_dir(workspace).stdin(Stdio::null());
+    for var in GIT_IDENTITY {
+        command.env_remove(var);
+    }
+    let output = command.output().context("running git init in cursor workspace")?;
+    ensure!(
+        output.status.success(),
+        "git init of {} failed ({}): {}",
+        workspace.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
 
 /// Restores `<workspace>/.cursor/mcp.json` to its pre-install snapshot on drop.
 pub struct McpGuard {
@@ -96,7 +131,7 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::McpGuard;
+    use super::{McpGuard, ensure_git};
 
     /// A fresh, empty temp directory unique to this process and `label`.
     fn temp_workspace(label: &str) -> PathBuf {
@@ -147,5 +182,34 @@ mod tests {
 
         let restored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(restored, original, "the original file is restored verbatim");
+    }
+
+    #[test]
+    fn ensure_git_inits_when_absent() {
+        let workspace = temp_workspace("git-absent");
+        assert!(!workspace.join(".git").exists());
+        ensure_git(&workspace).unwrap();
+        assert!(workspace.join(".git").exists(), "git init creates a root");
+    }
+
+    #[test]
+    fn ensure_git_leaves_existing_root() {
+        let workspace = temp_workspace("git-existing");
+        let git = workspace.join(".git");
+        fs::create_dir_all(&git).unwrap();
+        let marker = git.join("HEAD");
+        fs::write(&marker, "ref: refs/heads/kept\n").unwrap();
+        ensure_git(&workspace).unwrap();
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "ref: refs/heads/kept\n");
+    }
+
+    #[test]
+    fn ensure_git_leaves_git_file() {
+        let workspace = temp_workspace("git-file");
+        let git = workspace.join(".git");
+        fs::write(&git, "gitdir: /tmp/worktree\n").unwrap();
+        ensure_git(&workspace).unwrap();
+        assert_eq!(fs::read_to_string(&git).unwrap(), "gitdir: /tmp/worktree\n");
+        assert!(git.is_file(), "a worktree .git file is not replaced by a directory");
     }
 }

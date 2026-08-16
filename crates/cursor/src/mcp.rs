@@ -10,15 +10,15 @@
 //! process-wide lock only keeps two guards from interleaving a
 //! read-merge-write.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context as _, Result, ensure};
 use serde_json::{Map, Value, json};
+use tokio::process::Command;
 
 // Serializes install/restore so concurrent guards cannot interleave mid-write.
 static FILE_LOCK: Mutex<()> = Mutex::new(());
@@ -32,7 +32,7 @@ pub const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"
 /// # Errors
 ///
 /// Returns an error if `git init` cannot be spawned or exits unsuccessfully.
-pub fn ensure_git(workspace: &Path) -> Result<()> {
+pub async fn ensure_git(workspace: &Path) -> Result<()> {
     if workspace.join(".git").exists() {
         return Ok(());
     }
@@ -44,7 +44,7 @@ pub fn ensure_git(workspace: &Path) -> Result<()> {
     for var in GIT_IDENTITY {
         command.env_remove(var);
     }
-    let output = command.output().context("running git init in cursor workspace")?;
+    let output = command.output().await.context("running git init in cursor workspace")?;
     ensure!(
         output.status.success(),
         "git init of {} failed ({}): {}",
@@ -64,7 +64,9 @@ pub struct McpGuard {
 impl McpGuard {
     /// Merge each `name -> url` server into `<workspace>/.cursor/mcp.json`,
     /// snapshotting the prior file content for restore on drop.
-    pub fn install(workspace: &Path, servers: &BTreeMap<String, String>) -> Result<Self> {
+    pub fn install<'a>(
+        workspace: &Path, servers: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self> {
         let path = workspace.join(".cursor").join("mcp.json");
         let _lock = FILE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
 
@@ -103,7 +105,9 @@ impl Drop for McpGuard {
 }
 
 // Merge the omnia servers into `original`, preserving any user-defined servers.
-fn merge(original: Option<&[u8]>, servers: &BTreeMap<String, String>) -> Result<Vec<u8>> {
+fn merge<'a>(
+    original: Option<&[u8]>, servers: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<Vec<u8>> {
     let mut root = match original {
         Some(bytes) => serde_json::from_slice::<Value>(bytes)
             .context("existing .cursor/mcp.json is not valid JSON")?,
@@ -115,7 +119,7 @@ fn merge(original: Option<&[u8]>, servers: &BTreeMap<String, String>) -> Result<
     let entries =
         entries.as_object_mut().context("`mcpServers` in .cursor/mcp.json is not an object")?;
     for (name, url) in servers {
-        entries.insert(name.clone(), json!({ "url": url }));
+        entries.insert(name.to_owned(), json!({ "url": url }));
     }
 
     let mut bytes = serde_json::to_vec_pretty(&root).context("serializing .cursor/mcp.json")?;
@@ -125,7 +129,6 @@ fn merge(original: Option<&[u8]>, servers: &BTreeMap<String, String>) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -142,10 +145,6 @@ mod tests {
         dir
     }
 
-    fn servers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(name, url)| ((*name).to_owned(), (*url).to_owned())).collect()
-    }
-
     fn read_servers(path: &Path) -> Value {
         let bytes = fs::read(path).expect("reading mcp.json");
         let value: Value = serde_json::from_slice(&bytes).expect("mcp.json is JSON");
@@ -157,8 +156,7 @@ mod tests {
         let workspace = temp_workspace("absent");
         let path = workspace.join(".cursor/mcp.json");
         let guard =
-            McpGuard::install(&workspace, &servers(&[("docs", "http://127.0.0.1:8080/mcp/docs")]))
-                .unwrap();
+            McpGuard::install(&workspace, [("docs", "http://127.0.0.1:8080/mcp/docs")]).unwrap();
         assert_eq!(read_servers(&path)["docs"]["url"], "http://127.0.0.1:8080/mcp/docs");
         drop(guard);
         assert!(!path.exists(), "a file we created is removed on drop");
@@ -173,8 +171,7 @@ mod tests {
         let original = json!({ "mcpServers": { "other": { "url": "http://example" } } });
         fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
 
-        let guard =
-            McpGuard::install(&workspace, &servers(&[("docs", "http://127.0.0.1:9/x")])).unwrap();
+        let guard = McpGuard::install(&workspace, [("docs", "http://127.0.0.1:9/x")]).unwrap();
         let entries = read_servers(&path);
         assert_eq!(entries["docs"]["url"], "http://127.0.0.1:9/x");
         assert_eq!(entries["other"]["url"], "http://example", "existing servers survive");
@@ -184,31 +181,31 @@ mod tests {
         assert_eq!(restored, original, "the original file is restored verbatim");
     }
 
-    #[test]
-    fn ensure_git_inits_when_absent() {
+    #[tokio::test]
+    async fn ensure_git_inits_when_absent() {
         let workspace = temp_workspace("git-absent");
         assert!(!workspace.join(".git").exists());
-        ensure_git(&workspace).unwrap();
+        ensure_git(&workspace).await.unwrap();
         assert!(workspace.join(".git").exists(), "git init creates a root");
     }
 
-    #[test]
-    fn ensure_git_leaves_existing_root() {
+    #[tokio::test]
+    async fn ensure_git_leaves_existing_root() {
         let workspace = temp_workspace("git-existing");
         let git = workspace.join(".git");
         fs::create_dir_all(&git).unwrap();
         let marker = git.join("HEAD");
         fs::write(&marker, "ref: refs/heads/kept\n").unwrap();
-        ensure_git(&workspace).unwrap();
+        ensure_git(&workspace).await.unwrap();
         assert_eq!(fs::read_to_string(&marker).unwrap(), "ref: refs/heads/kept\n");
     }
 
-    #[test]
-    fn ensure_git_leaves_git_file() {
+    #[tokio::test]
+    async fn ensure_git_leaves_git_file() {
         let workspace = temp_workspace("git-file");
         let git = workspace.join(".git");
         fs::write(&git, "gitdir: /tmp/worktree\n").unwrap();
-        ensure_git(&workspace).unwrap();
+        ensure_git(&workspace).await.unwrap();
         assert_eq!(fs::read_to_string(&git).unwrap(), "gitdir: /tmp/worktree\n");
         assert!(git.is_file(), "a worktree .git file is not replaced by a directory");
     }

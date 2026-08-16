@@ -27,8 +27,8 @@ MSRV: Rust 1.97
 
 The [`cursor-agent`](https://cursor.com/docs/cli) CLI must be installed and on
 `PATH` (validated at `connect`), and authenticated via `CURSOR_API_KEY` or a
-prior `cursor-agent login`. When `CURSOR_API_KEY` is set, each spawn passes
-`--api-key`. Every spawn sets `AGENT_CLI_CREDENTIAL_STORE=memory` so the child
+prior `cursor-agent login`. The child inherits `CURSOR_API_KEY` from the
+environment. Every spawn sets `AGENT_CLI_CREDENTIAL_STORE=memory` so the child
 never reads or writes the operator's macOS keychain or `~/.cursor/auth.json`.
 The key is never stored on `Client` / `ConnectOptions`, logged, or recorded
 into fixtures.

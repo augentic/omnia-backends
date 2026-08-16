@@ -82,6 +82,7 @@ impl WasiModelCtx for Client {
                 prompt = format!("{}\n\n{prompt}", mcp_hint(&mcp_servers));
                 let map: BTreeMap<String, String> =
                     mcp_servers.iter().map(|s| (s.name.clone(), s.url.clone())).collect();
+                mcp::ensure_git(&workspace)?;
                 Some(mcp::McpGuard::install(&workspace, &map)?)
             };
 

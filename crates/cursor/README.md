@@ -51,7 +51,8 @@ The two kill errors are distinct (`inactive for Ns` vs `timed out after Ns
 that need different bounds or a default model pass `ConnectOptions` to
 `connect_with`. MCP servers are supplied per-request: a prompt's `mcp` grant
 carries the endpoint `url` directly (merged into `<workspace>/.cursor/mcp.json`
-for the spawn).
+for the spawn). `cursor-agent` discovers that file from the git toplevel of
+`--workspace`, so a lent tree that is not already a root is `git init`'d first.
 
 ## Usage
 

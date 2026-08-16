@@ -4,7 +4,6 @@
 mod mcp;
 mod model;
 
-use std::fmt::Debug;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -12,19 +11,13 @@ use omnia::Backend;
 use tracing::instrument;
 
 /// Spawned, filesystem-capable `cursor-agent` model backend.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Client {
     timeout: Duration,
     /// Kill a spawn after this long with no stream-json events.
     inactivity: Duration,
     /// Default model id when a request leaves `model` unset.
     model: Option<String>,
-}
-
-impl Debug for Client {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Client").finish_non_exhaustive()
-    }
 }
 
 impl Backend for Client {

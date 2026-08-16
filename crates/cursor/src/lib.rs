@@ -10,10 +10,16 @@ use anyhow::{Context, Result};
 use omnia::Backend;
 use tracing::instrument;
 
+#[derive(Clone, Copy, Debug)]
+struct Deadlines {
+    inactivity: Duration,
+    cap: Duration,
+}
+
 /// Spawned, filesystem-capable `cursor-agent` model backend.
 #[derive(Clone, Debug)]
 pub struct Client {
-    deadlines: model::Deadlines,
+    deadlines: Deadlines,
     /// Default model id when a request leaves `model` unset.
     model: Option<String>,
 }
@@ -26,7 +32,7 @@ impl Backend for Client {
         model::check_cursor().await?;
 
         Ok(Self {
-            deadlines: model::Deadlines {
+            deadlines: Deadlines {
                 inactivity: Duration::from_secs(options.inactivity_secs),
                 cap: Duration::from_secs(options.timeout_secs),
             },
@@ -51,7 +57,7 @@ mod config {
         #[env(from = "CURSOR_MODEL")]
         pub model: Option<String>,
         /// Absolute wall-clock cap in seconds on one `cursor-agent` spawn;
-        /// orphaned processes are killed on timeout.
+        /// timed-out processes are terminated and reaped.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
         pub timeout_secs: u64,
         /// Inactivity bound in seconds: a spawn is killed after this long with

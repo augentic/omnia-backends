@@ -1100,9 +1100,8 @@ mod tests {
             let removed: Vec<_> = cmd
                 .as_std()
                 .get_envs()
-                .filter_map(|(key, value)| {
-                    value.is_none().then(|| key.to_string_lossy().into_owned())
-                })
+                .filter(|(_, value)| value.is_none())
+                .map(|(key, _)| key.to_string_lossy().into_owned())
                 .collect();
             for var in crate::mcp::GIT_IDENTITY {
                 assert!(

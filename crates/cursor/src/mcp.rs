@@ -25,8 +25,7 @@ static FILE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Host git-identity vars that would make `git` and `cursor-agent` ignore
 /// `--workspace` and operate on the parent checkout instead.
-pub const GIT_IDENTITY: &[&str] =
-    &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
+pub const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
 /// `git init` `workspace` when it is not already a git root.
 ///

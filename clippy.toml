@@ -10,6 +10,7 @@ doc-valid-idents = [
 ]
 
 allowed-duplicate-crates = [
+  "bitflags",
   "block-buffer",
   "const-oid",
   "core-foundation",
@@ -35,6 +36,7 @@ allowed-duplicate-crates = [
   "jsonschema",
   "linux-raw-sys",
   "md-5",
+  "num-bigint",
   "openssl-probe",
   "prost",
   "prost-derive",

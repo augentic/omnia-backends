@@ -78,9 +78,7 @@ impl SpawnOptions<'_> {
     /// One agent run: spawn, re-spawning empty spawns (a clean exit with no
     /// terminal result event — a session the service dropped before any work
     /// happened) until the retry budget runs out.
-    pub async fn run_agent(
-        &self, prompt: &str, resume: Option<&str>,
-    ) -> Result<AgentOutput> {
+    pub async fn run_agent(&self, prompt: &str, resume: Option<&str>) -> Result<AgentOutput> {
         for retry in 1..=EMPTY_SPAWN_RETRIES {
             if let Some(output) = self.spawn_once(prompt, resume).await? {
                 return Ok(output);

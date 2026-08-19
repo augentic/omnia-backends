@@ -1998,9 +1998,9 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3346,7 +3346,7 @@ dependencies = [
 [[package]]
 name = "omnia"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3491,7 +3491,7 @@ dependencies = [
 [[package]]
 name = "omnia-guest"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "axum",
@@ -3502,6 +3502,7 @@ dependencies = [
  "clap_complete",
  "http",
  "http-body",
+ "omnia-guest-macros",
  "omnia-wasi-blobstore",
  "omnia-wasi-config",
  "omnia-wasi-docstore",
@@ -3527,7 +3528,7 @@ dependencies = [
 [[package]]
 name = "omnia-guest-macros"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3537,7 +3538,7 @@ dependencies = [
 [[package]]
 name = "omnia-host-macros"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3653,7 +3654,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-blobstore"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3669,7 +3670,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-config"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "omnia",
@@ -3682,7 +3683,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-docstore"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3698,7 +3699,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-http"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "axum",
@@ -3728,7 +3729,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-identity"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "fromenv",
@@ -3745,7 +3746,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-keyvalue"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3763,7 +3764,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-messaging"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "futures",
@@ -3779,7 +3780,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-model"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "cap-primitives",
@@ -3800,7 +3801,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-otel"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "futures",
@@ -3821,7 +3822,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-sql"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "fromenv",
@@ -3839,7 +3840,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-vault"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "futures",
@@ -3854,7 +3855,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-websocket"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#f3908e899873c9b6a4dec69f01a659812ae5d050"
+source = "git+https://github.com/augentic/omnia.git#f62c6c3b13046f0737ba0fc4e23272c3a0c0b0b5"
 dependencies = [
  "anyhow",
  "dashmap 6.2.1",
@@ -4453,9 +4454,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.16"
+version = "0.11.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
+checksum = "04759210543be93709136e28212294a659ef5001836ff4eab4d663e4529bba83"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -7737,9 +7738,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec-derive"
-version = "0.11.4"
+version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47402523226a02bfe5230160dc3ccc089aa6f6f19e7fcbb4e6f824bbb1b4aa62"
+checksum = "9f212a141d820099d57ffafb9569be9617a6f27d3dc881fbee8fb56642f917a9"
 dependencies = [
  "proc-macro2",
  "quote",

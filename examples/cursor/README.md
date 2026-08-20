@@ -35,7 +35,7 @@ The run command drives `wasi:cli/run` once, which calls `create` and prints the 
 MCP wiring is opt-in per completion and spans two layers:
 
 1. **Prompt grant** — the guest names a server in `tools` and supplies its endpoint `url` (here, `docs` → `http://localhost:8080/mcp` in `guest.rs`). Only granted servers are wired into the spawned `cursor-agent`.
-2. **HTTP serving** — that endpoint must resolve to a running MCP server. Here it is the same guest's `wasi:http` export (`omnia_guest::mcp::router`); it could equally be a separate guest behind a `[[route.http]]` prefix, or any external server.
+2. **HTTP serving** — that endpoint must resolve to a running MCP server. Here it is the same guest's `wasi:http` export (`omnia_guest::mcp::router`); it could equally be a separate guest behind a `routes.http` prefix, or any external server.
 
 When a completion runs, `omnia-cursor` reads the grant's `url`, merges the entry into `<workspace>/.cursor/mcp.json` for the spawn, and passes `--approve-mcps`. `cursor-agent` has no `--mcp-config` flag; it discovers servers from the git toplevel of `--workspace` (or `~/.cursor/mcp.json`), so the backend `git init`s the workspace when it is not already a root and
 strips host `GIT_*` identity vars from the spawn so discovery cannot skip it.

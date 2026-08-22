@@ -1,17 +1,22 @@
 #![doc = include_str!("../README.md")]
 
 mod blobstore;
+mod keyvalue;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use futures::FutureExt as _;
 use omnia::Backend;
 use tracing::instrument;
 
-/// Filesystem blobstore backend anchored at one root directory.
+/// Filesystem storage backend serving `wasi:blobstore` and `wasi:keyvalue`
+/// from disjoint subtrees of one root directory.
 #[derive(Debug, Clone)]
 pub struct Client {
     root: PathBuf,
+    locks: keyvalue::LockRegistry,
 }
 
 impl Backend for Client {
@@ -24,9 +29,9 @@ impl Backend for Client {
 }
 
 impl Client {
-    /// Open a blobstore rooted at `root`, creating the directory when
-    /// absent — the programmatic constructor for deployments that
-    /// anchor the root themselves rather than through the environment.
+    /// Open a store rooted at `root`, creating the directory when absent —
+    /// the programmatic constructor for deployments that anchor the root
+    /// themselves rather than through the environment.
     ///
     /// # Errors
     ///
@@ -34,13 +39,14 @@ impl Client {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root)
-            .with_context(|| format!("creating blobstore root `{}`", root.display()))?;
-        // Canonical so container paths stay stable regardless of later
-        // working-directory changes.
+            .with_context(|| format!("creating filesystem root `{}`", root.display()))?;
         let root = root
             .canonicalize()
-            .with_context(|| format!("resolving blobstore root `{}`", root.display()))?;
-        Ok(Self { root })
+            .with_context(|| format!("resolving filesystem root `{}`", root.display()))?;
+        Ok(Self {
+            root,
+            locks: Arc::default(),
+        })
     }
 }
 
@@ -51,8 +57,8 @@ mod config {
     /// Connection options for the filesystem backend.
     #[derive(Clone, Debug, FromEnv)]
     pub struct ConnectOptions {
-        /// Root directory of the object tree; created when absent.
-        #[env(from = "BLOBSTORE_ROOT")]
+        /// Root directory of the store; created when absent.
+        #[env(from = "FILESYSTEM_ROOT")]
         pub root: String,
     }
 }
@@ -62,4 +68,38 @@ impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }
+}
+
+fn blocking<T: Send + 'static>(
+    task: impl FnOnce() -> Result<T> + Send + 'static,
+) -> futures::future::BoxFuture<'static, Result<T>> {
+    async move { tokio::task::spawn_blocking(task).await? }.boxed()
+}
+
+fn segment_ok(segment: &str) -> bool {
+    !segment.is_empty() && segment != "." && segment != ".." && !segment.contains(['/', '\\', ':'])
+}
+
+fn collect(dir: &Path, prefix: &str, names: &mut Vec<String>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("listing `{}`", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        // Names written through this API are UTF-8; anything else was
+        // not written by a client of these interfaces.
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        // In-flight temp files from atomic writes are not entries.
+        if prefix.is_empty() && name.starts_with(".tmp") {
+            continue;
+        }
+        let rel = if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") };
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            collect(&entry.path(), &rel, names)?;
+        } else if kind.is_file() {
+            names.push(rel);
+        }
+    }
+    Ok(())
 }

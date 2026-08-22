@@ -1,6 +1,6 @@
 [package]
 name = "omnia-filesystem"
-description = "Filesystem provider for blobstore"
+description = "Filesystem provider for blobstore and keyvalue"
 readme = "README.md"
 authors.workspace = true
 categories.workspace = true
@@ -24,6 +24,7 @@ fromenv.workspace = true
 futures.workspace = true
 omnia.workspace = true
 omnia-wasi-blobstore.workspace = true
+omnia-wasi-keyvalue.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true

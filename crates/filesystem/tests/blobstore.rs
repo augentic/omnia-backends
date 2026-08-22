@@ -8,7 +8,7 @@ use omnia_wasi_blobstore::{Bytes, Container, WasiBlobstoreCtx};
 use tempfile::TempDir;
 
 fn client(root: &TempDir) -> omnia_filesystem::Client {
-    omnia_filesystem::Client::open(root.path().join("blobstore")).expect("open")
+    omnia_filesystem::Client::open(root.path()).expect("open")
 }
 
 async fn snapshots(client: &omnia_filesystem::Client) -> Arc<dyn Container> {

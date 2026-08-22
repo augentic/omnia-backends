@@ -55,7 +55,7 @@ mod config {
     #[derive(Clone, Debug, FromEnv)]
     pub struct ConnectOptions {
         /// Root directory of the store; created when absent.
-        #[env(from = "FILESYSTEM_ROOT")]
+        #[env(from = "FILESYSTEM_ROOT", default = ".omnia/storage")]
         pub root: String,
     }
 }

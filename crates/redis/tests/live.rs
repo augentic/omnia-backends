@@ -34,7 +34,7 @@ async fn atomics_swap_and_increment() -> Result<()> {
     let client = <Client as Backend>::connect().await?;
     let bucket: Arc<dyn Bucket> = client.open_bucket("omnia-live".to_owned()).await?;
 
-    // Increment is native `INCRBY`.
+    // Increment is native `INCRBY` plus the same one-day expiry as `set`.
     let counter = unique("counter");
     assert_eq!(bucket.increment(counter.clone(), 5).await?, 5);
     assert_eq!(bucket.increment(counter, -2).await?, 3);

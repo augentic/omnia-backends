@@ -3,10 +3,10 @@
 //! Buckets map to subdirectories of the `keyvalue/` subtree of the client
 //! root; keys may contain `/` and map to nested paths beneath their bucket
 //! directory. Writes are temp-file + atomic-rename: a value is either fully
-//! visible or absent, never torn. Atomic operations (`swap`, `increment`)
-//! serialize on a per-key lock shared by every bucket handle opened from one
-//! [`Client`] — a single host process owns the root, the same assumption the
-//! blobstore module makes.
+//! visible or absent, never torn. Every writer (`set`, `delete`, `swap`,
+//! `increment`) serializes on a per-key lock shared by every bucket handle
+//! opened from one [`Client`] — a single host process owns the root, the
+//! same assumption the blobstore module makes.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -69,15 +69,21 @@ impl Bucket for FsBucket {
     fn set(&self, key: String, value: Vec<u8>) -> FutureResult<()> {
         tracing::trace!("setting key: {key} in bucket: {}", self.name);
         let dir = self.dir.clone();
+        let lock = self.key_lock(&key);
 
-        blocking(move || write_value(&dir, &key, &value))
+        blocking(move || {
+            let _guard = lock.lock().expect("key lock poisoned");
+            write_value(&dir, &key, &value)
+        })
     }
 
     fn delete(&self, key: String) -> FutureResult<()> {
         tracing::trace!("deleting key: {key} from bucket: {}", self.name);
         let dir = self.dir.clone();
+        let lock = self.key_lock(&key);
 
         blocking(move || {
+            let _guard = lock.lock().expect("key lock poisoned");
             let path = key_path(&dir, &key)?;
             match std::fs::remove_file(&path) {
                 Ok(()) => Ok(()),

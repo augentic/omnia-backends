@@ -12,6 +12,15 @@ use crate::Client;
 
 const TTL_DAY: u64 = 24 * 60 * 60; // 1 day
 
+/// `INCRBY` plus the same one-day expiry `set` and `swap` apply. Bare
+/// `INCRBY` would leave increment-only keys permanent, and would not
+/// refresh the TTL on a key that was first written with `SET EX`.
+const INCREMENT: &str = r"
+local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+return n
+";
+
 /// Server-side compare-and-set: the compare and the write are one atomic
 /// step. `WATCH`/`MULTI` is not an option on a multiplexed connection.
 /// Returns `{swapped, present, current}`.
@@ -125,7 +134,11 @@ impl Bucket for RedisBucket {
         let key = format!("{}:{key}", self.identifier);
         let mut conn = self.conn.0.clone();
         async move {
-            conn.incr(key.clone(), delta)
+            redis::Script::new(INCREMENT)
+                .key(&key)
+                .arg(delta)
+                .arg(TTL_DAY)
+                .invoke_async(&mut conn)
                 .await
                 .with_context(|| format!("failed to increment {key}"))
         }

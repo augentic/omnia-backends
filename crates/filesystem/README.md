@@ -24,10 +24,10 @@ never collide.
   `/` and map to nested paths beneath their bucket directory, sanitized as
   above.
 - Writes are temp-file + atomic-rename, so a value is never observed torn.
-- The `wasi:keyvalue/atomics` surface (`swap`, `increment`) is native under a
-  per-key lock shared by every bucket handle opened from one client: a stale
-  swap never overwrites and returns a handle refreshed at the observed value.
-  Counter values are 8-byte big-endian `i64`.
+- Writers (`set`, `delete`, `swap`, `increment`) serialize on a per-key lock
+  shared by every bucket handle opened from one client. A stale swap never
+  overwrites and returns a handle refreshed at the observed value. Counter
+  values are 8-byte big-endian `i64`.
 - Scope: the lock serializes writers within one host process; a single
   process owns the root (the same assumption the blobstore makes).
 

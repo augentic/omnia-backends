@@ -1,6 +1,4 @@
-//! Filesystem blobstore contract: container lifecycle, atomic
-//! write-once visibility, nested object names, range reads, and name
-//! sanitization.
+//! Filesystem blobstore contract tests.
 
 use std::sync::Arc;
 
@@ -25,18 +23,20 @@ async fn container_lifecycle() {
     assert_eq!(container.name().expect("name"), "snapshots");
     assert!(client.container_exists("snapshots".to_string()).await.expect("exists"));
 
-    // Idempotent creation preserves contents.
     container.write_data("obj".to_string(), Bytes::from_static(b"x")).await.expect("write");
     let again = snapshots(&client).await;
     assert!(again.has_object("obj".to_string()).await.expect("has"));
+    let got = client.get_container("snapshots".to_string()).await.expect("get");
+    assert!(got.has_object("obj".to_string()).await.expect("has"));
 
-    // Get refuses an absent container; delete is idempotent.
-    client.get_container("snapshots".to_string()).await.expect("get");
     client.delete_container("snapshots".to_string()).await.expect("delete");
     client.delete_container("snapshots".to_string()).await.expect("delete again");
     assert!(!client.container_exists("snapshots".to_string()).await.expect("exists"));
-    let err = client.get_container("snapshots".to_string()).await.expect_err("must refuse");
-    assert!(err.to_string().contains("not found"), "unexpected error: {err}");
+
+    // Lookup creates a missing container.
+    let ensured = client.get_container("snapshots".to_string()).await.expect("get ensures");
+    assert!(client.container_exists("snapshots".to_string()).await.expect("exists"));
+    assert!(!ensured.has_object("obj".to_string()).await.expect("has"), "ensured empty");
 }
 
 #[tokio::test]
@@ -48,11 +48,9 @@ async fn write_read_round_trip() {
     let payload = Bytes::from_static(&[0_u8, 159, 146, 150, 255]);
     container.write_data("ab/cdef".to_string(), payload.clone()).await.expect("write");
 
-    // Nested names shard into subdirectories and read back whole.
     let data = container.get_data("ab/cdef".to_string(), 0, u64::MAX).await.expect("get");
     assert_eq!(data, Some(payload.clone()));
 
-    // Overwrite replaces atomically (last rename wins).
     container
         .write_data("ab/cdef".to_string(), Bytes::from_static(b"second"))
         .await
@@ -64,7 +62,6 @@ async fn write_read_round_trip() {
     assert_eq!(info.size, 6);
     assert_eq!(info.container, "snapshots");
 
-    // Absent objects read as `None`; info refuses them.
     assert_eq!(container.get_data("missing".to_string(), 0, 0).await.expect("get"), None);
     let err = container.object_info("missing".to_string()).await.expect_err("must refuse");
     assert!(err.to_string().contains("not found"), "unexpected error: {err}");
@@ -80,7 +77,7 @@ async fn range_reads() {
         .await
         .expect("write");
 
-    // `end` is inclusive; 0 and u64::MAX read to the end; bounds clamp.
+    // End offsets are inclusive; 0 and u64::MAX are unbounded.
     let slice = container.get_data("obj".to_string(), 2, 4).await.expect("get");
     assert_eq!(slice, Some(Bytes::from_static(b"234")));
     let tail = container.get_data("obj".to_string(), 8, u64::MAX).await.expect("get");

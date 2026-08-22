@@ -1,12 +1,6 @@
-//! `wasi-keyvalue` implementation over a local directory tree.
+//! `wasi-keyvalue` backed by a local directory tree.
 //!
-//! Buckets map to subdirectories of the `keyvalue/` subtree of the client
-//! root; keys may contain `/` and map to nested paths beneath their bucket
-//! directory. Writes are temp-file + atomic-rename: a value is either fully
-//! visible or absent, never torn. Every writer (`set`, `delete`, `swap`,
-//! `increment`) serializes on a per-key lock shared by every bucket handle
-//! opened from one [`Client`] — a single host process owns the root, the
-//! same assumption the blobstore module makes.
+//! Writes are atomic and serialized per key.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -177,8 +171,7 @@ fn write_value(dir: &Path, key: &str, value: &[u8]) -> Result<()> {
     Ok(())
 }
 
-// Counters are 8-byte big-endian i64, the convention the host's former
-// read-modify-write fallback established.
+// `increment` stores counters as big-endian `i64` values.
 fn decode_counter(key: &str, value: &[u8]) -> Result<i64> {
     let bytes: [u8; 8] = value.try_into().map_err(|_len_mismatch| {
         anyhow!("value at `{key}` is {} bytes, not an 8-byte big-endian integer", value.len())

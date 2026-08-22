@@ -175,7 +175,7 @@ version = "0.14.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.cc]]
-version = "1.4.3"
+version = "1.4.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.chacha20]]
@@ -607,7 +607,7 @@ version = "2.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.icu_provider]]
-version = "2.3.0"
+version = "2.3.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.id-arena]]
@@ -795,11 +795,11 @@ version = "0.1.6+1.18.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.mongodb]]
-version = "3.8.0"
+version = "3.8.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.mongodb-internal-macros]]
-version = "3.8.0"
+version = "3.8.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.multimap]]
@@ -1155,7 +1155,7 @@ version = "0.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-webpki]]
-version = "0.103.14"
+version = "0.103.15"
 criteria = "safe-to-deploy"
 
 [[exemptions.same-file]]
@@ -1615,7 +1615,7 @@ version = "0.11.8"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerovec-derive]]
-version = "0.11.5"
+version = "0.11.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.zmij]]

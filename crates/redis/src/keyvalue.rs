@@ -2,15 +2,45 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use futures::FutureExt;
-use omnia_wasi_keyvalue::{Bucket, FutureResult, WasiKeyValueCtx};
+use omnia_wasi_keyvalue::{Bucket, Cas, FutureResult, WasiKeyValueCtx};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 
 use crate::Client;
 
 const TTL_DAY: u64 = 24 * 60 * 60; // 1 day
+
+/// `INCRBY` plus the same one-day expiry `set` and `swap` apply. Bare
+/// `INCRBY` would leave increment-only keys permanent, and would not
+/// refresh the TTL on a key that was first written with `SET EX`.
+const INCREMENT: &str = r"
+local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+return n
+";
+
+/// Server-side compare-and-set: the compare and the write are one atomic
+/// step. `WATCH`/`MULTI` is not an option on a multiplexed connection.
+/// Returns `{swapped, present, current}`.
+const SWAP: &str = r"
+local current = redis.call('GET', KEYS[1])
+local matches
+if ARGV[1] == '1' then
+  matches = current ~= false and current == ARGV[2]
+else
+  matches = current == false
+end
+if matches then
+  redis.call('SET', KEYS[1], ARGV[3], 'EX', ARGV[4])
+  return {1, 0, ''}
+end
+if current == false then
+  return {0, 0, ''}
+end
+return {0, 1, current}
+";
 
 /// `wasi-keyvalue` implementation backed by Redis.
 impl WasiKeyValueCtx for Client {
@@ -96,6 +126,54 @@ impl Bucket for RedisBucket {
             conn.keys(pattern.clone())
                 .await
                 .with_context(|| format!("failed to list keys for {pattern}"))
+        }
+        .boxed()
+    }
+
+    fn increment(&self, key: String, delta: i64) -> FutureResult<i64> {
+        let key = format!("{}:{key}", self.identifier);
+        let mut conn = self.conn.0.clone();
+        async move {
+            redis::Script::new(INCREMENT)
+                .key(&key)
+                .arg(delta)
+                .arg(TTL_DAY)
+                .invoke_async(&mut conn)
+                .await
+                .with_context(|| format!("failed to increment {key}"))
+        }
+        .boxed()
+    }
+
+    fn swap(&self, cas: Cas, value: Vec<u8>) -> FutureResult<Result<(), Cas>> {
+        let key = format!("{}:{}", self.identifier, cas.key);
+        let mut conn = self.conn.0.clone();
+
+        async move {
+            let expected = cas.current.clone().unwrap_or_default();
+            let has_expected = i64::from(cas.current.is_some());
+
+            let (swapped, present, observed): (i64, i64, Vec<u8>) = redis::Script::new(SWAP)
+                .key(&key)
+                .arg(has_expected)
+                .arg(expected)
+                .arg(&value)
+                .arg(TTL_DAY)
+                .invoke_async(&mut conn)
+                .await
+                .with_context(|| format!("failed to swap {key}"))?;
+
+            match (swapped, present) {
+                (1, _) => Ok(Ok(())),
+                // Stale snapshot: refresh the handle at the observed value so
+                // the caller can retry, as the WIT contract requires.
+                (0, 1) => Ok(Err(Cas {
+                    current: Some(observed),
+                    ..cas
+                })),
+                (0, 0) => Ok(Err(Cas { current: None, ..cas })),
+                other => bail!("unexpected swap response for {key}: {other:?}"),
+            }
         }
         .boxed()
     }

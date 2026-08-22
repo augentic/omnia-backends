@@ -1,7 +1,4 @@
-//! Filesystem keyvalue contract: bucket round-trip, durability across
-//! reopen, shared-root isolation from the blobstore, name sanitization, and
-//! the CAS exit criterion — absent-expected, stale-expected, and contention
-//! under the per-key lock.
+//! Filesystem keyvalue contract tests.
 
 use std::sync::Arc;
 
@@ -42,12 +39,10 @@ async fn round_trip() {
     keys.sort();
     assert_eq!(keys, ["a", "b/c"]);
 
-    // Delete is idempotent.
     bucket.delete("a".to_string()).await.expect("delete");
     bucket.delete("a".to_string()).await.expect("delete again");
     assert!(!bucket.exists("a".to_string()).await.expect("exists"));
 
-    // Durability: a fresh client over the same root still sees the write.
     drop(bucket);
     drop(store);
     let bucket = state(&client(&root)).await;
@@ -101,7 +96,6 @@ async fn cas_absent_expected() {
     let store = client(&root);
     let bucket = state(&store).await;
 
-    // `current: None` on an absent key creates it.
     let handle = cas(&bucket, "pointer", None);
     bucket.swap(handle, b"first".to_vec()).await.expect("swap").expect("must commit");
     assert_eq!(
@@ -109,8 +103,7 @@ async fn cas_absent_expected() {
         Some(b"first".as_slice())
     );
 
-    // A second absent-expected swap mismatches, reports the observed value,
-    // and leaves the key untouched.
+    // A repeated absent-expected swap returns the current value.
     let stale = cas(&bucket, "pointer", None);
     let fresh =
         bucket.swap(stale, b"second".to_vec()).await.expect("swap").expect_err("must mismatch");
@@ -130,7 +123,6 @@ async fn cas_stale_expected() {
     bucket.set("pointer".to_string(), b"v1".to_vec()).await.expect("seed");
     let handle = cas(&bucket, "pointer", Some(b"v1"));
 
-    // An interfering write invalidates the snapshot.
     bucket.set("pointer".to_string(), b"v2".to_vec()).await.expect("interfere");
 
     let fresh =
@@ -142,7 +134,6 @@ async fn cas_stale_expected() {
         "stale swap must not overwrite"
     );
 
-    // The refreshed handle retries cleanly.
     bucket.swap(fresh, b"v3".to_vec()).await.expect("swap").expect("retry commits");
     assert_eq!(
         bucket.get("pointer".to_string()).await.expect("get").as_deref(),
@@ -157,8 +148,7 @@ async fn cas_contention() {
     let bucket = state(&store).await;
     bucket.set("pointer".to_string(), b"seed".to_vec()).await.expect("seed");
 
-    // Every contender swaps from the same snapshot; the per-key lock must
-    // admit exactly one.
+    // Exactly one contender may swap from the shared snapshot.
     let mut attempts = tokio::task::JoinSet::new();
     for i in 0..16_u8 {
         let bucket = Arc::clone(&bucket);
@@ -210,11 +200,9 @@ async fn increment_encoding() {
     let store = client(&root);
     let bucket = state(&store).await;
 
-    // Absent starts from zero; deltas may be negative.
     assert_eq!(bucket.increment("counter".to_string(), 5).await.expect("increment"), 5);
     assert_eq!(bucket.increment("counter".to_string(), -2).await.expect("increment"), 3);
 
-    // A non-integer value refuses rather than corrupting.
     bucket.set("text".to_string(), b"not a number".to_vec()).await.expect("set");
     let err = bucket.increment("text".to_string(), 1).await.expect_err("must refuse");
     assert!(err.to_string().contains("big-endian"), "unexpected error: {err}");

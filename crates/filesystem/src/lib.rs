@@ -11,8 +11,7 @@ use futures::FutureExt as _;
 use omnia::Backend;
 use tracing::instrument;
 
-/// Filesystem storage backend serving `wasi:blobstore` and `wasi:keyvalue`
-/// from disjoint subtrees of one root directory.
+/// Filesystem backend for `wasi:blobstore` and `wasi:keyvalue`.
 #[derive(Debug, Clone)]
 pub struct Client {
     root: PathBuf,
@@ -29,9 +28,7 @@ impl Backend for Client {
 }
 
 impl Client {
-    /// Open a store rooted at `root`, creating the directory when absent —
-    /// the programmatic constructor for deployments that anchor the root
-    /// themselves rather than through the environment.
+    /// Opens a store, creating its root directory when absent.
     ///
     /// # Errors
     ///
@@ -84,12 +81,11 @@ fn collect(dir: &Path, prefix: &str, names: &mut Vec<String>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("listing `{}`", dir.display()))? {
         let entry = entry?;
         let name = entry.file_name();
-        // Names written through this API are UTF-8; anything else was
-        // not written by a client of these interfaces.
+        // This API cannot create non-UTF-8 names.
         let Some(name) = name.to_str() else {
             continue;
         };
-        // In-flight temp files from atomic writes are not entries.
+        // Ignore atomic-write temp files.
         if prefix.is_empty() && name.starts_with(".tmp") {
             continue;
         }

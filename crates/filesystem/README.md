@@ -13,6 +13,10 @@ never collide.
   and map to nested paths beneath their container directory (sanitized:
   `..`, absolute paths, and empty segments are rejected), so clients encode
   their own sharding in names.
+- Opening a container is an ensure: `get-container` creates the directory
+  when absent, exactly as `create-container` does (and as keyvalue bucket
+  opens do), so read paths never fail on a container nothing has written
+  yet.
 - Writes are temp-file + atomic-rename: an object is either fully visible or
   absent, never torn, and concurrent same-name writes are benign (last
   rename wins).

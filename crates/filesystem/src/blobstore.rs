@@ -1,11 +1,6 @@
-//! `wasi-blobstore` implementation over a local directory tree.
+//! `wasi-blobstore` backed by a local directory tree.
 //!
-//! Containers map to subdirectories of the `blobstore/` subtree of the
-//! client root; object names may contain `/` and map to nested paths
-//! beneath their container directory, so clients encode their own
-//! sharding in names. Writes are temp-file + atomic-rename: an object
-//! is either fully visible or absent, never torn, and concurrent
-//! same-name writes are benign (last rename wins).
+//! Container lookup creates missing directories; writes replace files atomically.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -34,15 +29,7 @@ impl WasiBlobstoreCtx for Client {
 
     fn get_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("getting container: {name}");
-        let root = self.root.join("blobstore");
-
-        blocking(move || {
-            let dir = container_dir(&root, &name)?;
-            if !dir.is_dir() {
-                bail!("container not found: {name}");
-            }
-            Ok(Arc::new(FsContainer { name, dir }) as Arc<dyn Container>)
-        })
+        self.create_container(name)
     }
 
     fn delete_container(&self, name: String) -> FutureResult<()> {

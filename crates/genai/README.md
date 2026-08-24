@@ -8,10 +8,11 @@ implementing the `omnia:model/completion` boundary (`wasi-model`).
 
 Wraps the [`genai`](https://crates.io/crates/genai) SDK (`OpenAI`, Anthropic,
 Gemini, Groq, Ollama, …). The backend maps the gate-validated `Request`
-(`system` / `messages` channels) to a provider chat request; the
-in-process tool loop is driven to completion, and the runtime core's
-`resolve` tool is dispatched into the guest's `references` shelf via the lent
-`ToolHost`. The guest only ever sees the validated answer string.
+(`system` / `messages` channels) to a provider chat request, advertising the
+request's declared function tools; the in-process tool loop is driven to
+completion, forwarding every model tool call through the lent
+`ToolHost::call_tool` to the guest's session handler. The guest only ever
+sees the validated answer string.
 
 MSRV: Rust 1.97
 
@@ -57,7 +58,7 @@ let client = Client::connect().await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) drives a real completion through the `wasi-model`
-boundary, exercising the in-process tool loop and `resolve` dispatch. It is
+boundary, exercising the in-process tool loop and function-tool dispatch. It is
 `#[ignore]`d so it never touches the network in CI; run it with a provider key:
 
 ```bash

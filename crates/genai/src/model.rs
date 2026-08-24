@@ -1,14 +1,15 @@
 //! `wasi-model` implementation backed by the multi-provider genai SDK.
 //!
 //! Maps the gate-validated [`Request`] onto a genai
-//! [`ChatRequest`]/[`ChatOptions`], drives the in-process
-//! tool loop — dispatching the host-injected `resolve` tool into the caller's
-//! `references` shelf through the lent [`ToolHost`] — self-checks the answer
-//! against `response-format`, and returns a host-only [`Answer`] (the
-//! parsed value plus a tool transcript for record/replay). The guest only ever
-//! sees the validated answer string the `create` binding derives from `value`;
-//! the host re-validates as the single authority (§3.1.3), so this self-check
-//! is an optimization, not the gate.
+//! [`ChatRequest`]/[`ChatOptions`], advertises the request's declared
+//! function tools to the provider, drives the in-process tool loop —
+//! forwarding every model tool call through [`ToolHost::call_tool`], where
+//! the guest's tool closure answers — self-checks the answer against
+//! `response-format`, and returns a host-only [`Answer`] (the parsed value
+//! plus a tool transcript for record/replay). The guest only ever sees the
+//! validated answer string the `create` binding derives from `value`; the
+//! host re-validates as the single authority (§3.1.3), so this self-check is
+//! an optimization, not the gate.
 
 use std::sync::Arc;
 
@@ -19,10 +20,10 @@ use genai::chat::{
     ToolCall, ToolResponse,
 };
 use omnia_wasi_model::{
-    Answer, Effort, Format, FutureResult, Reference, Request, Role, Tool as ModelTool, ToolHost,
+    Answer, Effort, Format, Function, FutureResult, Request, Role, Tool as ModelTool, ToolHost,
     ToolTurn, Transcript, Usage, WasiModelCtx,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::Client;
 
@@ -67,7 +68,7 @@ impl WasiModelCtx for Client {
                     // response follows as its own `tool`-role message.
                     chat = chat.append_message(tool_calls.clone());
                     for call in tool_calls {
-                        let result = dispatch_tool(&request, &tool_host, &call).await?;
+                        let result = dispatch_tool(&tool_host, &call).await?;
                         transcript.turns.push(ToolTurn {
                             tool: call.fn_name,
                             args: call.fn_arguments,
@@ -127,8 +128,8 @@ impl WasiModelCtx for Client {
     }
 }
 
-/// Map the gate-validated [`Request`] onto a genai [`ChatRequest`]; the
-/// host-injected `resolve` tool is advertised only when a reference target is granted.
+/// Map the gate-validated [`Request`] onto a genai [`ChatRequest`],
+/// advertising the request's declared function tools to the provider.
 fn build_request(request: &Request) -> Result<ChatRequest> {
     let messages = request
         .messages
@@ -146,26 +147,18 @@ fn build_request(request: &Request) -> Result<ChatRequest> {
     }
 
     let mut tools: Vec<Tool> = Vec::new();
-    if request.grants.references.is_some() {
-        tools.push(resolve_tool());
-    }
-    match request.tools.first() {
-        // Guest-declared function tools are not executable until the model
-        // session lands; fail up front rather than advertising a tool whose
-        // selection would fail mid-loop.
-        Some(ModelTool::Function(function)) => bail!(
-            "the genai backend cannot execute the guest-declared function tool `{}`",
-            function.name
-        ),
-        // The genai backend has no MCP client; a spawned-agent backend
-        // (omnia-cursor) honors MCP grants. Fail loudly rather than silently
-        // dropping the grant.
-        Some(ModelTool::Mcp(mcp)) => bail!(
-            "the genai backend cannot honor the MCP tool grant for server `{}`; use a \
-             spawned-agent backend such as omnia-cursor",
-            mcp.name
-        ),
-        None => {}
+    for tool in &request.tools {
+        match tool {
+            ModelTool::Function(function) => tools.push(function_tool(function)?),
+            // The genai backend has no MCP client; a spawned-agent backend
+            // (omnia-cursor) honors MCP grants. Fail loudly rather than
+            // silently dropping the grant.
+            ModelTool::Mcp(mcp) => bail!(
+                "the genai backend cannot honor the MCP tool grant for server `{}`; use a \
+                 spawned-agent backend such as omnia-cursor",
+                mcp.name
+            ),
+        }
     }
     if !tools.is_empty() {
         chat = chat.with_tools(tools);
@@ -174,26 +167,15 @@ fn build_request(request: &Request) -> Result<ChatRequest> {
     Ok(chat)
 }
 
-/// The host-injected `resolve` tool advertised to the model (§4). Its single `name`
-/// argument mirrors [`Reference`]; the body is opaque to the runtime core and is
-/// interpreted only by the caller's `references` shelf.
-fn resolve_tool() -> Tool {
-    Tool::new("resolve")
-        .with_description(
-            "Resolve an opaque reference against the caller's references shelf and return its \
-             contents. Use this to fetch material the caller exposed by reference.",
-        )
-        .with_schema(json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "The opaque reference body the shelf interprets."
-                }
-            },
-            "required": ["name"],
-            "additionalProperties": false,
-        }))
+/// Translate a declared function tool into a genai [`Tool`]. The host gate
+/// already guarantees `parameters` parses as JSON.
+fn function_tool(function: &Function) -> Result<Tool> {
+    let schema: Value = serde_json::from_str(&function.parameters).with_context(|| {
+        format!("function tool `{}` parameters is not valid JSON", function.name)
+    })?;
+    Ok(Tool::new(function.name.clone())
+        .with_description(function.description.clone())
+        .with_schema(schema))
 }
 
 /// Translate the boundary's `format` and `generation` controls into genai
@@ -268,40 +250,17 @@ fn to_usage(usage: &genai::chat::Usage) -> Option<Usage> {
     })
 }
 
-/// Execute one model tool call. Only the host-injected `resolve` tool is
-/// executable (host-mediated dynamic linking into the caller's `references`
-/// shelf); guest-declared function tools are rejected up front in
-/// [`build_request`], so any other name here is unadvertised and the backend
-/// fails loudly rather than fabricating a result.
-async fn dispatch_tool(
-    request: &Request, tool_host: &Arc<dyn ToolHost>, call: &ToolCall,
-) -> Result<String> {
-    match call.fn_name.as_str() {
-        "resolve" => {
-            // The tool is only advertised with a granted target; re-check.
-            if request.grants.references.is_none() {
-                bail!("model called `resolve` but `grants.references` is not set");
-            }
-            let name = call
-                .fn_arguments
-                .get("name")
-                .and_then(Value::as_str)
-                .context("`resolve` tool call is missing a string `name` argument")?;
-            let bytes = tool_host
-                .resolve(Reference {
-                    name: name.to_owned(),
-                })
-                .await
-                .with_context(|| format!("resolving reference `{name}`"))?;
-            // The shelf returns typed bytes; genai tool responses are strings, so
-            // surface them as (lossy) UTF-8 text for the model to read.
-            Ok(String::from_utf8_lossy(&bytes).into_owned())
-        }
-        other => bail!(
-            "model called tool `{other}`, which the genai backend cannot execute (only the \
-             host-injected `resolve` tool is wired)"
-        ),
-    }
+/// Forward one model tool call through the session. The host enforces the
+/// declared-name check, budget, size cap, and timeout in `call_tool`; its
+/// outer error is a hard failure that ends the completion, while the inner
+/// `Err` is the guest tool's own failure text — fed back to the model as
+/// repairable content.
+async fn dispatch_tool(tool_host: &Arc<dyn ToolHost>, call: &ToolCall) -> Result<String> {
+    let outcome = tool_host
+        .call_tool(call.fn_name.clone(), call.fn_arguments.to_string())
+        .await
+        .with_context(|| format!("calling tool `{}`", call.fn_name))?;
+    Ok(outcome.unwrap_or_else(|failure| format!("tool `{}` failed: {failure}", call.fn_name)))
 }
 
 /// Append the rejected answer and a correction instruction so the next round
@@ -318,7 +277,7 @@ fn append_repair(
 // `tests/live.rs` proves a real provider run end-to-end.
 #[cfg(test)]
 mod tests {
-    use omnia_wasi_model::{Function, Grants, Mcp, Message};
+    use omnia_wasi_model::{Grants, Mcp, Message};
 
     use super::*;
 
@@ -333,22 +292,26 @@ mod tests {
             generation: None,
             format: Format::Text,
             tools,
-            grants: Grants {
-                references: None,
-                workspace: None,
-            },
+            grants: Grants { workspace: None },
         }
     }
 
     #[test]
-    fn function_tool() {
-        let err = build_request(&request(vec![ModelTool::Function(Function {
+    fn function_tool_advertised() {
+        let chat = build_request(&request(vec![ModelTool::Function(Function {
             name: "lookup".to_owned(),
             description: "look something up".to_owned(),
             parameters: "{\"type\":\"object\"}".to_owned(),
         })]))
-        .expect_err("a guest function tool this backend cannot execute must fail up front");
-        assert!(err.to_string().contains("`lookup`"), "unexpected error: {err}");
+        .expect("a declared function tool translates");
+        let tools = chat.tools.expect("the chat request advertises the tool");
+        assert_eq!(tools.len(), 1, "one declared tool, one advertised tool");
+        assert_eq!(tools[0].name, "lookup".into());
+        assert_eq!(
+            tools[0].schema,
+            Some(serde_json::json!({ "type": "object" })),
+            "the parameters document rides as the tool schema"
+        );
     }
 
     #[test]

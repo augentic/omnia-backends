@@ -30,15 +30,10 @@ impl WasiModelCtx for Client {
         let default_model = self.model.clone();
 
         Box::pin(async move {
-            // Interim honesty until the model session lands: fail loudly on
-            // request surfaces this backend cannot execute instead of silently
-            // dropping them. MCP grants are unaffected — they forward below.
-            if request.grants.references.is_some() {
-                bail!(
-                    "the cursor backend cannot honor `grants.references`; use an in-process \
-                     tool-loop backend such as omnia-genai"
-                );
-            }
+            // Interim honesty until the spawned agent can bridge session tool
+            // calls (Phase 5): fail loudly on guest-declared function tools
+            // instead of silently dropping them. MCP grants are unaffected —
+            // they forward below.
             for tool in &request.tools {
                 if let Tool::Function(function) = tool {
                     bail!(
@@ -218,8 +213,8 @@ mod tests {
     use std::time::Duration;
 
     use omnia_wasi_model::{
-        DirEntry, Format, Function, FutureResult, Grants, Mcp, Message, Reference, Request, Role,
-        Schema, Tool, ToolHost, WasiModelCtx as _,
+        DirEntry, Format, Function, FutureResult, Grants, Mcp, Message, Request, Role, Schema,
+        Tool, ToolHost, WasiModelCtx as _,
     };
     use serde_json::json;
 
@@ -245,10 +240,7 @@ mod tests {
                 .to_string(),
             }),
             tools: vec![],
-            grants: Grants {
-                references: None,
-                workspace: None,
-            },
+            grants: Grants { workspace: None },
         }
     }
 
@@ -259,17 +251,6 @@ mod tests {
             .await
             .expect_err("a backend with no local tree must fail");
         assert!(err.to_string().contains("no local tree on this node"), "unexpected error: {err}");
-    }
-
-    #[tokio::test]
-    async fn references_grant() {
-        let mut request = schema_request();
-        request.grants.references = Some("shelf".to_owned());
-        let err = client()
-            .complete(request, Arc::new(StubToolHost { path: None }))
-            .await
-            .expect_err("a references grant this backend cannot honor must fail loudly");
-        assert!(err.to_string().contains("grants.references"), "unexpected error: {err}");
     }
 
     #[tokio::test]
@@ -310,7 +291,9 @@ mod tests {
     }
 
     impl ToolHost for StubToolHost {
-        fn resolve(&self, _reference: Reference) -> FutureResult<Vec<u8>> {
+        fn call_tool(
+            &self, _name: String, _arguments: String,
+        ) -> FutureResult<Result<String, String>> {
             Box::pin(async { Err(anyhow::anyhow!("cursor ignores the tool host")) })
         }
 

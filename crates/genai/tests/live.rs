@@ -1,8 +1,8 @@
 //! Key-gated live integration tests for the genai backend — the function-tool
 //! session loop and the host-injected workspace tools against a real provider.
 //!
-//! The cross-repo companions to omnia's deterministic seam scenarios
-//! (`crates/seam-suite/tests/seam/model.rs`): those prove the session
+//! The cross-repo companions to omnia's deterministic ABI scenarios
+//! (`crates/abi-tests/tests/model.rs`): those prove the session
 //! machinery and the real workspace `ToolHost` with no network; these prove
 //! the genai backend itself — `Request`→`ChatRequest` mapping with declared
 //! and host-injected tools, the in-process tool loop forwarding through
@@ -27,7 +27,7 @@ use serde_json::Value;
 
 /// Deterministic stand-in for the host session: `call_tool("lookup", …)`
 /// answers `shelf:{arguments}`. The real guest closure round trip is proved
-/// in omnia's seam suite; here we only need the genai backend to drive a
+/// by omnia's ABI tests; here we only need the genai backend to drive a
 /// declared function tool call and consume its result.
 #[derive(Debug)]
 struct LiveTools;
@@ -101,7 +101,7 @@ const SENTINEL: &str = "omega-7734";
 /// Deterministic in-memory workspace stand-in for the host's `BoundToolHost`:
 /// `local_path` reports a resolved lend (which makes the backend advertise
 /// `read`/`list`), listing the root reveals `refs.md`, and reading it returns
-/// the sentinel. The real cap-std workspace is proved in omnia's seam suite;
+/// the sentinel. The real cap-std workspace is proved by omnia's ABI tests;
 /// here we only need the genai backend to discover, read, and use the file.
 #[derive(Debug)]
 struct LiveWorkspace;

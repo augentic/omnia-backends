@@ -21,7 +21,7 @@ The `omnia` runtime is consumed from the sibling checkout via a
 
 ## Testing policy (integration-first, service-free CI)
 
-These crates talk to real services, so the seam that matters is
+These crates talk to real services, so the boundary that matters is
 `backend ⇄ real service ⇄ omnia WasiXxxCtx`. CI cannot stand those services up,
 so the policy splits accordingly:
 

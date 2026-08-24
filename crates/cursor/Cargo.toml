@@ -1,6 +1,6 @@
 [package]
 name = "omnia-cursor"
-description = "Spawned cursor-agent model backend (the omnia:model boundary)"
+description = "Cursor SDK bridge model backend (the omnia:model boundary)"
 readme = "README.md"
 authors.workspace = true
 categories.workspace = true
@@ -20,19 +20,25 @@ all-features = true
 
 [dependencies]
 anyhow.workspace = true
+axum = { workspace = true, features = ["http1", "tokio"] }
+bytes.workspace = true
 fromenv.workspace = true
+getrandom.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 # Pinned to the local omnia 0.35.0 line via the workspace `[patch.crates-io]`
 # override (the `omnia-wasi-model` host crate is unreleased on crates.io).
 omnia.workspace = true
 omnia-wasi-model.workspace = true
+prost.workspace = true
+prost-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["io-util", "process", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "sync", "time"] }
 tracing.workspace = true
 
-# Integration tests are separate crates and do not inherit the library's normal
-# dependencies, so the ones the live run-3 test (`tests/live.rs`) drives are
-# repeated here.
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "test-util", "time"] }

@@ -2,7 +2,7 @@
 //!
 //! Command mode drives the `ask` guest's `wasi:cli/run` export once and exits
 //! with its status while the HTTP trigger keeps serving `/mcp/docs` in the
-//! background for the spawned `cursor-agent`. See `README.md`.
+//! background for the bridge-managed Cursor agent. See `README.md`.
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {

@@ -3,9 +3,9 @@
 //! A `wasi:cli/command` reactor that **imports** `omnia:model/completion` and
 //! calls `create` once when the host drives `wasi:cli/run`. The prompt carries
 //! a `docs` MCP grant; when the runtime binds `WasiModel` to the cursor backend,
-//! the backend resolves that logical name to a configured endpoint and wires the
-//! spawned `cursor-agent` to the read-only MCP documentation server served in the
-//! background by the sibling `docs` guest.
+//! the backend passes that grant inline to the bridge-managed agent, wiring it
+//! to the read-only MCP documentation server served in the background by the
+//! sibling `docs` guest.
 //!
 //! It reads `wasi:filesystem/preopens` and lends the `.` mount (the `[[mount]]`
 //! in `omnia.toml`) through `grants.workspace`; the host resolves it to the

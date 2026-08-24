@@ -4,46 +4,35 @@
 //! with the tool-callback registration flags and a client-owned state root,
 //! and handshaken by scanning stderr for the `cursor-sdk-bridge ready ` line.
 //! The discovery line can carry an inline auth token on older bridges, so it
-//! is never logged; the bearer token is read from `authTokenFile`. Shutdown is
-//! best-effort graceful (`Shutdown` RPC, then kill).
+//! is never logged; the bearer token is read from `authTokenFile`. A
+//! supervisor task owns the child and the state root; dropping `Bridge`
+//! closes a oneshot that asks it for a graceful `Shutdown`, then kill.
 
 pub mod transport;
 pub mod types;
 
+use std::net::IpAddr;
 use std::process::Stdio;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
-use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, BufReader, Lines};
 use tokio::process::{Child, Command};
+use tokio::sync::oneshot;
 use transport::Transport;
-use types::{GetVersionResponse, ShutdownRequest};
+use types::{Empty, GetVersionResponse, ShutdownRequest};
 
-/// Environment override for the bridge executable; else `PATH` is searched.
-const BRIDGE_BIN_ENV: &str = "CURSOR_SDK_BRIDGE_BIN";
 const BRIDGE_BIN: &str = "cursor-sdk-bridge";
-/// Literal stderr prefix (trailing space included) of the discovery line.
-const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
-/// The reference adapters allow the bridge 30s to print the ready line.
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long shutdown waits after the `Shutdown` RPC before killing.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Host git-identity vars stripped from the bridge spawn so nothing under it
-/// can mistake the host checkout for the agent workspace.
 const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
 /// One spawned bridge process plus the Connect transport speaking to it.
 #[derive(Debug)]
 pub struct Bridge {
     transport: Transport,
-    child: Mutex<Option<Child>>,
-    /// Durable local agent state lives here instead of `~/.cursor`, and is
-    /// removed with the client.
-    _state_root: tempfile::TempDir,
+    _shutdown: oneshot::Sender<()>,
 }
 
 impl Bridge {
@@ -56,13 +45,13 @@ impl Bridge {
     /// stays silent through the startup timeout, the discovery line is
     /// malformed, or the endpoint does not speak `sdk.v1`.
     pub async fn spawn(callback_url: &str, callback_token: &str) -> Result<Self> {
-        let bin = std::env::var(BRIDGE_BIN_ENV).unwrap_or_else(|_| BRIDGE_BIN.to_owned());
+        // let bin = std::env::var_os(BRIDGE_BIN_ENV).unwrap_or_else(|| OsString::from(BRIDGE_BIN));
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-state-")
             .tempdir()
             .context("creating the bridge state root")?;
 
-        let mut command = Command::new(&bin);
+        let mut command = Command::new(BRIDGE_BIN);
         command
             .kill_on_drop(true)
             .stdin(Stdio::null())
@@ -77,9 +66,7 @@ impl Bridge {
             command.env_remove(var);
         }
 
-        let mut child = command.spawn().with_context(|| {
-            format!("spawning `{bin}` (install cursor-sdk-bridge or set {BRIDGE_BIN_ENV})")
-        })?;
+        let mut child = command.spawn().context("issue spawning cursor-sdk-bridge")?;
         let stdout = child.stdout.take().context("bridge stdout is piped")?;
         let stderr = child.stderr.take().context("bridge stderr is piped")?;
         drain(stdout, "bridge stdout");
@@ -87,17 +74,18 @@ impl Bridge {
         let mut lines = BufReader::new(stderr).lines();
         let discovery = tokio::time::timeout(READY_TIMEOUT, ready_line(&mut lines))
             .await
-            .map_err(|_elapsed| anyhow::anyhow!("bridge printed no ready line within 30s"))??;
+            .map_err(|_elapsed| {
+                anyhow::anyhow!("bridge printed no ready line within {}s", READY_TIMEOUT.as_secs())
+            })??;
         // Keep draining stderr forever — a full pipe would block the bridge.
         drain_lines(lines, "bridge stderr");
 
-        let url = discovery.endpoint()?;
-        let token = discovery.token()?;
+        let (url, token) = discovery.into_connect().await?;
         let transport = Transport::new(url, &token);
 
-        let _: Value = transport.unary("SdkBridgeControlService/Ping", &json!({})).await?;
+        transport.unary::<_, Empty>("SdkBridgeControlService/Ping", &Empty {}).await?;
         let version: GetVersionResponse =
-            transport.unary("SdkBridgeControlService/GetVersion", &json!({})).await?;
+            transport.unary("SdkBridgeControlService/GetVersion", &Empty {}).await?;
         ensure!(
             version.protocol_version == "sdk.v1",
             "bridge speaks `{}`, this backend requires `sdk.v1`",
@@ -109,10 +97,11 @@ impl Bridge {
             "cursor-sdk-bridge ready"
         );
 
+        let (shutdown, rx) = oneshot::channel();
+        supervise(child, transport.clone(), state_root, rx);
         Ok(Self {
             transport,
-            child: Mutex::new(Some(child)),
-            _state_root: state_root,
+            _shutdown: shutdown,
         })
     }
 
@@ -121,35 +110,42 @@ impl Bridge {
     }
 }
 
-impl Drop for Bridge {
-    fn drop(&mut self) {
-        let Some(mut child) = self.child.lock().ok().and_then(|mut slot| slot.take()) else {
-            return;
+/// Own the child and its state root until `shutdown` fires or the process exits.
+fn supervise(
+    mut child: Child, transport: Transport, state_root: tempfile::TempDir,
+    shutdown: oneshot::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        let already_exited = tokio::select! {
+            _ = shutdown => false,
+            status = child.wait() => {
+                tracing::warn!(?status, "cursor-sdk-bridge exited");
+                true
+            }
         };
-        // Prefer a graceful stop; the kill_on_drop backstop covers the rest
-        // (including the no-runtime path, where dropping the child kills it).
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let transport = self.transport.clone();
-        handle.spawn(async move {
-            let shutdown = transport.unary::<_, Value>(
-                "SdkBridgeControlService/Shutdown",
-                &ShutdownRequest { grace_seconds: 1 },
-            );
-            let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, shutdown).await;
+        if !already_exited {
+            let _ = tokio::time::timeout(
+                SHUTDOWN_TIMEOUT,
+                transport.unary::<_, Empty>(
+                    "SdkBridgeControlService/Shutdown",
+                    &ShutdownRequest { grace_seconds: 1 },
+                ),
+            )
+            .await;
             if tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait()).await.is_err() {
                 let _ = child.start_kill();
             }
-        });
-    }
+        }
+        drop(child);
+        drop(state_root);
+    });
 }
 
 /// Scan stderr for the discovery line, logging ordinary diagnostics.
 async fn ready_line(lines: &mut Lines<impl AsyncBufRead + Unpin>) -> Result<Discovery> {
     let mut diagnostics = Vec::new();
     while let Some(line) = lines.next_line().await.context("reading bridge stderr")? {
-        if let Some(json) = line.strip_prefix(READY_PREFIX) {
+        if let Some(json) = line.strip_prefix(&format!("{BRIDGE_BIN} ready ")) {
             return Discovery::parse(json);
         }
         tracing::debug!(line = %line, "bridge stderr");
@@ -165,8 +161,10 @@ async fn ready_line(lines: &mut Lines<impl AsyncBufRead + Unpin>) -> Result<Disc
 #[serde(rename_all = "camelCase")]
 struct Discovery {
     schema_version: u32,
-    transport: String,
-    protocol: String,
+    #[serde(rename = "transport")]
+    _transport: DiscoveryTransport,
+    #[serde(rename = "protocol")]
+    _protocol: DiscoveryProtocol,
     #[serde(default)]
     url: Option<String>,
     #[serde(default)]
@@ -179,6 +177,18 @@ struct Discovery {
     auth_token: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DiscoveryTransport {
+    Tcp,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DiscoveryProtocol {
+    Connect,
+}
+
 impl Discovery {
     fn parse(json: &str) -> Result<Self> {
         let discovery: Self =
@@ -188,9 +198,13 @@ impl Discovery {
             "unsupported discovery schema version {}",
             discovery.schema_version
         );
-        ensure!(discovery.transport == "tcp", "unsupported transport `{}`", discovery.transport);
-        ensure!(discovery.protocol == "connect", "unsupported protocol `{}`", discovery.protocol);
         Ok(discovery)
+    }
+
+    async fn into_connect(self) -> Result<(String, String)> {
+        let endpoint = self.endpoint()?;
+        let token = self.into_token().await?;
+        Ok((endpoint, token))
     }
 
     /// Prefer `url`; fall back to `host` + `port` (bracketing `IPv6` hosts).
@@ -201,21 +215,25 @@ impl Discovery {
         let (Some(host), Some(port)) = (&self.host, self.port) else {
             bail!("discovery payload carries neither a url nor host and port");
         };
-        let host = if host.contains(':') { format!("[{host}]") } else { host.clone() };
-        Ok(format!("http://{host}:{port}"))
+        Ok(match host.parse::<IpAddr>() {
+            Ok(IpAddr::V6(ip)) => format!("http://[{ip}]:{port}"),
+            Ok(ip) => format!("http://{ip}:{port}"),
+            Err(_) if host.contains(':') => format!("http://[{host}]:{port}"),
+            Err(_) => format!("http://{host}:{port}"),
+        })
     }
 
     /// Prefer an inline token when present; else read `authTokenFile`.
-    fn token(&self) -> Result<String> {
-        if let Some(token) = &self.auth_token {
-            return Ok(token.clone());
+    async fn into_token(self) -> Result<String> {
+        if let Some(token) = self.auth_token {
+            return Ok(token);
         }
         let path = self
             .auth_token_file
-            .as_deref()
             .context("discovery payload carries no auth token or token file")?;
-        let token =
-            std::fs::read_to_string(path).with_context(|| format!("reading token file {path}"))?;
+        let token = tokio::fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("reading token file {path}"))?;
         Ok(token.trim().to_owned())
     }
 }
@@ -248,13 +266,14 @@ mod tests {
         assert_eq!(discovery.auth_token_file.as_deref(), Some("/tmp/auth-token"));
     }
 
-    #[test]
-    fn discovery_tolerates_unknown_fields() {
+    #[tokio::test]
+    async fn discovery_tolerates_unknown_fields() {
         let discovery = Discovery::parse(
             r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","url":"http://127.0.0.1:1","authToken":"inline","futureField":{"nested":true}}"#,
         )
         .expect("unknown fields are forward-compatible additions");
-        assert_eq!(discovery.token().expect("inline token"), "inline");
+        let (_, token) = discovery.into_connect().await.expect("inline token");
+        assert_eq!(token, "inline");
     }
 
     #[test]
@@ -275,5 +294,23 @@ mod tests {
         )
         .expect("host/port payload parses");
         assert_eq!(discovery.endpoint().expect("endpoint"), "http://[::1]:9");
+    }
+
+    #[tokio::test]
+    async fn token_is_read_from_the_auth_token_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("token");
+        std::fs::write(&path, " file-token \n").expect("write token");
+        let payload = serde_json::json!({
+            "schemaVersion": 1,
+            "transport": "tcp",
+            "protocol": "connect",
+            "url": "http://127.0.0.1:1",
+            "authTokenFile": path,
+        });
+        let discovery =
+            Discovery::parse(&payload.to_string()).expect("payload with a token file parses");
+        let (_, token) = discovery.into_connect().await.expect("token file");
+        assert_eq!(token, "file-token");
     }
 }

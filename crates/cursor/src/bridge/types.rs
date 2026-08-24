@@ -9,10 +9,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 // --- SdkBridgeControlService ---
-//
-// Empty request/response messages (`Ping`, `GetVersion`'s request, the
-// shutdown/cancel/delete acknowledgements) are passed as bare
-// `serde_json::Value` objects rather than dedicated types.
+
+/// Empty proto3 JSON object (`{}`), used as Ping / `GetVersion` request bodies
+/// and as acknowledgement responses.
+#[derive(Serialize, Deserialize, Default)]
+#[allow(clippy::empty_structs_with_brackets)] // unit structs serialize as `null`
+pub struct Empty {}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

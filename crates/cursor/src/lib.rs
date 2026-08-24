@@ -26,7 +26,6 @@ struct Deadlines {
 #[derive(Clone, Debug)]
 pub struct Client {
     deadlines: Deadlines,
-    /// Default model id when a request leaves `model` unset.
     model: Option<String>,
     shared: Arc<Shared>,
 }

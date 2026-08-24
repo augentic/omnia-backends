@@ -1,17 +1,18 @@
-//! Key-gated live integration test for the genai backend — the function-tool
-//! session loop against a real provider.
+//! Key-gated live integration tests for the genai backend — the function-tool
+//! session loop and the host-injected workspace tools against a real provider.
 //!
-//! The cross-repo companion to omnia's deterministic seam scenarios
+//! The cross-repo companions to omnia's deterministic seam scenarios
 //! (`crates/seam-suite/tests/seam/model.rs`): those prove the session
-//! machinery with no network; this one proves the genai backend itself —
-//! `Request`→`ChatRequest` mapping with a declared function tool, the
-//! in-process tool loop forwarding through [`ToolHost::call_tool`], and
-//! answer validation — against a real provider.
+//! machinery and the real workspace `ToolHost` with no network; these prove
+//! the genai backend itself — `Request`→`ChatRequest` mapping with declared
+//! and host-injected tools, the in-process tool loop forwarding through
+//! [`ToolHost`], and answer validation — against a real provider.
 //!
-//! `#[ignore]`d so it never runs or touches the network in CI; run it with
+//! `#[ignore]`d so they never run or touch the network in CI; run them with
 //! `cargo nextest run -p omnia-genai --run-ignored all` alongside a provider
 //! key such as `OPENAI_API_KEY`.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -93,6 +94,75 @@ fn lookup_request() -> Request {
     }
 }
 
+/// Sentinel only reachable through the workspace tools: `list` reveals the
+/// one file, `read` returns the text carrying it.
+const SENTINEL: &str = "omega-7734";
+
+/// Deterministic in-memory workspace stand-in for the host's `BoundToolHost`:
+/// `local_path` reports a resolved lend (which makes the backend advertise
+/// `read`/`list`), listing the root reveals `refs.md`, and reading it returns
+/// the sentinel. The real cap-std workspace is proved in omnia's seam suite;
+/// here we only need the genai backend to discover, read, and use the file.
+#[derive(Debug)]
+struct LiveWorkspace;
+
+impl ToolHost for LiveWorkspace {
+    fn call_tool(&self, name: String, _arguments: String) -> FutureResult<Result<String, String>> {
+        async move { Err(anyhow::anyhow!("no function tools are declared, model called `{name}`")) }
+            .boxed()
+    }
+
+    fn read(&self, path: String) -> FutureResult<Vec<u8>> {
+        async move {
+            anyhow::ensure!(path == "refs.md", "opening `{path}` in workspace");
+            Ok(format!("The reference value is {SENTINEL}.").into_bytes())
+        }
+        .boxed()
+    }
+
+    fn list(&self, path: String) -> FutureResult<Vec<DirEntry>> {
+        async move {
+            anyhow::ensure!(path.is_empty() || path == ".", "listing `{path}` in workspace");
+            Ok(vec![DirEntry {
+                name: "refs.md".to_owned(),
+                is_directory: false,
+            }])
+        }
+        .boxed()
+    }
+
+    fn write(&self, path: String, _bytes: Vec<u8>) -> FutureResult<()> {
+        async move { Err(anyhow::anyhow!("write to `{path}` is not granted")) }.boxed()
+    }
+
+    fn local_path(&self) -> Option<&Path> {
+        Some(Path::new("/unused/live-workspace"))
+    }
+}
+
+/// A prompt that forces workspace discovery: the file name is never stated,
+/// so the model must `list` the root, `read` what it finds, and answer with
+/// the value inside.
+fn workspace_request() -> Request {
+    Request {
+        model: None,
+        system: Some(
+            "A workspace is granted for this task. Discover its single file by listing the \
+             workspace root, read that file, then reply with a JSON object {\"reference\": <the \
+             exact value the file states>}. Use the file's content verbatim; do not invent it."
+                .to_owned(),
+        ),
+        messages: vec![Message {
+            role: Role::User,
+            content: "Report the reference value recorded in the workspace.".to_owned(),
+        }],
+        generation: None,
+        format: Format::Json,
+        tools: vec![],
+        grants: Grants { workspace: None },
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a provider key (e.g. OPENAI_API_KEY); run with --run-ignored"]
 async fn live_genai_function_tool_loop() -> Result<()> {
@@ -118,6 +188,41 @@ async fn live_genai_function_tool_loop() -> Result<()> {
     assert!(
         answer.value.to_string().contains("shelf:alpha"),
         "the tool's value must appear in the answer: {:?}",
+        answer.value
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs a provider key (e.g. OPENAI_API_KEY); run with --run-ignored"]
+async fn live_genai_workspace_tools() -> Result<()> {
+    let client = Client::connect().await?;
+    let answer: Answer =
+        client.complete(workspace_request(), Arc::new(LiveWorkspace)).await.map_err(|e| {
+            anyhow::anyhow!("live genai completion failed (is the API key valid?): {e}")
+        })?;
+
+    let transcript = answer.transcript.as_ref().expect("genai always records a transcript");
+    assert!(
+        transcript.turns.iter().any(|turn| turn.tool == "list"),
+        "the model must discover the file by listing the workspace root: {transcript:?}"
+    );
+    let read_turn = transcript
+        .turns
+        .iter()
+        .find(|turn| turn.tool == "read")
+        .expect("the model must read the discovered file");
+    assert!(
+        read_turn.result.as_str().is_some_and(|text| text.contains(SENTINEL)),
+        "the read result must carry the file body: {:?}",
+        read_turn.result
+    );
+
+    assert!(answer.value.is_object(), "the answer must be a JSON object: {:?}", answer.value);
+    assert!(
+        answer.value.to_string().contains(SENTINEL),
+        "the file's value must appear in the answer: {:?}",
         answer.value
     );
 

@@ -2,14 +2,17 @@
 //!
 //! Maps the gate-validated [`Request`] onto a genai
 //! [`ChatRequest`]/[`ChatOptions`], advertises the request's declared
-//! function tools to the provider, drives the in-process tool loop —
-//! forwarding every model tool call through [`ToolHost::call_tool`], where
-//! the guest's tool closure answers — self-checks the answer against
-//! `response-format`, and returns a host-only [`Answer`] (the parsed value
-//! plus a tool transcript for record/replay). The guest only ever sees the
-//! validated answer string the `create` binding derives from `value`; the
-//! host re-validates as the single authority (§3.1.3), so this self-check is
-//! an optimization, not the gate.
+//! function tools to the provider — plus the host-injected `read`/`list`
+//! workspace tools when the guest lent a workspace — and drives the
+//! in-process tool loop: `read`/`list` execute host-side through the lent
+//! [`ToolHost`] and never traverse the session, while every other tool call
+//! is forwarded through [`ToolHost::call_tool`], where the guest's tool
+//! closure answers. Self-checks the answer against `response-format` and
+//! returns a host-only [`Answer`] (the parsed value plus a tool transcript
+//! for record/replay). The guest only ever sees the validated answer string
+//! the `create` binding derives from `value`; the host re-validates as the
+//! single authority (§3.1.3), so this self-check is an optimization, not the
+//! gate.
 
 use std::sync::Arc;
 
@@ -41,13 +44,17 @@ impl WasiModelCtx for Client {
         // Clone the swappable vendor handle into the 'static future; the genai
         // client is cheap to clone (an `Arc` inside).
         let client = self.inner.clone();
+        let max_result_bytes = self.limits().max_result_bytes;
 
         async move {
             // The model id is carried on the request; fall back to the backend
             // default when the guest leaves it unset.
             let model = request.model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_owned());
             let format = request.format.clone();
-            let mut chat = build_request(&request)?;
+            // `local_path` reports a resolved workspace lend; it gates
+            // advertising the host-injected `read`/`list` tools.
+            let workspace = tool_host.local_path().is_some();
+            let mut chat = build_request(&request, workspace)?;
             let options = build_options(&request)?;
 
             let mut transcript = Transcript::default();
@@ -68,7 +75,7 @@ impl WasiModelCtx for Client {
                     // response follows as its own `tool`-role message.
                     chat = chat.append_message(tool_calls.clone());
                     for call in tool_calls {
-                        let result = dispatch_tool(&tool_host, &call).await?;
+                        let result = dispatch_tool(&tool_host, &call, max_result_bytes).await?;
                         transcript.turns.push(ToolTurn {
                             tool: call.fn_name,
                             args: call.fn_arguments,
@@ -129,8 +136,10 @@ impl WasiModelCtx for Client {
 }
 
 /// Map the gate-validated [`Request`] onto a genai [`ChatRequest`],
-/// advertising the request's declared function tools to the provider.
-fn build_request(request: &Request) -> Result<ChatRequest> {
+/// advertising the request's declared function tools to the provider plus —
+/// when `workspace` reports a resolved lend — the host-injected `read`/`list`
+/// tools.
+fn build_request(request: &Request, workspace: bool) -> Result<ChatRequest> {
     let messages = request
         .messages
         .iter()
@@ -160,11 +169,52 @@ fn build_request(request: &Request) -> Result<ChatRequest> {
             ),
         }
     }
+    if workspace {
+        tools.extend(workspace_tools());
+    }
     if !tools.is_empty() {
         chat = chat.with_tools(tools);
     }
 
     Ok(chat)
+}
+
+/// The host-injected workspace tools advertised alongside the request's
+/// declared function tools when the guest lent a workspace. The host gate
+/// reserves their names (`read`, `list`, plus the unadvertised `write`), so
+/// no guest tool can shadow them.
+fn workspace_tools() -> [Tool; 2] {
+    [
+        Tool::new("read")
+            .with_description("Read one UTF-8 text file from the workspace granted for this task.")
+            .with_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "`/`-separated file path relative to the workspace root."
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            })),
+        Tool::new("list")
+            .with_description(
+                "List one directory of the workspace granted for this task; omit `path` to list \
+                 the workspace root.",
+            )
+            .with_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "`/`-separated directory path relative to the workspace \
+                                        root; omit or leave empty for the root."
+                    }
+                },
+                "additionalProperties": false
+            })),
+    ]
 }
 
 /// Translate a declared function tool into a genai [`Tool`]. The host gate
@@ -250,17 +300,79 @@ fn to_usage(usage: &genai::chat::Usage) -> Option<Usage> {
     })
 }
 
-/// Forward one model tool call through the session. The host enforces the
-/// declared-name check, budget, size cap, and timeout in `call_tool`; its
-/// outer error is a hard failure that ends the completion, while the inner
-/// `Err` is the guest tool's own failure text — fed back to the model as
-/// repairable content.
-async fn dispatch_tool(tool_host: &Arc<dyn ToolHost>, call: &ToolCall) -> Result<String> {
-    let outcome = tool_host
-        .call_tool(call.fn_name.clone(), call.fn_arguments.to_string())
-        .await
-        .with_context(|| format!("calling tool `{}`", call.fn_name))?;
-    Ok(outcome.unwrap_or_else(|failure| format!("tool `{}` failed: {failure}", call.fn_name)))
+/// Route one model tool call: the host-injected `read`/`list` execute
+/// host-side through the lent [`ToolHost`] workspace capability and never
+/// traverse the session; every other name is forwarded through `call_tool`,
+/// where the guest's tool closure answers. For `call_tool` the host enforces
+/// the declared-name check, budget, size cap, and timeout; its outer error is
+/// a hard failure that ends the completion, while the inner `Err` is the
+/// guest tool's own failure text — fed back to the model as repairable
+/// content.
+async fn dispatch_tool(
+    tool_host: &Arc<dyn ToolHost>, call: &ToolCall, max_result_bytes: usize,
+) -> Result<String> {
+    match call.fn_name.as_str() {
+        // Workspace-tool failures (missing file, bounds, no workspace lent)
+        // are model-visible repairable text, never hard errors: models probe
+        // paths, and a bad one must not end the completion.
+        "read" => Ok(workspace_read(tool_host, &call.fn_arguments, max_result_bytes).await),
+        "list" => Ok(workspace_list(tool_host, &call.fn_arguments, max_result_bytes).await),
+        _ => {
+            let outcome = tool_host
+                .call_tool(call.fn_name.clone(), call.fn_arguments.to_string())
+                .await
+                .with_context(|| format!("calling tool `{}`", call.fn_name))?;
+            Ok(outcome
+                .unwrap_or_else(|failure| format!("tool `{}` failed: {failure}", call.fn_name)))
+        }
+    }
+}
+
+/// Serve a model `read` call from the lent workspace: bytes must decode as
+/// UTF-8 and fit the per-result byte cap before they become prompt content.
+async fn workspace_read(
+    tool_host: &Arc<dyn ToolHost>, arguments: &Value, max_result_bytes: usize,
+) -> String {
+    let Some(path) = arguments.get("path").and_then(Value::as_str) else {
+        return "tool `read` failed: arguments must carry a string `path`".to_owned();
+    };
+    let bytes = match tool_host.read(path.to_owned()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return format!("tool `read` failed: {error:#}"),
+    };
+    match String::from_utf8(bytes) {
+        Err(_) => format!("tool `read` failed: `{path}` is not valid UTF-8 text"),
+        Ok(text) => bounded_result("read", text, max_result_bytes),
+    }
+}
+
+/// Serve a model `list` call from the lent workspace as a JSON array of
+/// `{"name", "is_directory"}` entries; a missing or empty `path` lists the
+/// workspace root.
+async fn workspace_list(
+    tool_host: &Arc<dyn ToolHost>, arguments: &Value, max_result_bytes: usize,
+) -> String {
+    let path = arguments.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let entries = match tool_host.list(path).await {
+        Ok(entries) => entries,
+        Err(error) => return format!("tool `list` failed: {error:#}"),
+    };
+    match serde_json::to_string(&entries) {
+        Ok(json) => bounded_result("list", json, max_result_bytes),
+        Err(error) => format!("tool `list` failed: {error}"),
+    }
+}
+
+/// Apply the session's per-result byte cap to a host-injected tool's output,
+/// mirroring the host's enforcement on session tool results.
+fn bounded_result(tool: &str, text: String, max_result_bytes: usize) -> String {
+    if text.len() > max_result_bytes {
+        return format!(
+            "tool `{tool}` failed: result of {} bytes exceeds the {max_result_bytes}-byte cap",
+            text.len()
+        );
+    }
+    text
 }
 
 /// Append the rejected answer and a correction instruction so the next round
@@ -273,11 +385,15 @@ fn append_repair(
         .append_message(ChatMessage::user(format.repair(reason)))
 }
 
-// Deliberate unit tests: pure request-translation logic (the CI floor);
-// `tests/live.rs` proves a real provider run end-to-end.
+// Deliberate unit tests: pure request-translation logic plus deterministic,
+// service-free tool routing (the CI floor); `tests/live.rs` proves a real
+// provider run end-to-end.
 #[cfg(test)]
 mod tests {
-    use omnia_wasi_model::{Grants, Mcp, Message};
+    use std::collections::HashMap;
+
+    use omnia_wasi_model::{DirEntry, Grants, Mcp, Message};
+    use serde_json::json;
 
     use super::*;
 
@@ -296,14 +412,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn function_tool_advertised() {
-        let chat = build_request(&request(vec![ModelTool::Function(Function {
+    fn lookup_tool() -> ModelTool {
+        ModelTool::Function(Function {
             name: "lookup".to_owned(),
             description: "look something up".to_owned(),
             parameters: "{\"type\":\"object\"}".to_owned(),
-        })]))
-        .expect("a declared function tool translates");
+        })
+    }
+
+    #[test]
+    fn function_tool_advertised() {
+        let chat = build_request(&request(vec![lookup_tool()]), false)
+            .expect("a declared function tool translates");
         let tools = chat.tools.expect("the chat request advertises the tool");
         assert_eq!(tools.len(), 1, "one declared tool, one advertised tool");
         assert_eq!(tools[0].name, "lookup".into());
@@ -316,12 +436,179 @@ mod tests {
 
     #[test]
     fn mcp_grant() {
-        let err = build_request(&request(vec![ModelTool::Mcp(Mcp {
-            name: "docs".to_owned(),
-            tools: vec![],
-            url: "http://localhost:8080/mcp".to_owned(),
-        })]))
+        let err = build_request(
+            &request(vec![ModelTool::Mcp(Mcp {
+                name: "docs".to_owned(),
+                tools: vec![],
+                url: "http://localhost:8080/mcp".to_owned(),
+            })]),
+            false,
+        )
         .expect_err("an MCP grant needs a spawned-agent backend");
         assert!(err.to_string().contains("omnia-cursor"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn workspace_tools_advertised() {
+        let chat = build_request(&request(vec![lookup_tool()]), true)
+            .expect("declared and injected tools translate");
+        let tools = chat.tools.expect("the chat request advertises the tools");
+        let names: Vec<_> = tools.iter().map(|tool| tool.name.to_string()).collect();
+        assert_eq!(names, ["lookup", "read", "list"], "declared tools first, then read/list");
+
+        let read = &tools[1];
+        let schema = read.schema.as_ref().expect("read carries a schema");
+        assert_eq!(
+            schema.get("required"),
+            Some(&json!(["path"])),
+            "read requires a path argument"
+        );
+        let list = &tools[2];
+        let schema = list.schema.as_ref().expect("list carries a schema");
+        assert_eq!(schema.get("required"), None, "list's path is optional (root listing)");
+    }
+
+    #[test]
+    fn no_workspace_no_injected_tools() {
+        let chat = build_request(&request(vec![]), false).expect("an empty tool list translates");
+        assert!(chat.tools.is_none(), "without a workspace lend nothing is advertised");
+    }
+
+    /// Deterministic stand-in for `BoundToolHost`: an in-memory file map and
+    /// root listing, with a `call_tool` echo that proves session routing.
+    struct WorkspaceStub {
+        files: HashMap<String, Vec<u8>>,
+        entries: Vec<DirEntry>,
+    }
+
+    impl ToolHost for WorkspaceStub {
+        fn call_tool(
+            &self, name: String, arguments: String,
+        ) -> FutureResult<Result<String, String>> {
+            async move { Ok(Ok(format!("session:{name}:{arguments}"))) }.boxed()
+        }
+
+        fn read(&self, path: String) -> FutureResult<Vec<u8>> {
+            let result = self
+                .files
+                .get(&path)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("opening `{path}` in workspace"));
+            async move { result }.boxed()
+        }
+
+        fn list(&self, path: String) -> FutureResult<Vec<DirEntry>> {
+            let result = if path.is_empty() {
+                Ok(self.entries.clone())
+            } else {
+                Err(anyhow::anyhow!("listing `{path}` in workspace"))
+            };
+            async move { result }.boxed()
+        }
+
+        fn write(&self, path: String, _bytes: Vec<u8>) -> FutureResult<()> {
+            let error = anyhow::anyhow!("write to `{path}` is not exercised");
+            async move { Err(error) }.boxed()
+        }
+    }
+
+    fn workspace_stub() -> Arc<dyn ToolHost> {
+        Arc::new(WorkspaceStub {
+            files: [
+                ("refs.md".to_owned(), b"reference text".to_vec()),
+                ("logo.bin".to_owned(), vec![0xFF, 0xFE, 0x00]),
+            ]
+            .into(),
+            entries: vec![
+                DirEntry {
+                    name: "refs".to_owned(),
+                    is_directory: true,
+                },
+                DirEntry {
+                    name: "refs.md".to_owned(),
+                    is_directory: false,
+                },
+            ],
+        })
+    }
+
+    fn tool_call(name: &str, arguments: Value) -> ToolCall {
+        ToolCall {
+            call_id: "call-1".to_owned(),
+            fn_name: name.to_owned(),
+            fn_arguments: arguments,
+            thought_signatures: None,
+        }
+    }
+
+    const CAP: usize = 1024;
+
+    #[tokio::test]
+    async fn read_routes_host_side() {
+        let result =
+            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "refs.md"})), CAP)
+                .await
+                .expect("a workspace read is never a hard failure");
+        assert_eq!(result, "reference text", "the file body is the tool result");
+    }
+
+    #[tokio::test]
+    async fn binary_read() {
+        let result =
+            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "logo.bin"})), CAP)
+                .await
+                .expect("a binary read is model-visible, not a hard failure");
+        assert!(result.contains("not valid UTF-8"), "unexpected result: {result}");
+    }
+
+    #[tokio::test]
+    async fn oversize_read() {
+        let result =
+            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "refs.md"})), 8)
+                .await
+                .expect("an oversize read is model-visible, not a hard failure");
+        assert!(result.contains("exceeds the 8-byte cap"), "unexpected result: {result}");
+    }
+
+    #[tokio::test]
+    async fn read_missing_file() {
+        let result =
+            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "gone.md"})), CAP)
+                .await
+                .expect("a missing file is model-visible, not a hard failure");
+        assert!(result.starts_with("tool `read` failed:"), "unexpected result: {result}");
+        assert!(result.contains("gone.md"), "the failure names the path: {result}");
+    }
+
+    #[tokio::test]
+    async fn read_missing_path_argument() {
+        let result = dispatch_tool(&workspace_stub(), &tool_call("read", json!({})), CAP)
+            .await
+            .expect("malformed arguments are model-visible, not a hard failure");
+        assert!(result.contains("string `path`"), "unexpected result: {result}");
+    }
+
+    #[tokio::test]
+    async fn list_serialization() {
+        let result = dispatch_tool(&workspace_stub(), &tool_call("list", json!({})), CAP)
+            .await
+            .expect("a root listing is never a hard failure");
+        assert_eq!(
+            result,
+            r#"[{"name":"refs","is_directory":true},{"name":"refs.md","is_directory":false}]"#,
+            "entries serialize as a canonical JSON array"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_routes_to_session() {
+        let result =
+            dispatch_tool(&workspace_stub(), &tool_call("lookup", json!({"name": "alpha"})), CAP)
+                .await
+                .expect("the session stub answers");
+        assert_eq!(
+            result, r#"session:lookup:{"name":"alpha"}"#,
+            "non-reserved names go through call_tool"
+        );
     }
 }

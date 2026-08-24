@@ -9,10 +9,16 @@ implementing the `omnia:model/completion` boundary (`wasi-model`).
 Wraps the [`genai`](https://crates.io/crates/genai) SDK (`OpenAI`, Anthropic,
 Gemini, Groq, Ollama, …). The backend maps the gate-validated `Request`
 (`system` / `messages` channels) to a provider chat request, advertising the
-request's declared function tools; the in-process tool loop is driven to
-completion, forwarding every model tool call through the lent
-`ToolHost::call_tool` to the guest's session handler. The guest only ever
-sees the validated answer string.
+request's declared function tools — plus the host-injected `read`/`list`
+workspace tools when the guest lent a workspace through `grants.workspace`.
+The in-process tool loop is driven to completion: `read`/`list` execute
+host-side through the lent `ToolHost` workspace capability (bounded by the
+host; results must be UTF-8 text under the per-result byte cap, and failures
+such as a missing file are fed back to the model as repairable text), while
+every other model tool call is forwarded through `ToolHost::call_tool` to the
+guest's session handler. Workspace reads share the completion's bounded turn
+budget with tool calls and answer repair. The guest only ever sees the
+validated answer string.
 
 MSRV: Rust 1.97
 

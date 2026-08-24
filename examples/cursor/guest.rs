@@ -20,7 +20,7 @@ use omnia_guest::mcp::{
     self, CallToolResult, Implementation, McpError, McpServer, Resource, ResourceContents,
     Tool as McpTool,
 };
-use omnia_wasi_model::completion::{self, Format, Grants, Mcp, Tool};
+use omnia_wasi_model::completion::{self, Format, Grants, Mcp, Tool, WorkspaceGrant};
 use omnia_wasi_model::prompt::Sections;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -33,9 +33,17 @@ wasip3::cli::command::export!(CliGuest);
 impl wasip3::exports::cli::run::Guest for CliGuest {
     #[omnia_wasi_otel::instrument(name = "cursor_example_run")]
     async fn run() -> Result<(), ()> {
-        // Read the preopen table the host populated from `[[mount]]`.
+        // Read the preopen table the host populated from `[[mount]]` and lend
+        // the `.` mount as the grant's root (empty subpath — the mount itself).
+        // `directories` must outlive the `create` call below — the lent
+        // `workspace` borrows one of its descriptors.
         let directories = preopens::get_directories();
-        let workspace = directories.iter().find_map(|(dir, name)| (name == ".").then_some(dir));
+        let workspace = directories.iter().find_map(|(dir, name)| {
+            (name == ".").then_some(WorkspaceGrant {
+                root: dir,
+                subpath: String::new(),
+            })
+        });
 
         tracing::info!(workspace = workspace.is_some(), mcp = "docs", "cursor example completion");
 
@@ -64,7 +72,6 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
             grants: Grants {
                 references: None,
                 workspace,
-                verify: vec![],
             },
         };
 

@@ -9,7 +9,7 @@ use agent::SpawnOptions;
 pub use agent::check_cursor;
 use anyhow::{Context, Result, bail};
 use omnia_wasi_model::{
-    Answer, Format, FutureResult, Mcp, Request, ToolHost, Transcript, WasiModelCtx,
+    Answer, Format, FutureResult, Mcp, Request, Tool, ToolHost, Transcript, WasiModelCtx,
 };
 use stream::{PROMPT_PREVIEW_CHARS, truncate};
 
@@ -30,6 +30,24 @@ impl WasiModelCtx for Client {
         let default_model = self.model.clone();
 
         Box::pin(async move {
+            // Interim honesty until the model session lands: fail loudly on
+            // request surfaces this backend cannot execute instead of silently
+            // dropping them. MCP grants are unaffected — they forward below.
+            if request.grants.references.is_some() {
+                bail!(
+                    "the cursor backend cannot honor `grants.references`; use an in-process \
+                     tool-loop backend such as omnia-genai"
+                );
+            }
+            for tool in &request.tools {
+                if let Tool::Function(function) = tool {
+                    bail!(
+                        "the cursor backend cannot execute the guest-declared function tool `{}`",
+                        function.name
+                    );
+                }
+            }
+
             let format = &request.format;
             let Some(workspace) = workspace else {
                 bail!("no local tree on this node");
@@ -50,13 +68,7 @@ impl WasiModelCtx for Client {
                 approve_mcps: mcp_guard.is_some(),
             };
 
-            log_completion(
-                spawn.model,
-                format,
-                prompt.len(),
-                &mcp_names,
-                request.grants.references.is_some(),
-            );
+            log_completion(spawn.model, format, prompt.len(), &mcp_names);
 
             let output = spawn.run_agent(&prompt, None).await?;
             output.log(1);
@@ -180,10 +192,7 @@ fn append_repair(prompt: &str, answer: &str, reason: &str, format: &Format) -> S
 }
 
 /// One-line INFO for the completion start.
-fn log_completion(
-    model: Option<&str>, format: &Format, prompt_len: usize, mcp_servers: &[&str],
-    has_references: bool,
-) {
+fn log_completion(model: Option<&str>, format: &Format, prompt_len: usize, mcp_servers: &[&str]) {
     let format_name = match format {
         Format::Text => "text",
         Format::Json => "json",
@@ -196,14 +205,7 @@ fn log_completion(
             "schema"
         }
     };
-    tracing::info!(
-        model,
-        format = format_name,
-        prompt_len,
-        ?mcp_servers,
-        has_references,
-        "completion"
-    );
+    tracing::info!(model, format = format_name, prompt_len, ?mcp_servers, "completion");
 }
 
 // Deliberate unit tests: pure prompt-build and repair-plan logic (CI floor);
@@ -216,8 +218,8 @@ mod tests {
     use std::time::Duration;
 
     use omnia_wasi_model::{
-        DirEntry, Format, FutureResult, Grants, Message, Reference, Request, Role, Schema,
-        ToolHost, WasiModelCtx as _,
+        DirEntry, Format, Function, FutureResult, Grants, Mcp, Message, Reference, Request, Role,
+        Schema, Tool, ToolHost, WasiModelCtx as _,
     };
     use serde_json::json;
 
@@ -256,6 +258,48 @@ mod tests {
             .complete(schema_request(), Arc::new(StubToolHost { path: None }))
             .await
             .expect_err("a backend with no local tree must fail");
+        assert!(err.to_string().contains("no local tree on this node"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn references_grant() {
+        let mut request = schema_request();
+        request.grants.references = Some("shelf".to_owned());
+        let err = client()
+            .complete(request, Arc::new(StubToolHost { path: None }))
+            .await
+            .expect_err("a references grant this backend cannot honor must fail loudly");
+        assert!(err.to_string().contains("grants.references"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn function_tool() {
+        let mut request = schema_request();
+        request.tools.push(Tool::Function(Function {
+            name: "lookup".to_owned(),
+            description: "look something up".to_owned(),
+            parameters: "{\"type\":\"object\"}".to_owned(),
+        }));
+        let err = client()
+            .complete(request, Arc::new(StubToolHost { path: None }))
+            .await
+            .expect_err("a function tool this backend cannot execute must fail loudly");
+        assert!(err.to_string().contains("`lookup`"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn mcp_grant_only() {
+        let mut request = schema_request();
+        request.tools.push(Tool::Mcp(Mcp {
+            name: "docs".to_owned(),
+            tools: vec![],
+            url: "http://localhost:8080/mcp".to_owned(),
+        }));
+        let err = client()
+            .complete(request, Arc::new(StubToolHost { path: None }))
+            .await
+            .expect_err("the stub host has no local tree");
+        // MCP grants pass the honesty gate; the request fails later, on node state.
         assert!(err.to_string().contains("no local tree on this node"), "unexpected error: {err}");
     }
 

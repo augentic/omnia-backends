@@ -149,28 +149,23 @@ fn build_request(request: &Request) -> Result<ChatRequest> {
     if request.grants.references.is_some() {
         tools.push(resolve_tool());
     }
-    for tool in &request.tools {
-        match tool {
-            ModelTool::Function(function) => {
-                let schema: Value =
-                    serde_json::from_str(&function.parameters).with_context(|| {
-                        format!("guest tool `{}` has invalid JSON-Schema parameters", function.name)
-                    })?;
-                tools.push(
-                    Tool::new(function.name.clone())
-                        .with_description(function.description.clone())
-                        .with_schema(schema),
-                );
-            }
-            // The genai backend has no MCP client; a spawned-agent backend
-            // (omnia-cursor) honors MCP grants. Fail loudly rather than silently
-            // dropping the grant.
-            ModelTool::Mcp(mcp) => bail!(
-                "the genai backend cannot honor the MCP tool grant for server `{}`; use a \
-                 spawned-agent backend such as omnia-cursor",
-                mcp.name
-            ),
-        }
+    match request.tools.first() {
+        // Guest-declared function tools are not executable until the model
+        // session lands; fail up front rather than advertising a tool whose
+        // selection would fail mid-loop.
+        Some(ModelTool::Function(function)) => bail!(
+            "the genai backend cannot execute the guest-declared function tool `{}`",
+            function.name
+        ),
+        // The genai backend has no MCP client; a spawned-agent backend
+        // (omnia-cursor) honors MCP grants. Fail loudly rather than silently
+        // dropping the grant.
+        Some(ModelTool::Mcp(mcp)) => bail!(
+            "the genai backend cannot honor the MCP tool grant for server `{}`; use a \
+             spawned-agent backend such as omnia-cursor",
+            mcp.name
+        ),
+        None => {}
     }
     if !tools.is_empty() {
         chat = chat.with_tools(tools);
@@ -273,10 +268,11 @@ fn to_usage(usage: &genai::chat::Usage) -> Option<Usage> {
     })
 }
 
-/// Execute one model tool call. Phase 2a wires only `resolve` (host-mediated
-/// dynamic linking into the caller's `references` shelf); the other host-injected tools
-/// (`read`/`list`/`write`/`verify`) and guest-declared tools are not executable
-/// here yet, so the backend fails loudly rather than fabricating a result.
+/// Execute one model tool call. Only the host-injected `resolve` tool is
+/// executable (host-mediated dynamic linking into the caller's `references`
+/// shelf); guest-declared function tools are rejected up front in
+/// [`build_request`], so any other name here is unadvertised and the backend
+/// fails loudly rather than fabricating a result.
 async fn dispatch_tool(
     request: &Request, tool_host: &Arc<dyn ToolHost>, call: &ToolCall,
 ) -> Result<String> {
@@ -302,9 +298,8 @@ async fn dispatch_tool(
             Ok(String::from_utf8_lossy(&bytes).into_owned())
         }
         other => bail!(
-            "model called tool `{other}`, which the genai backend cannot execute in Phase 2a \
-             (only `resolve` is wired; `read`/`list`/`write`/`verify` and guest-declared tools \
-             land in Phase 2b)"
+            "model called tool `{other}`, which the genai backend cannot execute (only the \
+             host-injected `resolve` tool is wired)"
         ),
     }
 }
@@ -317,4 +312,53 @@ fn append_repair(
     request
         .append_message(ChatMessage::assistant(answer))
         .append_message(ChatMessage::user(format.repair(reason)))
+}
+
+// Deliberate unit tests: pure request-translation logic (the CI floor);
+// `tests/live.rs` proves a real provider run end-to-end.
+#[cfg(test)]
+mod tests {
+    use omnia_wasi_model::{Function, Grants, Mcp, Message};
+
+    use super::*;
+
+    fn request(tools: Vec<ModelTool>) -> Request {
+        Request {
+            model: None,
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content: "hello".to_owned(),
+            }],
+            generation: None,
+            format: Format::Text,
+            tools,
+            grants: Grants {
+                references: None,
+                workspace: None,
+            },
+        }
+    }
+
+    #[test]
+    fn function_tool() {
+        let err = build_request(&request(vec![ModelTool::Function(Function {
+            name: "lookup".to_owned(),
+            description: "look something up".to_owned(),
+            parameters: "{\"type\":\"object\"}".to_owned(),
+        })]))
+        .expect_err("a guest function tool this backend cannot execute must fail up front");
+        assert!(err.to_string().contains("`lookup`"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn mcp_grant() {
+        let err = build_request(&request(vec![ModelTool::Mcp(Mcp {
+            name: "docs".to_owned(),
+            tools: vec![],
+            url: "http://localhost:8080/mcp".to_owned(),
+        })]))
+        .expect_err("an MCP grant needs a spawned-agent backend");
+        assert!(err.to_string().contains("omnia-cursor"), "unexpected error: {err}");
+    }
 }

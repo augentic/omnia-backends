@@ -86,7 +86,7 @@ No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; thos
 
 The two `wasi-model` backends serve `omnia:model/completion` requests and differ in execution model:
 
-- **`genai`** calls provider APIs (OpenAI, Anthropic, Gemini, Groq, Ollama, ...) in-process via the [`genai`](https://crates.io/crates/genai) SDK, advertising the request's declared function tools and driving the bounded session tool loop through the host's `ToolHost::call_tool`. Provider API keys are read from the environment at call time. MCP tool grants are rejected — use `cursor` for those.
+- **`genai`** calls provider APIs (OpenAI, Anthropic, Gemini, Groq, Ollama, ...) in-process via the [`genai`](https://crates.io/crates/genai) SDK, advertising the request's declared function tools — plus the host-injected `read`/`list` workspace tools when the guest lent a workspace — and driving the bounded session tool loop: `read`/`list` execute host-side through the `ToolHost` workspace capability, every other call goes through `ToolHost::call_tool`. Provider API keys are read from the environment at call time. MCP tool grants are rejected — use `cursor` for those.
 - **`cursor`** spawns the [`cursor-agent`](https://cursor.com/docs/cli) CLI per completion, running an agentic session inside the workspace the guest granted. MCP server grants are honoured by writing the workspace's `.cursor/mcp.json` for the session. Requires `cursor-agent` on `PATH` and `CURSOR_API_KEY` (or a prior `cursor-agent login`).
 
 ## Wiring a backend into a host runtime

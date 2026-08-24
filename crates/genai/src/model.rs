@@ -340,10 +340,10 @@ async fn workspace_read(
         Ok(bytes) => bytes,
         Err(error) => return format!("tool `read` failed: {error:#}"),
     };
-    match String::from_utf8(bytes) {
-        Err(_) => format!("tool `read` failed: `{path}` is not valid UTF-8 text"),
-        Ok(text) => bounded_result("read", text, max_result_bytes),
-    }
+    String::from_utf8(bytes).map_or_else(
+        |_| format!("tool `read` failed: `{path}` is not valid UTF-8 text"),
+        |text| bounded_result("read", text, max_result_bytes),
+    )
 }
 
 /// Serve a model `list` call from the lent workspace as a JSON array of
@@ -458,11 +458,7 @@ mod tests {
 
         let read = &tools[1];
         let schema = read.schema.as_ref().expect("read carries a schema");
-        assert_eq!(
-            schema.get("required"),
-            Some(&json!(["path"])),
-            "read requires a path argument"
-        );
+        assert_eq!(schema.get("required"), Some(&json!(["path"])), "read requires a path argument");
         let list = &tools[2];
         let schema = list.schema.as_ref().expect("list carries a schema");
         assert_eq!(schema.get("required"), None, "list's path is optional (root listing)");

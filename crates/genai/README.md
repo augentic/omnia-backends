@@ -63,9 +63,11 @@ let client = Client::connect().await?;
 
 ## Live tests
 
-[`tests/live.rs`](tests/live.rs) drives a real completion through the `wasi-model`
-boundary, exercising the in-process tool loop and function-tool dispatch. It is
-`#[ignore]`d so it never touches the network in CI; run it with a provider key:
+[`tests/live.rs`](tests/live.rs) drives real completions through the `wasi-model`
+boundary: the in-process tool loop with function-tool dispatch, and the
+host-injected `read`/`list` workspace tools (the model discovers and reads a
+file the prompt never names). They are `#[ignore]`d so they never touch the
+network in CI; run them with a provider key:
 
 ```bash
 OPENAI_API_KEY=... \

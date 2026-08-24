@@ -243,7 +243,7 @@ version = "0.2.17"
 criteria = "safe-to-deploy"
 
 [[exemptions.crc32fast]]
-version = "1.5.0"
+version = "1.5.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.critical-section]]
@@ -723,7 +723,7 @@ version = "0.8.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.log]]
-version = "0.4.33"
+version = "0.4.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.lru-slab]]
@@ -1475,7 +1475,7 @@ version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid]]
-version = "1.24.1"
+version = "1.25.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid-simd]]

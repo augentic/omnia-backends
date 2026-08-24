@@ -12,7 +12,7 @@ MSRV: Rust 1.97. Each release line pairs with a specific omnia line — the curr
 | [`omnia-azure-id`](crates/azure-id)           | `wasi-identity`                                     | Azure Managed Identity         |
 | [`omnia-azure-table`](crates/azure-table)     | `wasi-docstore`                                     | Azure Table Storage            |
 | [`omnia-azure-vault`](crates/azure-vault)     | `wasi-vault`                                        | Azure Key Vault                |
-| [`omnia-cursor`](crates/cursor)               | `wasi-model`                                        | `cursor-agent` CLI             |
+| [`omnia-cursor`](crates/cursor)               | `wasi-model`                                        | `cursor-sdk-bridge`            |
 | [`omnia-genai`](crates/genai)                 | `wasi-model`                                        | LLM provider APIs (OpenAI, Anthropic, Gemini, ...) |
 | [`omnia-kafka`](crates/kafka)                 | `wasi-messaging`                                    | Apache Kafka                   |
 | [`omnia-mongodb`](crates/mongodb)             | `wasi-blobstore`                                    | MongoDB                        |

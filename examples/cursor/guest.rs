@@ -3,9 +3,9 @@
 //! A `wasi:cli/command` reactor that **imports** `omnia:model/completion` and
 //! calls `create` once when the host drives `wasi:cli/run`. The prompt carries
 //! a `docs` MCP grant; when the runtime binds `WasiModel` to the cursor backend,
-//! the backend resolves that logical name to a configured endpoint and wires the
-//! spawned `cursor-agent` to the read-only MCP documentation server served in the
-//! background by the sibling `docs` guest.
+//! the backend passes that grant inline to the bridge-managed agent, wiring it
+//! to the read-only MCP documentation server served in the background by the
+//! sibling `docs` guest.
 //!
 //! It reads `wasi:filesystem/preopens` and lends the `.` mount (the `[[mount]]`
 //! in `omnia.toml`) through `grants.workspace`; the host resolves it to the
@@ -20,8 +20,9 @@ use omnia_guest::mcp::{
     self, CallToolResult, Implementation, McpError, McpServer, Resource, ResourceContents,
     Tool as McpTool,
 };
-use omnia_wasi_model::completion::{self, Format, Grants, Mcp, Tool};
+use omnia_wasi_model::completion::{self, Format, Grants, Mcp, Tool, WorkspaceGrant};
 use omnia_wasi_model::prompt::Sections;
+use omnia_wasi_model::wit_stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use wasip3::filesystem::preopens;
@@ -33,9 +34,17 @@ wasip3::cli::command::export!(CliGuest);
 impl wasip3::exports::cli::run::Guest for CliGuest {
     #[omnia_wasi_otel::instrument(name = "cursor_example_run")]
     async fn run() -> Result<(), ()> {
-        // Read the preopen table the host populated from `[[mount]]`.
+        // Read the preopen table the host populated from `[[mount]]` and lend
+        // the `.` mount as the grant's root (empty subpath — the mount itself).
+        // `directories` must outlive the `create` call below — the lent
+        // `workspace` borrows one of its descriptors.
         let directories = preopens::get_directories();
-        let workspace = directories.iter().find_map(|(dir, name)| (name == ".").then_some(dir));
+        let workspace = directories.iter().find_map(|(dir, name)| {
+            (name == ".").then_some(WorkspaceGrant {
+                root: dir,
+                subpath: String::new(),
+            })
+        });
 
         tracing::info!(workspace = workspace.is_some(), mcp = "docs", "cursor example completion");
 
@@ -61,18 +70,24 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
                 tools: vec![],
                 url: "http://localhost:8080/mcp".to_string(),
             })],
-            grants: Grants {
-                references: None,
-                workspace,
-                verify: vec![],
-            },
+            grants: Grants { workspace },
         };
 
-        let answer = match completion::create(request).await {
-            Ok(reply) => {
-                tracing::info!("cursor example answered");
-                reply.answer
-            }
+        // No function tools are declared, so the calls stream stays silent;
+        // open the session and await the reply directly. The results writer
+        // stays alive until the reply resolves.
+        let (_results, results_rx) = wit_stream::new::<completion::ToolResult>();
+        let answer = match completion::create(request, results_rx).await {
+            Ok(session) => match session.reply.await {
+                Ok(reply) => {
+                    tracing::info!("cursor example answered");
+                    reply.answer
+                }
+                Err(error) => {
+                    tracing::warn!(?error, "cursor example completion failed");
+                    format!("error: {error:?}")
+                }
+            },
             Err(error) => {
                 tracing::warn!(?error, "cursor example completion failed");
                 format!("error: {error:?}")

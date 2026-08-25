@@ -93,28 +93,21 @@ impl WasiModelCtx for Client {
                 let last_turn = turn == MAX_TURNS;
 
                 match format.parse(&text) {
-                    Ok(value) => match format.check(&value) {
-                        Ok(()) => {
-                            return Ok(Answer {
-                                value,
-                                usage,
-                                transcript: Some(transcript),
-                            });
-                        }
-                        // Budget spent: hand the value back so the host validation gate
-                        // remains the single authority and produces the canonical error.
-                        Err(_) if last_turn => {
-                            return Ok(Answer {
-                                value,
-                                usage,
-                                transcript: Some(transcript),
-                            });
-                        }
-                        Err(reason) => {
-                            chat = append_repair(chat, text, &reason, &format);
-                        }
-                    },
+                    Ok(value) => {
+                        return Ok(Answer {
+                            value,
+                            usage,
+                            transcript: Some(transcript),
+                        });
+                    }
                     Err(reason) if last_turn => {
+                        if let Ok(value) = format.parse_candidate(&text) {
+                            return Ok(Answer {
+                                value,
+                                usage,
+                                transcript: Some(transcript),
+                            });
+                        }
                         bail!(
                             "genai did not return a valid answer for model `{model}` after \
                              {MAX_TURNS} attempts: {reason}"

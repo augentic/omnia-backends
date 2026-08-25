@@ -216,7 +216,7 @@ impl Agent {
         Ok(AgentOutput {
             result: result.result,
             transcript: log.finish(),
-            usage: to_usage(result.usage),
+            usage: result.usage.map(Usage::from),
         })
     }
 
@@ -351,25 +351,24 @@ enum Outcome {
 
 fn take_answer(format: &Format, output: AgentOutput) -> Outcome {
     match format.parse(&output.result) {
-        Ok(value) => match format.check(&value) {
-            Ok(()) => Outcome::Done(Answer {
-                value,
-                usage: output.usage,
-                transcript: output.transcript,
-            }),
-            Err(reason) => Outcome::Repair(reason),
-        },
+        Ok(value) => Outcome::Done(Answer {
+            value,
+            usage: output.usage,
+            transcript: output.transcript,
+        }),
         Err(reason) => Outcome::Repair(reason),
     }
 }
 
-fn to_usage(usage: Option<TokenUsage>) -> Option<Usage> {
-    let usage = usage?;
-    Some(Usage {
-        input_tokens: u32::try_from(usage.input_tokens).unwrap_or(u32::MAX),
-        output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
-        reasoning_tokens: usage.reasoning_tokens.and_then(|count| u32::try_from(count).ok()),
-    })
+impl From<TokenUsage> for Usage {
+    // Wire counts are `i64`; saturate rather than fail on absurd values.
+    fn from(usage: TokenUsage) -> Self {
+        Self {
+            input_tokens: u32::try_from(usage.input_tokens).unwrap_or(u32::MAX),
+            output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
+            reasoning_tokens: usage.reasoning_tokens.and_then(|count| u32::try_from(count).ok()),
+        }
+    }
 }
 
 fn prepare_workspace(path: &Path) -> Result<PathBuf> {

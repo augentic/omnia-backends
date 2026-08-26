@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use super::messages::{
     AgentOptions, CancelRunRequest, CreateAgentRequest, CreateAgentResponse, DeleteAgentRequest,
-    Empty, GetVersionResponse, SendRequest, ShutdownRequest, UserMessage,
+    Empty, GetVersionResponse, RunStreamMessage, SendRequest, ShutdownRequest, UserMessage,
 };
 
 /// Envelope flag bit marking the end-of-stream frame.
@@ -101,13 +101,13 @@ impl Rpc {
             .map(drop)
     }
 
-    /// `Send`: one agent turn; the stream yields the run's event envelopes.
-    pub async fn send(&self, agent_id: String, text: String) -> Result<FrameStream> {
+    /// `Send`: one agent turn; the stream yields the run's messages.
+    pub async fn send(&self, agent_id: String, text: String) -> Result<RunStream> {
         let request = SendRequest {
             agent_id,
             message: UserMessage { text },
         };
-        self.server_stream("SdkAgentService/Send", &request).await
+        Ok(RunStream(self.server_stream("SdkAgentService/Send", &request).await?))
     }
 
     /// One unary RPC in the plain JSON codec.
@@ -200,21 +200,57 @@ fn connect_error(method: &str, status: http::StatusCode, body: &[u8]) -> anyhow:
     anyhow::anyhow!("bridge RPC `{method}` failed ({status}, {code}): {}", message.trim())
 }
 
+/// The typed message stream of one `Send` call: envelope framing, end-stream
+/// errors, keepalives, and unparsable frames are all absorbed here, so a
+/// yielded message is always real progress.
+pub struct RunStream(FrameStream);
+
+impl RunStream {
+    /// The next run message, or `None` once the run stream ends.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on transport failures or when the stream ends with a
+    /// Connect error.
+    pub async fn next(&mut self) -> Result<Option<RunStreamMessage>> {
+        while let Some(frame) = self.0.next().await? {
+            if frame.is_end_stream() {
+                self.0.end_stream_error(&frame.payload)?;
+                return Ok(None);
+            }
+            let message: RunStreamMessage = match serde_json::from_slice(&frame.payload) {
+                Ok(message) => message,
+                Err(error) => {
+                    tracing::debug!(%error, "skipping unparsable stream frame");
+                    continue;
+                }
+            };
+            // Keepalives (and unknown envelope cases) are dropped here so the
+            // caller's inactivity deadline only rearms on real progress.
+            if message.is_keepalive() {
+                continue;
+            }
+            return Ok(Some(message));
+        }
+        Ok(None)
+    }
+}
+
 /// A decoded response envelope: the flag byte and the message payload.
 #[derive(Debug)]
-pub struct Frame {
-    pub flags: u8,
-    pub payload: Bytes,
+struct Frame {
+    flags: u8,
+    payload: Bytes,
 }
 
 impl Frame {
-    pub const fn is_end_stream(&self) -> bool {
+    const fn is_end_stream(&self) -> bool {
         self.flags & END_STREAM != 0
     }
 }
 
 /// Incrementally decodes Connect envelopes from a streaming response body.
-pub struct FrameStream {
+struct FrameStream {
     method: String,
     body: Incoming,
     buffer: BytesMut,
@@ -222,13 +258,9 @@ pub struct FrameStream {
 
 impl FrameStream {
     /// The next envelope, or `None` when the body ends cleanly at a frame
-    /// boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error on transport failures, a truncated frame, or a
+    /// boundary. Fails on transport errors, a truncated frame, or a
     /// compressed frame (compression is never negotiated).
-    pub async fn next(&mut self) -> Result<Option<Frame>> {
+    async fn next(&mut self) -> Result<Option<Frame>> {
         loop {
             if let Some(frame) = decode_frame(&mut self.buffer)? {
                 return Ok(Some(frame));
@@ -251,7 +283,7 @@ impl FrameStream {
 
     /// Interpret an end-of-stream frame observed on this stream: `Ok` on a
     /// clean end, `Err` when the `EndStreamResponse` carries a Connect error.
-    pub fn end_stream_error(&self, payload: &[u8]) -> Result<()> {
+    fn end_stream_error(&self, payload: &[u8]) -> Result<()> {
         end_stream_error(&self.method, payload)
     }
 }

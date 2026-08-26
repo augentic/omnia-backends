@@ -1,20 +1,61 @@
-//! Observe the `sdk_message` events of one run: rebuild the tool transcript,
-//! coalesce thinking deltas for DEBUG logs, and capture the run id and last
-//! status text. Payload shapes mirror the public SDK's message types — an
-//! external, versioned protocol — so every field access is nullable and a
-//! malformed event is skipped, never fatal.
+//! One completion's observability: the start/send/answer log lines, and the
+//! [`EventLog`] that follows a run's `sdk_message` events — rebuilding the
+//! tool transcript, coalescing thinking deltas for DEBUG logs, and capturing
+//! the run id and last status text. Payload shapes mirror the public SDK's
+//! message types — an external, versioned protocol — so every field access
+//! is nullable and a malformed event is skipped, never fatal.
 
 use std::collections::HashMap;
 
-use omnia_wasi_model::{ToolTurn, Transcript};
+use omnia_wasi_model::{Format, ToolTurn, Transcript};
 use serde_json::Value;
 
+use super::agent::AgentOutput;
 use crate::bridge::SdkMessage;
 
-pub const PROMPT_PREVIEW_CHARS: usize = 500;
+const PROMPT_PREVIEW_CHARS: usize = 500;
 const TEXT_PREVIEW_CHARS: usize = 300;
 /// Coalesced thinking blocks stay readable; flush when a turn grows past this.
 const THINKING_PREVIEW_CHARS: usize = 2_000;
+
+/// One-line INFO for the completion start.
+pub fn log_completion(model: &str, format: &Format, prompt_len: usize, mcp_servers: &[&str]) {
+    let format_name = match format {
+        Format::Text => "text",
+        Format::Json => "json",
+        Format::Schema(spec) => {
+            tracing::trace!(
+                schema_name = %spec.name,
+                schema = %preview(&spec.schema, PROMPT_PREVIEW_CHARS),
+                "completion schema"
+            );
+            "schema"
+        }
+    };
+    tracing::info!(model, format = format_name, prompt_len, ?mcp_servers, "completion");
+}
+
+/// One-line DEBUG for the text sent on one turn.
+pub fn log_send(text: &str) {
+    tracing::debug!(
+        prompt_len = text.len(),
+        preview = %preview(text, PROMPT_PREVIEW_CHARS),
+        "send"
+    );
+}
+
+/// One-line DEBUG summarizing one answer attempt.
+pub fn log_answer(attempt: u32, output: &AgentOutput) {
+    let turns = output.transcript.as_ref().map_or(&[][..], |t| t.turns.as_slice());
+    let noisy = turns.iter().filter(|turn| is_noisy_tool(&turn.tool)).count();
+    tracing::debug!(
+        attempt,
+        result_len = output.result.len(),
+        interesting_tools = turns.len() - noisy,
+        noisy_tools = noisy,
+        "answer"
+    );
+}
 
 /// Compact JSON when parseable; otherwise collapse whitespace so a log field
 /// stays one line.
@@ -26,14 +67,14 @@ fn single_line(text: &str) -> String {
 }
 
 /// The first `max` characters of `text` on one line, ellipsized when longer.
-pub fn preview(text: &str, max: usize) -> String {
+fn preview(text: &str, max: usize) -> String {
     let collapsed = single_line(text);
     let mut chars = collapsed.chars();
     let head: String = chars.by_ref().take(max).collect();
     if chars.next().is_some() { format!("{head}…") } else { head }
 }
 
-pub fn is_noisy_tool(name: &str) -> bool {
+fn is_noisy_tool(name: &str) -> bool {
     matches!(
         name,
         "read"

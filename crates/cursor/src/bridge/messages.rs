@@ -161,11 +161,11 @@ pub struct RunStreamMessage {
     pub sdk_message: Option<SdkMessage>,
     pub result: Option<RunStreamResult>,
     pub done: Option<Value>,
-    pub offset: Option<String>,
+    offset: Option<String>,
 }
 
 impl RunStreamMessage {
-    pub const fn is_keepalive(&self) -> bool {
+    pub(super) const fn is_keepalive(&self) -> bool {
         self.sdk_message.is_none()
             && self.result.is_none()
             && self.done.is_none()

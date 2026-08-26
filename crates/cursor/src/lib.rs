@@ -14,12 +14,7 @@ use omnia::Backend;
 use tracing::instrument;
 
 use crate::bridge::Bridge;
-
-#[derive(Clone, Copy, Debug)]
-struct Deadlines {
-    inactivity: Duration,
-    cap: Duration,
-}
+use crate::model::Deadlines;
 
 /// Cursor model backend
 #[derive(Clone)]

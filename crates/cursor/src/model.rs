@@ -10,35 +10,22 @@
 //! repair instruction on the same agent, whose session already carries the
 //! prompt and the failed answer.
 
-mod events;
+mod agent;
+mod deadlines;
+mod observe;
+mod options;
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::{env, fs};
+use std::env;
+use std::sync::Arc;
 
-use anyhow::{Context as _, Result, bail};
-use events::{EventLog, PROMPT_PREVIEW_CHARS, is_noisy_tool, preview};
-use omnia_wasi_model::{
-    Answer, Candidate, Format, FutureResult, Mcp, Request, Tool, ToolHost, Transcript, Usage,
-    WasiModelCtx,
-};
-use serde_json::Value;
-use tokio::sync::{mpsc, watch};
-use tokio::time::{Instant, sleep_until};
+use agent::{Agent, AgentOutput};
+use anyhow::{Context as _, bail};
+pub use deadlines::Deadlines;
+use omnia_wasi_model::{Answer, Candidate, Format, FutureResult, Request, ToolHost, WasiModelCtx};
+use options::{Workspace, agent_options, with_mcp_hint};
+use tokio::sync::mpsc;
 
-use crate::bridge::{
-    AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection, Rpc,
-    RunStatus, RunStreamMessage, RunStreamResult, TokenUsage, ToolList,
-};
-use crate::{Client, Deadlines};
-
-#[derive(Debug)]
-struct AgentOutput {
-    result: String,
-    transcript: Option<Transcript>,
-    usage: Option<Usage>,
-}
+use crate::Client;
 
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
@@ -50,16 +37,7 @@ impl WasiModelCtx for Client {
             // key is never recorded
             let api_key = env::var("CURSOR_API_KEY").context("missing CURSOR_API_KEY")?;
 
-            let workspace = match tool_host.local_path() {
-                Some(path) => Workspace::Lent(prepare_workspace(path)?),
-                None => Workspace::Private(
-                    tempfile::Builder::new()
-                        .prefix("omnia-cursor-cwd-")
-                        .tempdir()
-                        .context("creating a private workspace")?,
-                ),
-            };
-
+            let workspace = Workspace::new(tool_host.local_path())?;
             let format = request.format.clone();
             let options = agent_options(&request, &workspace, &default_model, api_key)?;
             let model_id = options.model.id.clone();
@@ -67,22 +45,17 @@ impl WasiModelCtx for Client {
             let mcp_servers = request.mcp_servers();
             let mcp_names: Vec<&str> = mcp_servers.iter().map(|s| s.name.as_str()).collect();
             let prompt = with_mcp_hint(&mcp_servers, request.to_string());
-            log_completion(&model_id, &format, prompt.len(), &mcp_names);
+            observe::log_completion(&model_id, &format, prompt.len(), &mcp_names);
 
             let rpc = bridge.rpc().clone();
             let created = rpc.create_agent(options).await?;
-            let agent = Agent {
-                rpc,
-                id: created.agent_id.clone(),
-                deadlines,
-                live_run: Mutex::new(None),
-            };
+            let agent = Agent::new(rpc, created.agent_id.clone(), deadlines);
 
             let (abort_tx, mut abort_rx) = mpsc::unbounded_channel();
             let _attached = bridge.attach(created.agent_id, tool_host, abort_tx);
 
             let output = agent.send(&prompt, &mut abort_rx).await?;
-            output.log(1);
+            observe::log_answer(1, &output);
             let reason = match take_answer(&format, output) {
                 Outcome::Done(answer) => return Ok(answer),
                 Outcome::Repair(reason) => reason,
@@ -93,7 +66,7 @@ impl WasiModelCtx for Client {
             // and the failed answer.
             tracing::debug!(attempt = 1, %reason, "repairing answer");
             let output = agent.send(&format.repair(&reason), &mut abort_rx).await?;
-            output.log(2);
+            observe::log_answer(2, &output);
 
             match take_answer(&format, output) {
                 Outcome::Done(answer) => Ok(answer),
@@ -105,212 +78,7 @@ impl WasiModelCtx for Client {
     }
 }
 
-/// One bridge-managed agent, deleted (and its live run cancelled) on drop.
-struct Agent {
-    rpc: Rpc,
-    id: String,
-    deadlines: Deadlines,
-    live_run: Mutex<Option<String>>,
-}
-
-impl Agent {
-    /// One turn: `Send` the text and consume the run stream to its terminal
-    /// result, bounded by the inactivity and absolute deadlines and by the
-    /// callback's abort signal.
-    async fn send(
-        &self, text: &str, abort_rx: &mut mpsc::UnboundedReceiver<String>,
-    ) -> Result<AgentOutput> {
-        tracing::debug!(
-            prompt_len = text.len(),
-            preview = %preview(text, PROMPT_PREVIEW_CHARS),
-            "send"
-        );
-        let mut stream = self.rpc.send(self.id.clone(), text.to_owned()).await?;
-
-        let (activity_tx, activity_rx) = watch::channel(Instant::now());
-        let deadline = self.deadlines.watch(activity_rx);
-        tokio::pin!(deadline);
-
-        let mut log = EventLog::default();
-        let mut outcome: Option<RunStreamResult> = None;
-
-        loop {
-            tokio::select! {
-                frame = stream.next() => {
-                    let Some(frame) = frame? else {
-                        break;
-                    };
-                    if frame.is_end_stream() {
-                        stream.end_stream_error(&frame.payload)?;
-                        break;
-                    }
-                    let message: RunStreamMessage = match serde_json::from_slice(&frame.payload) {
-                        Ok(message) => message,
-                        Err(error) => {
-                            tracing::debug!(%error, "skipping unparsable stream frame");
-                            continue;
-                        }
-                    };
-                    // Keepalives (and unknown envelope cases) do not rearm
-                    // the inactivity deadline: only real progress counts.
-                    if message.is_keepalive() {
-                        continue;
-                    }
-                    activity_tx.send_replace(Instant::now());
-                    if let Some(event) = &message.sdk_message {
-                        log.observe(event);
-                        self.note_live_run(log.run_id());
-                    }
-                    if let Some(result) = message.result {
-                        self.note_live_run(Some(&result.run_id));
-                        outcome = Some(result);
-                    }
-                    if message.done.is_some() {
-                        break;
-                    }
-                }
-                error = &mut deadline => {
-                    self.cancel_live_run();
-                    return Err(error);
-                }
-                reason = abort_rx.recv() => {
-                    self.cancel_live_run();
-                    bail!(
-                        "completion aborted: {}",
-                        reason.unwrap_or_else(|| "session closed".to_owned())
-                    );
-                }
-            }
-        }
-
-        // The run reached a terminal state; nothing is left to cancel.
-        self.lock_live_run().take();
-        let outcome = outcome.context("the run stream ended without a result")?;
-        if outcome.status != RunStatus::Finished {
-            let detail = outcome
-                .error_code
-                .filter(|code| !code.is_empty())
-                .or_else(|| log.status_message().map(ToOwned::to_owned))
-                .unwrap_or_else(|| "<no detail>".to_owned());
-            bail!("cursor run {}: {detail}", outcome.status);
-        }
-        let result = outcome.result.unwrap_or_default();
-        Ok(AgentOutput {
-            result: result.result,
-            transcript: log.finish(),
-            usage: result.usage.map(Usage::from),
-        })
-    }
-
-    fn note_live_run(&self, run_id: Option<&str>) {
-        if let Some(run_id) = run_id {
-            self.lock_live_run().get_or_insert_with(|| run_id.to_owned());
-        }
-    }
-
-    /// Best-effort, detached `CancelRun` when a turn is abandoned mid-run
-    /// (deadline breach or callback abort) — the completion's own error is
-    /// already decided, so the cancel is not awaited.
-    fn cancel_live_run(&self) {
-        let Some(run_id) = self.lock_live_run().take() else {
-            return;
-        };
-        let rpc = self.rpc.clone();
-        let agent_id = self.id.clone();
-        tokio::spawn(async move {
-            if let Err(error) = rpc.cancel_run(run_id, agent_id).await {
-                tracing::debug!(%error, "cancel after abandon failed");
-            }
-        });
-    }
-
-    fn lock_live_run(&self) -> std::sync::MutexGuard<'_, Option<String>> {
-        self.live_run.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-impl Drop for Agent {
-    fn drop(&mut self) {
-        self.cancel_live_run();
-        let rpc = self.rpc.clone();
-        let agent_id = std::mem::take(&mut self.id);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                if let Err(error) = rpc.delete_agent(agent_id).await {
-                    tracing::debug!(%error, "agent delete failed");
-                }
-            });
-        }
-    }
-}
-
-/// The agent's working directory: the lent tree, or a private empty one for
-/// references-only completions.
-enum Workspace {
-    Lent(PathBuf),
-    Private(tempfile::TempDir),
-}
-
-impl Workspace {
-    fn path(&self) -> &Path {
-        match self {
-            Self::Lent(path) => path,
-            Self::Private(dir) => dir.path(),
-        }
-    }
-
-    const fn is_lent(&self) -> bool {
-        matches!(self, Self::Lent(_))
-    }
-}
-
-// Map the request onto `CreateAgent` options.
-fn agent_options(
-    request: &Request, workspace: &Workspace, default_model: &str, api_key: String,
-) -> Result<AgentOptions> {
-    let mut custom_tools = BTreeMap::new();
-    let mut mcp_servers = BTreeMap::new();
-
-    // translate guest tools into custom tools
-    for tool in &request.tools {
-        match tool {
-            Tool::Function(function) => {
-                let input_schema: Value =
-                    serde_json::from_str(&function.parameters).with_context(|| {
-                        format!("function tool `{}` parameters is not valid JSON", function.name)
-                    })?;
-                custom_tools.insert(
-                    function.name.clone(),
-                    CustomToolDefinition {
-                        description: (!function.description.is_empty())
-                            .then(|| function.description.clone()),
-                        input_schema,
-                    },
-                );
-            }
-
-            Tool::Mcp(mcp) => {
-                mcp_servers.insert(mcp.name.clone(), McpServerConfig::streamable_http(&mcp.url));
-            }
-        }
-    }
-
-    // request model -> env var -> default model
-    let model = request.model.as_deref().unwrap_or(default_model).to_owned();
-
-    Ok(AgentOptions {
-        model: ModelSelection { id: model },
-        api_key,
-        local: LocalAgentOptions {
-            cwd: vec![workspace.path().display().to_string()],
-            source: workspace.is_lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
-            custom_tools,
-        },
-        mcp_servers,
-        tools: if workspace.is_lent() { None } else { Some(ToolList { names: Vec::new() }) },
-    })
-}
-
+/// The format gate's verdict on one answer attempt.
 enum Outcome {
     Done(Answer),
     Repair(String),
@@ -324,215 +92,5 @@ fn take_answer(format: &Format, output: AgentOutput) -> Outcome {
             transcript: output.transcript,
         }),
         Ok(Candidate::Invalid { reason, .. }) | Err(reason) => Outcome::Repair(reason),
-    }
-}
-
-impl From<TokenUsage> for Usage {
-    // Wire counts are `i64`; saturate rather than fail on absurd values.
-    fn from(usage: TokenUsage) -> Self {
-        Self {
-            input_tokens: u32::try_from(usage.input_tokens).unwrap_or(u32::MAX),
-            output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
-            reasoning_tokens: usage.reasoning_tokens.and_then(|count| u32::try_from(count).ok()),
-        }
-    }
-}
-
-fn prepare_workspace(path: &Path) -> Result<PathBuf> {
-    fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
-    path.canonicalize().with_context(|| format!("canonicalizing {}", path.display()))
-}
-
-/// Prepend a natural-language hint naming the granted MCP servers and any
-/// tool allowlist, so the agent prefers them over assumptions.
-fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
-    if servers.is_empty() {
-        return prompt;
-    }
-    let lines: Vec<String> = servers
-        .iter()
-        .map(|server| {
-            if server.tools.is_empty() {
-                format!("- `{}`", server.name)
-            } else {
-                format!("- `{}` (use only: {})", server.name, server.tools.join(", "))
-            }
-        })
-        .collect();
-    format!(
-        "The following read-only MCP servers are available. Consult their tools and resources for \
-         authoritative reference material before answering, and prefer that material over \
-         assumptions:\n{}\n\n{prompt}",
-        lines.join("\n")
-    )
-}
-
-/// One-line INFO for the completion start.
-fn log_completion(model: &str, format: &Format, prompt_len: usize, mcp_servers: &[&str]) {
-    let format_name = match format {
-        Format::Text => "text",
-        Format::Json => "json",
-        Format::Schema(spec) => {
-            tracing::trace!(
-                schema_name = %spec.name,
-                schema = %preview(&spec.schema, PROMPT_PREVIEW_CHARS),
-                "completion schema"
-            );
-            "schema"
-        }
-    };
-    tracing::info!(model, format = format_name, prompt_len, ?mcp_servers, "completion");
-}
-
-impl AgentOutput {
-    fn log(&self, attempt: u32) {
-        let turns = self.transcript.as_ref().map_or(&[][..], |t| t.turns.as_slice());
-        let noisy = turns.iter().filter(|turn| is_noisy_tool(&turn.tool)).count();
-        tracing::debug!(
-            attempt,
-            result_len = self.result.len(),
-            interesting_tools = turns.len() - noisy,
-            noisy_tools = noisy,
-            "answer"
-        );
-    }
-}
-
-impl Deadlines {
-    // Resolve when a run breaches its inactivity or absolute bound.
-    async fn watch(&self, mut activity: watch::Receiver<Instant>) -> anyhow::Error {
-        let cap = sleep_until(Instant::now() + self.cap);
-        tokio::pin!(cap);
-        let mut activity_closed = false;
-
-        loop {
-            let last_activity = *activity.borrow_and_update();
-            let inactive = sleep_until(last_activity + self.inactivity);
-            tokio::pin!(inactive);
-
-            tokio::select! {
-                () = &mut cap => {
-                    return anyhow::anyhow!(
-                        "cursor run timed out after {}s (absolute cap exceeded while still active)",
-                        self.cap.as_secs()
-                    );
-                }
-                () = &mut inactive => {
-                    let idle = Instant::now().saturating_duration_since(last_activity).as_secs();
-                    return anyhow::anyhow!(
-                        "cursor run inactive for {idle}s (no stream events; inactivity limit {}s, \
-                         absolute cap {}s)",
-                        self.inactivity.as_secs(),
-                        self.cap.as_secs()
-                    );
-                }
-                changed = activity.changed(), if !activity_closed => {
-                    activity_closed = changed.is_err();
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use omnia_wasi_model::{Format, Grants, Message, Request, Role};
-    use tokio::sync::watch;
-    use tokio::time::{Duration, Instant, sleep};
-
-    use super::*;
-    use crate::Deadlines;
-
-    const DEADLINES: Deadlines = Deadlines {
-        inactivity: Duration::from_mins(2),
-        cap: Duration::from_mins(10),
-    };
-
-    fn request() -> Request {
-        Request {
-            model: None,
-            system: None,
-            messages: vec![Message {
-                role: Role::User,
-                content: "hello".to_owned(),
-            }],
-            generation: None,
-            format: Format::Text,
-            tools: vec![],
-            grants: Grants { workspace: None },
-        }
-    }
-
-    fn lent() -> Workspace {
-        Workspace::Lent(std::env::temp_dir())
-    }
-
-    fn private() -> Workspace {
-        Workspace::Private(tempfile::tempdir().expect("temp cwd"))
-    }
-
-    #[test]
-    fn workspace_shapes() {
-        let options = agent_options(&request(), &lent(), "auto", "key".into()).unwrap();
-        assert!(options.tools.is_none());
-        assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
-
-        let options = agent_options(&request(), &private(), "auto", "key".into()).unwrap();
-        assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
-        assert!(options.local.source.is_none());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn silent_stream_hits_inactivity_deadline() {
-        let (_activity, receiver) = watch::channel(Instant::now());
-        let started = Instant::now();
-        let error = DEADLINES.watch(receiver).await;
-        assert_eq!(started.elapsed(), Duration::from_mins(2));
-        assert!(
-            error.to_string().contains("inactive for 120s"),
-            "the inactivity kill names the idle span: {error}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn steady_activity_hits_absolute_cap() {
-        let (activity, receiver) = watch::channel(Instant::now());
-        let started = Instant::now();
-        let toucher = async {
-            loop {
-                sleep(Duration::from_mins(1)).await;
-                activity.send_replace(Instant::now());
-            }
-        };
-        let error = tokio::select! {
-            error = DEADLINES.watch(receiver) => error,
-            () = toucher => unreachable!("the toucher never finishes"),
-        };
-        assert_eq!(started.elapsed(), Duration::from_mins(10));
-        assert!(
-            error.to_string().contains("timed out after 600s"),
-            "the cap kill names the absolute bound: {error}"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn late_activity_rearms_inactivity_deadline() {
-        let (activity, receiver) = watch::channel(Instant::now());
-        let started = Instant::now();
-        let toucher = async {
-            sleep(Duration::from_secs(100)).await;
-            activity.send_replace(Instant::now());
-            std::future::pending::<()>().await;
-        };
-        let error = tokio::select! {
-            error = DEADLINES.watch(receiver) => error,
-            () = toucher => unreachable!("the toucher never finishes"),
-        };
-        assert_eq!(
-            started.elapsed(),
-            Duration::from_secs(220),
-            "one touch at 100s moves the kill to 100s + the 120s window"
-        );
-        assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
     }
 }

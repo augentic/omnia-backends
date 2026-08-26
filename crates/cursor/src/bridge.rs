@@ -16,7 +16,7 @@ use anyhow::{Context as _, Result};
 use discovery::BRIDGE_BIN;
 pub use messages::{
     AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
-    RunStatus, RunStreamMessage, RunStreamResult, SdkMessage, TokenUsage, ToolList,
+    RunStatus, RunStreamResult, SdkMessage, TokenUsage, ToolList,
 };
 use omnia_wasi_model::ToolHost;
 pub use rpc::Rpc;

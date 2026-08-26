@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use omnia_wasi_model::{Format, ToolTurn, Transcript};
 use serde_json::Value;
 
-use super::agent::AgentOutput;
+use crate::model::agent::Response;
 use crate::bridge::SdkMessage;
 
 const PROMPT_PREVIEW_CHARS: usize = 500;
@@ -45,7 +45,7 @@ pub fn log_send(text: &str) {
 }
 
 /// One-line DEBUG summarizing one answer attempt.
-pub fn log_answer(attempt: u32, output: &AgentOutput) {
+pub fn log_answer(attempt: u32, output: &Response) {
     let turns = output.transcript.as_ref().map_or(&[][..], |t| t.turns.as_slice());
     let noisy = turns.iter().filter(|turn| is_noisy_tool(&turn.tool)).count();
     tracing::debug!(

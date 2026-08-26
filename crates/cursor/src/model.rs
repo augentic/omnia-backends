@@ -20,7 +20,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use anyhow::{Context as _, Result, bail};
 use events::{EventLog, PROMPT_PREVIEW_CHARS, is_noisy_tool, truncate};
 use omnia_wasi_model::{
-    Answer, Format, FutureResult, Mcp, Request, Tool, ToolHost, Transcript, Usage, WasiModelCtx,
+    Answer, Candidate, Format, FutureResult, Mcp, Request, Tool, ToolHost, Transcript, Usage,
+    WasiModelCtx,
 };
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
@@ -351,12 +352,12 @@ enum Outcome {
 
 fn take_answer(format: &Format, output: AgentOutput) -> Outcome {
     match format.parse(&output.result) {
-        Ok(value) => Outcome::Done(Answer {
+        Ok(Candidate::Valid(value)) => Outcome::Done(Answer {
             value,
             usage: output.usage,
             transcript: output.transcript,
         }),
-        Err(reason) => Outcome::Repair(reason),
+        Ok(Candidate::Invalid { reason, .. }) | Err(reason) => Outcome::Repair(reason),
     }
 }
 

@@ -23,8 +23,8 @@ use genai::chat::{
     ToolCall, ToolResponse,
 };
 use omnia_wasi_model::{
-    Answer, Effort, Format, Function, FutureResult, Request, Role, Tool as ModelTool, ToolHost,
-    ToolTurn, Transcript, Usage, WasiModelCtx,
+    Answer, Candidate, Effort, Format, Function, FutureResult, Request, Role, Tool as ModelTool,
+    ToolHost, ToolTurn, Transcript, Usage, WasiModelCtx,
 };
 use serde_json::Value;
 
@@ -93,7 +93,14 @@ impl WasiModelCtx for Client {
                 let last_turn = turn == MAX_TURNS;
 
                 match format.parse(&text) {
-                    Ok(value) => {
+                    Ok(Candidate::Valid(value)) => {
+                        return Ok(Answer {
+                            value,
+                            usage,
+                            transcript: Some(transcript),
+                        });
+                    }
+                    Ok(Candidate::Invalid { value, .. }) if last_turn => {
                         return Ok(Answer {
                             value,
                             usage,
@@ -101,19 +108,12 @@ impl WasiModelCtx for Client {
                         });
                     }
                     Err(reason) if last_turn => {
-                        if let Ok(value) = format.parse_candidate(&text) {
-                            return Ok(Answer {
-                                value,
-                                usage,
-                                transcript: Some(transcript),
-                            });
-                        }
                         bail!(
                             "genai did not return a valid answer for model `{model}` after \
                              {MAX_TURNS} attempts: {reason}"
                         );
                     }
-                    Err(reason) => {
+                    Ok(Candidate::Invalid { reason, .. }) | Err(reason) => {
                         chat = append_repair(chat, text, &reason, &format);
                     }
                 }

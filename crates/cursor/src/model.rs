@@ -13,10 +13,9 @@
 mod events;
 
 use std::collections::BTreeMap;
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::{env, fs};
 
 use anyhow::{Context as _, Result, bail};
 use events::{EventLog, PROMPT_PREVIEW_CHARS, is_noisy_tool, preview};
@@ -28,9 +27,8 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
 
-use crate::bridge::Rpc;
 use crate::bridge::{
-    AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
+    AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection, Rpc,
     RunStatus, RunStreamMessage, RunStreamResult, TokenUsage, ToolList,
 };
 use crate::{Client, Deadlines};

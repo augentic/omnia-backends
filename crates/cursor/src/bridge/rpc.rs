@@ -46,12 +46,18 @@ impl std::fmt::Debug for Rpc {
 }
 
 impl Rpc {
-    pub fn new(base: String, token: &str) -> Self {
-        Self {
+    /// Bind to `base` and prove the bridge answers `sdk.v1`.
+    pub async fn connect(base: String, token: &str) -> Result<Self> {
+        let rpc = Self {
             client: HyperClient::builder(TokioExecutor::new()).build_http(),
             base,
             bearer: format!("Bearer {token}"),
-        }
+        };
+        rpc.ping().await?;
+        let version = rpc.get_version().await?;
+        ensure!(version.protocol_version == "sdk.v1", "unsupported protocol version");
+        tracing::info!(?version.capabilities, "ready");
+        Ok(rpc)
     }
 
     /// `Ping`: verify the control endpoint answers.

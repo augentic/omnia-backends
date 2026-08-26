@@ -78,7 +78,7 @@ impl Discovery {
     pub async fn into_rpc(self) -> Result<Rpc> {
         let base_url = self.base_url()?;
         let token = self.token().await?;
-        Ok(Rpc::new(base_url, &token))
+        Rpc::connect(base_url, &token).await
     }
 
     /// Prefer `url`; fall back to `host` + `port` (bracketing `IPv6` hosts).

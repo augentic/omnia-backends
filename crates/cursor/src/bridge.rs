@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result};
 use discovery::BRIDGE_BIN;
 pub use messages::{
     AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
@@ -76,12 +76,6 @@ impl Bridge {
         drain(lines, "stderr");
 
         let rpc = discovery.into_rpc().await?;
-        rpc.ping().await?;
-
-        // verify protocol version
-        let version = rpc.get_version().await?;
-        ensure!(version.protocol_version == "sdk.v1", "unsupported protocol version");
-        tracing::info!(?version.capabilities, "ready");
 
         // shutdown handler
         let (tx, rx) = oneshot::channel();

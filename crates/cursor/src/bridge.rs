@@ -5,7 +5,7 @@
 //! and handshaken by scanning stderr for the `cursor-sdk-bridge ready ` line.
 
 mod discovery;
-pub mod transport;
+pub mod rpc;
 pub mod types;
 
 use std::process::Stdio;
@@ -13,45 +13,34 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
-use discovery::{BRIDGE_BIN, Discovery};
+use discovery::BRIDGE_BIN;
 use omnia_wasi_model::ToolHost;
+use rpc::Rpc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader, Lines};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
-use transport::Transport;
-use types::{Empty, GetVersionResponse, ShutdownRequest};
 
 use crate::endpoint::{Attached, Endpoint};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-// Never inherited: a hook- or rebase-set git identity would point the agent's
-// git at the host process's repository instead of the lent workspace.
 const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
-/// One spawned bridge process plus the Connect transport speaking to it.
+/// One spawned bridge process plus the `sdk.v1` client speaking to it.
 #[derive(Debug)]
 pub struct Bridge {
-    transport: Transport,
+    rpc: Rpc,
     _shutdown: oneshot::Sender<()>,
     endpoint: Endpoint,
 }
 
 impl Bridge {
-    /// Bind the tool-callback endpoint, spawn the bridge against it, complete
-    /// the ready-line handshake, and verify it with `Ping` + `GetVersion`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the loopback bind fails, the executable is
-    /// missing, the process exits or stays silent through the startup
-    /// timeout, the discovery line is malformed, or the endpoint does not
-    /// speak `sdk.v1`.
+    // Bind the tool-callback endpoint and spawn the bridge against it.
     pub async fn spawn() -> Result<Self> {
         let endpoint = Endpoint::bind().await?;
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-")
             .tempdir()
-            .context("creating the bridge state root")?;
+            .context("creating state root")?;
 
         let mut command = Command::new(BRIDGE_BIN);
         command
@@ -69,45 +58,63 @@ impl Bridge {
         }
 
         let mut child = command.spawn().context("issue spawning cursor-sdk-bridge")?;
-        let stdout = child.stdout.take().expect("stdout");
-        drain_lines(BufReader::new(stdout).lines(), "stdout");
 
+        // drain stdout
+        let stdout = child.stdout.take().expect("stdout");
+        drain(BufReader::new(stdout).lines(), "stdout");
+
+        // scan stderr for the discovery line
         let stderr = child.stderr.take().expect("stderr");
         let mut lines = BufReader::new(stderr).lines();
-        let discovery = Discovery::scan(&mut lines).await?;
-        drain_lines(lines, "stderr");
+        let discovery = discovery::from_stderr(&mut lines).await?;
 
-        let transport = discovery.into_transport().await?;
+        // drain stderr
+        drain(lines, "stderr");
 
-        transport.unary::<_, Empty>("SdkBridgeControlService/Ping", &Empty {}).await?;
-        let version: GetVersionResponse =
-            transport.unary("SdkBridgeControlService/GetVersion", &Empty {}).await?;
-        ensure!(
-            version.protocol_version == "sdk.v1",
-            "bridge speaks `{}`, this backend requires `sdk.v1`",
-            version.protocol_version
-        );
-        tracing::info!(
-            bridge_version = %version.bridge_version,
-            capabilities = version.capabilities.len(),
-            "cursor-sdk-bridge ready"
-        );
+        let rpc = discovery.into_rpc().await?;
+        rpc.ping().await?;
 
-        let (shutdown, rx) = oneshot::channel();
-        supervise(child, transport.clone(), state_root, rx);
+        // verify protocol version
+        let version = rpc.get_version().await?;
+        ensure!(version.protocol_version == "sdk.v1", "unsupported protocol version");
+        tracing::info!(?version.capabilities, "ready");
+
+        // shutdown handler
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn({
+            let rpc = rpc.clone();
+            async move {
+                // wait for shutdown or process exit
+                tokio::select! {
+                    _ = rx => {}
+                    status = child.wait() => {
+                        tracing::warn!(?status, "cursor-sdk-bridge exited");
+                        return;
+                    }
+                }
+
+                // shutdown the bridge
+                let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, rpc.shutdown()).await;
+                if tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait()).await.is_err() {
+                    let _ = child.start_kill();
+                }
+                drop(state_root);
+            }
+        });
+
         Ok(Self {
-            transport,
-            _shutdown: shutdown,
+            rpc,
+            _shutdown: tx,
             endpoint,
         })
     }
 
-    pub const fn transport(&self) -> &Transport {
-        &self.transport
+    pub const fn rpc(&self) -> &Rpc {
+        &self.rpc
     }
 
-    /// Route callbacks for `agent_id` into `tool_host` until the returned
-    /// guard drops.
+    // Route callbacks for `agent_id` into `tool_host` until the returned guard
+    // drops.
     pub fn attach(
         &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
     ) -> Attached {
@@ -115,38 +122,8 @@ impl Bridge {
     }
 }
 
-/// Own the child and its state root until `shutdown` fires or the process exits.
-fn supervise(
-    mut child: Child, transport: Transport, state_root: tempfile::TempDir,
-    shutdown: oneshot::Receiver<()>,
-) {
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = shutdown => {}
-            status = child.wait() => {
-                tracing::warn!(?status, "cursor-sdk-bridge exited");
-                return;
-            }
-        }
-        let _ = tokio::time::timeout(
-            SHUTDOWN_TIMEOUT,
-            transport.unary::<_, Empty>(
-                "SdkBridgeControlService/Shutdown",
-                &ShutdownRequest { grace_seconds: 1 },
-            ),
-        )
-        .await;
-        if tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait()).await.is_err() {
-            let _ = child.start_kill();
-        }
-        // Mentioning the state root moves it into the task, so it outlives
-        // the process on every path (early return included).
-        drop(state_root);
-    });
-}
-
-// Log lines forever so the child can never block on a full pipe.
-fn drain_lines(mut lines: Lines<impl AsyncBufRead + Unpin + Send + 'static>, label: &'static str) {
+// Drain stdout/stderr so the child process never blocks.
+fn drain(mut lines: Lines<impl AsyncBufRead + Unpin + Send + 'static>, label: &'static str) {
     tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
             tracing::debug!(%line, stream = label, "bridge output");

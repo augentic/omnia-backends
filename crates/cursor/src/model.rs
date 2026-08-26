@@ -27,17 +27,14 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
 
-use crate::bridge::transport::{Transport, end_stream_error};
+use crate::bridge::rpc::Rpc;
 use crate::bridge::types::{
-    AgentOptions, CancelRunRequest, CreateAgentRequest, CreateAgentResponse, CustomToolDefinition,
-    DeleteAgentRequest, LocalAgentOptions, McpServerConfig, ModelSelection, RunStatus,
-    RunStreamMessage, RunStreamResult, SendRequest, TokenUsage, ToolList, UserMessage,
+    AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
+    RunStatus, RunStreamMessage, RunStreamResult, TokenUsage, ToolList,
 };
 use crate::{Client, Deadlines};
 
-/// The model id sent when neither the request nor `CURSOR_MODEL` names one:
-/// Cursor's own server-side selection.
-const AUTO_MODEL: &str = "auto";
+const DEFAULT_MODEL: &str = "auto";
 
 #[derive(Debug)]
 struct AgentOutput {
@@ -80,12 +77,10 @@ impl WasiModelCtx for Client {
             let prompt = with_mcp_hint(&mcp_servers, request.to_string());
             log_completion(&model_id, &format, prompt.len(), &mcp_names);
 
-            let transport = bridge.transport().clone();
-            let created: CreateAgentResponse = transport
-                .unary("SdkAgentService/CreateAgent", &CreateAgentRequest { options })
-                .await?;
+            let rpc = bridge.rpc().clone();
+            let created = rpc.create_agent(options).await?;
             let agent = Agent {
-                transport,
+                rpc,
                 id: created.agent_id.clone(),
                 deadlines,
                 live_run: Mutex::new(None),
@@ -120,7 +115,7 @@ impl WasiModelCtx for Client {
 
 /// One bridge-managed agent, deleted (and its live run cancelled) on drop.
 struct Agent {
-    transport: Transport,
+    rpc: Rpc,
     id: String,
     deadlines: Deadlines,
     live_run: Mutex<Option<String>>,
@@ -133,18 +128,12 @@ impl Agent {
     async fn send(
         &self, text: &str, abort_rx: &mut mpsc::UnboundedReceiver<String>,
     ) -> Result<AgentOutput> {
-        let request = SendRequest {
-            agent_id: self.id.clone(),
-            message: UserMessage {
-                text: text.to_owned(),
-            },
-        };
         tracing::debug!(
             prompt_len = text.len(),
             preview = %preview(text, PROMPT_PREVIEW_CHARS),
             "send"
         );
-        let mut stream = self.transport.server_stream("SdkAgentService/Send", &request).await?;
+        let mut stream = self.rpc.send(self.id.clone(), text.to_owned()).await?;
 
         let (activity_tx, activity_rx) = watch::channel(Instant::now());
         let deadline = self.deadlines.watch(activity_rx);
@@ -160,7 +149,7 @@ impl Agent {
                         break;
                     };
                     if frame.is_end_stream() {
-                        end_stream_error("SdkAgentService/Send", &frame.payload)?;
+                        stream.end_stream_error(&frame.payload)?;
                         break;
                     }
                     let message: RunStreamMessage = match serde_json::from_slice(&frame.payload) {
@@ -234,16 +223,10 @@ impl Agent {
         let Some(run_id) = self.lock_live_run().take() else {
             return;
         };
-        let transport = self.transport.clone();
+        let rpc = self.rpc.clone();
         let agent_id = self.id.clone();
         tokio::spawn(async move {
-            let cancel = CancelRunRequest {
-                run_id,
-                agent_id: Some(agent_id),
-            };
-            if let Err(error) =
-                transport.unary::<_, Value>("SdkAgentService/CancelRun", &cancel).await
-            {
+            if let Err(error) = rpc.cancel_run(run_id, agent_id).await {
                 tracing::debug!(%error, "cancel after abandon failed");
             }
         });
@@ -257,14 +240,11 @@ impl Agent {
 impl Drop for Agent {
     fn drop(&mut self) {
         self.cancel_live_run();
-        let transport = self.transport.clone();
+        let rpc = self.rpc.clone();
         let agent_id = std::mem::take(&mut self.id);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                let delete = DeleteAgentRequest { agent_id };
-                if let Err(error) =
-                    transport.unary::<_, Value>("SdkAgentService/DeleteAgent", &delete).await
-                {
+                if let Err(error) = rpc.delete_agent(agent_id).await {
                     tracing::debug!(%error, "agent delete failed");
                 }
             });
@@ -323,7 +303,7 @@ fn agent_options(
     }
 
     // Guest-supplied request.model wins; else CURSOR_MODEL; else `auto`.
-    let model = request.model.as_deref().or(default_model).unwrap_or(AUTO_MODEL).to_owned();
+    let model = request.model.as_deref().or(default_model).unwrap_or(DEFAULT_MODEL).to_owned();
     Ok(AgentOptions {
         model: ModelSelection { id: model },
         api_key,

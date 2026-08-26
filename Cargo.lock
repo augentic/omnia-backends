@@ -3494,6 +3494,7 @@ dependencies = [
  "prost-types 0.14.4",
  "serde",
  "serde_json",
+ "serde_repr",
  "tempfile",
  "tokio",
  "tracing",

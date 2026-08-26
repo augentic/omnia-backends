@@ -1,4 +1,8 @@
-//! Connect-over-HTTP/1.1 client for the bridge's loopback endpoint.
+//! Connect-over-HTTP/1.1 client for the bridge's loopback endpoint, exposing
+//! one typed method per `sdk.v1` procedure. Response shapes deserialize
+//! tolerantly (unknown fields ignored, missing fields defaulted), so a
+//! mispaired path and response type would fail silently — the pairing lives
+//! only here.
 //!
 //! Every RPC is `POST {base}/sdk.v1.{Service}/{Method}` in the Connect JSON
 //! codec with bearer auth. Unary calls are plain JSON bodies; server streams
@@ -17,26 +21,31 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use super::types::{
+    AgentOptions, CancelRunRequest, CreateAgentRequest, CreateAgentResponse, DeleteAgentRequest,
+    Empty, GetVersionResponse, SendRequest, ShutdownRequest, UserMessage,
+};
+
 /// Envelope flag bit marking the end-of-stream frame.
 const END_STREAM: u8 = 0x02;
 /// Envelope flag bit marking a compressed frame (never negotiated here).
 const COMPRESSED: u8 = 0x01;
 
-/// A cloneable Connect client bound to one bridge endpoint and bearer token.
+/// A cloneable `sdk.v1` client bound to one bridge endpoint and bearer token.
 #[derive(Clone)]
-pub struct Transport {
+pub struct Rpc {
     client: HyperClient<HttpConnector, Full<Bytes>>,
     base: String,
     bearer: String,
 }
 
-impl std::fmt::Debug for Transport {
+impl std::fmt::Debug for Rpc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Transport").field("base", &self.base).finish_non_exhaustive()
+        f.debug_struct("Rpc").field("base", &self.base).finish_non_exhaustive()
     }
 }
 
-impl Transport {
+impl Rpc {
     pub fn new(base: String, token: &str) -> Self {
         Self {
             client: HyperClient::builder(TokioExecutor::new()).build_http(),
@@ -45,44 +54,95 @@ impl Transport {
         }
     }
 
-    /// One unary RPC, e.g. `unary("SdkBridgeControlService/Ping", &request)`.
-    pub async fn unary<Req: Serialize + Sync, Resp: DeserializeOwned>(
-        &self, rpc: &str, request: &Req,
+    /// `Ping`: verify the control endpoint answers.
+    pub async fn ping(&self) -> Result<()> {
+        self.unary::<_, Empty>("SdkBridgeControlService/Ping", &Empty {}).await.map(drop)
+    }
+
+    /// `GetVersion`: the bridge's version, protocol, and capabilities.
+    pub async fn get_version(&self) -> Result<GetVersionResponse> {
+        self.unary("SdkBridgeControlService/GetVersion", &Empty {}).await
+    }
+
+    /// `Shutdown`: ask the bridge to exit gracefully.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.unary::<_, Empty>(
+            "SdkBridgeControlService/Shutdown",
+            &ShutdownRequest { grace_seconds: 1 },
+        )
+        .await
+        .map(drop)
+    }
+
+    /// `CreateAgent`: one fresh agent from the completion's options.
+    pub async fn create_agent(&self, options: AgentOptions) -> Result<CreateAgentResponse> {
+        self.unary("SdkAgentService/CreateAgent", &CreateAgentRequest { options }).await
+    }
+
+    /// `CancelRun`: best-effort cancel of an abandoned run.
+    pub async fn cancel_run(&self, run_id: String, agent_id: String) -> Result<()> {
+        let request = CancelRunRequest {
+            run_id,
+            agent_id: Some(agent_id),
+        };
+        self.unary::<_, Empty>("SdkAgentService/CancelRun", &request).await.map(drop)
+    }
+
+    /// `DeleteAgent`: discard the agent and its session state.
+    pub async fn delete_agent(&self, agent_id: String) -> Result<()> {
+        self.unary::<_, Empty>("SdkAgentService/DeleteAgent", &DeleteAgentRequest { agent_id })
+            .await
+            .map(drop)
+    }
+
+    /// `Send`: one agent turn; the stream yields the run's event envelopes.
+    pub async fn send(&self, agent_id: String, text: String) -> Result<FrameStream> {
+        let request = SendRequest {
+            agent_id,
+            message: UserMessage { text },
+        };
+        self.server_stream("SdkAgentService/Send", &request).await
+    }
+
+    /// One unary RPC in the plain JSON codec.
+    async fn unary<Req: Serialize + Sync, Resp: DeserializeOwned>(
+        &self, method: &str, request: &Req,
     ) -> Result<Resp> {
-        let body = serde_json::to_vec(request).with_context(|| format!("encoding `{rpc}`"))?;
-        let response = self.send(rpc, "application/json", body).await?;
+        let body = serde_json::to_vec(request).with_context(|| format!("encoding `{method}`"))?;
+        let response = self.call(method, "application/json", body).await?;
         let bytes = response
             .into_body()
             .collect()
             .await
-            .with_context(|| format!("reading `{rpc}` response"))?
+            .with_context(|| format!("reading `{method}` response"))?
             .to_bytes();
-        serde_json::from_slice(&bytes).with_context(|| format!("decoding `{rpc}` response"))
+        serde_json::from_slice(&bytes).with_context(|| format!("decoding `{method}` response"))
     }
 
     /// One server-streaming RPC: the request rides as a single enveloped JSON
     /// message; the returned stream yields response envelopes.
-    pub async fn server_stream<Req: Serialize + Sync>(
-        &self, rpc: &str, request: &Req,
+    async fn server_stream<Req: Serialize + Sync>(
+        &self, method: &str, request: &Req,
     ) -> Result<FrameStream> {
-        let payload = serde_json::to_vec(request).with_context(|| format!("encoding `{rpc}`"))?;
-        let response = self.send(rpc, "application/connect+json", envelope(&payload)).await?;
+        let payload =
+            serde_json::to_vec(request).with_context(|| format!("encoding `{method}`"))?;
+        let response = self.call(method, "application/connect+json", envelope(&payload)).await?;
         Ok(FrameStream {
-            rpc: rpc.to_owned(),
+            method: method.to_owned(),
             body: response.into_body(),
             buffer: BytesMut::new(),
         })
     }
 
     /// POST the body and map a non-success status onto a Connect error.
-    async fn send(
-        &self, rpc: &str, content_type: &str, body: Vec<u8>,
+    async fn call(
+        &self, method: &str, content_type: &str, body: Vec<u8>,
     ) -> Result<http::Response<Incoming>> {
         let response = self
             .client
-            .request(self.post(rpc, content_type, body)?)
+            .request(self.post(method, content_type, body)?)
             .await
-            .with_context(|| format!("bridge RPC `{rpc}`"))?;
+            .with_context(|| format!("bridge RPC `{method}`"))?;
 
         let status = response.status();
         if status.is_success() {
@@ -92,20 +152,20 @@ impl Transport {
             .into_body()
             .collect()
             .await
-            .with_context(|| format!("reading `{rpc}` response"))?
+            .with_context(|| format!("reading `{method}` response"))?
             .to_bytes();
-        Err(connect_error(rpc, status, &bytes))
+        Err(connect_error(method, status, &bytes))
     }
 
     fn post(
-        &self, rpc: &str, content_type: &str, body: Vec<u8>,
+        &self, method: &str, content_type: &str, body: Vec<u8>,
     ) -> Result<http::Request<Full<Bytes>>> {
-        http::Request::post(format!("{}/sdk.v1.{rpc}", self.base))
+        http::Request::post(format!("{}/sdk.v1.{method}", self.base))
             .header(CONTENT_TYPE, content_type)
             .header(AUTHORIZATION, &self.bearer)
             .header("connect-protocol-version", "1")
             .body(Full::new(Bytes::from(body)))
-            .with_context(|| format!("building `{rpc}` request"))
+            .with_context(|| format!("building `{method}` request"))
     }
 }
 
@@ -121,7 +181,7 @@ fn envelope(payload: &[u8]) -> Vec<u8> {
 }
 
 /// Map a non-200 Connect response — `{"code", "message", ...}` — onto an error.
-fn connect_error(rpc: &str, status: http::StatusCode, body: &[u8]) -> anyhow::Error {
+fn connect_error(method: &str, status: http::StatusCode, body: &[u8]) -> anyhow::Error {
     let parsed: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let code = parsed.get("code").and_then(Value::as_str).unwrap_or("unknown");
     let message = parsed
@@ -129,9 +189,9 @@ fn connect_error(rpc: &str, status: http::StatusCode, body: &[u8]) -> anyhow::Er
         .and_then(Value::as_str)
         .map_or_else(|| String::from_utf8_lossy(body).into_owned(), ToOwned::to_owned);
     if let Some(details) = parsed.get("details") {
-        tracing::debug!(rpc, %details, "bridge error details");
+        tracing::debug!(method, %details, "bridge error details");
     }
-    anyhow::anyhow!("bridge RPC `{rpc}` failed ({status}, {code}): {}", message.trim())
+    anyhow::anyhow!("bridge RPC `{method}` failed ({status}, {code}): {}", message.trim())
 }
 
 /// A decoded response envelope: the flag byte and the message payload.
@@ -149,7 +209,7 @@ impl Frame {
 
 /// Incrementally decodes Connect envelopes from a streaming response body.
 pub struct FrameStream {
-    rpc: String,
+    method: String,
     body: Incoming,
     buffer: BytesMut,
 }
@@ -171,16 +231,22 @@ impl FrameStream {
                 ensure!(
                     self.buffer.is_empty(),
                     "bridge RPC `{}` stream ended mid-frame ({} bytes buffered)",
-                    self.rpc,
+                    self.method,
                     self.buffer.len()
                 );
                 return Ok(None);
             };
-            let chunk = chunk.with_context(|| format!("reading `{}` stream", self.rpc))?;
+            let chunk = chunk.with_context(|| format!("reading `{}` stream", self.method))?;
             if let Ok(data) = chunk.into_data() {
                 self.buffer.extend_from_slice(&data);
             }
         }
+    }
+
+    /// Interpret an end-of-stream frame observed on this stream: `Ok` on a
+    /// clean end, `Err` when the `EndStreamResponse` carries a Connect error.
+    pub fn end_stream_error(&self, payload: &[u8]) -> Result<()> {
+        end_stream_error(&self.method, payload)
     }
 }
 
@@ -200,20 +266,19 @@ fn decode_frame(buffer: &mut BytesMut) -> Result<Option<Frame>> {
     Ok(Some(Frame { flags, payload }))
 }
 
-/// Interpret an end-of-stream frame: `Ok` on clean end, `Err` when the
-/// `EndStreamResponse` carries a Connect error.
-pub fn end_stream_error(rpc: &str, payload: &[u8]) -> Result<()> {
+/// `Ok` on a clean end frame, `Err` when it carries a Connect error.
+fn end_stream_error(method: &str, payload: &[u8]) -> Result<()> {
     let parsed: Value = serde_json::from_slice(payload).unwrap_or(Value::Null);
     let Some(error) = parsed.get("error").filter(|error| !error.is_null()) else {
         return Ok(());
     };
     let code = error.get("code").and_then(Value::as_str).unwrap_or("unknown");
     let message = error.get("message").and_then(Value::as_str).unwrap_or_default();
-    bail!("bridge RPC `{rpc}` stream failed ({code}): {message}")
+    bail!("bridge RPC `{method}` stream failed ({code}): {message}")
 }
 
 // Deliberate unit tests: pure envelope framing and error decoding (CI floor);
-// `tests/live.rs` proves the transport against a real bridge.
+// `tests/live.rs` proves the client against a real bridge.
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;

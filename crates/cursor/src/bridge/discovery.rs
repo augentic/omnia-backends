@@ -7,81 +7,78 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
+use serde_repr::Deserialize_repr;
 use tokio::io::{AsyncBufRead, Lines};
 
-use super::transport::Transport;
+use super::rpc::Rpc;
 
 pub const BRIDGE_BIN: &str = "cursor-sdk-bridge";
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Discovery {
-    schema_version: u32,
-    #[serde(rename = "transport")]
-    _transport: DiscoveryTransport,
-    #[serde(rename = "protocol")]
-    _protocol: DiscoveryProtocol,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    auth_token_file: Option<String>,
-    #[serde(default)]
-    auth_token: Option<String>,
+// Scan stderr for the ready line and parse its JSON payload.
+pub async fn from_stderr(lines: &mut Lines<impl AsyncBufRead + Unpin>) -> Result<Discovery> {
+    let ready_prefix = format!("{BRIDGE_BIN} ready ");
+
+    tokio::time::timeout(TIMEOUT, async {
+        while let Some(line) = lines.next_line().await.context("reading stderr")? {
+            // look for "ready" line
+            let Some(json) = line.strip_prefix(&ready_prefix) else {
+                tracing::debug!(line = %line, "stderr");
+                continue;
+            };
+
+            let discovery: Discovery = serde_json::from_str(json)
+                .with_context(|| format!("parsing discovery payload: {json}"))?;
+            return Ok(discovery);
+        }
+
+        bail!("no ready line found")
+    })
+    .await
+    .map_err(|_elapsed| anyhow!("no ready line within {}s", TIMEOUT.as_secs()))?
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Discovery {
+    schema_version: Version,
+    url: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    auth_token: Option<String>,
+    auth_token_file: Option<String>,
+    transport: Transport,
+    protocol: Protocol,
+}
+
+#[derive(Default, Deserialize_repr)]
+#[repr(u32)]
+enum Version {
+    #[default]
+    V1 = 1,
+}
+
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum DiscoveryTransport {
+enum Transport {
+    #[default]
     Tcp,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum DiscoveryProtocol {
+enum Protocol {
+    #[default]
     Connect,
 }
 
 impl Discovery {
-    /// Scan stderr for the ready line and parse its JSON payload.
-    pub async fn scan(lines: &mut Lines<impl AsyncBufRead + Unpin>) -> Result<Self> {
-        let ready_prefix = format!("{BRIDGE_BIN} ready ");
-        tokio::time::timeout(READY_TIMEOUT, async {
-            let mut diagnostics = Vec::new();
-            while let Some(line) = lines.next_line().await.context("reading bridge stderr")? {
-                if let Some(json) = line.strip_prefix(&ready_prefix) {
-                    return Self::parse(json);
-                }
-                tracing::debug!(line = %line, "bridge stderr");
-                diagnostics.push(line);
-            }
-            bail!("bridge exited before its ready line: {}", diagnostics.join("\n"))
-        })
-        .await
-        .map_err(|_elapsed| anyhow!("no ready line within {}s", READY_TIMEOUT.as_secs()))?
-    }
-
-    fn parse(json: &str) -> Result<Self> {
-        let discovery: Self =
-            serde_json::from_str(json).context("parsing the bridge discovery payload")?;
-        ensure!(
-            discovery.schema_version == 1,
-            "unsupported discovery schema version {}",
-            discovery.schema_version
-        );
-        Ok(discovery)
-    }
-
-    pub async fn into_transport(self) -> Result<Transport> {
+    pub async fn into_rpc(self) -> Result<Rpc> {
         let base_url = self.base_url()?;
         let token = self.token().await?;
-        Ok(Transport::new(base_url, &token))
+        Ok(Rpc::new(base_url, &token))
     }
 
     /// Prefer `url`; fall back to `host` + `port` (bracketing `IPv6` hosts).
@@ -121,39 +118,41 @@ impl Discovery {
 mod tests {
     use super::Discovery;
 
-    const READY: &str = r#"{"schemaVersion":1,"serverVersion":"1.0.0","pid":12345,"transport":"tcp","protocol":"connect","host":"127.0.0.1","port":49152,"url":"http://127.0.0.1:49152","authTokenFile":"/tmp/auth-token","workspaceRef":"/home/me/project","stateRoot":"/home/me/.cursor/sdk-agent-store/abc"}"#;
-
     #[test]
-    fn discovery_parses_the_documented_payload() {
-        let discovery = Discovery::parse(READY).expect("the documented ready payload parses");
+    fn discovery_parsed() {
+        let discovery: Discovery = serde_json::from_str(
+            r#"{"schemaVersion":1,"serverVersion":"1.0.0","pid":12345,"transport":"tcp","protocol":"connect","host":"127.0.0.1","port":49152,"url":"http://127.0.0.1:49152","authTokenFile":"/tmp/auth-token","workspaceRef":"/home/me/project","stateRoot":"/home/me/.cursor/sdk-agent-store/abc"}"#
+        ).expect("should parse");
         assert_eq!(discovery.base_url().expect("url"), "http://127.0.0.1:49152");
         assert_eq!(discovery.auth_token_file.as_deref(), Some("/tmp/auth-token"));
     }
 
     #[tokio::test]
-    async fn discovery_tolerates_unknown_fields() {
-        let discovery = Discovery::parse(
+    async fn unknown_fields() {
+        let discovery: Discovery = serde_json::from_str(
             r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","url":"http://127.0.0.1:1","authToken":"inline","futureField":{"nested":true}}"#,
-        )
-        .expect("unknown fields are forward-compatible additions");
+        ).expect("should parse");
         let token = discovery.token().await.expect("inline token");
         assert_eq!(token, "inline");
     }
 
     #[test]
-    fn discovery_rejects_other_schemas_and_transports() {
+    fn discovery_rejected() {
         for payload in [
             r#"{"schemaVersion":2,"transport":"tcp","protocol":"connect"}"#,
             r#"{"schemaVersion":1,"transport":"unix","protocol":"connect"}"#,
             r#"{"schemaVersion":1,"transport":"tcp","protocol":"grpc"}"#,
         ] {
-            assert!(Discovery::parse(payload).is_err(), "unsupported payload accepted: {payload}");
+            assert!(
+                serde_json::from_str::<Discovery>(payload).is_err(),
+                "unsupported payload accepted: {payload}"
+            );
         }
     }
 
     #[test]
-    fn base_url_falls_back_to_host_and_port() {
-        let discovery = Discovery::parse(
+    fn base_url_fallback() {
+        let discovery: Discovery = serde_json::from_str(
             r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"::1","port":9}"#,
         )
         .expect("host/port payload parses");
@@ -161,7 +160,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_is_read_from_the_auth_token_file() {
+    async fn token_read() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("token");
         std::fs::write(&path, " file-token \n").expect("write token");
@@ -172,8 +171,8 @@ mod tests {
             "url": "http://127.0.0.1:1",
             "authTokenFile": path,
         });
-        let discovery =
-            Discovery::parse(&payload.to_string()).expect("payload with a token file parses");
+        let discovery = serde_json::from_str::<Discovery>(&payload.to_string())
+            .expect("payload with a token file parses");
         let token = discovery.token().await.expect("token file");
         assert_eq!(token, "file-token");
     }

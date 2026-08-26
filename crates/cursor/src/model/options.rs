@@ -1,19 +1,50 @@
-//! Map one gate-validated request onto `CreateAgent` options: guest function
+//! Translate one gate-validated request into a [`Turn`]: guest function
 //! tools become SDK custom tools, MCP grants ride inline as `mcp_servers`,
-//! and the workspace becomes the agent's `cwd`.
+//! the workspace becomes the agent's `cwd`, and the prompt gains a hint
+//! naming the granted MCP servers.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 use anyhow::{Context as _, Result};
-use omnia_wasi_model::{Mcp, Request, Tool};
+use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::Value;
 
 use crate::bridge::{
     AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
     ToolList,
 };
+
+/// Everything one completion derives from the request: the `CreateAgent`
+/// options, the workspace they point into, the opening prompt, and the
+/// format gate.
+pub struct Turn {
+    pub options: AgentOptions,
+    pub workspace: Workspace,
+    pub prompt: String,
+    pub format: Format,
+}
+
+impl Turn {
+    /// Translate the request against the lent workspace path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace cannot be prepared or the request
+    /// does not map onto agent options.
+    pub fn prepare(request: &Request, lent: Option<&Path>, default_model: &str) -> Result<Self> {
+        let workspace = Workspace::new(lent)?;
+        let options = AgentOptions::from_request(request, &workspace, default_model)?;
+        let prompt = with_mcp_hint(&request.mcp_servers(), request.to_string());
+        Ok(Self {
+            options,
+            workspace,
+            prompt,
+            format: request.format.clone(),
+        })
+    }
+}
 
 /// The agent's working directory: the lent tree, or a private empty one for
 /// references-only completions.
@@ -61,12 +92,6 @@ impl Workspace {
 }
 
 impl AgentOptions {
-    /// Map the request onto `CreateAgent` options.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a function tool's parameters are not valid JSON,
-    /// or when `CURSOR_API_KEY` is unset.
     pub fn from_request(
         request: &Request, workspace: &Workspace, default_model: &str,
     ) -> Result<Self> {
@@ -119,9 +144,9 @@ impl AgentOptions {
     }
 }
 
-/// Prepend a natural-language hint naming the granted MCP servers and any
-/// tool allowlist, so the agent prefers them over assumptions.
-pub fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
+// Prepend a hint naming the granted MCP servers and tool allowlist, so the
+// agent prefers them over assumptions.
+fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
     if servers.is_empty() {
         return prompt;
     }

@@ -19,29 +19,18 @@ use std::sync::Arc;
 use agent::Agent;
 pub use agent::Deadlines;
 use omnia_wasi_model::{Answer, FutureResult, Request, ToolHost, WasiModelCtx};
-use options::{Workspace, with_mcp_hint};
+use options::Turn;
 
 use crate::Client;
-use crate::bridge::AgentOptions;
 
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
-        let bridge = Arc::clone(&self.bridge);
-        let model = self.model.clone();
-        let deadlines = self.deadlines;
-
+        let client = self.clone();
+        
         Box::pin(async move {
-            let workspace = Workspace::new(tool_host.local_path())?;
-            let options = AgentOptions::from_request(&request, &workspace, &model)?;
-            let mcp_servers = request.mcp_servers();
-            let mcp_names: Vec<&str> =
-                mcp_servers.iter().map(|server| server.name.as_str()).collect();
-            let prompt = with_mcp_hint(&mcp_servers, request.to_string());
-            observe::log_completion(&options.model.id, &request.format, prompt.len(), &mcp_names);
-
-            let mut agent =
-                Agent::create(&bridge, options, tool_host, deadlines, workspace).await?;
-            agent.complete(&prompt, &request.format).await
+            let turn = Turn::prepare(&request, tool_host.local_path(), &client.model)?;
+            observe::log_completion(&turn);
+            Agent::create(&client, turn, tool_host).await?.complete().await
         })
     }
 }

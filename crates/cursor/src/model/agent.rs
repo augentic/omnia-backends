@@ -1,4 +1,4 @@
-//! One bridge-managed agent: `send` drives a turn's run stream to its
+//! A bridge-managed agent: `send` drives a turn's run stream to its
 //! terminal result, bounded by an inactivity deadline that stream progress
 //! rearms, an absolute wall-clock cap, and the callback's abort signal.
 //! An abandoned run is cancelled best-effort, and the agent (with its
@@ -13,15 +13,17 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
 
 use super::observe::{self, EventLog};
-use super::options::Workspace;
-use crate::bridge::{AgentOptions, Bridge, Rpc, RunStatus, RunStreamResult, TokenUsage};
+use super::options::{Turn, Workspace};
+use crate::Client;
+use crate::bridge::{Rpc, RunStatus, RunStreamResult, TokenUsage};
 use crate::endpoint::Attached;
 
-/// One bridge-managed agent, deleted (and its live run cancelled) on drop.
 pub struct Agent {
     rpc: Rpc,
     id: String,
     deadlines: Deadlines,
+    prompt: String,
+    format: Format,
     live_run: Option<String>,
     abort_rx: mpsc::UnboundedReceiver<String>,
     _attached: Attached,
@@ -29,70 +31,52 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Create one agent and attach its callback route.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the bridge cannot create the agent.
-    pub async fn create(
-        bridge: &Bridge, options: AgentOptions, tool_host: Arc<dyn ToolHost>, deadlines: Deadlines,
-        workspace: Workspace,
-    ) -> Result<Self> {
-        let rpc = bridge.rpc().clone();
-        let created = rpc.create_agent(options).await?;
+    pub async fn create(client: &Client, turn: Turn, tool_host: Arc<dyn ToolHost>) -> Result<Self> {
+        let rpc = client.bridge.rpc().clone();
+        let created = rpc.create_agent(turn.options).await?;
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
-        let attached = bridge.attach(created.agent_id.clone(), tool_host, abort_tx);
+        let attached = client.bridge.attach(created.agent_id.clone(), tool_host, abort_tx);
+
         Ok(Self {
             rpc,
             id: created.agent_id,
-            deadlines,
+            deadlines: client.deadlines,
+            prompt: turn.prompt,
+            format: turn.format,
             live_run: None,
             abort_rx,
             _attached: attached,
-            _workspace: workspace,
+            _workspace: turn.workspace,
         })
     }
 
-    /// Produce a format-valid answer, with one repair turn when needed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when either turn fails or the repair is still invalid.
-    pub async fn complete(&mut self, prompt: &str, format: &Format) -> Result<Answer> {
-        let reason = match self.attempt(prompt, format, 1).await? {
-            Outcome::Done(answer) => return Ok(answer),
-            Outcome::Repair(reason) => reason,
+    pub async fn complete(mut self) -> Result<Answer> {
+        let prompt = std::mem::take(&mut self.prompt);
+        let reason = match self.attempt(&prompt, 1).await? {
+            Verdict::Done(answer) => return Ok(answer),
+            Verdict::Repair(reason) => reason,
         };
 
         tracing::debug!(attempt = 1, %reason, "repairing answer");
-        let repair = format.repair(&reason);
-        match self.attempt(&repair, format, 2).await? {
-            Outcome::Done(answer) => Ok(answer),
-            Outcome::Repair(reason) => bail!("no valid answer after 2 attempts: {reason}"),
+        let repair = self.format.repair(&reason);
+        match self.attempt(&repair, 2).await? {
+            Verdict::Done(answer) => Ok(answer),
+            Verdict::Repair(reason) => bail!("no valid answer after 2 attempts: {reason}"),
         }
     }
 
-    async fn attempt(&mut self, text: &str, format: &Format, attempt: u32) -> Result<Outcome> {
-        let output = self.send(text).await?;
-        observe::log_answer(attempt, &output);
-        Ok(output.answer(format))
+    async fn attempt(&mut self, text: &str, attempt: u32) -> Result<Verdict> {
+        let response = self.send(text).await?;
+        observe::log_answer(attempt, &response);
+        Ok(response.answer(&self.format))
     }
 
-    /// One turn: `Send` the text and consume the run stream to its terminal
-    /// result, bounded by the inactivity and absolute deadlines and by the
-    /// callback's abort signal.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error on transport failures, a breached deadline, an
-    /// abort from the tool callback, or a run that ends unfinished.
     async fn send(&mut self, text: &str) -> Result<Response> {
         observe::log_send(text);
         let mut stream = self.rpc.send(self.id.clone(), text.to_owned()).await?;
 
         let (activity_tx, activity_rx) = watch::channel(Instant::now());
-        let deadlines = self.deadlines;
-        let deadline = deadlines.watch(activity_rx);
+        let deadline = self.deadlines.watch(activity_rx);
         tokio::pin!(deadline);
 
         let mut log = EventLog::default();
@@ -131,7 +115,7 @@ impl Agent {
             }
         }
 
-        // The run reached a terminal state; nothing is left to cancel.
+        // the run reached a terminal state; nothing is left to cancel.
         self.live_run = None;
         let outcome = outcome.context("the run stream ended without a result")?;
         if outcome.status != RunStatus::Finished {
@@ -143,7 +127,7 @@ impl Agent {
             bail!("cursor run {}: {detail}", outcome.status);
         }
         let result = outcome.result.unwrap_or_default();
-        
+
         Ok(Response {
             result: result.result,
             transcript: log.finish(),
@@ -151,16 +135,12 @@ impl Agent {
         })
     }
 
-    // Keep the first observed run id.
     fn note_run(&mut self, run_id: Option<&str>) {
         if self.live_run.is_none() {
             self.live_run = run_id.map(ToOwned::to_owned);
         }
     }
 
-    // Best-effort, detached `CancelRun` when a turn is abandoned mid-run
-    // (deadline breach or callback abort) — the completion's own error is
-    // already decided, so the cancel is not awaited.
     fn cancel_live_run(&mut self) {
         let Some(run_id) = self.live_run.take() else {
             return;
@@ -190,12 +170,6 @@ impl Drop for Agent {
     }
 }
 
-// The format gate's verdict on one answer attempt.
-enum Outcome {
-    Done(Answer),
-    Repair(String),
-}
-
 // One completed turn: the final text plus the observed transcript and usage.
 #[derive(Debug)]
 pub struct Response {
@@ -205,17 +179,21 @@ pub struct Response {
 }
 
 impl Response {
-    /// Gate this turn's text against `format`.
-    fn answer(self, format: &Format) -> Outcome {
+    fn answer(self, format: &Format) -> Verdict {
         match format.parse(&self.result) {
-            Ok(Candidate::Valid(value)) => Outcome::Done(Answer {
+            Ok(Candidate::Valid(value)) => Verdict::Done(Answer {
                 value,
                 usage: self.usage,
                 transcript: self.transcript,
             }),
-            Ok(Candidate::Invalid { reason, .. }) | Err(reason) => Outcome::Repair(reason),
+            Ok(Candidate::Invalid { reason, .. }) | Err(reason) => Verdict::Repair(reason),
         }
     }
+}
+
+enum Verdict {
+    Done(Answer),
+    Repair(String),
 }
 
 impl From<TokenUsage> for Usage {
@@ -240,7 +218,7 @@ pub struct Deadlines {
 
 impl Deadlines {
     /// Resolve when a run breaches its inactivity or absolute bound.
-    pub async fn watch(&self, mut activity: watch::Receiver<Instant>) -> anyhow::Error {
+    pub async fn watch(self, mut activity: watch::Receiver<Instant>) -> anyhow::Error {
         let cap = sleep_until(Instant::now() + self.cap);
         tokio::pin!(cap);
         let mut activity_closed = false;

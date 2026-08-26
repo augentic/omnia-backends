@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use omnia_wasi_model::{Format, ToolTurn, Transcript};
 use serde_json::Value;
 
-use crate::model::agent::Response;
 use crate::bridge::SdkMessage;
+use crate::model::agent::Response;
+use crate::model::options::Turn;
 
 const PROMPT_PREVIEW_CHARS: usize = 500;
 const TEXT_PREVIEW_CHARS: usize = 300;
@@ -19,8 +20,8 @@ const TEXT_PREVIEW_CHARS: usize = 300;
 const THINKING_PREVIEW_CHARS: usize = 2_000;
 
 /// One-line INFO for the completion start.
-pub fn log_completion(model: &str, format: &Format, prompt_len: usize, mcp_servers: &[&str]) {
-    let format_name = match format {
+pub fn log_completion(turn: &Turn) {
+    let format_name = match &turn.format {
         Format::Text => "text",
         Format::Json => "json",
         Format::Schema(spec) => {
@@ -32,7 +33,14 @@ pub fn log_completion(model: &str, format: &Format, prompt_len: usize, mcp_serve
             "schema"
         }
     };
-    tracing::info!(model, format = format_name, prompt_len, ?mcp_servers, "completion");
+    let mcp_servers: Vec<&str> = turn.options.mcp_servers.keys().map(String::as_str).collect();
+    tracing::info!(
+        model = %turn.options.model.id,
+        format = format_name,
+        prompt_len = turn.prompt.len(),
+        ?mcp_servers,
+        "completion"
+    );
 }
 
 /// One-line DEBUG for the text sent on one turn.

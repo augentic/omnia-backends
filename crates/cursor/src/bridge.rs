@@ -9,15 +9,19 @@ pub mod types;
 
 use std::net::IpAddr;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
+use omnia_wasi_model::ToolHost;
 use serde::Deserialize;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, BufReader, Lines};
 use tokio::process::{Child, Command};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use transport::Transport;
 use types::{Empty, GetVersionResponse, ShutdownRequest};
+
+use crate::endpoint::{Attached, Endpoint};
 
 const BRIDGE_BIN: &str = "cursor-sdk-bridge";
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,19 +33,21 @@ const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "G
 pub struct Bridge {
     transport: Transport,
     _shutdown: oneshot::Sender<()>,
+    endpoint: Endpoint,
 }
 
 impl Bridge {
-    /// Spawn the bridge, complete the ready-line handshake, and verify the
-    /// endpoint with `Ping` + `GetVersion`.
+    /// Bind the tool-callback endpoint, spawn the bridge against it, complete
+    /// the ready-line handshake, and verify it with `Ping` + `GetVersion`.
     ///
     /// # Errors
     ///
-    /// Returns an error when the executable is missing, the process exits or
-    /// stays silent through the startup timeout, the discovery line is
-    /// malformed, or the endpoint does not speak `sdk.v1`.
-    pub async fn spawn(callback_url: &str, callback_token: &str) -> Result<Self> {
-        // let bin = std::env::var_os(BRIDGE_BIN_ENV).unwrap_or_else(|| OsString::from(BRIDGE_BIN));
+    /// Returns an error when the loopback bind fails, the executable is
+    /// missing, the process exits or stays silent through the startup
+    /// timeout, the discovery line is malformed, or the endpoint does not
+    /// speak `sdk.v1`.
+    pub async fn spawn() -> Result<Self> {
+        let endpoint = Endpoint::bind().await?;
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-state-")
             .tempdir()
@@ -56,8 +62,8 @@ impl Bridge {
             .env("CURSOR_SDK_CLIENT_LANGUAGE", "rust")
             .arg("--state-root")
             .arg(state_root.path())
-            .args(["--tool-callback-url", callback_url])
-            .args(["--tool-callback-auth-token", callback_token]);
+            .args(["--tool-callback-url", endpoint.url()])
+            .args(["--tool-callback-auth-token", endpoint.token()]);
         for var in GIT_IDENTITY {
             command.env_remove(var);
         }
@@ -98,11 +104,20 @@ impl Bridge {
         Ok(Self {
             transport,
             _shutdown: shutdown,
+            endpoint,
         })
     }
 
     pub const fn transport(&self) -> &Transport {
         &self.transport
+    }
+
+    /// Route callbacks for `agent_id` into `tool_host` until the returned
+    /// guard drops.
+    pub fn attach(
+        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
+    ) -> Attached {
+        self.endpoint.attach(agent_id, tool_host, abort)
     }
 }
 

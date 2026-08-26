@@ -465,6 +465,7 @@ mod tests {
 
     /// Deterministic stand-in for `BoundToolHost`: an in-memory file map and
     /// root listing, with a `call_tool` echo that proves session routing.
+    #[derive(Debug)]
     struct WorkspaceStub {
         files: HashMap<String, Vec<u8>>,
         entries: Vec<DirEntry>,

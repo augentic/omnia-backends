@@ -48,7 +48,7 @@ struct AgentOutput {
 
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
-        let state = Arc::clone(&self.state);
+        let bridge = Arc::clone(&self.bridge);
         let deadlines = self.deadlines;
         let default_model = self.model.clone();
 
@@ -80,7 +80,7 @@ impl WasiModelCtx for Client {
             let prompt = with_mcp_hint(&mcp_servers, request.to_string());
             log_completion(&model_id, &format, prompt.len(), &mcp_names);
 
-            let transport = state.bridge.transport().clone();
+            let transport = bridge.transport().clone();
             let created: CreateAgentResponse = transport
                 .unary("SdkAgentService/CreateAgent", &CreateAgentRequest { options })
                 .await?;
@@ -92,7 +92,7 @@ impl WasiModelCtx for Client {
             };
 
             let (abort_tx, mut abort_rx) = mpsc::unbounded_channel();
-            let _registration = state.registry.register(created.agent_id, tool_host, abort_tx);
+            let _attached = bridge.attach(created.agent_id, tool_host, abort_tx);
 
             let output = agent.send(&prompt, &mut abort_rx).await?;
             output.log(1);

@@ -2,7 +2,7 @@
 #![allow(clippy::multiple_crate_versions)]
 
 mod bridge;
-mod callback;
+mod endpoint;
 mod model;
 
 use std::sync::Arc;
@@ -13,7 +13,6 @@ use omnia::Backend;
 use tracing::instrument;
 
 use crate::bridge::Bridge;
-use crate::callback::{Endpoint, Registry};
 
 #[derive(Clone, Copy, Debug)]
 struct Deadlines {
@@ -26,16 +25,7 @@ struct Deadlines {
 pub struct Client {
     deadlines: Deadlines,
     model: Option<String>,
-    state: Arc<State>,
-}
-
-// Connect-scoped state shared by every completion.
-#[derive(Debug)]
-struct State {
-    bridge: Bridge,
-    registry: Arc<Registry>,
-    /// Held for its lifetime: dropping it stops serving.
-    _endpoint: Endpoint,
+    bridge: Arc<Bridge>,
 }
 
 impl Backend for Client {
@@ -48,21 +38,13 @@ impl Backend for Client {
             "CURSOR_API_KEY must be set for the cursor backend"
         );
 
-        let registry = Arc::new(Registry::default());
-        let endpoint = Endpoint::spawn(Arc::clone(&registry)).await?;
-        let bridge = Bridge::spawn(endpoint.url(), endpoint.token()).await?;
-
         Ok(Self {
             deadlines: Deadlines {
                 inactivity: Duration::from_secs(options.inactivity_secs),
                 cap: Duration::from_secs(options.timeout_secs),
             },
             model: options.model.filter(|id| !id.trim().is_empty()),
-            state: Arc::new(State {
-                bridge,
-                registry,
-                _endpoint: endpoint,
-            }),
+            bridge: Arc::new(Bridge::spawn().await?),
         })
     }
 }

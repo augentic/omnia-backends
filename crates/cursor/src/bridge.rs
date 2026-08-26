@@ -5,8 +5,8 @@
 //! and handshaken by scanning stderr for the `cursor-sdk-bridge ready ` line.
 
 mod discovery;
-pub mod rpc;
-pub mod types;
+mod messages;
+mod rpc;
 
 use std::process::Stdio;
 use std::sync::Arc;
@@ -14,8 +14,12 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use discovery::BRIDGE_BIN;
+pub use messages::{
+    AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
+    RunStatus, RunStreamMessage, RunStreamResult, SdkMessage, TokenUsage, ToolList,
+};
 use omnia_wasi_model::ToolHost;
-use rpc::Rpc;
+pub use rpc::Rpc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader, Lines};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};

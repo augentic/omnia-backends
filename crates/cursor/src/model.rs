@@ -28,8 +28,8 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
 
-use crate::bridge::rpc::Rpc;
-use crate::bridge::types::{
+use crate::bridge::Rpc;
+use crate::bridge::{
     AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
     RunStatus, RunStreamMessage, RunStreamResult, TokenUsage, ToolList,
 };
@@ -436,8 +436,6 @@ impl Deadlines {
     }
 }
 
-// The lent/private workspace wire distinction and deadline logic (CI floor).
-// Tool/MCP/model mapping is accepted by `tests/live.rs`.
 #[cfg(test)]
 mod tests {
     use omnia_wasi_model::{Format, Grants, Message, Request, Role};

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use omnia_wasi_model::{ToolTurn, Transcript};
 use serde_json::Value;
 
-use crate::bridge::types::SdkMessage;
+use crate::bridge::SdkMessage;
 
 pub const PROMPT_PREVIEW_CHARS: usize = 500;
 const TEXT_PREVIEW_CHARS: usize = 300;
@@ -265,7 +265,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{EventLog, ThinkingBuf, preview, single_line};
-    use crate::bridge::types::SdkMessage;
+    use crate::bridge::SdkMessage;
 
     fn observe_all(events: &[Value]) -> EventLog {
         let mut log = EventLog::default();

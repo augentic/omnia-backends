@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::types::{
+use super::messages::{
     AgentOptions, CancelRunRequest, CreateAgentRequest, CreateAgentResponse, DeleteAgentRequest,
     Empty, GetVersionResponse, SendRequest, ShutdownRequest, UserMessage,
 };

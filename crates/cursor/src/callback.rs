@@ -84,20 +84,20 @@ impl Drop for Registration {
     }
 }
 
-/// The bound loopback server; dropping it stops serving.
-pub struct CallbackServer {
+/// The bound loopback endpoint; dropping it stops serving.
+pub struct Endpoint {
     url: String,
     token: String,
     server: tokio::task::JoinHandle<()>,
 }
 
-impl std::fmt::Debug for CallbackServer {
+impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CallbackServer").field("url", &self.url).finish_non_exhaustive()
+        f.debug_struct("Endpoint").field("url", &self.url).finish_non_exhaustive()
     }
 }
 
-impl Drop for CallbackServer {
+impl Drop for Endpoint {
     fn drop(&mut self) {
         self.server.abort();
     }
@@ -108,7 +108,7 @@ struct ServerState {
     bearer: String,
 }
 
-impl CallbackServer {
+impl Endpoint {
     /// Bind `127.0.0.1:0` with a fresh bearer token and start serving.
     ///
     /// # Errors
@@ -311,9 +311,9 @@ fn connect_error(status: StatusCode, code: &str, message: &str) -> Response {
         .into_response()
 }
 
-// Deliberate unit tests: result-wrapping policy plus the callback server
-// driven in-process over real HTTP in both codecs and framings — our server,
-// not a mocked SDK. `tests/live.rs` proves a real bridge drives it.
+// Deliberate unit tests: result-wrapping policy plus the callback endpoint
+// driven in-process over real HTTP in both codecs and framings — our
+// endpoint, not a mocked SDK. `tests/live.rs` proves a real bridge drives it.
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -326,7 +326,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::proto::{CallCustomToolRequest, CallCustomToolResponse, value_to_struct};
-    use super::{CallbackServer, Registry, wrap_output};
+    use super::{Endpoint, Registry, wrap_output};
 
     #[test]
     fn wrap_output_policy() {
@@ -367,18 +367,18 @@ mod tests {
     }
 
     struct Harness {
-        server: CallbackServer,
+        endpoint: Endpoint,
         registration: super::Registration,
         abort_rx: mpsc::UnboundedReceiver<String>,
     }
 
     async fn serve_one_agent(agent_id: &str) -> Harness {
         let registry = Arc::new(Registry::default());
-        let server = CallbackServer::spawn(Arc::clone(&registry)).await.expect("spawn server");
+        let endpoint = Endpoint::spawn(Arc::clone(&registry)).await.expect("spawn endpoint");
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let registration = registry.register(agent_id.to_owned(), Arc::new(SessionStub), abort_tx);
         Harness {
-            server,
+            endpoint,
             registration,
             abort_rx,
         }
@@ -423,8 +423,8 @@ mod tests {
         out
     }
 
-    fn bearer(server: &CallbackServer) -> String {
-        format!("Authorization: Bearer {}\r\n", server.token())
+    fn bearer(endpoint: &Endpoint) -> String {
+        format!("Authorization: Bearer {}\r\n", endpoint.token())
     }
 
     #[tokio::test]
@@ -434,10 +434,11 @@ mod tests {
             json!({ "toolName": "lookup", "args": { "q": "x" }, "agentId": "agent-1" }).to_string();
         let headers = format!(
             "{}Content-Type: application/json\r\nContent-Length: {}\r\n",
-            bearer(&harness.server),
+            bearer(&harness.endpoint),
             body.len()
         );
-        let (status, _, payload) = exchange(harness.server.url(), &headers, body.as_bytes()).await;
+        let (status, _, payload) =
+            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 200);
         let response: Value = serde_json::from_slice(&payload).expect("json response");
         assert_eq!(response["result"]["echo"][0], "lookup");
@@ -459,9 +460,9 @@ mod tests {
 
         let headers = format!(
             "{}Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n",
-            bearer(&harness.server)
+            bearer(&harness.endpoint)
         );
-        let (status, _, payload) = exchange(harness.server.url(), &headers, &body).await;
+        let (status, _, payload) = exchange(harness.endpoint.url(), &headers, &body).await;
         assert_eq!(status, 200);
         let response: Value = serde_json::from_slice(&payload).expect("json response");
         assert_eq!(response["result"]["echo"][0], "lookup");
@@ -480,10 +481,10 @@ mod tests {
         let body = request.encode_to_vec();
         let headers = format!(
             "{}Content-Type: application/proto\r\nContent-Length: {}\r\n",
-            bearer(&harness.server),
+            bearer(&harness.endpoint),
             body.len()
         );
-        let (status, head, payload) = exchange(harness.server.url(), &headers, &body).await;
+        let (status, head, payload) = exchange(harness.endpoint.url(), &headers, &body).await;
         assert_eq!(status, 200);
         assert!(head.to_ascii_lowercase().contains("content-type: application/proto"), "{head}");
         let response = CallCustomToolResponse::decode(payload.as_slice()).expect("proto response");
@@ -498,10 +499,11 @@ mod tests {
             json!({ "toolName": "repairable", "args": {}, "agentId": "agent-1" }).to_string();
         let headers = format!(
             "{}Content-Type: application/json\r\nContent-Length: {}\r\n",
-            bearer(&harness.server),
+            bearer(&harness.endpoint),
             body.len()
         );
-        let (status, _, payload) = exchange(harness.server.url(), &headers, body.as_bytes()).await;
+        let (status, _, payload) =
+            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 200, "a repairable failure is a successful callback");
         let response: Value = serde_json::from_slice(&payload).expect("json response");
         assert_eq!(response["result"]["error"], "bad arguments");
@@ -513,10 +515,11 @@ mod tests {
         let body = json!({ "toolName": "hard", "args": {}, "agentId": "agent-1" }).to_string();
         let headers = format!(
             "{}Content-Type: application/json\r\nContent-Length: {}\r\n",
-            bearer(&harness.server),
+            bearer(&harness.endpoint),
             body.len()
         );
-        let (status, _, payload) = exchange(harness.server.url(), &headers, body.as_bytes()).await;
+        let (status, _, payload) =
+            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 409);
         let response: Value = serde_json::from_slice(&payload).expect("connect error json");
         assert_eq!(response["code"], "aborted");
@@ -530,10 +533,11 @@ mod tests {
         let body = json!({ "toolName": "lookup", "args": {}, "agentId": "ghost" }).to_string();
         let headers = format!(
             "{}Content-Type: application/json\r\nContent-Length: {}\r\n",
-            bearer(&harness.server),
+            bearer(&harness.endpoint),
             body.len()
         );
-        let (status, _, payload) = exchange(harness.server.url(), &headers, body.as_bytes()).await;
+        let (status, _, payload) =
+            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 404);
         let response: Value = serde_json::from_slice(&payload).expect("connect error json");
         assert_eq!(response["code"], "not_found");
@@ -547,7 +551,8 @@ mod tests {
             "Authorization: Bearer wrong\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
             body.len()
         );
-        let (status, _, payload) = exchange(harness.server.url(), &headers, body.as_bytes()).await;
+        let (status, _, payload) =
+            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 401);
         let response: Value = serde_json::from_slice(&payload).expect("connect error json");
         assert_eq!(response["code"], "unauthenticated");
@@ -556,8 +561,8 @@ mod tests {
     #[tokio::test]
     async fn dropped_registration_unregisters() {
         let harness = serve_one_agent("agent-1").await;
-        let url = harness.server.url().to_owned();
-        let token = bearer(&harness.server);
+        let url = harness.endpoint.url().to_owned();
+        let token = bearer(&harness.endpoint);
         drop(harness.registration);
 
         let body = json!({ "toolName": "lookup", "args": {}, "agentId": "agent-1" }).to_string();

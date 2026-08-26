@@ -13,7 +13,7 @@ loop and edits the lent working tree directly, then returns a validated
 answer through the same boundary as `omnia-genai`. Guest-declared function
 tools round-trip through the session exactly as genai's do: they are declared
 as SDK custom tools at `CreateAgent`, and when the agent calls one the bridge
-POSTs `CallCustomTool` to this crate's loopback callback server, which routes
+POSTs `CallCustomTool` to this crate's loopback callback endpoint, which routes
 it into the completion's session via `ToolHost::call_tool` — so the guest's
 tool closure answers, under the host's declared-name check, budget, size cap,
 and per-call timeout. `Tool::Mcp` grants pass inline as the agent's

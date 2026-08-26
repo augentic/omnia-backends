@@ -1,12 +1,8 @@
-//! Spawn and manage one `cursor-sdk-bridge` child process.
+//! Spawn and manage a `cursor-sdk-bridge` process.
 //!
-//! The bridge is located via `CURSOR_SDK_BRIDGE_BIN` (else `PATH`), spawned
+//! The bridge is located in the `PATH`, spawned
 //! with the tool-callback registration flags and a client-owned state root,
 //! and handshaken by scanning stderr for the `cursor-sdk-bridge ready ` line.
-//! The discovery line can carry an inline auth token on older bridges, so it
-//! is never logged; the bearer token is read from `authTokenFile`. A
-//! supervisor task owns the child and the state root; dropping `Bridge`
-//! closes a oneshot that asks it for a graceful `Shutdown`, then kill.
 
 pub mod transport;
 pub mod types;

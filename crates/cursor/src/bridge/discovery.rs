@@ -51,10 +51,11 @@ enum DiscoveryProtocol {
 impl Discovery {
     /// Scan stderr for the ready line and parse its JSON payload.
     pub async fn scan(lines: &mut Lines<impl AsyncBufRead + Unpin>) -> Result<Self> {
+        let ready_prefix = format!("{BRIDGE_BIN} ready ");
         tokio::time::timeout(READY_TIMEOUT, async {
             let mut diagnostics = Vec::new();
             while let Some(line) = lines.next_line().await.context("reading bridge stderr")? {
-                if let Some(json) = line.strip_prefix(&format!("{BRIDGE_BIN} ready ")) {
+                if let Some(json) = line.strip_prefix(&ready_prefix) {
                     return Self::parse(json);
                 }
                 tracing::debug!(line = %line, "bridge stderr");
@@ -78,13 +79,13 @@ impl Discovery {
     }
 
     pub async fn into_transport(self) -> Result<Transport> {
-        let endpoint = self.endpoint()?;
+        let base_url = self.base_url()?;
         let token = self.token().await?;
-        Ok(Transport::new(endpoint, &token))
+        Ok(Transport::new(base_url, &token))
     }
 
     /// Prefer `url`; fall back to `host` + `port` (bracketing `IPv6` hosts).
-    fn endpoint(&self) -> Result<String> {
+    fn base_url(&self) -> Result<String> {
         if let Some(url) = &self.url {
             return Ok(url.trim_end_matches('/').to_owned());
         }
@@ -125,7 +126,7 @@ mod tests {
     #[test]
     fn discovery_parses_the_documented_payload() {
         let discovery = Discovery::parse(READY).expect("the documented ready payload parses");
-        assert_eq!(discovery.endpoint().expect("url"), "http://127.0.0.1:49152");
+        assert_eq!(discovery.base_url().expect("url"), "http://127.0.0.1:49152");
         assert_eq!(discovery.auth_token_file.as_deref(), Some("/tmp/auth-token"));
     }
 
@@ -151,12 +152,12 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_falls_back_to_host_and_port() {
+    fn base_url_falls_back_to_host_and_port() {
         let discovery = Discovery::parse(
             r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"::1","port":9}"#,
         )
         .expect("host/port payload parses");
-        assert_eq!(discovery.endpoint().expect("endpoint"), "http://[::1]:9");
+        assert_eq!(discovery.base_url().expect("base url"), "http://[::1]:9");
     }
 
     #[tokio::test]

@@ -25,7 +25,8 @@ fn single_line(text: &str) -> String {
     )
 }
 
-pub fn truncate(text: &str, max: usize) -> String {
+/// The first `max` characters of `text` on one line, ellipsized when longer.
+pub fn preview(text: &str, max: usize) -> String {
     let collapsed = single_line(text);
     let mut chars = collapsed.chars();
     let head: String = chars.by_ref().take(max).collect();
@@ -55,10 +56,10 @@ pub fn is_noisy_tool(name: &str) -> bool {
 fn args_summary(args: &Value) -> String {
     for key in ["path", "url", "query"] {
         if let Some(value) = args.get(key).and_then(Value::as_str) {
-            return truncate(value, TEXT_PREVIEW_CHARS);
+            return preview(value, TEXT_PREVIEW_CHARS);
         }
     }
-    truncate(&args.to_string(), TEXT_PREVIEW_CHARS)
+    preview(&args.to_string(), TEXT_PREVIEW_CHARS)
 }
 
 /// Coalesces thinking deltas into turn-sized blocks for DEBUG logs.
@@ -66,7 +67,9 @@ fn args_summary(args: &Value) -> String {
 struct ThinkingBuf(String);
 
 impl ThinkingBuf {
-    fn event(&mut self, subtype: Option<&str>, text: &str) -> Option<String> {
+    /// Absorb one thinking event; yields a block once it completes or the
+    /// buffer overflows.
+    fn push(&mut self, subtype: Option<&str>, text: &str) -> Option<String> {
         match subtype {
             Some("completed") => self.take(),
             Some("delta") | None => {
@@ -95,7 +98,7 @@ impl ThinkingBuf {
 }
 
 fn log_thinking(text: &str) {
-    tracing::debug!(text = %truncate(text, THINKING_PREVIEW_CHARS), "thinking");
+    tracing::debug!(text = %preview(text, THINKING_PREVIEW_CHARS), "thinking");
 }
 
 /// The first string found under any of `keys`, tolerating both `snake_case`
@@ -104,11 +107,17 @@ fn string_field<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
 }
 
+/// A started tool call awaiting its completion event.
+struct PendingCall {
+    tool: String,
+    args: Value,
+}
+
 #[derive(Default)]
 pub struct EventLog {
     run_id: Option<String>,
     status_message: Option<String>,
-    pending_tools: HashMap<String, (String, Value)>,
+    pending_tools: HashMap<String, PendingCall>,
     turns: Vec<ToolTurn>,
     thinking: ThinkingBuf,
 }
@@ -125,13 +134,13 @@ impl EventLog {
                 self.flush_thinking();
                 let text = assistant_text(payload);
                 if !text.is_empty() {
-                    tracing::debug!(text = %truncate(&text, TEXT_PREVIEW_CHARS), "assistant text");
+                    tracing::debug!(text = %preview(&text, TEXT_PREVIEW_CHARS), "assistant text");
                 }
             }
             "thinking" => {
                 let subtype = string_field(payload, &["subtype"]);
                 let text = string_field(payload, &["text"]).unwrap_or_default();
-                if let Some(block) = self.thinking.event(subtype, text) {
+                if let Some(block) = self.thinking.push(subtype, text) {
                     log_thinking(&block);
                 }
             }
@@ -176,13 +185,13 @@ impl EventLog {
 
         match phase {
             Some("started" | "running") => {
-                if let (Some(call_id), Some((tool, args))) =
+                if let (Some(call_id), Some(pending)) =
                     (call_id, tool_call.and_then(tool_call_identity))
                 {
-                    if is_noisy_tool(&tool) {
-                        tracing::trace!(%call_id, %tool, "tool call started");
+                    if is_noisy_tool(&pending.tool) {
+                        tracing::trace!(%call_id, tool = %pending.tool, "tool call started");
                     }
-                    self.pending_tools.insert(call_id.to_owned(), (tool, args));
+                    self.pending_tools.insert(call_id.to_owned(), pending);
                 }
             }
             Some("completed" | "error") => {
@@ -192,11 +201,14 @@ impl EventLog {
                 let Some(tool_call) = tool_call else {
                     return;
                 };
-                let (tool, args) = self
+                let PendingCall { tool, args } = self
                     .pending_tools
                     .remove(call_id)
                     .or_else(|| tool_call_identity(tool_call))
-                    .unwrap_or_else(|| ("unknown".to_owned(), Value::Null));
+                    .unwrap_or_else(|| PendingCall {
+                        tool: "unknown".to_owned(),
+                        args: Value::Null,
+                    });
 
                 if is_noisy_tool(&tool) {
                     tracing::trace!(%call_id, %tool, "tool call completed");
@@ -233,11 +245,14 @@ fn assistant_text(payload: &Value) -> String {
     parts.iter().filter_map(|part| part.get("text").and_then(Value::as_str)).collect()
 }
 
-fn tool_call_identity(tool_call: &Value) -> Option<(String, Value)> {
+fn tool_call_identity(tool_call: &Value) -> Option<PendingCall> {
     tool_call.as_object()?.iter().find_map(|(key, value)| {
         let tool = key.strip_suffix("ToolCall")?;
         let args = value.get("args").cloned().unwrap_or_else(|| value.clone());
-        Some((tool.to_owned(), args))
+        Some(PendingCall {
+            tool: tool.to_owned(),
+            args,
+        })
     })
 }
 
@@ -249,7 +264,7 @@ fn tool_call_identity(tool_call: &Value) -> Option<(String, Value)> {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{EventLog, ThinkingBuf, single_line, truncate};
+    use super::{EventLog, ThinkingBuf, preview, single_line};
     use crate::bridge::types::SdkMessage;
 
     fn observe_all(events: &[Value]) -> EventLog {
@@ -274,18 +289,18 @@ mod tests {
     }
 
     #[test]
-    fn truncate_appends_ellipsis() {
-        assert_eq!(truncate("abcdef", 3), "abc…");
-        assert_eq!(truncate("ab", 3), "ab");
+    fn preview_appends_ellipsis() {
+        assert_eq!(preview("abcdef", 3), "abc…");
+        assert_eq!(preview("ab", 3), "ab");
     }
 
     #[test]
     fn thinking_buf_coalesces_deltas() {
         let mut buf = ThinkingBuf::default();
-        assert!(buf.event(Some("delta"), "line 22, the canc").is_none());
-        assert!(buf.event(Some("delta"), "ellation constraint").is_none());
+        assert!(buf.push(Some("delta"), "line 22, the canc").is_none());
+        assert!(buf.push(Some("delta"), "ellation constraint").is_none());
         assert_eq!(
-            buf.event(Some("completed"), "").as_deref(),
+            buf.push(Some("completed"), "").as_deref(),
             Some("line 22, the cancellation constraint")
         );
         assert!(buf.take().is_none(), "completed clears the buffer");
@@ -295,7 +310,7 @@ mod tests {
     fn thinking_buf_extended_is_one_shot() {
         let mut buf = ThinkingBuf::default();
         assert_eq!(
-            buf.event(Some("extended"), "weighing the verdict").as_deref(),
+            buf.push(Some("extended"), "weighing the verdict").as_deref(),
             Some("weighing the verdict")
         );
     }

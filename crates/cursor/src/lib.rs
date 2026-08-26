@@ -49,6 +49,8 @@ impl Backend for Client {
     }
 }
 
+// A named module solely to scope the allow: the `FromEnv` derive expands to
+// an undocumented public builder that `missing_docs` would otherwise flag.
 #[allow(missing_docs)]
 mod config {
     use fromenv::FromEnv;

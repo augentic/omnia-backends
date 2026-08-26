@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, Result, bail};
-use events::{EventLog, PROMPT_PREVIEW_CHARS, is_noisy_tool, truncate};
+use events::{EventLog, PROMPT_PREVIEW_CHARS, is_noisy_tool, preview};
 use omnia_wasi_model::{
     Answer, Candidate, Format, FutureResult, Mcp, Request, Tool, ToolHost, Transcript, Usage,
     WasiModelCtx,
@@ -141,7 +141,7 @@ impl Agent {
         };
         tracing::debug!(
             prompt_len = text.len(),
-            preview = %truncate(text, PROMPT_PREVIEW_CHARS),
+            preview = %preview(text, PROMPT_PREVIEW_CHARS),
             "send"
         );
         let mut stream = self.transport.server_stream("SdkAgentService/Send", &request).await?;
@@ -211,7 +211,7 @@ impl Agent {
                 .filter(|code| !code.is_empty())
                 .or_else(|| log.status_message().map(ToOwned::to_owned))
                 .unwrap_or_else(|| "<no detail>".to_owned());
-            bail!("cursor run {}: {detail}", outcome.status.describe());
+            bail!("cursor run {}: {detail}", outcome.status);
         }
         let result = outcome.result.unwrap_or_default();
         Ok(AgentOutput {
@@ -287,7 +287,7 @@ impl Workspace {
         }
     }
 
-    const fn lent(&self) -> bool {
+    const fn is_lent(&self) -> bool {
         matches!(self, Self::Lent(_))
     }
 }
@@ -331,7 +331,7 @@ fn agent_options(
             cwd: vec![workspace.path().display().to_string()],
             // A lent tree's own project settings apply (matching the old
             // spawned CLI's discovery); nothing is read from the host user.
-            setting_sources: if workspace.lent() {
+            setting_sources: if workspace.is_lent() {
                 vec!["SETTING_SOURCE_PROJECT".to_owned()]
             } else {
                 Vec::new()
@@ -341,7 +341,7 @@ fn agent_options(
         mcp_servers,
         // With a lent tree the agent keeps the default built-in toolset; a
         // references-only run explicitly disables every built-in tool.
-        tools: if workspace.lent() { None } else { Some(ToolList { names: Vec::new() }) },
+        tools: if workspace.is_lent() { None } else { Some(ToolList { names: Vec::new() }) },
     })
 }
 
@@ -409,7 +409,7 @@ fn log_completion(model: &str, format: &Format, prompt_len: usize, mcp_servers: 
         Format::Schema(spec) => {
             tracing::trace!(
                 schema_name = %spec.name,
-                schema = %truncate(&spec.schema, PROMPT_PREVIEW_CHARS),
+                schema = %preview(&spec.schema, PROMPT_PREVIEW_CHARS),
                 "completion schema"
             );
             "schema"

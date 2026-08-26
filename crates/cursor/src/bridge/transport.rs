@@ -50,22 +50,13 @@ impl Transport {
         &self, rpc: &str, request: &Req,
     ) -> Result<Resp> {
         let body = serde_json::to_vec(request).with_context(|| format!("encoding `{rpc}`"))?;
-        let response = self
-            .client
-            .request(self.post(rpc, "application/json", body)?)
-            .await
-            .with_context(|| format!("bridge RPC `{rpc}`"))?;
-
-        let status = response.status();
+        let response = self.send(rpc, "application/json", body).await?;
         let bytes = response
             .into_body()
             .collect()
             .await
             .with_context(|| format!("reading `{rpc}` response"))?
             .to_bytes();
-        if !status.is_success() {
-            return Err(connect_error(rpc, status, &bytes));
-        }
         serde_json::from_slice(&bytes).with_context(|| format!("decoding `{rpc}` response"))
     }
 
@@ -75,27 +66,35 @@ impl Transport {
         &self, rpc: &str, request: &Req,
     ) -> Result<FrameStream> {
         let payload = serde_json::to_vec(request).with_context(|| format!("encoding `{rpc}`"))?;
-        let response = self
-            .client
-            .request(self.post(rpc, "application/connect+json", envelope(&payload))?)
-            .await
-            .with_context(|| format!("bridge RPC `{rpc}`"))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let bytes = response
-                .into_body()
-                .collect()
-                .await
-                .with_context(|| format!("reading `{rpc}` response"))?
-                .to_bytes();
-            return Err(connect_error(rpc, status, &bytes));
-        }
+        let response = self.send(rpc, "application/connect+json", envelope(&payload)).await?;
         Ok(FrameStream {
             rpc: rpc.to_owned(),
             body: response.into_body(),
             buffer: BytesMut::new(),
         })
+    }
+
+    /// POST the body and map a non-success status onto a Connect error.
+    async fn send(
+        &self, rpc: &str, content_type: &str, body: Vec<u8>,
+    ) -> Result<http::Response<Incoming>> {
+        let response = self
+            .client
+            .request(self.post(rpc, content_type, body)?)
+            .await
+            .with_context(|| format!("bridge RPC `{rpc}`"))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .with_context(|| format!("reading `{rpc}` response"))?
+            .to_bytes();
+        Err(connect_error(rpc, status, &bytes))
     }
 
     fn post(
@@ -112,9 +111,11 @@ impl Transport {
 
 /// Wrap one message in the Connect streaming envelope.
 fn envelope(payload: &[u8]) -> Vec<u8> {
+    // A wrong length prefix would corrupt the stream; fail loudly instead.
+    let length = u32::try_from(payload.len()).expect("payload exceeds the Connect frame limit");
     let mut body = Vec::with_capacity(payload.len() + 5);
     body.push(0);
-    body.extend_from_slice(&u32::try_from(payload.len()).unwrap_or(u32::MAX).to_be_bytes());
+    body.extend_from_slice(&length.to_be_bytes());
     body.extend_from_slice(payload);
     body
 }

@@ -4,6 +4,7 @@
 //! additively, so every deserialized shape ignores unknown fields.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -231,9 +232,9 @@ pub enum RunStatus {
     Unknown,
 }
 
-impl RunStatus {
-    pub const fn describe(self) -> &'static str {
-        match self {
+impl fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
             Self::Unspecified => "unspecified",
             Self::Creating => "creating",
             Self::Running => "running",
@@ -242,7 +243,7 @@ impl RunStatus {
             Self::Cancelled => "cancelled",
             Self::Expired => "expired",
             Self::Unknown => "unknown",
-        }
+        })
     }
 }
 

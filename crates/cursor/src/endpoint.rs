@@ -13,6 +13,7 @@ mod proto;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
@@ -69,6 +70,9 @@ impl Endpoint {
                         Ok(conn) => conn,
                         Err(error) => {
                             tracing::warn!(%error, "tool-callback accept error");
+                            // A persistent failure (e.g. fd exhaustion) must
+                            // not turn this loop into a busy spin.
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                             continue;
                         }
                     };
@@ -123,21 +127,37 @@ impl Drop for Endpoint {
     }
 }
 
-/// Live completions by `agent_id`: the session's tool host plus the abort
-/// signal that ends the completion on a hard (non-repairable) tool failure.
+/// Live completions by `agent_id`.
 #[derive(Debug, Default)]
 struct Sessions {
-    entries: Mutex<HashMap<String, Entry>>,
+    entries: Mutex<HashMap<String, Session>>,
 }
 
 impl Sessions {
-    fn lookup(&self, agent_id: &str) -> Option<Entry> {
+    fn insert(&self, agent_id: String, session: Session) {
+        self.lock().insert(agent_id, session);
+    }
+
+    fn remove(&self, agent_id: &str) {
+        self.lock().remove(agent_id);
+    }
+
+    fn lookup(&self, agent_id: &str) -> Option<Session> {
         self.lock().get(agent_id).cloned()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// One live completion's callback route: the session's tool host plus the
+/// abort signal that ends the completion on a hard (non-repairable) tool
+/// failure.
+#[derive(Clone, Debug)]
+struct Session {
+    tool_host: Arc<dyn ToolHost>,
+    abort: mpsc::UnboundedSender<String>,
 }
 
 /// Detaches its agent on drop.
@@ -149,7 +169,7 @@ pub struct Attached {
 
 impl Drop for Attached {
     fn drop(&mut self) {
-        self.handler.sessions.lock().remove(&self.agent_id);
+        self.handler.sessions.remove(&self.agent_id);
     }
 }
 
@@ -164,7 +184,7 @@ impl Handler {
         self: &Arc<Self>, agent_id: String, tool_host: Arc<dyn ToolHost>,
         abort: mpsc::UnboundedSender<String>,
     ) -> Attached {
-        self.sessions.lock().insert(agent_id.clone(), Entry { tool_host, abort });
+        self.sessions.insert(agent_id.clone(), Session { tool_host, abort });
         Attached {
             handler: Arc::clone(self),
             agent_id,
@@ -178,6 +198,10 @@ impl Handler {
         if request.uri().path() != PATH {
             return connect_error(StatusCode::NOT_FOUND, "not_found", "unknown callback path");
         }
+        // Authenticate on headers alone, before buffering any body bytes.
+        if !self.authorized(request.headers()) {
+            return connect_error(StatusCode::UNAUTHORIZED, "unauthenticated", "bad bearer token");
+        }
 
         let (parts, body) = request.into_parts();
         let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
@@ -186,7 +210,7 @@ impl Handler {
                 return connect_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "invalid_argument",
-                    "request body exceeds 2 MiB",
+                    &format!("request body exceeds {MAX_BODY_BYTES} bytes"),
                 );
             }
             Err(error) => {
@@ -201,15 +225,13 @@ impl Handler {
         self.call_custom_tool(&parts.headers, body).await
     }
 
-    async fn call_custom_tool(&self, headers: &HeaderMap, body: Bytes) -> Reply {
-        let authorized =
-            headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()).is_some_and(|value| {
-                value.strip_prefix("Bearer ").is_some_and(|token| token == self.token)
-            });
-        if !authorized {
-            return connect_error(StatusCode::UNAUTHORIZED, "unauthenticated", "bad bearer token");
-        }
+    fn authorized(&self, headers: &HeaderMap) -> bool {
+        headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()).is_some_and(|value| {
+            value.strip_prefix("Bearer ").is_some_and(|token| token == self.token)
+        })
+    }
 
+    async fn call_custom_tool(&self, headers: &HeaderMap, body: Bytes) -> Reply {
         let content_type =
             headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
         let codec = if content_type.contains("json") {
@@ -224,7 +246,7 @@ impl Handler {
             );
         };
 
-        let call = match ToolCall::try_from((codec, body.as_ref())) {
+        let call = match ToolCall::decode(codec, &body) {
             Ok(call) => call,
             Err(error) => {
                 return connect_error(
@@ -235,7 +257,7 @@ impl Handler {
             }
         };
 
-        let Some(entry) = self.sessions.lookup(&call.agent_id) else {
+        let Some(session) = self.sessions.lookup(&call.agent_id) else {
             return connect_error(
                 StatusCode::NOT_FOUND,
                 "not_found",
@@ -245,7 +267,7 @@ impl Handler {
 
         let arguments = call.args.to_string();
         tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
-        match entry.tool_host.call_tool(call.tool_name.clone(), arguments).await {
+        match session.tool_host.call_tool(call.tool_name.clone(), arguments).await {
             // The guest tool answered; non-object output is wrapped because the
             // callback result must be a JSON object on the wire.
             Ok(Ok(output)) => respond(codec, &wrap_output(&output)),
@@ -257,17 +279,11 @@ impl Handler {
             // guest-visible reply.
             Err(error) => {
                 let message = format!("tool `{}` failed: {error:#}", call.tool_name);
-                let _ = entry.abort.send(message.clone());
+                let _ = session.abort.send(message.clone());
                 connect_error(StatusCode::CONFLICT, "aborted", &message)
             }
         }
     }
-}
-
-#[derive(Clone, Debug)]
-struct Entry {
-    tool_host: Arc<dyn ToolHost>,
-    abort: mpsc::UnboundedSender<String>,
 }
 
 /// 32 random bytes, hex-encoded, from the OS entropy source.
@@ -295,10 +311,8 @@ struct ToolCall {
     agent_id: String,
 }
 
-impl TryFrom<(Codec, &[u8])> for ToolCall {
-    type Error = anyhow::Error;
-
-    fn try_from((codec, body): (Codec, &[u8])) -> Result<Self> {
+impl ToolCall {
+    fn decode(codec: Codec, body: &[u8]) -> Result<Self> {
         match codec {
             Codec::Json => {
                 #[derive(Default, serde::Deserialize)]

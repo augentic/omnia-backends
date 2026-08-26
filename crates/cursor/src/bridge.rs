@@ -24,6 +24,8 @@ use types::{Empty, GetVersionResponse, ShutdownRequest};
 use crate::endpoint::{Attached, Endpoint};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+// Never inherited: a hook- or rebase-set git identity would point the agent's
+// git at the host process's repository instead of the lent workspace.
 const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
 /// One spawned bridge process plus the Connect transport speaking to it.
@@ -46,7 +48,10 @@ impl Bridge {
     /// speak `sdk.v1`.
     pub async fn spawn() -> Result<Self> {
         let endpoint = Endpoint::bind().await?;
-        let state_root = tempfile::Builder::new().prefix("omnia-cursor-").tempdir()?;
+        let state_root = tempfile::Builder::new()
+            .prefix("omnia-cursor-")
+            .tempdir()
+            .context("creating the bridge state root")?;
 
         let mut command = Command::new(BRIDGE_BIN);
         command
@@ -116,27 +121,26 @@ fn supervise(
     shutdown: oneshot::Receiver<()>,
 ) {
     tokio::spawn(async move {
-        let already_exited = tokio::select! {
-            _ = shutdown => false,
+        tokio::select! {
+            _ = shutdown => {}
             status = child.wait() => {
                 tracing::warn!(?status, "cursor-sdk-bridge exited");
-                true
-            }
-        };
-        if !already_exited {
-            let _ = tokio::time::timeout(
-                SHUTDOWN_TIMEOUT,
-                transport.unary::<_, Empty>(
-                    "SdkBridgeControlService/Shutdown",
-                    &ShutdownRequest { grace_seconds: 1 },
-                ),
-            )
-            .await;
-            if tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait()).await.is_err() {
-                let _ = child.start_kill();
+                return;
             }
         }
-        drop(child);
+        let _ = tokio::time::timeout(
+            SHUTDOWN_TIMEOUT,
+            transport.unary::<_, Empty>(
+                "SdkBridgeControlService/Shutdown",
+                &ShutdownRequest { grace_seconds: 1 },
+            ),
+        )
+        .await;
+        if tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait()).await.is_err() {
+            let _ = child.start_kill();
+        }
+        // Mentioning the state root moves it into the task, so it outlives
+        // the process on every path (early return included).
         drop(state_root);
     });
 }
@@ -145,7 +149,7 @@ fn supervise(
 fn drain_lines(mut lines: Lines<impl AsyncBufRead + Unpin + Send + 'static>, label: &'static str) {
     tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(line = %line, "{label}");
+            tracing::debug!(%line, stream = label, "bridge output");
         }
     });
 }

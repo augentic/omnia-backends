@@ -6,7 +6,7 @@
 use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context as _, Result, bail};
-use omnia_wasi_model::{Transcript, Usage};
+use omnia_wasi_model::{Answer, Candidate, Format, Transcript, Usage};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
@@ -22,10 +22,30 @@ pub struct AgentOutput {
     pub usage: Option<Usage>,
 }
 
+/// The format gate's verdict on one answer attempt.
+pub enum Outcome {
+    Done(Answer),
+    Repair(String),
+}
+
+impl AgentOutput {
+    /// Gate this turn's text against `format`.
+    pub fn answer(self, format: &Format) -> Outcome {
+        match format.parse(&self.result) {
+            Ok(Candidate::Valid(value)) => Outcome::Done(Answer {
+                value,
+                usage: self.usage,
+                transcript: self.transcript,
+            }),
+            Ok(Candidate::Invalid { reason, .. }) | Err(reason) => Outcome::Repair(reason),
+        }
+    }
+}
+
 /// One bridge-managed agent, deleted (and its live run cancelled) on drop.
 pub struct Agent {
     rpc: Rpc,
-    id: String,
+    pub id: String,
     deadlines: Deadlines,
     live_run: LiveRun,
 }

@@ -3,8 +3,8 @@
 //! and the workspace becomes the agent's `cwd`.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::{env, fs};
 
 use anyhow::{Context as _, Result};
 use omnia_wasi_model::{Mcp, Request, Tool};
@@ -60,55 +60,63 @@ impl Workspace {
     }
 }
 
-/// Map the request onto `CreateAgent` options.
-///
-/// # Errors
-///
-/// Returns an error when a function tool's parameters are not valid JSON.
-pub fn agent_options(
-    request: &Request, workspace: &Workspace, default_model: &str, api_key: String,
-) -> Result<AgentOptions> {
-    let mut custom_tools = BTreeMap::new();
-    let mut mcp_servers = BTreeMap::new();
+impl AgentOptions {
+    /// Map the request onto `CreateAgent` options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a function tool's parameters are not valid JSON,
+    /// or when `CURSOR_API_KEY` is unset.
+    pub fn from_request(
+        request: &Request, workspace: &Workspace, default_model: &str,
+    ) -> Result<Self> {
+        let mut custom_tools = BTreeMap::new();
+        let mut mcp_servers = BTreeMap::new();
 
-    // translate guest tools into custom tools
-    for tool in &request.tools {
-        match tool {
-            Tool::Function(function) => {
-                let input_schema: Value =
-                    serde_json::from_str(&function.parameters).with_context(|| {
-                        format!("function tool `{}` parameters is not valid JSON", function.name)
-                    })?;
-                custom_tools.insert(
-                    function.name.clone(),
-                    CustomToolDefinition {
-                        description: (!function.description.is_empty())
-                            .then(|| function.description.clone()),
-                        input_schema,
-                    },
-                );
-            }
+        // translate guest tools into custom tools
+        for tool in &request.tools {
+            match tool {
+                Tool::Function(function) => {
+                    let input_schema: Value = serde_json::from_str(&function.parameters)
+                        .with_context(|| {
+                            format!(
+                                "function tool `{}` parameters is not valid JSON",
+                                function.name
+                            )
+                        })?;
+                    custom_tools.insert(
+                        function.name.clone(),
+                        CustomToolDefinition {
+                            description: (!function.description.is_empty())
+                                .then(|| function.description.clone()),
+                            input_schema,
+                        },
+                    );
+                }
 
-            Tool::Mcp(mcp) => {
-                mcp_servers.insert(mcp.name.clone(), McpServerConfig::streamable_http(&mcp.url));
+                Tool::Mcp(mcp) => {
+                    mcp_servers
+                        .insert(mcp.name.clone(), McpServerConfig::streamable_http(&mcp.url));
+                }
             }
         }
+
+        // request model -> env var -> default model
+        let model = request.model.as_deref().unwrap_or(default_model).to_owned();
+        let api_key = env::var("CURSOR_API_KEY").context("missing CURSOR_API_KEY")?;
+
+        Ok(Self {
+            model: ModelSelection { id: model },
+            api_key,
+            local: LocalAgentOptions {
+                cwd: vec![workspace.path().display().to_string()],
+                source: workspace.is_lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
+                custom_tools,
+            },
+            mcp_servers,
+            tools: if workspace.is_lent() { None } else { Some(ToolList { names: Vec::new() }) },
+        })
     }
-
-    // request model -> env var -> default model
-    let model = request.model.as_deref().unwrap_or(default_model).to_owned();
-
-    Ok(AgentOptions {
-        model: ModelSelection { id: model },
-        api_key,
-        local: LocalAgentOptions {
-            cwd: vec![workspace.path().display().to_string()],
-            source: workspace.is_lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
-            custom_tools,
-        },
-        mcp_servers,
-        tools: if workspace.is_lent() { None } else { Some(ToolList { names: Vec::new() }) },
-    })
 }
 
 /// Prepend a natural-language hint naming the granted MCP servers and any
@@ -141,7 +149,8 @@ pub fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
 mod tests {
     use omnia_wasi_model::{Format, Grants, Message, Request, Role};
 
-    use super::{Workspace, agent_options};
+    use super::Workspace;
+    use crate::bridge::AgentOptions;
 
     fn request() -> Request {
         Request {
@@ -168,11 +177,11 @@ mod tests {
 
     #[test]
     fn workspace_shapes() {
-        let options = agent_options(&request(), &lent(), "auto", "key".into()).unwrap();
+        let options = AgentOptions::from_request(&request(), &lent(), "auto").unwrap();
         assert!(options.tools.is_none());
         assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
 
-        let options = agent_options(&request(), &private(), "auto", "key".into()).unwrap();
+        let options = AgentOptions::from_request(&request(), &private(), "auto").unwrap();
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
         assert!(options.local.source.is_none());
     }

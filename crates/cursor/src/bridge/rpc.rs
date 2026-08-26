@@ -34,7 +34,7 @@ const COMPRESSED: u8 = 0x01;
 /// A cloneable `sdk.v1` client bound to one bridge endpoint and bearer token.
 #[derive(Clone)]
 pub struct Rpc {
-    client: HyperClient<HttpConnector, Full<Bytes>>,
+    hyper: HyperClient<HttpConnector, Full<Bytes>>,
     base: String,
     bearer: String,
 }
@@ -49,7 +49,7 @@ impl Rpc {
     /// Bind to `base` and prove the bridge answers `sdk.v1`.
     pub async fn connect(base: String, token: &str) -> Result<Self> {
         let rpc = Self {
-            client: HyperClient::builder(TokioExecutor::new()).build_http(),
+            hyper: HyperClient::builder(TokioExecutor::new()).build_http(),
             base,
             bearer: format!("Bearer {token}"),
         };
@@ -145,7 +145,7 @@ impl Rpc {
         &self, method: &str, content_type: &str, body: Vec<u8>,
     ) -> Result<http::Response<Incoming>> {
         let response = self
-            .client
+            .hyper
             .request(self.post(method, content_type, body)?)
             .await
             .with_context(|| format!("bridge RPC `{method}`"))?;

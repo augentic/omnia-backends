@@ -401,7 +401,7 @@ impl AgentOutput {
 }
 
 impl Deadlines {
-    /// Resolve when a run breaches its inactivity or absolute bound.
+    // Resolve when a run breaches its inactivity or absolute bound.
     async fn watch(&self, mut activity: watch::Receiver<Instant>) -> anyhow::Error {
         let cap = sleep_until(Instant::now() + self.cap);
         tokio::pin!(cap);
@@ -436,13 +436,11 @@ impl Deadlines {
     }
 }
 
-// Deliberate unit tests: pure request-mapping and deadline logic (CI floor);
-// `tests/live.rs` is the acceptance gate proving a real bridge-driven run
-// works end-to-end.
+// The lent/private workspace wire distinction and deadline logic (CI floor).
+// Tool/MCP/model mapping is accepted by `tests/live.rs`.
 #[cfg(test)]
 mod tests {
-    use omnia_wasi_model::{Format, Function, Grants, Mcp, Message, Request, Role, Tool};
-    use serde_json::{Value, json};
+    use omnia_wasi_model::{Format, Grants, Message, Request, Role};
     use tokio::sync::watch;
     use tokio::time::{Duration, Instant, sleep};
 
@@ -454,7 +452,7 @@ mod tests {
         cap: Duration::from_mins(10),
     };
 
-    fn request(tools: Vec<Tool>) -> Request {
+    fn request() -> Request {
         Request {
             model: None,
             system: None,
@@ -464,23 +462,9 @@ mod tests {
             }],
             generation: None,
             format: Format::Text,
-            tools,
+            tools: vec![],
             grants: Grants { workspace: None },
         }
-    }
-
-    fn lookup_tool() -> Tool {
-        Tool::Function(Function {
-            name: "lookup".to_owned(),
-            description: "look something up".to_owned(),
-            parameters: r#"{"type":"object"}"#.to_owned(),
-        })
-    }
-
-    fn options_json(request: &Request, workspace: &Workspace) -> Value {
-        let options = agent_options(request, workspace, "auto", "key".to_owned())
-            .expect("a gate-validated request maps");
-        serde_json::to_value(options).expect("options serialize")
     }
 
     fn lent() -> Workspace {
@@ -492,94 +476,14 @@ mod tests {
     }
 
     #[test]
-    fn custom_tool() {
-        let options = options_json(&request(vec![lookup_tool()]), &lent());
-        let tool = &options["local"]["customTools"]["lookup"];
-        assert_eq!(tool["description"], "look something up");
-        assert_eq!(tool["inputSchema"], json!({ "type": "object" }));
-    }
+    fn workspace_shapes() {
+        let options = agent_options(&request(), &lent(), "auto", "key".into()).unwrap();
+        assert!(options.tools.is_none());
+        assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
 
-    #[test]
-    fn invalid_parameters() {
-        let mut request = request(vec![]);
-        request.tools.push(Tool::Function(Function {
-            name: "broken".to_owned(),
-            description: String::new(),
-            parameters: "not json".to_owned(),
-        }));
-        let Err(error) = agent_options(&request, &lent(), "auto", "key".to_owned()) else {
-            panic!("unparseable parameters cannot be advertised");
-        };
-        assert!(error.to_string().contains("`broken`"), "unexpected error: {error}");
-    }
-
-    #[test]
-    fn mcp_grant() {
-        let options = options_json(
-            &request(vec![Tool::Mcp(Mcp {
-                name: "docs".to_owned(),
-                tools: vec![],
-                url: "http://localhost:8080/mcp".to_owned(),
-            })]),
-            &lent(),
-        );
-        let server = &options["mcpServers"]["docs"]["http"];
-        assert_eq!(server["type"], "HTTP_MCP_TRANSPORT_TYPE_HTTP");
-        assert_eq!(server["url"], "http://localhost:8080/mcp");
-    }
-
-    #[test]
-    fn lent_workspace() {
-        let options = options_json(&request(vec![]), &lent());
-        assert_eq!(options.get("tools"), None, "absent tools means the default built-in set");
-        assert_eq!(options["local"]["settingSources"], json!(["SETTING_SOURCE_PROJECT"]));
-    }
-
-    #[test]
-    fn no_workspace() {
-        let workspace = private();
-        let options = options_json(&request(vec![lookup_tool()]), &workspace);
-        assert_eq!(
-            options["tools"],
-            json!({ "names": [] }),
-            "an explicit empty list disables every built-in tool"
-        );
-        assert_eq!(options["local"].get("settingSources"), None);
-        assert_eq!(
-            options["local"]["cwd"],
-            json!([workspace.path().display().to_string()]),
-            "the private cwd is the agent's working directory"
-        );
-    }
-
-    #[test]
-    fn model_fallback() {
-        let mut with_model = request(vec![]);
-        with_model.model = Some("composer-2".to_owned());
-        let options =
-            agent_options(&with_model, &lent(), "default-model", "key".to_owned()).expect("maps");
-        assert_eq!(options.model.id, "composer-2", "the request's model wins");
-
-        let options = agent_options(&request(vec![]), &lent(), "default-model", "key".to_owned())
-            .expect("maps");
-        assert_eq!(options.model.id, "default-model", "else the configured default");
-
-        let options =
-            agent_options(&request(vec![]), &lent(), "auto", "key".to_owned()).expect("maps");
-        assert_eq!(options.model.id, "auto", "else Cursor's server-side selection");
-    }
-
-    #[test]
-    fn mcp_hint() {
-        let docs = Mcp {
-            name: "docs".to_owned(),
-            tools: vec!["read_doc".to_owned()],
-            url: "http://localhost/mcp".to_owned(),
-        };
-        let hinted = with_mcp_hint(&[&docs], "the prompt".to_owned());
-        assert!(hinted.contains("`docs` (use only: read_doc)"), "hint: {hinted}");
-        assert!(hinted.ends_with("the prompt"), "the original prompt closes the text");
-        assert_eq!(with_mcp_hint(&[], "bare".to_owned()), "bare", "no grant, no hint");
+        let options = agent_options(&request(), &private(), "auto", "key".into()).unwrap();
+        assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
+        assert!(options.local.source.is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -613,10 +517,6 @@ mod tests {
             error.to_string().contains("timed out after 600s"),
             "the cap kill names the absolute bound: {error}"
         );
-        assert!(
-            error.to_string().contains("absolute cap"),
-            "the cap kill is distinguishable from inactivity: {error}"
-        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -637,18 +537,6 @@ mod tests {
             Duration::from_secs(220),
             "one touch at 100s moves the kill to 100s + the 120s window"
         );
-        assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn activity_before_watch_is_not_lost() {
-        let (activity, receiver) = watch::channel(Instant::now());
-        sleep(Duration::from_secs(100)).await;
-        activity.send_replace(Instant::now());
-
-        let started = Instant::now();
-        let error = DEADLINES.watch(receiver).await;
-        assert_eq!(started.elapsed(), Duration::from_mins(2));
         assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
     }
 }

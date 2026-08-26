@@ -114,7 +114,6 @@ pub struct LocalAgentOptions {
 pub struct CustomToolDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// JSON Schema object describing the tool's input parameters.
     pub input_schema: Value,
 }
 

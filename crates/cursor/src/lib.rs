@@ -5,6 +5,7 @@ mod bridge;
 mod endpoint;
 mod model;
 
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,11 +22,20 @@ struct Deadlines {
 }
 
 /// Cursor model backend
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     deadlines: Deadlines,
-    model: Option<String>,
+    model: String,
     bridge: Arc<Bridge>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("deadlines", &self.deadlines)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Backend for Client {
@@ -33,17 +43,14 @@ impl Backend for Client {
 
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        ensure!(
-            std::env::var_os("CURSOR_API_KEY").is_some_and(|key| !key.is_empty()),
-            "CURSOR_API_KEY must be set for the cursor backend"
-        );
+        ensure!(env::var("CURSOR_API_KEY").is_ok(), "CURSOR_API_KEY must be set");
 
         Ok(Self {
             deadlines: Deadlines {
                 inactivity: Duration::from_secs(options.inactivity_secs),
                 cap: Duration::from_secs(options.timeout_secs),
             },
-            model: options.model.filter(|id| !id.trim().is_empty()),
+            model: options.model,
             bridge: Arc::new(Bridge::spawn().await?),
         })
     }
@@ -65,8 +72,8 @@ mod config {
     pub struct ConnectOptions {
         /// Default model id when a request leaves `model` unset; omitted
         /// means Cursor's server-side selection (`auto`).
-        #[env(from = "CURSOR_MODEL")]
-        pub model: Option<String>,
+        #[env(from = "CURSOR_MODEL", default = "auto")]
+        pub model: String,
         /// Absolute wall-clock cap in seconds on one agent run; timed-out
         /// runs are cancelled.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]

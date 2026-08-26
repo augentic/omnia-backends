@@ -173,10 +173,15 @@ impl Drop for Attached {
     }
 }
 
-#[derive(Debug)]
 struct Handler {
     token: String,
     sessions: Sessions,
+}
+
+impl std::fmt::Debug for Handler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handler").field("sessions", &self.sessions).finish_non_exhaustive()
+    }
 }
 
 impl Handler {

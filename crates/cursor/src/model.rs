@@ -13,6 +13,7 @@
 mod events;
 
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -34,8 +35,6 @@ use crate::bridge::types::{
 };
 use crate::{Client, Deadlines};
 
-const DEFAULT_MODEL: &str = "auto";
-
 #[derive(Debug)]
 struct AgentOutput {
     result: String,
@@ -50,26 +49,21 @@ impl WasiModelCtx for Client {
         let default_model = self.model.clone();
 
         Box::pin(async move {
-            // Read per completion rather than held on `Client`, so the key is
-            // never stored, logged, or recorded into fixtures.
-            let api_key = std::env::var("CURSOR_API_KEY")
-                .context("CURSOR_API_KEY must be set for the cursor backend")?;
+            // key is never recorded
+            let api_key = env::var("CURSOR_API_KEY").context("missing CURSOR_API_KEY")?;
 
             let workspace = match tool_host.local_path() {
                 Some(path) => Workspace::Lent(prepare_workspace(path)?),
-                // No lent tree: a references-only completion (function tools
-                // and MCP grants) runs in a private empty cwd with every
-                // built-in tool disabled.
                 None => Workspace::Private(
                     tempfile::Builder::new()
                         .prefix("omnia-cursor-cwd-")
                         .tempdir()
-                        .context("creating a private working directory")?,
+                        .context("creating a private workspace")?,
                 ),
             };
 
             let format = request.format.clone();
-            let options = agent_options(&request, &workspace, default_model.as_deref(), api_key)?;
+            let options = agent_options(&request, &workspace, &default_model, api_key)?;
             let model_id = options.model.id.clone();
 
             let mcp_servers = request.mcp_servers();
@@ -272,12 +266,14 @@ impl Workspace {
     }
 }
 
-/// Map the gate-validated request onto `CreateAgent` options.
+// Map the request onto `CreateAgent` options.
 fn agent_options(
-    request: &Request, workspace: &Workspace, default_model: Option<&str>, api_key: String,
+    request: &Request, workspace: &Workspace, default_model: &str, api_key: String,
 ) -> Result<AgentOptions> {
     let mut custom_tools = BTreeMap::new();
     let mut mcp_servers = BTreeMap::new();
+
+    // translate guest tools into custom tools
     for tool in &request.tools {
         match tool {
             Tool::Function(function) => {
@@ -294,33 +290,25 @@ fn agent_options(
                     },
                 );
             }
-            // The grant's `tools` allowlist stays advisory (the prompt hint
-            // names it); enforcing it needs a filtering proxy — future work.
+
             Tool::Mcp(mcp) => {
                 mcp_servers.insert(mcp.name.clone(), McpServerConfig::streamable_http(&mcp.url));
             }
         }
     }
 
-    // Guest-supplied request.model wins; else CURSOR_MODEL; else `auto`.
-    let model = request.model.as_deref().or(default_model).unwrap_or(DEFAULT_MODEL).to_owned();
+    // request model -> env var -> default model
+    let model = request.model.as_deref().unwrap_or(default_model).to_owned();
+
     Ok(AgentOptions {
         model: ModelSelection { id: model },
         api_key,
         local: LocalAgentOptions {
             cwd: vec![workspace.path().display().to_string()],
-            // A lent tree's own project settings apply (matching the old
-            // spawned CLI's discovery); nothing is read from the host user.
-            setting_sources: if workspace.is_lent() {
-                vec!["SETTING_SOURCE_PROJECT".to_owned()]
-            } else {
-                Vec::new()
-            },
+            source: workspace.is_lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
             custom_tools,
         },
         mcp_servers,
-        // With a lent tree the agent keeps the default built-in toolset; a
-        // references-only run explicitly disables every built-in tool.
         tools: if workspace.is_lent() { None } else { Some(ToolList { names: Vec::new() }) },
     })
 }
@@ -455,8 +443,16 @@ impl Deadlines {
 mod tests {
     use omnia_wasi_model::{Format, Function, Grants, Mcp, Message, Request, Role, Tool};
     use serde_json::{Value, json};
+    use tokio::sync::watch;
+    use tokio::time::{Duration, Instant, sleep};
 
-    use super::{Workspace, agent_options, with_mcp_hint};
+    use super::*;
+    use crate::Deadlines;
+
+    const DEADLINES: Deadlines = Deadlines {
+        inactivity: Duration::from_mins(2),
+        cap: Duration::from_mins(10),
+    };
 
     fn request(tools: Vec<Tool>) -> Request {
         Request {
@@ -482,7 +478,7 @@ mod tests {
     }
 
     fn options_json(request: &Request, workspace: &Workspace) -> Value {
-        let options = agent_options(request, workspace, None, "key".to_owned())
+        let options = agent_options(request, workspace, "auto", "key".to_owned())
             .expect("a gate-validated request maps");
         serde_json::to_value(options).expect("options serialize")
     }
@@ -496,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn function_tool_becomes_a_custom_tool() {
+    fn custom_tool() {
         let options = options_json(&request(vec![lookup_tool()]), &lent());
         let tool = &options["local"]["customTools"]["lookup"];
         assert_eq!(tool["description"], "look something up");
@@ -504,21 +500,21 @@ mod tests {
     }
 
     #[test]
-    fn invalid_parameters_fail_loudly() {
+    fn invalid_parameters() {
         let mut request = request(vec![]);
         request.tools.push(Tool::Function(Function {
             name: "broken".to_owned(),
             description: String::new(),
             parameters: "not json".to_owned(),
         }));
-        let Err(error) = agent_options(&request, &lent(), None, "key".to_owned()) else {
+        let Err(error) = agent_options(&request, &lent(), "auto", "key".to_owned()) else {
             panic!("unparseable parameters cannot be advertised");
         };
         assert!(error.to_string().contains("`broken`"), "unexpected error: {error}");
     }
 
     #[test]
-    fn mcp_grant_rides_inline() {
+    fn mcp_grant() {
         let options = options_json(
             &request(vec![Tool::Mcp(Mcp {
                 name: "docs".to_owned(),
@@ -533,14 +529,14 @@ mod tests {
     }
 
     #[test]
-    fn lent_workspace_keeps_the_default_toolset() {
+    fn lent_workspace() {
         let options = options_json(&request(vec![]), &lent());
         assert_eq!(options.get("tools"), None, "absent tools means the default built-in set");
         assert_eq!(options["local"]["settingSources"], json!(["SETTING_SOURCE_PROJECT"]));
     }
 
     #[test]
-    fn no_workspace_disables_builtin_tools() {
+    fn no_workspace() {
         let workspace = private();
         let options = options_json(&request(vec![lookup_tool()]), &workspace);
         assert_eq!(
@@ -557,25 +553,24 @@ mod tests {
     }
 
     #[test]
-    fn model_fallback_chain() {
+    fn model_fallback() {
         let mut with_model = request(vec![]);
         with_model.model = Some("composer-2".to_owned());
-        let options = agent_options(&with_model, &lent(), Some("default-model"), "key".to_owned())
-            .expect("maps");
+        let options =
+            agent_options(&with_model, &lent(), "default-model", "key".to_owned()).expect("maps");
         assert_eq!(options.model.id, "composer-2", "the request's model wins");
 
-        let options =
-            agent_options(&request(vec![]), &lent(), Some("default-model"), "key".to_owned())
-                .expect("maps");
+        let options = agent_options(&request(vec![]), &lent(), "default-model", "key".to_owned())
+            .expect("maps");
         assert_eq!(options.model.id, "default-model", "else the configured default");
 
         let options =
-            agent_options(&request(vec![]), &lent(), None, "key".to_owned()).expect("maps");
+            agent_options(&request(vec![]), &lent(), "auto", "key".to_owned()).expect("maps");
         assert_eq!(options.model.id, "auto", "else Cursor's server-side selection");
     }
 
     #[test]
-    fn mcp_hint_names_servers_and_allowlists() {
+    fn mcp_hint() {
         let docs = Mcp {
             name: "docs".to_owned(),
             tools: vec!["read_doc".to_owned()],
@@ -587,85 +582,73 @@ mod tests {
         assert_eq!(with_mcp_hint(&[], "bare".to_owned()), "bare", "no grant, no hint");
     }
 
-    mod timeouts {
-        use tokio::sync::watch;
-        use tokio::time::{Duration, Instant, sleep};
+    #[tokio::test(start_paused = true)]
+    async fn silent_stream_hits_inactivity_deadline() {
+        let (_activity, receiver) = watch::channel(Instant::now());
+        let started = Instant::now();
+        let error = DEADLINES.watch(receiver).await;
+        assert_eq!(started.elapsed(), Duration::from_mins(2));
+        assert!(
+            error.to_string().contains("inactive for 120s"),
+            "the inactivity kill names the idle span: {error}"
+        );
+    }
 
-        use crate::Deadlines;
-
-        const DEADLINES: Deadlines = Deadlines {
-            inactivity: Duration::from_mins(2),
-            cap: Duration::from_mins(10),
-        };
-
-        #[tokio::test(start_paused = true)]
-        async fn silent_stream_hits_inactivity_deadline() {
-            let (_activity, receiver) = watch::channel(Instant::now());
-            let started = Instant::now();
-            let error = DEADLINES.watch(receiver).await;
-            assert_eq!(started.elapsed(), Duration::from_mins(2));
-            assert!(
-                error.to_string().contains("inactive for 120s"),
-                "the inactivity kill names the idle span: {error}"
-            );
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn steady_activity_hits_absolute_cap() {
-            let (activity, receiver) = watch::channel(Instant::now());
-            let started = Instant::now();
-            let toucher = async {
-                loop {
-                    sleep(Duration::from_mins(1)).await;
-                    activity.send_replace(Instant::now());
-                }
-            };
-            let error = tokio::select! {
-                error = DEADLINES.watch(receiver) => error,
-                () = toucher => unreachable!("the toucher never finishes"),
-            };
-            assert_eq!(started.elapsed(), Duration::from_mins(10));
-            assert!(
-                error.to_string().contains("timed out after 600s"),
-                "the cap kill names the absolute bound: {error}"
-            );
-            assert!(
-                error.to_string().contains("absolute cap"),
-                "the cap kill is distinguishable from inactivity: {error}"
-            );
-        }
-
-        #[tokio::test(start_paused = true)]
-        async fn late_activity_rearms_inactivity_deadline() {
-            let (activity, receiver) = watch::channel(Instant::now());
-            let started = Instant::now();
-            let toucher = async {
-                sleep(Duration::from_secs(100)).await;
+    #[tokio::test(start_paused = true)]
+    async fn steady_activity_hits_absolute_cap() {
+        let (activity, receiver) = watch::channel(Instant::now());
+        let started = Instant::now();
+        let toucher = async {
+            loop {
+                sleep(Duration::from_mins(1)).await;
                 activity.send_replace(Instant::now());
-                std::future::pending::<()>().await;
-            };
-            let error = tokio::select! {
-                error = DEADLINES.watch(receiver) => error,
-                () = toucher => unreachable!("the toucher never finishes"),
-            };
-            assert_eq!(
-                started.elapsed(),
-                Duration::from_secs(220),
-                "one touch at 100s moves the kill to 100s + the 120s window"
-            );
-            assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
-        }
+            }
+        };
+        let error = tokio::select! {
+            error = DEADLINES.watch(receiver) => error,
+            () = toucher => unreachable!("the toucher never finishes"),
+        };
+        assert_eq!(started.elapsed(), Duration::from_mins(10));
+        assert!(
+            error.to_string().contains("timed out after 600s"),
+            "the cap kill names the absolute bound: {error}"
+        );
+        assert!(
+            error.to_string().contains("absolute cap"),
+            "the cap kill is distinguishable from inactivity: {error}"
+        );
+    }
 
-        #[tokio::test(start_paused = true)]
-        async fn activity_before_watch_is_not_lost() {
-            let (activity, receiver) = watch::channel(Instant::now());
+    #[tokio::test(start_paused = true)]
+    async fn late_activity_rearms_inactivity_deadline() {
+        let (activity, receiver) = watch::channel(Instant::now());
+        let started = Instant::now();
+        let toucher = async {
             sleep(Duration::from_secs(100)).await;
             activity.send_replace(Instant::now());
+            std::future::pending::<()>().await;
+        };
+        let error = tokio::select! {
+            error = DEADLINES.watch(receiver) => error,
+            () = toucher => unreachable!("the toucher never finishes"),
+        };
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(220),
+            "one touch at 100s moves the kill to 100s + the 120s window"
+        );
+        assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
+    }
 
-            let started = Instant::now();
-            let error = DEADLINES.watch(receiver).await;
-            assert_eq!(started.elapsed(), Duration::from_mins(2));
-            assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
-        }
+    #[tokio::test(start_paused = true)]
+    async fn activity_before_watch_is_not_lost() {
+        let (activity, receiver) = watch::channel(Instant::now());
+        sleep(Duration::from_secs(100)).await;
+        activity.send_replace(Instant::now());
+
+        let started = Instant::now();
+        let error = DEADLINES.watch(receiver).await;
+        assert_eq!(started.elapsed(), Duration::from_mins(2));
+        assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
     }
 }

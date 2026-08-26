@@ -32,7 +32,7 @@ MSRV: Rust 1.97
 ## Requirements
 
 The [`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge) executable
-must be on `PATH` (or named via `CURSOR_SDK_BRIDGE_BIN`), and `CURSOR_API_KEY`
+must be on `PATH`, and `CURSOR_API_KEY`
 must be set — the bridge protocol authenticates every agent with an explicit
 key, so a prior `cursor-agent login` no longer suffices. The key is read from
 the environment per completion; it is never stored on `Client` /

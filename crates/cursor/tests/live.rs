@@ -7,8 +7,7 @@
 //!
 //! All tests are `#[ignore]`d so they never run or spawn a process in CI; run
 //! them with `cargo nextest run --run-ignored all` (or `cargo test --
-//! --ignored`) alongside an installed `cursor-sdk-bridge` (or
-//! `CURSOR_SDK_BRIDGE_BIN`) and a `CURSOR_API_KEY`.
+//! --ignored`) alongside an installed `cursor-sdk-bridge` and a `CURSOR_API_KEY`.
 
 mod support;
 

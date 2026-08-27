@@ -21,6 +21,7 @@ allowed-duplicate-crates = [
   "embedded-io",
   "fallible-iterator",
   "fancy-regex",
+  "fraction",
   "getrandom",
   "indexmap",
   "io-lifetimes",
@@ -44,6 +45,7 @@ allowed-duplicate-crates = [
   "thiserror-impl",
   "wasi",
   "wasm-encoder",
+  "wasm-metadata",
   "wasmparser",
   "webpki-roots",
   "windows-sys",
@@ -57,5 +59,6 @@ allowed-duplicate-crates = [
   "windows_x86_64_gnullvm",
   "windows_x86_64_msvc",
   "wit-bindgen",
+  "wit-component",
   "wit-parser",
 ]

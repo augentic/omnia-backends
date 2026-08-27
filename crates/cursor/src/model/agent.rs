@@ -16,7 +16,7 @@ use tracing::instrument;
 use super::observe::{self, Completion, EventLog};
 use super::options::{Turn, Workspace};
 use crate::Client;
-use crate::bridge::{Rpc, RunStatus, RunStreamResult, TokenUsage};
+use crate::bridge::{Rpc, RunStatus, RunStreamResult};
 use crate::endpoint::Attached;
 
 pub struct Agent {
@@ -45,6 +45,7 @@ impl Agent {
         let completion = Completion::start(&turn);
         let model = turn.options.model.id.clone();
         let rpc = client.bridge.rpc().clone();
+        
         let created = match rpc.create_agent(turn.options).await {
             Ok(created) => created,
             Err(error) => {
@@ -52,6 +53,7 @@ impl Agent {
                 return Err(error);
             }
         };
+
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let attached = client.bridge.attach(created.agent_id.clone(), tool_host, abort_tx);
 
@@ -212,7 +214,7 @@ impl Drop for Agent {
         self.cancel_live_run();
         let rpc = self.rpc.clone();
         let agent_id = std::mem::take(&mut self.id);
-        
+
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 if let Err(error) = rpc.delete_agent(agent_id).await {
@@ -247,17 +249,6 @@ impl Response {
 enum Verdict {
     Done(Answer),
     Repair(String),
-}
-
-impl From<TokenUsage> for Usage {
-    // Wire counts are `i64`; saturate rather than fail on absurd values.
-    fn from(usage: TokenUsage) -> Self {
-        Self {
-            input_tokens: u32::try_from(usage.input_tokens).unwrap_or(u32::MAX),
-            output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
-            reasoning_tokens: usage.reasoning_tokens.and_then(|count| u32::try_from(count).ok()),
-        }
-    }
 }
 
 /// Inactivity and absolute bounds on one run, from the connect options.
@@ -305,9 +296,6 @@ impl Deadlines {
     }
 }
 
-// Deliberate unit tests: pure deadline logic under a paused clock (CI floor);
-// `tests/live.rs` is the acceptance gate proving a real bridge-driven run
-// works end-to-end.
 #[cfg(test)]
 mod tests {
     use tokio::sync::watch;
@@ -321,7 +309,7 @@ mod tests {
     };
 
     #[tokio::test(start_paused = true)]
-    async fn silent_stream_hits_inactivity_deadline() {
+    async fn hit_deadline() {
         let (_activity, receiver) = watch::channel(Instant::now());
         let started = Instant::now();
         let error = DEADLINES.watch(receiver).await;
@@ -333,7 +321,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn steady_activity_hits_absolute_cap() {
+    async fn hit_timeout() {
         let (activity, receiver) = watch::channel(Instant::now());
         let started = Instant::now();
         let toucher = async {
@@ -354,7 +342,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn late_activity_rearms_inactivity_deadline() {
+    async fn reset_deadline() {
         let (activity, receiver) = watch::channel(Instant::now());
         let started = Instant::now();
         let toucher = async {

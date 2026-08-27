@@ -58,7 +58,7 @@ impl Endpoint {
         let addr = listener.local_addr().context("reading the tool-callback address")?;
 
         let handler = Arc::new(Handler {
-            token: random_token()?,
+            token: gen_token()?,
             sessions: Sessions::default(),
         });
 
@@ -70,8 +70,7 @@ impl Endpoint {
                         Ok(conn) => conn,
                         Err(error) => {
                             tracing::warn!(%error, "tool-callback accept error");
-                            // A persistent failure (e.g. fd exhaustion) must
-                            // not turn this loop into a busy spin.
+                            // don't spin on persistent failure (e.g. fd exhaustion)
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             continue;
                         }
@@ -227,7 +226,7 @@ impl Handler {
             }
         };
 
-        self.call_custom_tool(&parts.headers, body).await
+        self.call_tool(&parts.headers, body).await
     }
 
     fn authorized(&self, headers: &HeaderMap) -> bool {
@@ -236,7 +235,7 @@ impl Handler {
         })
     }
 
-    async fn call_custom_tool(&self, headers: &HeaderMap, body: Bytes) -> Reply {
+    async fn call_tool(&self, headers: &HeaderMap, body: Bytes) -> Reply {
         let content_type =
             headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
         let codec = if content_type.contains("json") {
@@ -273,16 +272,10 @@ impl Handler {
         let arguments = call.args.to_string();
         tracing::info!(monotonic_counter.cursor_custom_tool_calls = 1_u64, "custom tool callback");
         tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
+
         match session.tool_host.call_tool(call.tool_name.clone(), arguments).await {
-            // The guest tool answered; non-object output is wrapped because the
-            // callback result must be a JSON object on the wire.
-            Ok(Ok(output)) => respond(codec, &wrap_output(&output)),
-            // The guest tool failed repairably: hand the failure text to the
-            // model — the same channel genai feeds back as tool-result text.
+            Ok(Ok(output)) => respond(codec, &to_json(&output)),
             Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
-            // Hard session failure (budget, timeout, unknown tool, closed
-            // session): abort the completion; the host's typed error wins in the
-            // guest-visible reply.
             Err(error) => {
                 let message = format!("tool `{}` failed: {error:#}", call.tool_name);
                 let _ = session.abort.send(message.clone());
@@ -292,10 +285,10 @@ impl Handler {
     }
 }
 
-/// 32 random bytes, hex-encoded, from the OS entropy source.
-fn random_token() -> Result<String> {
+fn gen_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|error| anyhow::anyhow!("gathering entropy: {error}"))?;
+
     Ok(bytes.iter().fold(String::with_capacity(64), |mut hex, byte| {
         use std::fmt::Write as _;
         let _ = write!(hex, "{byte:02x}");
@@ -303,8 +296,6 @@ fn random_token() -> Result<String> {
     }))
 }
 
-/// The Connect unary codec of one callback exchange; the response mirrors the
-/// request's content type (errors are always JSON, per the Connect spec).
 #[derive(Clone, Copy)]
 enum Codec {
     Json,
@@ -349,10 +340,7 @@ impl ToolCall {
     }
 }
 
-/// Shape a guest tool's output into the JSON object the callback requires:
-/// objects pass through; anything else (including non-JSON text) rides under
-/// `"value"` so no content is lost.
-fn wrap_output(output: &str) -> Value {
+fn to_json(output: &str) -> Value {
     match serde_json::from_str::<Value>(output) {
         Ok(value @ Value::Object(_)) => value,
         Ok(value) => json!({ "value": value }),
@@ -375,7 +363,6 @@ fn respond(codec: Codec, result: &Value) -> Reply {
     }
 }
 
-/// A Connect unary error: matching HTTP status, JSON body `{"code","message"}`.
 fn connect_error(status: StatusCode, code: &str, message: &str) -> Reply {
     reply(status, "application/json", json!({ "code": code, "message": message }).to_string())
 }
@@ -399,104 +386,14 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::proto::{CallCustomToolRequest, CallCustomToolResponse, value_to_struct};
-    use super::{Endpoint, wrap_output};
+    use super::{Endpoint, to_json};
 
     #[test]
-    fn wrap_output_policy() {
-        assert_eq!(wrap_output(r#"{"answer":42}"#), json!({ "answer": 42 }));
-        assert_eq!(wrap_output("[1,2]"), json!({ "value": [1, 2] }));
-        assert_eq!(wrap_output(r#""text""#), json!({ "value": "text" }));
-        assert_eq!(wrap_output("not json"), json!({ "value": "not json" }));
-    }
-
-    /// Echoes `call_tool` back, or fails per the requested tool name.
-    #[derive(Debug)]
-    struct SessionStub;
-
-    impl ToolHost for SessionStub {
-        fn call_tool(
-            &self, name: String, arguments: String,
-        ) -> FutureResult<Result<String, String>> {
-            Box::pin(async move {
-                match name.as_str() {
-                    "repairable" => Ok(Err("bad arguments".to_owned())),
-                    "hard" => Err(anyhow::anyhow!("tool budget exhausted")),
-                    _ => Ok(Ok(json!({ "echo": [name, arguments] }).to_string())),
-                }
-            })
-        }
-
-        fn read(&self, _path: String) -> FutureResult<Vec<u8>> {
-            Box::pin(async { Err(anyhow::anyhow!("unused")) })
-        }
-
-        fn list(&self, _path: String) -> FutureResult<Vec<DirEntry>> {
-            Box::pin(async { Err(anyhow::anyhow!("unused")) })
-        }
-
-        fn write(&self, _path: String, _bytes: Vec<u8>) -> FutureResult<()> {
-            Box::pin(async { Err(anyhow::anyhow!("unused")) })
-        }
-    }
-
-    struct Harness {
-        endpoint: Endpoint,
-        attached: super::Attached,
-        abort_rx: mpsc::UnboundedReceiver<String>,
-    }
-
-    async fn serve_agent(agent_id: &str) -> Harness {
-        let endpoint = Endpoint::bind().await.expect("bind endpoint");
-        let (abort_tx, abort_rx) = mpsc::unbounded_channel();
-        let attached = endpoint.attach(agent_id.to_owned(), Arc::new(SessionStub), abort_tx);
-        Harness {
-            endpoint,
-            attached,
-            abort_rx,
-        }
-    }
-
-    /// One raw HTTP/1.1 exchange, so the framing is under test control.
-    async fn exchange(url: &str, headers: &str, body: &[u8]) -> (u16, String, Vec<u8>) {
-        let (host, path) = url
-            .strip_prefix("http://")
-            .and_then(|rest| rest.split_once('/'))
-            .expect("callback url shape");
-        let mut socket = TcpStream::connect(host).await.expect("connect");
-        let head =
-            format!("POST /{path} HTTP/1.1\r\nHost: {host}\r\n{headers}Connection: close\r\n\r\n");
-        socket.write_all(head.as_bytes()).await.expect("write head");
-        socket.write_all(body).await.expect("write body");
-
-        let mut response = Vec::new();
-        socket.read_to_end(&mut response).await.expect("read response");
-        let split = response.windows(4).position(|w| w == b"\r\n\r\n").expect("header end");
-        let head = String::from_utf8_lossy(&response[..split]).into_owned();
-        let status: u16 =
-            head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).expect("status");
-        let mut payload = response[split + 4..].to_vec();
-        if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
-            payload = dechunk(&payload);
-        }
-        (status, head, payload)
-    }
-
-    fn dechunk(mut body: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        while let Some(line_end) = body.windows(2).position(|w| w == b"\r\n") {
-            let size = usize::from_str_radix(String::from_utf8_lossy(&body[..line_end]).trim(), 16)
-                .unwrap_or(0);
-            if size == 0 {
-                break;
-            }
-            out.extend_from_slice(&body[line_end + 2..line_end + 2 + size]);
-            body = &body[line_end + 2 + size + 2..];
-        }
-        out
-    }
-
-    fn bearer(endpoint: &Endpoint) -> String {
-        format!("Authorization: Bearer {}\r\n", endpoint.token())
+    fn to_json_policy() {
+        assert_eq!(to_json(r#"{"answer":42}"#), json!({ "answer": 42 }));
+        assert_eq!(to_json("[1,2]"), json!({ "value": [1, 2] }));
+        assert_eq!(to_json(r#""text""#), json!({ "value": "text" }));
+        assert_eq!(to_json("not json"), json!({ "value": "not json" }));
     }
 
     #[tokio::test]
@@ -642,5 +539,95 @@ mod tests {
             format!("{token}Content-Type: application/json\r\nContent-Length: {}\r\n", body.len());
         let (status, _, _) = exchange(&url, &headers, body.as_bytes()).await;
         assert_eq!(status, 404, "a finished completion no longer routes callbacks");
+    }
+
+    /// Echoes `call_tool` back, or fails per the requested tool name.
+    #[derive(Debug)]
+    struct SessionStub;
+
+    impl ToolHost for SessionStub {
+        fn call_tool(
+            &self, name: String, arguments: String,
+        ) -> FutureResult<Result<String, String>> {
+            Box::pin(async move {
+                match name.as_str() {
+                    "repairable" => Ok(Err("bad arguments".to_owned())),
+                    "hard" => Err(anyhow::anyhow!("tool budget exhausted")),
+                    _ => Ok(Ok(json!({ "echo": [name, arguments] }).to_string())),
+                }
+            })
+        }
+
+        fn read(&self, _path: String) -> FutureResult<Vec<u8>> {
+            Box::pin(async { Err(anyhow::anyhow!("unused")) })
+        }
+
+        fn list(&self, _path: String) -> FutureResult<Vec<DirEntry>> {
+            Box::pin(async { Err(anyhow::anyhow!("unused")) })
+        }
+
+        fn write(&self, _path: String, _bytes: Vec<u8>) -> FutureResult<()> {
+            Box::pin(async { Err(anyhow::anyhow!("unused")) })
+        }
+    }
+
+    struct Harness {
+        endpoint: Endpoint,
+        attached: super::Attached,
+        abort_rx: mpsc::UnboundedReceiver<String>,
+    }
+
+    async fn serve_agent(agent_id: &str) -> Harness {
+        let endpoint = Endpoint::bind().await.expect("bind endpoint");
+        let (abort_tx, abort_rx) = mpsc::unbounded_channel();
+        let attached = endpoint.attach(agent_id.to_owned(), Arc::new(SessionStub), abort_tx);
+        Harness {
+            endpoint,
+            attached,
+            abort_rx,
+        }
+    }
+
+    /// One raw HTTP/1.1 exchange, so the framing is under test control.
+    async fn exchange(url: &str, headers: &str, body: &[u8]) -> (u16, String, Vec<u8>) {
+        let (host, path) = url
+            .strip_prefix("http://")
+            .and_then(|rest| rest.split_once('/'))
+            .expect("callback url shape");
+        let mut socket = TcpStream::connect(host).await.expect("connect");
+        let head =
+            format!("POST /{path} HTTP/1.1\r\nHost: {host}\r\n{headers}Connection: close\r\n\r\n");
+        socket.write_all(head.as_bytes()).await.expect("write head");
+        socket.write_all(body).await.expect("write body");
+
+        let mut response = Vec::new();
+        socket.read_to_end(&mut response).await.expect("read response");
+        let split = response.windows(4).position(|w| w == b"\r\n\r\n").expect("header end");
+        let head = String::from_utf8_lossy(&response[..split]).into_owned();
+        let status: u16 =
+            head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).expect("status");
+        let mut payload = response[split + 4..].to_vec();
+        if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+            payload = dechunk(&payload);
+        }
+        (status, head, payload)
+    }
+
+    fn dechunk(mut body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(line_end) = body.windows(2).position(|w| w == b"\r\n") {
+            let size = usize::from_str_radix(String::from_utf8_lossy(&body[..line_end]).trim(), 16)
+                .unwrap_or(0);
+            if size == 0 {
+                break;
+            }
+            out.extend_from_slice(&body[line_end + 2..line_end + 2 + size]);
+            body = &body[line_end + 2 + size + 2..];
+        }
+        out
+    }
+
+    fn bearer(endpoint: &Endpoint) -> String {
+        format!("Authorization: Bearer {}\r\n", endpoint.token())
     }
 }

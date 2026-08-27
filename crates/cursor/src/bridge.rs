@@ -16,7 +16,7 @@ use anyhow::{Context as _, Result};
 use discovery::BRIDGE_BIN;
 pub use messages::{
     AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
-    RunStatus, RunStreamResult, SdkMessage, TokenUsage, ToolList,
+    RunStatus, RunStreamResult, SdkMessage, ToolList,
 };
 use omnia_wasi_model::ToolHost;
 pub use rpc::Rpc;
@@ -29,7 +29,7 @@ use crate::endpoint::{Attached, Endpoint};
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
-/// One spawned bridge process plus the `sdk.v1` client speaking to it.
+/// Spawned bridge process plus the `sdk.v1` client speaking to it.
 #[derive(Debug)]
 pub struct Bridge {
     rpc: Rpc,
@@ -38,7 +38,6 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    // Bind the tool-callback endpoint and spawn the bridge against it.
     pub async fn spawn() -> Result<Self> {
         let endpoint = Endpoint::bind().await?;
         let state_root = tempfile::Builder::new()
@@ -111,8 +110,7 @@ impl Bridge {
         &self.rpc
     }
 
-    // Route callbacks for `agent_id` into `tool_host` until the returned guard
-    // drops.
+    // Route callbacks for `agent_id` into `tool_host`.
     pub fn attach(
         &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
     ) -> Attached {

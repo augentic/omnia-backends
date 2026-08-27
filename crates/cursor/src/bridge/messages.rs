@@ -6,15 +6,79 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use omnia_wasi_model::Usage;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-// --- SdkBridgeControlService ---
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentOptions {
+    pub model: ModelSelection,
+    pub api_key: String,
+    pub local: LocalAgentOptions,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolList>,
+}
 
-/// Empty proto3 JSON object (`{}`), used as Ping / `GetVersion` request bodies
-/// and as acknowledgement responses.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelSelection {
+    pub id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAgentOptions {
+    pub cwd: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub custom_tools: BTreeMap<String, CustomToolDefinition>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomToolDefinition {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub input_schema: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    pub http: HttpMcpServerConfig,
+}
+
+impl McpServerConfig {
+    pub fn streamable_http(url: &str) -> Self {
+        Self {
+            http: HttpMcpServerConfig {
+                transport: "HTTP_MCP_TRANSPORT_TYPE_HTTP",
+                url: url.to_owned(),
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpMcpServerConfig {
+    #[serde(rename = "type")]
+    pub transport: &'static str,
+    pub url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolList {
+    pub names: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Default)]
-#[allow(clippy::empty_structs_with_brackets)] // unit structs serialize as `null`
+#[allow(clippy::empty_structs_with_brackets)] // prevent serialization as `null`
 pub struct Empty {}
 
 #[derive(Debug, Default, Deserialize)]
@@ -30,8 +94,6 @@ pub struct GetVersionResponse {
 pub struct ShutdownRequest {
     pub grace_seconds: u32,
 }
-
-// --- SdkAgentService ---
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,83 +133,6 @@ pub struct SendRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UserMessage {
     pub text: String,
-}
-
-// --- Agent options ---
-
-/// Cursor auth and runtime selection for one agent. The API key rides on the
-/// request per the bridge protocol ("always set it explicitly"); never derive
-/// `Debug` here or log the serialized form.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentOptions {
-    pub model: ModelSelection,
-    pub api_key: String,
-    pub local: LocalAgentOptions,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub mcp_servers: BTreeMap<String, McpServerConfig>,
-    /// `None` keeps the bridge's default built-in toolset; `Some` with an
-    /// empty `names` list disables every built-in tool (the wrapper exists
-    /// precisely to keep that distinction on the wire).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<ToolList>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct ModelSelection {
-    pub id: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalAgentOptions {
-    pub cwd: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub custom_tools: BTreeMap<String, CustomToolDefinition>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomToolDefinition {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub input_schema: Value,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolList {
-    pub names: Vec<String>,
-}
-
-/// The `config` oneof: exactly one case serialized as its own field.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpServerConfig {
-    pub http: HttpMcpServerConfig,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HttpMcpServerConfig {
-    #[serde(rename = "type")]
-    pub transport: &'static str,
-    pub url: String,
-}
-
-impl McpServerConfig {
-    /// Streamable-HTTP server at `url`, matching the WIT `tool::mcp` grant.
-    pub fn streamable_http(url: &str) -> Self {
-        Self {
-            http: HttpMcpServerConfig {
-                transport: "HTTP_MCP_TRANSPORT_TYPE_HTTP",
-                url: url.to_owned(),
-            },
-        }
-    }
 }
 
 // --- Run streaming ---
@@ -192,32 +177,6 @@ pub struct RunStreamResult {
     pub result: Option<RunResult>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct RunResult {
-    pub run_id: String,
-    /// Final assistant text for a completed run.
-    pub result: String,
-    pub usage: Option<TokenUsage>,
-}
-
-/// Billed token counts; proto3 JSON writes `int64` as strings, so every field
-/// tolerates both encodings.
-// Field names mirror the wire message; the shared postfix is the protocol's.
-#[allow(clippy::struct_field_names)]
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct TokenUsage {
-    #[serde(deserialize_with = "flexible_i64")]
-    pub input_tokens: i64,
-    #[serde(deserialize_with = "flexible_i64")]
-    pub output_tokens: i64,
-    #[serde(deserialize_with = "flexible_i64_opt")]
-    pub reasoning_tokens: Option<i64>,
-}
-
-/// `RunLifecycleStatus`, tolerating the proto3 JSON name, a bare integer, or
-/// values this backend does not know.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RunStatus {
     #[default]
@@ -272,6 +231,41 @@ impl<'de> Deserialize<'de> for RunStatus {
             },
             _ => Self::Unknown,
         })
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunResult {
+    pub run_id: String,
+    /// Final assistant text for a completed run.
+    pub result: String,
+    pub usage: Option<TokenUsage>,
+}
+
+/// Billed token counts; proto3 JSON writes `int64` as strings, so every field
+/// tolerates both encodings.
+// Field names mirror the wire message; the shared postfix is the protocol's.
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TokenUsage {
+    #[serde(deserialize_with = "flexible_i64")]
+    pub input_tokens: i64,
+    #[serde(deserialize_with = "flexible_i64")]
+    pub output_tokens: i64,
+    #[serde(deserialize_with = "flexible_i64_opt")]
+    pub reasoning_tokens: Option<i64>,
+}
+
+impl From<TokenUsage> for Usage {
+    // Wire counts are `i64`; saturate rather than fail on absurd values.
+    fn from(usage: TokenUsage) -> Self {
+        Self {
+            input_tokens: u32::try_from(usage.input_tokens).unwrap_or(u32::MAX),
+            output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
+            reasoning_tokens: usage.reasoning_tokens.and_then(|count| u32::try_from(count).ok()),
+        }
     }
 }
 

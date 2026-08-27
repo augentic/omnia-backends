@@ -24,6 +24,8 @@ fromenv.workspace = true
 genai = "0.6.5"
 omnia.workspace = true
 omnia-wasi-model.workspace = true
+schemars.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 

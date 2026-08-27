@@ -1,7 +1,7 @@
-//! An in-process provider conversation: `run` drives chat rounds to a
-//! settled answer — executing tool calls between rounds and repairing a
-//! rejected answer — inside one shared round budget that bounds cost and
-//! guarantees the loop terminates.
+//! Provider conversation loop.
+//!
+//! Tool calls and format repairs may add further provider rounds. All rounds
+//! share one budget, bounding cost and guaranteeing termination.
 
 use std::sync::Arc;
 
@@ -17,8 +17,6 @@ use super::options::Turn;
 use super::tools;
 use crate::Client;
 
-/// Hard cap on model round-trips for one completion: tool-call rounds plus
-/// answer-repair attempts share this budget.
 const MAX_ROUNDS: usize = 8;
 
 pub struct Conversation {
@@ -163,7 +161,7 @@ enum Verdict {
     Repair(String),
 }
 
-// `None` when the provider surfaced no counts.
+// `None` when the provider did not surface any counts.
 fn to_usage(usage: &genai::chat::Usage) -> Option<Usage> {
     if usage.prompt_tokens.is_none() && usage.completion_tokens.is_none() {
         return None;

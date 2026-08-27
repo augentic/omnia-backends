@@ -9,26 +9,17 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use omnia_wasi_model::{Format, ToolTurn, Transcript, Usage};
+use omnia_wasi_model::{ToolTurn, Transcript, Usage};
 use serde_json::Value;
 
 use crate::bridge::SdkMessage;
 use crate::model::options::Turn;
 
-/// Format kind used as a low-cardinality metric label.
-const fn format_name(format: &Format) -> &'static str {
-    match format {
-        Format::Text => "text",
-        Format::Json => "json",
-        Format::Schema(_) => "schema",
-    }
-}
-
 /// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
 /// records `outcome=abort` (a cancelled future).
 pub struct Completion {
     model: String,
-    format: &'static str,
+    format: String,
     prompt_bytes: u64,
     started: Instant,
     attempts: u32,
@@ -43,12 +34,12 @@ pub struct Completion {
 impl Completion {
     // INFO that a completion is in flight (no metric prefixes — live tail).
     pub fn start(turn: &Turn) -> Self {
-        let format = format_name(&turn.format);
+        let format = turn.format.to_string();
         let prompt_bytes = u64::try_from(turn.prompt.len()).unwrap_or(u64::MAX);
 
         tracing::info!(
             model = %turn.options.model.id,
-            format,
+            format = %format,
             prompt_bytes,
             mcp = turn.options.mcp_servers.len(),
             "completion started"
@@ -104,7 +95,7 @@ impl Completion {
         let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::info!(
             model = %self.model,
-            format = self.format,
+            format = %self.format,
             outcome,
             attempts = self.attempts,
             histogram.cursor_completion_duration_ms = duration_ms,
@@ -193,18 +184,6 @@ pub fn outcome_of(error: &anyhow::Error) -> &'static str {
     error.downcast_ref::<Failure>().map_or("error", Failure::outcome)
 }
 
-/// The first string found under any of `keys`, tolerating both `snake_case`
-/// and `camelCase` spellings across bridge versions.
-fn string_field<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
-}
-
-/// A started tool call awaiting its completion event.
-struct PendingCall {
-    tool: String,
-    args: Value,
-}
-
 /// Reconstructs the tool transcript and run metadata from the SDK stream.
 #[derive(Default)]
 pub struct EventLog {
@@ -218,13 +197,13 @@ impl EventLog {
     pub fn observe(&mut self, event: &SdkMessage) {
         let payload = &event.message;
         if self.run_id.is_none() {
-            self.run_id = string_field(payload, &["run_id", "runId"]).map(ToOwned::to_owned);
+            self.run_id = first_match(payload, &["run_id", "runId"]).map(ToOwned::to_owned);
         }
 
         match event.kind.as_str() {
             "tool_call" => self.tool_call(payload),
             "system" | "status" => {
-                if let Some(message) = string_field(payload, &["message"]) {
+                if let Some(message) = first_match(payload, &["message"]) {
                     self.status_message = Some(message.to_owned());
                 }
             }
@@ -243,17 +222,17 @@ impl EventLog {
         self.status_message.as_deref()
     }
 
+    // The CLI stream spells the phase `subtype` (started/completed); the
+    // SDK message type spells it `status` (running/completed/error).
     fn tool_call(&mut self, payload: &Value) {
-        // The CLI stream spells the phase `subtype` (started/completed); the
-        // SDK message type spells it `status` (running/completed/error).
-        let phase = string_field(payload, &["subtype", "status"]);
-        let call_id = string_field(payload, &["call_id", "callId", "tool_call_id", "toolCallId"]);
+        let phase = first_match(payload, &["subtype", "status"]);
+        let call_id = first_match(payload, &["call_id", "callId", "tool_call_id", "toolCallId"]);
         let tool_call = payload.get("tool_call").or_else(|| payload.get("toolCall"));
 
         match phase {
             Some("started" | "running") => {
                 if let (Some(call_id), Some(pending)) =
-                    (call_id, tool_call.and_then(tool_call_identity))
+                    (call_id, tool_call.and_then(PendingCall::from_value))
                 {
                     self.pending_tools.insert(call_id.to_owned(), pending);
                 }
@@ -268,7 +247,7 @@ impl EventLog {
                 let PendingCall { tool, args } = self
                     .pending_tools
                     .remove(call_id)
-                    .or_else(|| tool_call_identity(tool_call))
+                    .or_else(|| PendingCall::from_value(tool_call))
                     .unwrap_or_else(|| PendingCall {
                         tool: "unknown".to_owned(),
                         args: Value::Null,
@@ -291,21 +270,31 @@ impl EventLog {
     }
 }
 
-fn tool_call_identity(tool_call: &Value) -> Option<PendingCall> {
-    tool_call.as_object()?.iter().find_map(|(key, value)| {
-        let tool = key.strip_suffix("ToolCall")?;
-        let args = value.get("args").cloned().unwrap_or_else(|| value.clone());
-        Some(PendingCall {
-            tool: tool.to_owned(),
-            args,
-        })
-    })
+// The first string found under any of `keys`, tolerating both `snake_case`
+// and `camelCase` spellings across bridge versions.
+fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
 }
 
-// Deliberate unit tests: pure event-log logic (CI floor). The edge variants
-// (mixed spellings, garbled payloads) cannot be induced deterministically
-// from a real bridge; `tests/live.rs` is the acceptance gate proving a real
-// run's stream parses end-to-end.
+/// A started tool call awaiting its completion event.
+struct PendingCall {
+    tool: String,
+    args: Value,
+}
+
+impl PendingCall {
+    fn from_value(tool_call: &Value) -> Option<Self> {
+        tool_call.as_object()?.iter().find_map(|(key, value)| {
+            let tool = key.strip_suffix("ToolCall")?;
+            let args = value.get("args").cloned().unwrap_or_else(|| value.clone());
+            Some(Self {
+                tool: tool.to_owned(),
+                args,
+            })
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};

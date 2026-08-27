@@ -1,13 +1,11 @@
-//! `wasi-model` implementation driving one in-process provider conversation
-//! per completion.
+//! In-process `wasi-model` backend.
 //!
-//! The gate-validated [`Request`] maps onto a provider chat request: guest
-//! function tools are advertised to the provider (executed in-process
-//! through [`ToolHost::call_tool`], where the guest's tool closure answers),
-//! and a lent workspace adds the host-injected `read`/`list` tools, served
-//! host-side without traversing the session. Chat rounds share one budget;
-//! a failed format gate appends the repair instruction to the same
-//! conversation, which already carries the prompt and the failed answer.
+//! Each completion translates a validated [`Request`] into a provider
+//! conversation and drives it within a shared round budget. Guest function
+//! calls are delegated through [`ToolHost::call_tool`], while the `read` and
+//! `list` tools operate directly on a lent workspace. When an answer fails
+//! format validation, the backend keeps it in the conversation and asks the
+//! provider to repair it.
 
 mod conversation;
 mod observe;

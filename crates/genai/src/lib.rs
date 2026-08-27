@@ -1,8 +1,9 @@
-#![doc = include_str!("../README.md")]
-// The genai SDK's dependency tree pulls duplicate transitive crates (e.g.
-// `schemars`, `indexmap`); these are outside this crate's control and cannot be
-// unified without patching upstream, so silence the workspace `cargo` lint here.
-#![allow(clippy::multiple_crate_versions)]
+//! A multi-provider generative-AI model backend.
+//!
+//! The genai SDK's dependency tree pulls duplicate transitive crates (e.g.
+//! `schemars`, `indexmap`); these are outside this crate's control and cannot
+//! be unified without patching upstream, so silence the workspace `cargo` lint
+//! here.
 
 mod model;
 

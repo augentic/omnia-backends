@@ -1,10 +1,8 @@
-//! In-process tool routing — this backend's counterpart of the cursor
-//! crate's callback endpoint. The host-injected `read`/`list` execute
-//! host-side through the lent [`ToolHost`] workspace capability and never
-//! traverse the session; every other name is forwarded through
-//! [`ToolHost::call_tool`], where the guest's tool closure answers.
-//! Workspace failures (missing file, bounds, no workspace lent) are
-//! model-visible repairable text, never hard errors.
+//! Provider tool-call routing.
+//!
+//! The `read` and `list` tools access a lent workspace directly; all other
+//! calls are delegated through [`ToolHost::call_tool`]. Workspace failures
+//! are returned to the model as repairable tool output.
 
 use std::sync::Arc;
 
@@ -12,6 +10,23 @@ use anyhow::{Context as _, Result};
 use genai::chat::ToolCall;
 use omnia_wasi_model::ToolHost;
 use serde_json::Value;
+
+/// Arguments accepted by the host-provided `read` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReadArgs {
+    /// `/`-separated file path relative to the workspace root.
+    path: String,
+}
+
+/// Arguments accepted by the host-provided `list` tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ListArgs {
+    /// `/`-separated directory path; omit or leave empty for the workspace root.
+    #[serde(default)]
+    path: String,
+}
 
 /// Route one model tool call. The returned `Err` is a hard `call_tool`
 /// failure (undeclared tool, exhausted budget, closed session, oversize
@@ -42,10 +57,11 @@ pub async fn dispatch_tool(
 async fn workspace_read(
     tool_host: &Arc<dyn ToolHost>, arguments: &Value, max_result_bytes: usize,
 ) -> String {
-    let Some(path) = arguments.get("path").and_then(Value::as_str) else {
-        return "tool `read` failed: arguments must carry a string `path`".to_owned();
+    let ReadArgs { path } = match serde_json::from_value(arguments.clone()) {
+        Ok(arguments) => arguments,
+        Err(error) => return format!("tool `read` failed: invalid arguments: {error}"),
     };
-    let bytes = match tool_host.read(path.to_owned()).await {
+    let bytes = match tool_host.read(path.clone()).await {
         Ok(bytes) => bytes,
         Err(error) => return format!("tool `read` failed: {error:#}"),
     };
@@ -60,7 +76,10 @@ async fn workspace_read(
 async fn workspace_list(
     tool_host: &Arc<dyn ToolHost>, arguments: &Value, max_result_bytes: usize,
 ) -> String {
-    let path = arguments.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let ListArgs { path } = match serde_json::from_value(arguments.clone()) {
+        Ok(arguments) => arguments,
+        Err(error) => return format!("tool `list` failed: invalid arguments: {error}"),
+    };
     let entries = match tool_host.list(path).await {
         Ok(entries) => entries,
         Err(error) => return format!("tool `list` failed: {error:#}"),
@@ -205,7 +224,7 @@ mod tests {
         let result = dispatch_tool(&workspace_stub(), &tool_call("read", json!({})), CAP)
             .await
             .expect("malformed arguments are model-visible, not a hard failure");
-        assert!(result.contains("string `path`"), "unexpected result: {result}");
+        assert!(result.contains("missing field `path`"), "unexpected result: {result}");
     }
 
     #[tokio::test]

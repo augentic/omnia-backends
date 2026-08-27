@@ -1,28 +1,19 @@
-//! Completion telemetry. [`Completion`] emits the start/finish INFO lines
-//! and tracing-opentelemetry metric fields; [`Failure`] carries the
-//! completion failures this crate constructs so [`outcome_of`] classifies
-//! by type, not message wording.
+//! Completion telemetry and failure classification.
+//!
+//! [`Completion`] records lifecycle events and metrics. [`Failure`] lets
+//! [`outcome_of`] classify backend errors by type instead of message text.
 
 use std::time::Instant;
 
-use omnia_wasi_model::{Format, Usage};
+use omnia_wasi_model::Usage;
 
 use crate::model::options::Turn;
 
-/// Format kind used as a low-cardinality metric label.
-const fn format_name(format: &Format) -> &'static str {
-    match format {
-        Format::Text => "text",
-        Format::Json => "json",
-        Format::Schema(_) => "schema",
-    }
-}
-
-/// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
-/// records `outcome=abort` (a cancelled future).
+// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
+// records `outcome=abort` (a cancelled future).
 pub struct Completion {
     model: String,
-    format: &'static str,
+    format: String,
     prompt_bytes: u64,
     started: Instant,
     attempts: u32,
@@ -37,11 +28,11 @@ pub struct Completion {
 impl Completion {
     // INFO that a completion is in flight (no metric prefixes — live tail).
     pub fn start(turn: &Turn) -> Self {
-        let format = format_name(&turn.format);
+        let format = turn.format.to_string();
 
         tracing::info!(
             model = %turn.model,
-            format,
+            format = %format,
             prompt_bytes = turn.prompt_bytes,
             tools = turn.tools,
             "completion started"
@@ -97,7 +88,7 @@ impl Completion {
         let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::info!(
             model = %self.model,
-            format = self.format,
+            format = %self.format,
             outcome,
             attempts = self.attempts,
             histogram.genai_completion_duration_ms = duration_ms,
@@ -153,7 +144,7 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Exhausted { rounds } => {
-                write!(f, "no final answer after {rounds} model round-trips")
+                write!(f, "no answer after {rounds} model round-trips")
             }
             Self::Invalid { rounds, reason } => {
                 write!(f, "no valid answer after {rounds} model round-trips: {reason}")
@@ -169,13 +160,12 @@ pub fn outcome_of(error: &anyhow::Error) -> &'static str {
     error.downcast_ref::<Failure>().map_or("error", Failure::outcome)
 }
 
-// Deliberate unit tests: pure outcome classification (CI floor).
 #[cfg(test)]
 mod tests {
     use super::{Failure, outcome_of};
 
     #[test]
-    fn classify_crate_errors() {
+    fn classify_errors() {
         let exhausted: anyhow::Error = Failure::Exhausted { rounds: 8 }.into();
         assert_eq!(outcome_of(&exhausted), "exhausted");
 
@@ -190,10 +180,10 @@ mod tests {
     }
 
     #[test]
-    fn failure_messages_name_the_budget() {
+    fn failure_budget() {
         assert_eq!(
             Failure::Exhausted { rounds: 8 }.to_string(),
-            "no final answer after 8 model round-trips"
+            "no answer after 8 model round-trips"
         );
         assert_eq!(
             Failure::Invalid {

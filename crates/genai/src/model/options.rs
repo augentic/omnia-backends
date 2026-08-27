@@ -1,7 +1,7 @@
-//! Translate one gate-validated request into a [`Turn`]: guest function
-//! tools are advertised to the provider — plus the host-injected
-//! `read`/`list` workspace tools when the guest lent a workspace — and the
-//! boundary's `format` and `generation` controls become chat options.
+//! Provider request translation.
+//!
+//! [`Turn`] maps a validated request into provider messages, tools, and chat
+//! options. A lent workspace adds the host-provided `read` and `list` tools.
 
 use std::path::Path;
 
@@ -10,7 +10,10 @@ use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, JsonSpec, ReasoningEffort, Tool,
 };
 use omnia_wasi_model::{Effort, Format, Function, Request, Role, Tool as ModelTool};
+use schemars::schema_for;
 use serde_json::Value;
+
+use super::tools::{ListArgs, ReadArgs};
 
 /// Everything one completion derives from the request: the model id, the
 /// provider chat request and options, and the format gate.
@@ -19,19 +22,12 @@ pub struct Turn {
     pub chat: ChatRequest,
     pub options: ChatOptions,
     pub format: Format,
-    // telemetry-only stats for `Completion::start`
     pub prompt_bytes: u64,
     pub tools: usize,
 }
 
 impl Turn {
     /// Translate the request against the lent workspace path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the request does not map onto a provider chat
-    /// request: an MCP grant (this backend has no MCP client), or tool
-    /// parameters and format schemas that are not valid JSON.
     pub fn prepare(request: &Request, lent: Option<&Path>, default_model: &str) -> Result<Self> {
         let model = request.model.as_deref().unwrap_or(default_model).to_owned();
         let chat = build_request(request, lent.is_some())?;
@@ -73,14 +69,7 @@ fn build_request(request: &Request, workspace: bool) -> Result<ChatRequest> {
     for tool in &request.tools {
         match tool {
             ModelTool::Function(function) => tools.push(function_tool(function)?),
-            // The genai backend has no MCP client; a spawned-agent backend
-            // (omnia-cursor) honors MCP grants. Fail loudly rather than
-            // silently dropping the grant.
-            ModelTool::Mcp(mcp) => bail!(
-                "the genai backend cannot honor the MCP tool grant for server `{}`; use a \
-                 spawned-agent backend such as omnia-cursor",
-                mcp.name
-            ),
+            ModelTool::Mcp(_) => bail!("genai does not support MCP servers"),
         }
     }
     if workspace {
@@ -98,34 +87,14 @@ fn build_request(request: &Request, workspace: bool) -> Result<ChatRequest> {
 fn workspace_tools() -> [Tool; 2] {
     [
         Tool::new("read")
-            .with_description("Read one UTF-8 text file from the workspace granted for this task.")
-            .with_schema(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "`/`-separated file path relative to the workspace root."
-                    }
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            })),
+            .with_description("Read a text file from the workspace for this task.")
+            .with_schema(schema_for!(ReadArgs).to_value()),
         Tool::new("list")
             .with_description(
-                "List one directory of the workspace granted for this task; omit `path` to list \
+                "List a directory of the workspace for this task. Omit `path` to list \
                  the workspace root.",
             )
-            .with_schema(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "`/`-separated directory path relative to the workspace \
-                                        root; omit or leave empty for the root."
-                    }
-                },
-                "additionalProperties": false
-            })),
+            .with_schema(schema_for!(ListArgs).to_value()),
     ]
 }
 
@@ -258,8 +227,8 @@ mod tests {
             })]),
             false,
         )
-        .expect_err("an MCP grant needs a spawned-agent backend");
-        assert!(err.to_string().contains("omnia-cursor"), "unexpected error: {err}");
+        .expect_err("genai rejects MCP grants");
+        assert!(err.to_string().contains("does not support MCP"), "unexpected error: {err}");
     }
 
     #[test]

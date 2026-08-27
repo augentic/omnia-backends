@@ -117,18 +117,10 @@ impl Drop for Completion {
 /// so metric labels do not depend on message wording.
 #[derive(Debug)]
 pub enum Failure {
-    /// Round budget spent without the model producing a final text answer.
-    Exhausted {
-        /// The configured round budget.
-        rounds: usize,
-    },
-    /// Format gate found no parseable answer on the final round.
-    Invalid {
-        /// The configured round budget.
-        rounds: usize,
-        /// Why the last answer was rejected.
-        reason: String,
-    },
+    // Round budget spent without the model producing a final text answer.
+    Exhausted { rounds: usize },
+    // Format gate found no parseable answer on the final round.
+    Invalid { rounds: usize, reason: String },
 }
 
 impl Failure {

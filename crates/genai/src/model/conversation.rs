@@ -73,8 +73,6 @@ impl Conversation {
                 .await
                 .with_context(|| format!("genai exec_chat failed for model `{}`", self.model))?;
 
-            // Capture the text turn and usage before consuming the response
-            // for tool calls.
             let text = response.first_text().map(ToOwned::to_owned);
             let usage = to_usage(&response.usage);
             let tool_calls = response.into_tool_calls();
@@ -105,8 +103,6 @@ impl Conversation {
         Err(Failure::Exhausted { rounds: MAX_ROUNDS }.into())
     }
 
-    // The assistant turn carries all the tool calls; each tool response
-    // follows as its own `tool`-role message.
     async fn tool_round(&mut self, tool_calls: Vec<ToolCall>) -> Result<()> {
         let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
         for call in tool_calls {
@@ -126,8 +122,6 @@ impl Conversation {
     fn verdict(&mut self, text: &str, usage: Option<Usage>, last_round: bool) -> Result<Verdict> {
         match self.format.parse(text) {
             Ok(Candidate::Valid(value)) => Ok(Verdict::Done(self.answer(value, usage))),
-            // Budget spent: hand the value back so the host validation gate
-            // remains the single authority and produces the canonical error.
             Ok(Candidate::Invalid { value, .. }) if last_round => {
                 self.unchecked = true;
                 Ok(Verdict::Done(self.answer(value, usage)))

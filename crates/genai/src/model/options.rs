@@ -29,7 +29,7 @@ impl Turn {
         let model = request.model.as_deref().unwrap_or(default_model).to_owned();
         let chat = build_request(request, lent.is_some())?;
         let options = build_options(request)?;
-        
+
         Ok(Self {
             model,
             chat,

@@ -107,7 +107,7 @@ version = "1.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.azure_security_keyvault_secrets]]
-version = "1.0.0"
+version = "1.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.azure_storage_blob]]
@@ -184,10 +184,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.chrono]]
 version = "0.4.45"
-criteria = "safe-to-deploy"
-
-[[exemptions.clap_complete]]
-version = "4.6.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.cmov]]
@@ -347,15 +343,15 @@ version = "2.11.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.deadpool]]
-version = "0.12.3"
+version = "0.13.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.deadpool-postgres]]
-version = "0.14.1"
+version = "0.14.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.deadpool-runtime]]
-version = "0.1.4"
+version = "0.3.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.defmt]]
@@ -548,10 +544,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.hashlink]]
 version = "0.12.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.hermit-abi]]
-version = "0.3.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.hickory-net]]
@@ -852,10 +844,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.num-iter]]
 version = "0.1.46"
-criteria = "safe-to-deploy"
-
-[[exemptions.num_cpus]]
-version = "1.13.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.num_enum]]
@@ -1186,6 +1174,10 @@ criteria = "safe-to-deploy"
 version = "1.2.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.schemars_derive]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.sea-query]]
 version = "1.0.2"
 criteria = "safe-to-deploy"
@@ -1208,6 +1200,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.serde_derive]]
 version = "1.0.229"
+criteria = "safe-to-deploy"
+
+[[exemptions.serde_derive_internals]]
+version = "0.30.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.serde_nanos]]
@@ -1487,7 +1483,7 @@ version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid]]
-version = "1.25.0"
+version = "1.26.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid-simd]]

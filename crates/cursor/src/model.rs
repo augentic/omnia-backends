@@ -20,6 +20,7 @@ use agent::Agent;
 pub use agent::Deadlines;
 use omnia_wasi_model::{Answer, FutureResult, Request, ToolHost, WasiModelCtx};
 use options::Turn;
+use tracing::{Instrument, info_span};
 
 use crate::Client;
 
@@ -27,9 +28,12 @@ impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let client = self.clone();
         
-        Box::pin(async move {
-            let turn = Turn::prepare(&request, tool_host.local_path(), &client.model)?;
-            Agent::create(&client, turn, tool_host).await?.complete().await
-        })
+        Box::pin(
+            async move {
+                let turn = Turn::prepare(&request, tool_host.local_path(), &client.model)?;
+                Agent::create(&client, turn, tool_host).await?.complete().await
+            }
+            .instrument(info_span!("complete")),
+        )
     }
 }

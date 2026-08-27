@@ -101,7 +101,6 @@ impl Completion {
             return;
         }
         self.emitted = true;
-        tracing::Span::current().record("outcome", outcome);
         let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::info!(
             model = %self.model,

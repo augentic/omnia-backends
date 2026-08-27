@@ -160,7 +160,7 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
             }
         })
         .collect();
-    
+
     format!(
         "The following read-only MCP servers are available. Consult their tools and resources for \
          authoritative reference material before answering, and prefer that material over \

@@ -11,7 +11,6 @@ use anyhow::{Context as _, Result, bail};
 use omnia_wasi_model::{Answer, Candidate, Format, ToolHost, Transcript, Usage};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
-use tracing::instrument;
 
 use super::observe::{self, Completion, EventLog};
 use super::options::{Turn, Workspace};
@@ -23,7 +22,6 @@ pub struct Agent {
     rpc: Rpc,
     id: String,
     deadlines: Deadlines,
-    model: String,
     prompt: String,
     format: Format,
     live_run: Option<String>,
@@ -34,18 +32,10 @@ pub struct Agent {
 }
 
 impl Agent {
-    #[instrument(
-        skip_all,
-        fields(
-            model = %turn.options.model.id,
-            format = observe::format_name(&turn.format),
-        )
-    )]
     pub async fn create(client: &Client, turn: Turn, tool_host: Arc<dyn ToolHost>) -> Result<Self> {
         let completion = Completion::start(&turn);
-        let model = turn.options.model.id.clone();
         let rpc = client.bridge.rpc().clone();
-        
+
         let created = match rpc.create_agent(turn.options).await {
             Ok(created) => created,
             Err(error) => {
@@ -61,7 +51,6 @@ impl Agent {
             rpc,
             id: created.agent_id,
             deadlines: client.deadlines,
-            model,
             prompt: turn.prompt,
             format: turn.format,
             live_run: None,
@@ -72,14 +61,6 @@ impl Agent {
         })
     }
 
-    #[instrument(
-        skip_all,
-        fields(
-            model = %self.model,
-            format = observe::format_name(&self.format),
-            outcome = tracing::field::Empty,
-        )
-    )]
     pub async fn complete(mut self) -> Result<Answer> {
         let result = self.run().await;
         let attempts = self.completion.as_ref().map_or(0, Completion::attempts);

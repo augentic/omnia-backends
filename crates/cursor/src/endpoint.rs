@@ -271,6 +271,7 @@ impl Handler {
         };
 
         let arguments = call.args.to_string();
+        tracing::info!(monotonic_counter.cursor_custom_tool_calls = 1_u64, "custom tool callback");
         tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
         match session.tool_host.call_tool(call.tool_name.clone(), arguments).await {
             // The guest tool answered; non-object output is wrapped because the

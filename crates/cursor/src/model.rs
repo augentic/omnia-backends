@@ -26,10 +26,8 @@ use crate::Client;
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let client = self.clone();
-        
         Box::pin(async move {
             let turn = Turn::prepare(&request, tool_host.local_path(), &client.model)?;
-            observe::log_completion(&turn);
             Agent::create(&client, turn, tool_host).await?.complete().await
         })
     }

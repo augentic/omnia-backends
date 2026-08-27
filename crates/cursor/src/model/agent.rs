@@ -11,8 +11,9 @@ use anyhow::{Context as _, Result, bail};
 use omnia_wasi_model::{Answer, Candidate, Format, ToolHost, Transcript, Usage};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
+use tracing::instrument;
 
-use super::observe::{self, EventLog};
+use super::observe::{self, Completion, EventLog};
 use super::options::{Turn, Workspace};
 use crate::Client;
 use crate::bridge::{Rpc, RunStatus, RunStreamResult, TokenUsage};
@@ -22,18 +23,35 @@ pub struct Agent {
     rpc: Rpc,
     id: String,
     deadlines: Deadlines,
+    model: String,
     prompt: String,
     format: Format,
     live_run: Option<String>,
     abort_rx: mpsc::UnboundedReceiver<String>,
+    completion: Option<Completion>,
     _attached: Attached,
     _workspace: Workspace,
 }
 
 impl Agent {
+    #[instrument(
+        skip_all,
+        fields(
+            model = %turn.options.model.id,
+            format = observe::format_name(&turn.format),
+        )
+    )]
     pub async fn create(client: &Client, turn: Turn, tool_host: Arc<dyn ToolHost>) -> Result<Self> {
+        let completion = Completion::start(&turn);
+        let model = turn.options.model.id.clone();
         let rpc = client.bridge.rpc().clone();
-        let created = rpc.create_agent(turn.options).await?;
+        let created = match rpc.create_agent(turn.options).await {
+            Ok(created) => created,
+            Err(error) => {
+                completion.finish("error");
+                return Err(error);
+            }
+        };
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let attached = client.bridge.attach(created.agent_id.clone(), tool_host, abort_tx);
 
@@ -41,38 +59,70 @@ impl Agent {
             rpc,
             id: created.agent_id,
             deadlines: client.deadlines,
+            model,
             prompt: turn.prompt,
             format: turn.format,
             live_run: None,
             abort_rx,
+            completion: Some(completion),
             _attached: attached,
             _workspace: turn.workspace,
         })
     }
 
+    #[instrument(
+        skip_all,
+        fields(
+            model = %self.model,
+            format = observe::format_name(&self.format),
+            outcome = tracing::field::Empty,
+        )
+    )]
     pub async fn complete(mut self) -> Result<Answer> {
+        let result = self.run().await;
+        let attempts = self.completion.as_ref().map_or(0, Completion::attempts);
+        let outcome = match &result {
+            Ok(_) if attempts > 1 => "repair",
+            Ok(_) => "ok",
+            Err(error) => observe::outcome_of(error),
+        };
+        if let Some(completion) = self.completion.take() {
+            completion.finish(outcome);
+        }
+        result
+    }
+
+    async fn run(&mut self) -> Result<Answer> {
         let prompt = std::mem::take(&mut self.prompt);
-        let reason = match self.attempt(&prompt, 1).await? {
+        let reason = match self.try_complete(&prompt).await? {
             Verdict::Done(answer) => return Ok(answer),
             Verdict::Repair(reason) => reason,
         };
 
-        tracing::debug!(attempt = 1, %reason, "repairing answer");
-        let repair = self.format.repair(&reason);
-        match self.attempt(&repair, 2).await? {
+        tracing::debug!(%reason, "repairing answer");
+        let repaired = self.format.repair(&reason);
+
+        match self.try_complete(&repaired).await? {
             Verdict::Done(answer) => Ok(answer),
             Verdict::Repair(reason) => bail!("no valid answer after 2 attempts: {reason}"),
         }
     }
 
-    async fn attempt(&mut self, text: &str, attempt: u32) -> Result<Verdict> {
+    async fn try_complete(&mut self, text: &str) -> Result<Verdict> {
+        if let Some(completion) = &mut self.completion {
+            completion.new_attempt();
+        }
+
         let response = self.send(text).await?;
-        observe::log_answer(attempt, &response);
+        if let Some(completion) = &mut self.completion {
+            let tools = response.transcript.as_ref().map_or(0, |t| t.turns.len());
+            completion.record(response.result.len(), tools, response.usage.as_ref());
+        }
+
         Ok(response.answer(&self.format))
     }
 
     async fn send(&mut self, text: &str) -> Result<Response> {
-        observe::log_send(text);
         let mut stream = self.rpc.send(self.id.clone(), text.to_owned()).await?;
 
         let (activity_tx, activity_rx) = watch::channel(Instant::now());
@@ -145,8 +195,10 @@ impl Agent {
         let Some(run_id) = self.live_run.take() else {
             return;
         };
+
         let rpc = self.rpc.clone();
         let agent_id = self.id.clone();
+
         tokio::spawn(async move {
             if let Err(error) = rpc.cancel_run(run_id, agent_id).await {
                 tracing::debug!(%error, "cancel after abandon failed");
@@ -160,6 +212,7 @@ impl Drop for Agent {
         self.cancel_live_run();
         let rpc = self.rpc.clone();
         let agent_id = std::mem::take(&mut self.id);
+        
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 if let Err(error) = rpc.delete_agent(agent_id).await {

@@ -28,9 +28,6 @@ impl Backend for Client {
 
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        // The genai client reads provider API keys from the ambient environment
-        // (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …) on demand. Keys are never
-        // captured here, logged, or recorded into fixtures (§7.5).
         Ok(Self {
             model: options.model,
             inner: genai::Client::default(),
@@ -51,9 +48,7 @@ mod config {
     /// prefix.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
-        /// Default model id when a request leaves `model` unset; genai
-        /// routes to the provider by the id's prefix (e.g. `gpt-…`,
-        /// `claude-…`, `gemini-…`).
+        /// Default model id when a request leaves `model` unset
         #[env(from = "GENAI_MODEL", default = "gpt-5.5")]
         pub model: String,
     }

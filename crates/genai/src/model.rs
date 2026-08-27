@@ -8,9 +8,6 @@
 //! host-side without traversing the session. Chat rounds share one budget;
 //! a failed format gate appends the repair instruction to the same
 //! conversation, which already carries the prompt and the failed answer.
-//! The guest only ever sees the validated answer string; the host
-//! re-validates as the single authority, so this crate's self-check is an
-//! optimization, not the gate.
 
 mod conversation;
 mod observe;

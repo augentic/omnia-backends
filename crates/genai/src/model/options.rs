@@ -19,9 +19,8 @@ pub struct Turn {
     pub chat: ChatRequest,
     pub options: ChatOptions,
     pub format: Format,
-    /// System plus message bytes, a telemetry-only size stat.
+    // telemetry-only stats for `Completion::start`
     pub prompt_bytes: u64,
-    /// Declared-tool count, a telemetry-only shape stat.
     pub tools: usize,
 }
 
@@ -34,8 +33,6 @@ impl Turn {
     /// request: an MCP grant (this backend has no MCP client), or tool
     /// parameters and format schemas that are not valid JSON.
     pub fn prepare(request: &Request, lent: Option<&Path>, default_model: &str) -> Result<Self> {
-        // The model id is carried on the request; fall back to the backend
-        // default when the guest leaves it unset.
         let model = request.model.as_deref().unwrap_or(default_model).to_owned();
         let chat = build_request(request, lent.is_some())?;
         let options = build_options(request)?;
@@ -56,10 +53,6 @@ fn prompt_bytes(request: &Request) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
-/// Map the gate-validated [`Request`] onto a genai [`ChatRequest`],
-/// advertising the request's declared function tools to the provider plus —
-/// when `workspace` reports a resolved lend — the host-injected `read`/`list`
-/// tools.
 fn build_request(request: &Request, workspace: bool) -> Result<ChatRequest> {
     let messages = request
         .messages
@@ -100,10 +93,8 @@ fn build_request(request: &Request, workspace: bool) -> Result<ChatRequest> {
     Ok(chat)
 }
 
-/// The host-injected workspace tools advertised alongside the request's
-/// declared function tools when the guest lent a workspace. The host gate
-/// reserves their names (`read`, `list`, plus the unadvertised `write`), so
-/// no guest tool can shadow them.
+// The host gate reserves these names (`read`, `list`, plus the unadvertised
+// `write`), so no guest tool can shadow them.
 fn workspace_tools() -> [Tool; 2] {
     [
         Tool::new("read")
@@ -138,8 +129,7 @@ fn workspace_tools() -> [Tool; 2] {
     ]
 }
 
-/// Translate a declared function tool into a genai [`Tool`]. The host gate
-/// already guarantees `parameters` parses as JSON.
+// The host gate already guarantees `parameters` parses as JSON.
 fn function_tool(function: &Function) -> Result<Tool> {
     let schema: Value = serde_json::from_str(&function.parameters).with_context(|| {
         format!("function tool `{}` parameters is not valid JSON", function.name)
@@ -149,8 +139,6 @@ fn function_tool(function: &Function) -> Result<Tool> {
         .with_schema(schema))
 }
 
-/// Translate the boundary's `format` and `generation` controls into genai
-/// [`ChatOptions`].
 fn build_options(request: &Request) -> Result<ChatOptions> {
     let mut options = ChatOptions::default().with_capture_usage(true);
 
@@ -163,10 +151,8 @@ fn build_options(request: &Request) -> Result<ChatOptions> {
                 schema,
             )))
         }
-        // `json`: request the provider's JSON mode (the strongest portable
-        // structured-output hint).
+        // JSON mode is the strongest portable structured-output hint.
         Format::Json => options.with_response_format(ChatResponseFormat::JsonMode),
-        // `text`: a plain string answer, no structured-output hint.
         Format::Text => options,
     };
 
@@ -194,7 +180,6 @@ fn build_options(request: &Request) -> Result<ChatOptions> {
     Ok(options)
 }
 
-/// Map the boundary's `effort` hint onto genai's [`ReasoningEffort`].
 const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
     match effort {
         Effort::Minimal => ReasoningEffort::Minimal,

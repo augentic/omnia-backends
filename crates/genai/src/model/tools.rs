@@ -13,16 +13,10 @@ use genai::chat::ToolCall;
 use omnia_wasi_model::ToolHost;
 use serde_json::Value;
 
-/// Route one model tool call. For `call_tool` the host enforces the
-/// declared-name check, budget, size cap, and timeout; its outer error is a
-/// hard failure that ends the completion, while the inner `Err` is the
-/// guest tool's own failure text — fed back to the model as repairable
-/// content.
-///
-/// # Errors
-///
-/// Returns an error only on a hard `call_tool` failure (undeclared tool,
-/// exhausted budget, closed session, oversize result, timeout).
+/// Route one model tool call. The returned `Err` is a hard `call_tool`
+/// failure (undeclared tool, exhausted budget, closed session, oversize
+/// result, timeout) that ends the completion; a tool's own failure text
+/// comes back as `Ok` — model-visible, repairable content.
 pub async fn dispatch_tool(
     tool_host: &Arc<dyn ToolHost>, call: &ToolCall, max_result_bytes: usize,
 ) -> Result<String> {
@@ -43,8 +37,8 @@ pub async fn dispatch_tool(
     }
 }
 
-/// Serve a model `read` call from the lent workspace: bytes must decode as
-/// UTF-8 and fit the per-result byte cap before they become prompt content.
+// Bytes must decode as UTF-8 and fit the per-result byte cap before they
+// become prompt content.
 async fn workspace_read(
     tool_host: &Arc<dyn ToolHost>, arguments: &Value, max_result_bytes: usize,
 ) -> String {
@@ -61,9 +55,8 @@ async fn workspace_read(
     )
 }
 
-/// Serve a model `list` call from the lent workspace as a JSON array of
-/// `{"name", "is_directory"}` entries; a missing or empty `path` lists the
-/// workspace root.
+// A JSON array of `{"name", "is_directory"}` entries; a missing or empty
+// `path` lists the workspace root.
 async fn workspace_list(
     tool_host: &Arc<dyn ToolHost>, arguments: &Value, max_result_bytes: usize,
 ) -> String {
@@ -78,8 +71,7 @@ async fn workspace_list(
     }
 }
 
-/// Apply the session's per-result byte cap to a host-injected tool's output,
-/// mirroring the host's enforcement on session tool results.
+// Mirrors the host's per-result byte cap on session tool results.
 fn bounded_result(tool: &str, text: String, max_result_bytes: usize) -> String {
     if text.len() > max_result_bytes {
         return format!(

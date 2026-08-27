@@ -56,8 +56,6 @@ impl Conversation {
         let result = self.run().await;
         let attempts = self.completion.as_ref().map_or(0, Completion::attempts);
         let outcome = match &result {
-            // Budget spent on an unvalidated value: the host gate stays the
-            // single authority and produces the canonical error.
             Ok(_) if self.unchecked => "unchecked",
             Ok(_) if attempts > 1 => "repair",
             Ok(_) => "ok",
@@ -88,7 +86,6 @@ impl Conversation {
                 continue;
             }
 
-            // No tool calls: this is the model's (attempted) final answer.
             let Some(text) = text else {
                 bail!("genai returned neither content nor tool calls (model `{}`)", self.model);
             };
@@ -154,8 +151,6 @@ impl Conversation {
         }
     }
 
-    // Append the rejected answer and a correction instruction so the next
-    // round can repair it (bounded by `MAX_ROUNDS`).
     fn repair(&mut self, answer: String, reason: &str) {
         self.chat = std::mem::take(&mut self.chat)
             .append_message(ChatMessage::assistant(answer))
@@ -168,8 +163,7 @@ enum Verdict {
     Repair(String),
 }
 
-/// Fold a genai response's token counts into the boundary's [`Usage`],
-/// reporting `None` when the provider surfaced no counts.
+// `None` when the provider surfaced no counts.
 fn to_usage(usage: &genai::chat::Usage) -> Option<Usage> {
     if usage.prompt_tokens.is_none() && usage.completion_tokens.is_none() {
         return None;

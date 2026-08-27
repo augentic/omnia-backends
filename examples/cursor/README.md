@@ -2,7 +2,7 @@
 
 Live model completion via `[omnia-cursor](../../crates/cursor)`: the guest calls `create` once (command mode) with a `docs` MCP grant. The same guest also exports `wasi:http` serving a small read-only MCP documentation server, so the bridge-managed Cursor agent answers the prompt by calling back into the guest's own MCP tools.
 
-Requires a sibling `[omnia](https://github.com/augentic/omnia)` checkout (this workspace patches the `omnia` crates to `../omnia/crates/*`), `[cursor-sdk-bridge](https://github.com/cursor/sdk-bridge)` on `PATH` (or `CURSOR_SDK_BRIDGE_BIN`), and `CURSOR_API_KEY` set.
+Requires a sibling `[omnia](https://github.com/augentic/omnia)` checkout (this workspace patches the `omnia` crates to `../omnia/crates/*`), `[cursor-sdk-bridge](https://github.com/cursor/sdk-bridge)` on `PATH`, and `CURSOR_API_KEY` set.
 
 ## Build and run
 

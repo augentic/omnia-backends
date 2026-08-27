@@ -52,6 +52,6 @@ pub fn local_path_tool_host(path: PathBuf) -> Arc<dyn ToolHost> {
 }
 
 /// A tool host with no local tree: the references-only completion shape.
-pub fn no_workspace_tool_host() -> Arc<dyn ToolHost> {
+pub fn no_tool_host() -> Arc<dyn ToolHost> {
     Arc::new(StubToolHost { path: None })
 }

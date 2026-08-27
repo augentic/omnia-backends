@@ -2,9 +2,10 @@
 #![allow(clippy::multiple_crate_versions)]
 
 mod bridge;
-mod callback;
+mod endpoint;
 mod model;
 
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,32 +14,23 @@ use omnia::Backend;
 use tracing::instrument;
 
 use crate::bridge::Bridge;
-use crate::callback::{CallbackServer, Registry};
+use crate::model::Deadlines;
 
-#[derive(Clone, Copy, Debug)]
-struct Deadlines {
-    inactivity: Duration,
-    cap: Duration,
-}
-
-/// Cursor model backend driving completions through a spawned
-/// `cursor-sdk-bridge` process.
-#[derive(Clone, Debug)]
+/// Cursor model backend
+#[derive(Clone)]
 pub struct Client {
     deadlines: Deadlines,
-    model: Option<String>,
-    shared: Arc<Shared>,
+    model: String,
+    bridge: Arc<Bridge>,
 }
 
-/// Connect-scoped state shared by every completion: the bridge process and
-/// its transport, the loopback callback server, and the agent registry that
-/// routes `CallCustomTool` callbacks into live sessions.
-#[derive(Debug)]
-struct Shared {
-    bridge: Bridge,
-    registry: Arc<Registry>,
-    /// Held for its lifetime: dropping it stops the callback server.
-    _callback: CallbackServer,
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("deadlines", &self.deadlines)
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Backend for Client {
@@ -46,32 +38,23 @@ impl Backend for Client {
 
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        // The bridge protocol wants the key set explicitly per agent; fail
-        // fast here rather than on the first completion.
-        ensure!(
-            std::env::var_os("CURSOR_API_KEY").is_some_and(|key| !key.is_empty()),
-            "CURSOR_API_KEY must be set for the cursor backend"
-        );
-
-        let registry = Arc::new(Registry::default());
-        let callback = CallbackServer::spawn(Arc::clone(&registry)).await?;
-        let bridge = Bridge::spawn(callback.url(), callback.token()).await?;
+        ensure!(env::var("CURSOR_API_KEY").is_ok(), "CURSOR_API_KEY must be set");
+        ensure!(options.timeout_secs > 0, "timeout_secs must be greater than 0");
+        ensure!(options.inactivity_secs > 0, "inactivity_secs must be greater than 0");
 
         Ok(Self {
             deadlines: Deadlines {
                 inactivity: Duration::from_secs(options.inactivity_secs),
                 cap: Duration::from_secs(options.timeout_secs),
             },
-            model: options.model.filter(|id| !id.trim().is_empty()),
-            shared: Arc::new(Shared {
-                bridge,
-                registry,
-                _callback: callback,
-            }),
+            model: options.model,
+            bridge: Arc::new(Bridge::spawn().await?),
         })
     }
 }
 
+// A named module solely to scope the allow: the `FromEnv` derive expands to
+// an undocumented public builder that `missing_docs` would otherwise flag.
 #[allow(missing_docs)]
 mod config {
     use fromenv::FromEnv;
@@ -86,10 +69,11 @@ mod config {
     pub struct ConnectOptions {
         /// Default model id when a request leaves `model` unset; omitted
         /// means Cursor's server-side selection (`auto`).
-        #[env(from = "CURSOR_MODEL")]
-        pub model: Option<String>,
-        /// Absolute wall-clock cap in seconds on one agent run; timed-out
-        /// runs are cancelled.
+        #[env(from = "CURSOR_MODEL", default = "auto")]
+        pub model: String,
+        /// Absolute wall-clock cap in seconds on one agent run (the opening
+        /// prompt, or a format-repair); timed-out runs are cancelled. A
+        /// completion that repairs gets a fresh cap on the second send.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
         pub timeout_secs: u64,
         /// Inactivity bound in seconds: a run is cancelled after this long

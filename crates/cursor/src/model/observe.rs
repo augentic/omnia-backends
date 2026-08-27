@@ -1,0 +1,397 @@
+//! Stream parse plus completion telemetry.
+//!
+//! [`EventLog`] follows a run's `sdk_message` events to rebuild the tool
+//! transcript and capture the run id and last status text. Payload shapes
+//! mirror the public SDK — every field access is nullable and a malformed
+//! event is skipped, never fatal. [`Completion`] emits the start/finish INFO
+//! lines and tracing-opentelemetry metric fields.
+
+use std::collections::HashMap;
+use std::time::Instant;
+
+use omnia_wasi_model::{ToolTurn, Transcript, Usage};
+use serde_json::Value;
+
+use crate::bridge::SdkMessage;
+use crate::model::options::Turn;
+
+/// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
+/// records `outcome=abort` (a cancelled future).
+pub struct Completion {
+    model: String,
+    format: String,
+    prompt_bytes: u64,
+    started: Instant,
+    attempts: u32,
+    result_bytes: u64,
+    tool_turns: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    reasoning_tokens: u64,
+    emitted: bool,
+}
+
+impl Completion {
+    // INFO that a completion is in flight (no metric prefixes — live tail).
+    pub fn start(turn: &Turn) -> Self {
+        let format = turn.format.to_string();
+        let prompt_bytes = u64::try_from(turn.prompt.len()).unwrap_or(u64::MAX);
+
+        tracing::info!(
+            model = %turn.options.model.id,
+            format = %format,
+            prompt_bytes,
+            mcp = turn.options.mcp_servers.len(),
+            "completion started"
+        );
+
+        Self {
+            model: turn.options.model.id.clone(),
+            format,
+            prompt_bytes,
+            started: Instant::now(),
+            attempts: 0,
+            result_bytes: 0,
+            tool_turns: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            emitted: false,
+        }
+    }
+
+    // Count an attempt as started, including ones that later time out.
+    pub const fn new_attempt(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+    }
+
+    /// Snapshot the last successful send (result size, tools, tokens).
+    pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
+        self.result_bytes = u64::try_from(result_len).unwrap_or(u64::MAX);
+        self.tool_turns = u64::try_from(tool_turns).unwrap_or(u64::MAX);
+
+        if let Some(usage) = usage {
+            self.input_tokens = u64::from(usage.input_tokens);
+            self.output_tokens = u64::from(usage.output_tokens);
+            self.reasoning_tokens = u64::from(usage.reasoning_tokens.unwrap_or(0));
+        }
+    }
+
+    pub const fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    // INFO + OTEL metric fields for this completion. Consumes self so Drop
+    // does not emit a second time.
+    pub fn finish(mut self, outcome: &'static str) {
+        self.emit(outcome);
+    }
+
+    fn emit(&mut self, outcome: &'static str) {
+        if self.emitted {
+            return;
+        }
+        self.emitted = true;
+        let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::info!(
+            model = %self.model,
+            format = %self.format,
+            outcome,
+            attempts = self.attempts,
+            histogram.cursor_completion_duration_ms = duration_ms,
+            histogram.cursor_prompt_bytes = self.prompt_bytes,
+            histogram.cursor_result_bytes = self.result_bytes,
+            histogram.cursor_tool_turns = self.tool_turns,
+            histogram.cursor_input_tokens = self.input_tokens,
+            histogram.cursor_output_tokens = self.output_tokens,
+            histogram.cursor_reasoning_tokens = self.reasoning_tokens,
+            monotonic_counter.cursor_completions = 1_u64,
+            monotonic_counter.cursor_repairs = u64::from(outcome == "repair"),
+            "completion"
+        );
+    }
+}
+
+impl Drop for Completion {
+    fn drop(&mut self) {
+        if !self.emitted {
+            self.emit("abort");
+        }
+    }
+}
+
+/// A completion failure this crate constructs. [`outcome_of`] downcasts this
+/// so metric labels do not depend on message wording.
+#[derive(Debug)]
+pub enum Failure {
+    /// Absolute wall-clock cap exceeded while the stream was still active.
+    Timeout {
+        /// The cap in seconds, from connect options.
+        cap_secs: u64,
+    },
+    /// No stream events within the inactivity window.
+    Inactive {
+        /// Observed idle span in seconds.
+        idle_secs: u64,
+        /// Configured inactivity limit in seconds.
+        inactivity_secs: u64,
+        /// Configured absolute cap in seconds.
+        cap_secs: u64,
+    },
+    /// Hard tool-host failure (or a closed abort channel).
+    Aborted(String),
+    /// Format gate rejected both the first answer and the repair.
+    Invalid(String),
+}
+
+impl Failure {
+    pub const fn outcome(&self) -> &'static str {
+        match self {
+            Self::Timeout { .. } => "timeout",
+            Self::Inactive { .. } => "inactive",
+            Self::Aborted(_) => "abort",
+            Self::Invalid(_) => "invalid",
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout { cap_secs } => write!(
+                f,
+                "cursor run timed out after {cap_secs}s (absolute cap exceeded while still active)"
+            ),
+            Self::Inactive {
+                idle_secs,
+                inactivity_secs,
+                cap_secs,
+            } => write!(
+                f,
+                "cursor run inactive for {idle_secs}s (no stream events; inactivity limit \
+                 {inactivity_secs}s, absolute cap {cap_secs}s)"
+            ),
+            Self::Aborted(reason) => write!(f, "completion aborted: {reason}"),
+            Self::Invalid(reason) => write!(f, "no valid answer after 2 attempts: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for Failure {}
+
+/// Classify a failed `complete` from a [`Failure`] when present.
+pub fn outcome_of(error: &anyhow::Error) -> &'static str {
+    error.downcast_ref::<Failure>().map_or("error", Failure::outcome)
+}
+
+/// Reconstructs the tool transcript and run metadata from the SDK stream.
+#[derive(Default)]
+pub struct EventLog {
+    run_id: Option<String>,
+    status_message: Option<String>,
+    pending_tools: HashMap<String, PendingCall>,
+    turns: Vec<ToolTurn>,
+}
+
+impl EventLog {
+    pub fn observe(&mut self, event: &SdkMessage) {
+        let payload = &event.message;
+        if self.run_id.is_none() {
+            self.run_id = first_match(payload, &["run_id", "runId"]).map(ToOwned::to_owned);
+        }
+
+        match event.kind.as_str() {
+            "tool_call" => self.tool_call(payload),
+            "system" | "status" => {
+                if let Some(message) = first_match(payload, &["message"]) {
+                    self.status_message = Some(message.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The run id observed in the stream, for `CancelRun`.
+    pub fn run_id(&self) -> Option<&str> {
+        self.run_id.as_deref()
+    }
+
+    /// The last `status`/`system` payload's message — the failure detail when
+    /// a run ends in an error status.
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message.as_deref()
+    }
+
+    // The CLI stream spells the phase `subtype` (started/completed); the
+    // SDK message type spells it `status` (running/completed/error).
+    fn tool_call(&mut self, payload: &Value) {
+        let phase = first_match(payload, &["subtype", "status"]);
+        let call_id = first_match(payload, &["call_id", "callId", "tool_call_id", "toolCallId"]);
+        let tool_call = payload.get("tool_call").or_else(|| payload.get("toolCall"));
+
+        match phase {
+            Some("started" | "running") => {
+                if let (Some(call_id), Some(pending)) =
+                    (call_id, tool_call.and_then(PendingCall::from_value))
+                {
+                    self.pending_tools.insert(call_id.to_owned(), pending);
+                }
+            }
+            Some("completed" | "error") => {
+                let Some(call_id) = call_id else {
+                    return;
+                };
+                let Some(tool_call) = tool_call else {
+                    return;
+                };
+                let PendingCall { tool, args } = self
+                    .pending_tools
+                    .remove(call_id)
+                    .or_else(|| PendingCall::from_value(tool_call))
+                    .unwrap_or_else(|| PendingCall {
+                        tool: "unknown".to_owned(),
+                        args: Value::Null,
+                    });
+
+                let result = tool_call
+                    .as_object()
+                    .and_then(|map| map.values().find_map(|value| value.get("result").cloned()))
+                    .unwrap_or_default();
+
+                self.turns.push(ToolTurn { tool, args, result });
+            }
+            _ => {}
+        }
+    }
+
+    /// The reconstructed tool transcript, or `None` when no tool completed.
+    pub fn finish(self) -> Option<Transcript> {
+        if self.turns.is_empty() { None } else { Some(Transcript { turns: self.turns }) }
+    }
+}
+
+// The first string found under any of `keys`, tolerating both `snake_case`
+// and `camelCase` spellings across bridge versions.
+fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
+}
+
+/// A started tool call awaiting its completion event.
+struct PendingCall {
+    tool: String,
+    args: Value,
+}
+
+impl PendingCall {
+    fn from_value(tool_call: &Value) -> Option<Self> {
+        tool_call.as_object()?.iter().find_map(|(key, value)| {
+            let tool = key.strip_suffix("ToolCall")?;
+            let args = value.get("args").cloned().unwrap_or_else(|| value.clone());
+            Some(Self {
+                tool: tool.to_owned(),
+                args,
+            })
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::EventLog;
+    use crate::bridge::SdkMessage;
+
+    fn observe_all(events: &[Value]) -> EventLog {
+        let mut log = EventLog::default();
+        for event in events {
+            let message: SdkMessage =
+                serde_json::from_value(event.clone()).expect("test events are SdkMessages");
+            log.observe(&message);
+        }
+        log
+    }
+
+    #[test]
+    fn tool_calls() {
+        let log = observe_all(&[
+            json!({ "type": "system", "message": { "subtype": "init", "run_id": "r-1" } }),
+            json!({ "type": "tool_call", "message": {
+                "subtype": "started", "call_id": "c1",
+                "tool_call": { "readToolCall": { "args": { "path": "README.md" } } },
+            }}),
+            json!({ "type": "tool_call", "message": {
+                "subtype": "completed", "call_id": "c1",
+                "tool_call": { "readToolCall": {
+                    "args": { "path": "README.md" },
+                    "result": { "success": { "content": "hi" } },
+                }},
+            }}),
+        ]);
+        assert_eq!(log.run_id(), Some("r-1"));
+        let transcript = log.finish().expect("one completed tool turn");
+        assert_eq!(transcript.turns.len(), 1);
+        assert_eq!(transcript.turns[0].tool, "read");
+        assert_eq!(transcript.turns[0].args, json!({ "path": "README.md" }));
+    }
+
+    #[test]
+    fn sdk_status_spelling() {
+        let log = observe_all(&[
+            json!({ "type": "tool_call", "message": {
+                "status": "running", "toolCallId": "c1",
+                "toolCall": { "lookupToolCall": { "args": { "q": "x" } } },
+            }}),
+            json!({ "type": "tool_call", "message": {
+                "status": "completed", "toolCallId": "c1",
+                "toolCall": { "lookupToolCall": { "args": { "q": "x" }, "result": { "hit": true } } },
+            }}),
+        ]);
+        let transcript = log.finish().expect("the camelCase spelling still yields a turn");
+        assert_eq!(transcript.turns[0].tool, "lookup");
+        assert_eq!(transcript.turns[0].result, json!({ "hit": true }));
+    }
+
+    #[test]
+    fn status_message() {
+        let log = observe_all(&[
+            json!({ "type": "status", "message": { "runId": "r-2", "message": "model overloaded" } }),
+        ]);
+        assert_eq!(log.run_id(), Some("r-2"));
+        assert_eq!(log.status_message(), Some("model overloaded"));
+    }
+
+    #[test]
+    fn garbled_payloads() {
+        let log = observe_all(&[
+            json!({ "type": "assistant", "message": null }),
+            json!({ "type": "thinking", "message": { "subtype": "delta", "text": null } }),
+            json!({ "type": "tool_call", "message": { "subtype": "completed" } }),
+        ]);
+        assert!(log.finish().is_none(), "nothing usable, nothing recorded");
+    }
+
+    #[test]
+    fn classify_crate_errors() {
+        use super::Failure;
+
+        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
+        assert_eq!(super::outcome_of(&timeout), "timeout");
+
+        let inactive: anyhow::Error = Failure::Inactive {
+            idle_secs: 120,
+            inactivity_secs: 120,
+            cap_secs: 600,
+        }
+        .into();
+        assert_eq!(super::outcome_of(&inactive), "inactive");
+
+        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
+        assert_eq!(super::outcome_of(&aborted), "abort");
+
+        let invalid: anyhow::Error = Failure::Invalid("not json".to_owned()).into();
+        assert_eq!(super::outcome_of(&invalid), "invalid");
+
+        assert_eq!(super::outcome_of(&anyhow::anyhow!("bridge RPC failed")), "error");
+    }
+}

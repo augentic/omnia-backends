@@ -4,16 +4,81 @@
 //! additively, so every deserialized shape ignores unknown fields.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
+use omnia_wasi_model::Usage;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-// --- SdkBridgeControlService ---
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentOptions {
+    pub model: ModelSelection,
+    pub api_key: String,
+    pub local: LocalAgentOptions,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolList>,
+}
 
-/// Empty proto3 JSON object (`{}`), used as Ping / `GetVersion` request bodies
-/// and as acknowledgement responses.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelSelection {
+    pub id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAgentOptions {
+    pub cwd: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub custom_tools: BTreeMap<String, CustomToolDefinition>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomToolDefinition {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub input_schema: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    pub http: HttpMcpServerConfig,
+}
+
+impl McpServerConfig {
+    pub fn streamable_http(url: &str) -> Self {
+        Self {
+            http: HttpMcpServerConfig {
+                transport: "HTTP_MCP_TRANSPORT_TYPE_HTTP",
+                url: url.to_owned(),
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpMcpServerConfig {
+    #[serde(rename = "type")]
+    pub transport: &'static str,
+    pub url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolList {
+    pub names: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Default)]
-#[allow(clippy::empty_structs_with_brackets)] // unit structs serialize as `null`
+#[allow(clippy::empty_structs_with_brackets)] // prevent serialization as `null`
 pub struct Empty {}
 
 #[derive(Debug, Default, Deserialize)]
@@ -29,8 +94,6 @@ pub struct GetVersionResponse {
 pub struct ShutdownRequest {
     pub grace_seconds: u32,
 }
-
-// --- SdkAgentService ---
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,84 +135,6 @@ pub struct UserMessage {
     pub text: String,
 }
 
-// --- Agent options ---
-
-/// Cursor auth and runtime selection for one agent. The API key rides on the
-/// request per the bridge protocol ("always set it explicitly"); never derive
-/// `Debug` here or log the serialized form.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentOptions {
-    pub model: ModelSelection,
-    pub api_key: String,
-    pub local: LocalAgentOptions,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub mcp_servers: BTreeMap<String, McpServerConfig>,
-    /// `None` keeps the bridge's default built-in toolset; `Some` with an
-    /// empty `names` list disables every built-in tool (the wrapper exists
-    /// precisely to keep that distinction on the wire).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<ToolList>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct ModelSelection {
-    pub id: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalAgentOptions {
-    pub cwd: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub setting_sources: Vec<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub custom_tools: BTreeMap<String, CustomToolDefinition>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomToolDefinition {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// JSON Schema object describing the tool's input parameters.
-    pub input_schema: Value,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolList {
-    pub names: Vec<String>,
-}
-
-/// The `config` oneof: exactly one case serialized as its own field.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpServerConfig {
-    pub http: HttpMcpServerConfig,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HttpMcpServerConfig {
-    #[serde(rename = "type")]
-    pub transport: &'static str,
-    pub url: String,
-}
-
-impl McpServerConfig {
-    /// Streamable-HTTP server at `url`, matching the WIT `tool::mcp` grant.
-    pub fn streamable_http(url: &str) -> Self {
-        Self {
-            http: HttpMcpServerConfig {
-                transport: "HTTP_MCP_TRANSPORT_TYPE_HTTP",
-                url: url.to_owned(),
-            },
-        }
-    }
-}
-
 // --- Run streaming ---
 
 /// One frame of a `Send` stream. A frame with no envelope case and no offset
@@ -161,11 +146,11 @@ pub struct RunStreamMessage {
     pub sdk_message: Option<SdkMessage>,
     pub result: Option<RunStreamResult>,
     pub done: Option<Value>,
-    pub offset: Option<String>,
+    offset: Option<String>,
 }
 
 impl RunStreamMessage {
-    pub const fn is_keepalive(&self) -> bool {
+    pub(super) const fn is_keepalive(&self) -> bool {
         self.sdk_message.is_none()
             && self.result.is_none()
             && self.done.is_none()
@@ -192,32 +177,6 @@ pub struct RunStreamResult {
     pub result: Option<RunResult>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct RunResult {
-    pub run_id: String,
-    /// Final assistant text for a completed run.
-    pub result: String,
-    pub usage: Option<TokenUsage>,
-}
-
-/// Billed token counts; proto3 JSON writes `int64` as strings, so every field
-/// tolerates both encodings.
-// Field names mirror the wire message; the shared postfix is the protocol's.
-#[allow(clippy::struct_field_names)]
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct TokenUsage {
-    #[serde(deserialize_with = "flexible_i64")]
-    pub input_tokens: i64,
-    #[serde(deserialize_with = "flexible_i64")]
-    pub output_tokens: i64,
-    #[serde(deserialize_with = "flexible_i64_opt")]
-    pub reasoning_tokens: Option<i64>,
-}
-
-/// `RunLifecycleStatus`, tolerating the proto3 JSON name, a bare integer, or
-/// values this backend does not know.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RunStatus {
     #[default]
@@ -231,9 +190,9 @@ pub enum RunStatus {
     Unknown,
 }
 
-impl RunStatus {
-    pub const fn describe(self) -> &'static str {
-        match self {
+impl fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
             Self::Unspecified => "unspecified",
             Self::Creating => "creating",
             Self::Running => "running",
@@ -242,7 +201,7 @@ impl RunStatus {
             Self::Cancelled => "cancelled",
             Self::Expired => "expired",
             Self::Unknown => "unknown",
-        }
+        })
     }
 }
 
@@ -275,6 +234,45 @@ impl<'de> Deserialize<'de> for RunStatus {
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunResult {
+    pub run_id: String,
+    /// Final assistant text for a completed run.
+    pub result: String,
+    pub usage: Option<TokenUsage>,
+}
+
+/// Billed token counts; proto3 JSON writes `int64` as strings, so every field
+/// tolerates both encodings.
+// Field names mirror the wire message; the shared postfix is the protocol's.
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TokenUsage {
+    #[serde(deserialize_with = "flexible_i64")]
+    pub input_tokens: i64,
+    #[serde(deserialize_with = "flexible_i64")]
+    pub output_tokens: i64,
+    #[serde(deserialize_with = "flexible_i64_opt")]
+    pub reasoning_tokens: Option<i64>,
+}
+
+impl From<TokenUsage> for Usage {
+    fn from(usage: TokenUsage) -> Self {
+        Self {
+            input_tokens: clamp_u32(usage.input_tokens),
+            output_tokens: clamp_u32(usage.output_tokens),
+            reasoning_tokens: usage.reasoning_tokens.map(clamp_u32),
+        }
+    }
+}
+
+/// Wire counts are `i64`; negatives become 0, values above `u32::MAX` saturate.
+fn clamp_u32(count: i64) -> u32 {
+    u32::try_from(count.clamp(0, i64::from(u32::MAX))).unwrap_or(u32::MAX)
+}
+
 fn flexible_i64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
     Ok(flexible_i64_opt(deserializer)?.unwrap_or_default())
 }
@@ -286,4 +284,43 @@ fn flexible_i64_opt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option
         Value::String(text) => text.parse().ok(),
         _ => None,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use omnia_wasi_model::Usage;
+
+    use super::TokenUsage;
+
+    fn usage(input: i64, output: i64, reasoning: Option<i64>) -> Usage {
+        Usage::from(TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            reasoning_tokens: reasoning,
+        })
+    }
+
+    #[test]
+    fn token_counts() {
+        assert_eq!(
+            usage(-1, -1, Some(-1)),
+            Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                reasoning_tokens: Some(0),
+            }
+        );
+        let saturated = usage(i64::MAX, i64::MAX, Some(i64::MAX));
+        assert_eq!(saturated.input_tokens, u32::MAX);
+        assert_eq!(saturated.output_tokens, u32::MAX);
+        assert_eq!(saturated.reasoning_tokens, Some(u32::MAX));
+        assert_eq!(
+            usage(7, 3, None),
+            Usage {
+                input_tokens: 7,
+                output_tokens: 3,
+                reasoning_tokens: None,
+            }
+        );
+    }
 }

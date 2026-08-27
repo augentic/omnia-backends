@@ -26,15 +26,18 @@ MSRV: Rust 1.97
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `GENAI_MODEL` | no | `gpt-5.5` | Default model id when a request leaves `model` unset |
 | `OPENAI_API_KEY` | per provider | | `OpenAI` API key, read by genai from the ambient environment |
 | `ANTHROPIC_API_KEY` | per provider | | Anthropic API key |
 | `GEMINI_API_KEY` | per provider | | Gemini API key |
 | (other provider keys) | per provider | | Any key the [`genai`](https://crates.io/crates/genai) SDK supports (Groq, Ollama, …) |
 
-The provider model id is carried per-request (`request.model`); when a request
-leaves it unset the backend falls back to `gpt-5.5`. genai routes to the
+The provider model id is taken from each request (`request.model`); an unset
+value falls back to `GENAI_MODEL`, else `gpt-5.5`. genai routes to the
 provider by the model id's prefix. Only the key for the provider a request
 routes to is required, and keys are never logged or recorded.
+`Client::connect()` / `FromEnv` reads the optional `GENAI_MODEL`; callers
+that need a different default model pass `ConnectOptions` to `connect_with`.
 
 ## Usage
 
@@ -56,9 +59,15 @@ For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia::Backend;
-use omnia_genai::Client;
+use omnia_genai::{Client, ConnectOptions};
 
+// GENAI_MODEL when set; else `gpt-5.5`.
 let client = Client::connect().await?;
+
+// Explicit default model for requests that leave `model` unset.
+let client = Client::connect_with(ConnectOptions {
+    model: "claude-fable-5".into(),
+}).await?;
 ```
 
 ## Live tests

@@ -265,13 +265,10 @@ dependencies = [
  "axum-core",
  "axum-macros",
  "bytes",
- "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
  "http-body-util",
- "hyper",
- "hyper-util",
  "itoa",
  "matchit",
  "memchr",
@@ -281,9 +278,7 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
- "serde_urlencoded",
  "sync_wrapper",
- "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -371,9 +366,9 @@ dependencies = [
 
 [[package]]
 name = "azure_security_keyvault_secrets"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e96b370d75ebb8807cc1ccfc6fe647b1e61e13052cba2e800b95f0cf0bd27d9a"
+checksum = "a344d7c923ea305fa36bdad4d36c54e7c6fb806077430efcafb19ee40ed7b786"
 dependencies = [
  "async-lock",
  "async-trait",
@@ -499,27 +494,25 @@ dependencies = [
 
 [[package]]
 name = "bon"
-version = "3.9.3"
+version = "3.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a602c73c7b0148ec6d12af6fd5cc7a46e2eacc8878271a999abac56eed12f561"
+checksum = "9e3fac94a66da67200398458a25412bcc3f9b6443b5119a6cad9cf3ccfcd8cc6"
 dependencies = [
  "bon-macros",
- "rustversion",
 ]
 
 [[package]]
 name = "bon-macros"
-version = "3.9.3"
+version = "3.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6dee98b0db6a962de883bf5d20362dee4d7ca0d12fe39a7c6c73c844e1cd7c1f"
+checksum = "d4654961ad0494e4774c5c60b4cb4cd0ae9b9d92d039d901638b1dba97ebebf5"
 dependencies = [
- "darling 0.23.0",
+ "darling 0.24.1",
  "ident_case",
- "prettyplease",
+ "prettyplease 0.3.0",
  "proc-macro2",
  "quote",
- "rustversion",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -733,15 +726,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clap_complete"
-version = "4.6.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3be2ad0423bdbbb0e25bc89add796f3559706d4a95e1bc98e4d9662a957b6a19"
-dependencies = [
- "clap",
-]
-
-[[package]]
 name = "clap_derive"
 version = "4.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -785,9 +769,9 @@ dependencies = [
 
 [[package]]
 name = "combine"
-version = "4.6.7"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "futures-core",
@@ -1232,6 +1216,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
+dependencies = [
+ "darling_core 0.24.1",
+ "darling_macro 0.24.1",
+]
+
+[[package]]
 name = "darling_core"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1259,6 +1253,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling_core"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6837e2cf7485aaae18f86181d2f0e9a7ed297a025e220aeabf63fdebd3a2ddff"
+dependencies = [
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 3.0.4",
+]
+
+[[package]]
 name = "darling_macro"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1278,6 +1285,17 @@ dependencies = [
  "darling_core 0.23.0",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
+dependencies = [
+ "darling_core 0.24.1",
+ "quote",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -1315,25 +1333,23 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "deadpool"
-version = "0.12.3"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0be2b1d1d6ec8d846f05e137292d0b89133caf95ef33695424c09568bdd39b1b"
+checksum = "3e98a7e119cd347f4201e1159b19831029e203e2d8b790547708e8157b4acf1e"
 dependencies = [
  "deadpool-runtime",
- "lazy_static",
- "num_cpus",
  "tokio",
 ]
 
 [[package]]
 name = "deadpool-postgres"
-version = "0.14.1"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d697d376cbfa018c23eb4caab1fd1883dd9c906a8c034e8d9a3cb06a7e0bef9"
+checksum = "65a536565624b97fc19f758cd01b15d12908d3344425066efc8162236fbd3749"
 dependencies = [
  "async-trait",
  "deadpool",
- "getrandom 0.2.17",
+ "getrandom 0.4.3",
  "tokio",
  "tokio-postgres",
  "tracing",
@@ -1341,9 +1357,9 @@ dependencies = [
 
 [[package]]
 name = "deadpool-runtime"
-version = "0.1.4"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
+checksum = "2657f61fb1dd8bf37a8d51093cc7cee4e77125b22f7753f49b289f831bec2bae"
 dependencies = [
  "tokio",
 ]
@@ -2001,9 +2017,9 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "h2"
-version = "0.4.18"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "839c0e8a181239723652be9062bb56ca5bf5f64011f73b623f6f4fc59086a228"
+checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2068,12 +2084,6 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
-
-[[package]]
-name = "hermit-abi"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "hex"
@@ -3137,7 +3147,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
  "log",
- "rand 0.8.7",
+ "rand 0.8.8",
  "signatory",
 ]
 
@@ -3166,7 +3176,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc895af95856f929163a0aa20c26a78d26bfdc839f51b9d5aa7a5b79e52b7e83"
 dependencies = [
- "rand 0.8.7",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -3265,16 +3275,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num_cpus"
-version = "1.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
-dependencies = [
- "hermit-abi",
- "libc",
-]
-
-[[package]]
 name = "num_enum"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3306,7 +3306,7 @@ dependencies = [
  "chrono",
  "getrandom 0.2.17",
  "http",
- "rand 0.8.7",
+ "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3349,7 +3349,7 @@ dependencies = [
 [[package]]
 name = "omnia"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3453,10 +3453,9 @@ name = "omnia-cursor"
 version = "0.29.0"
 dependencies = [
  "anyhow",
- "axum",
  "bytes",
  "fromenv",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "http",
  "http-body-util",
  "hyper",
@@ -3467,6 +3466,7 @@ dependencies = [
  "prost-types 0.14.4",
  "serde",
  "serde_json",
+ "serde_repr",
  "tempfile",
  "tokio",
  "tracing",
@@ -3492,10 +3492,13 @@ name = "omnia-genai"
 version = "0.29.0"
 dependencies = [
  "anyhow",
+ "fromenv",
  "futures",
  "genai",
  "omnia",
  "omnia-wasi-model",
+ "schemars 1.2.2",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -3504,15 +3507,13 @@ dependencies = [
 [[package]]
 name = "omnia-guest"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "axum",
  "bon",
  "bytes",
  "chrono",
- "clap",
- "clap_complete",
  "futures",
  "http",
  "http-body",
@@ -3528,7 +3529,6 @@ dependencies = [
  "omnia-wasi-otel",
  "omnia-wasi-sql",
  "omnia-wasi-websocket",
- "rand 0.10.2",
  "sea-query",
  "serde",
  "serde_json",
@@ -3542,7 +3542,7 @@ dependencies = [
 [[package]]
 name = "omnia-guest-macros"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3552,7 +3552,7 @@ dependencies = [
 [[package]]
 name = "omnia-host-macros"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3668,7 +3668,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-blobstore"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3684,7 +3684,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-config"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "omnia",
@@ -3697,7 +3697,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-docstore"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3713,7 +3713,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-http"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "axum",
@@ -3743,7 +3743,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-identity"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "fromenv",
@@ -3760,7 +3760,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-keyvalue"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3778,7 +3778,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-messaging"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "futures",
@@ -3794,7 +3794,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-model"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "cap-primitives",
@@ -3815,7 +3815,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-otel"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "futures",
@@ -3836,7 +3836,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-sql"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "fromenv",
@@ -3854,7 +3854,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-vault"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "futures",
@@ -3869,7 +3869,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-websocket"
 version = "0.35.0"
-source = "git+https://github.com/augentic/omnia.git#0d039749b4362ca0b563f0cea9e43f586022d3c6"
+source = "git+https://github.com/augentic/omnia.git#6b4e75bab8af5743d4284118a7c2849ade7acc35"
 dependencies = [
  "anyhow",
  "dashmap 6.2.1",
@@ -4245,6 +4245,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "prettyplease"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
+dependencies = [
+ "proc-macro2",
+ "syn 3.0.4",
+]
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4309,7 +4319,7 @@ dependencies = [
  "multimap",
  "once_cell",
  "petgraph",
- "prettyplease",
+ "prettyplease 0.2.37",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "regex",
@@ -4532,9 +4542,9 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
-version = "0.8.7"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -5167,8 +5177,21 @@ checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
 dependencies = [
  "dyn-clone",
  "ref-cast",
+ "schemars_derive",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d98c67716b46af2f0b8cf752abc930f6f9aecfbf671ecfb531db8a31dbe4e2ba"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -5263,6 +5286,17 @@ name = "serde_derive"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5820,7 +5854,7 @@ dependencies = [
  "digest 0.10.7",
  "hkdf",
  "lazy_static",
- "rand 0.8.7",
+ "rand 0.8.8",
  "sha-1",
  "sha2 0.10.9",
  "subtle",
@@ -6021,7 +6055,7 @@ dependencies = [
  "futures-sink",
  "http",
  "httparse",
- "rand 0.8.7",
+ "rand 0.8.8",
  "ring",
  "rustls-pki-types",
  "tokio",
@@ -6490,9 +6524,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.25.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -7459,7 +7493,7 @@ dependencies = [
  "anyhow",
  "heck",
  "indexmap 2.14.0",
- "prettyplease",
+ "prettyplease 0.2.37",
  "syn 2.0.119",
  "wasm-metadata",
  "wit-bindgen-core",
@@ -7474,7 +7508,7 @@ checksum = "d689c4bc9d6af067c651cfba444766343c9a4bdef15fad1e2efab95c0c277af0"
 dependencies = [
  "anyhow",
  "macro-string",
- "prettyplease",
+ "prettyplease 0.2.37",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -7575,7 +7609,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 [[package]]
 name = "wrpc-introspect"
 version = "0.7.0"
-source = "git+https://github.com/bytecodealliance/wrpc#d2233d8c70f812a3848cd4783c756ae63fceeadd"
+source = "git+https://github.com/bytecodealliance/wrpc#1b182e762e9e11a32df671ab52303eede2bd3c27"
 dependencies = [
  "wit-parser 0.251.0",
 ]
@@ -7583,7 +7617,7 @@ dependencies = [
 [[package]]
 name = "wrpc-transport"
 version = "0.29.0"
-source = "git+https://github.com/bytecodealliance/wrpc#d2233d8c70f812a3848cd4783c756ae63fceeadd"
+source = "git+https://github.com/bytecodealliance/wrpc#1b182e762e9e11a32df671ab52303eede2bd3c27"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7600,7 +7634,7 @@ dependencies = [
 [[package]]
 name = "wrpc-wasmtime"
 version = "0.1.0"
-source = "git+https://github.com/bytecodealliance/wrpc#d2233d8c70f812a3848cd4783c756ae63fceeadd"
+source = "git+https://github.com/bytecodealliance/wrpc#1b182e762e9e11a32df671ab52303eede2bd3c27"
 dependencies = [
  "anyhow",
  "bytes",

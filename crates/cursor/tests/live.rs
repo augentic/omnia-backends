@@ -7,8 +7,7 @@
 //!
 //! All tests are `#[ignore]`d so they never run or spawn a process in CI; run
 //! them with `cargo nextest run --run-ignored all` (or `cargo test --
-//! --ignored`) alongside an installed `cursor-sdk-bridge` (or
-//! `CURSOR_SDK_BRIDGE_BIN`) and a `CURSOR_API_KEY`.
+//! --ignored`) alongside an installed `cursor-sdk-bridge` and a `CURSOR_API_KEY`.
 
 mod support;
 
@@ -19,14 +18,14 @@ use omnia_wasi_model::{
     Answer, Format, Function, Grants, Mcp, Message, Request, Role, Schema, Tool, WasiModelCtx,
 };
 use serde_json::json;
-use support::{SENTINEL, TOOL_SENTINEL, local_path_tool_host, no_workspace_tool_host, serve};
+use support::{SENTINEL, TOOL_SENTINEL, local_path_tool_host, no_tool_host, serve};
 use tokio::net::TcpListener;
 
 async fn connect() -> Result<Client> {
     Client::connect_with(ConnectOptions {
         timeout_secs: 120,
         inactivity_secs: 120,
-        model: None,
+        model: "auto".to_owned(),
     })
     .await
 }
@@ -38,9 +37,7 @@ fn temp_workspace(label: &str) -> Result<std::path::PathBuf> {
     Ok(workspace)
 }
 
-/// Spawn-and-handshake only: ready line, token file, `Ping`, `GetVersion`,
-/// and a clean shutdown on drop. Runs against any bridge — the API key is
-/// not exercised.
+// Spawn-and-handshake only
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
 async fn live_bridge_handshake() -> Result<()> {
@@ -105,7 +102,7 @@ async fn live_cursor_completes() -> Result<()> {
 
 /// A request whose only path to the answer is the `lookup` function tool the
 /// stub session answers with [`TOOL_SENTINEL`].
-fn function_tool_request() -> Request {
+fn tool_request() -> Request {
     Request {
         model: None,
         system: Some("Answer only from tools. Do not guess or fabricate values.".to_owned()),
@@ -135,15 +132,12 @@ fn function_tool_request() -> Request {
     }
 }
 
-/// Proves the whole custom-tool chain: `CreateAgent` declares the guest
-/// function tool, the agent calls it, the bridge calls our loopback
-/// `CallCustomTool`, and the session's `call_tool` answer reaches the answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
 async fn live_cursor_function_tool_round_trip() -> Result<()> {
     let client = connect().await?;
     let answer: Answer = client
-        .complete(function_tool_request(), local_path_tool_host(temp_workspace("tool")?))
+        .complete(tool_request(), local_path_tool_host(temp_workspace("tool")?))
         .await
         .map_err(|e| anyhow::anyhow!("live cursor function-tool completion failed: {e}"))?;
 
@@ -159,13 +153,12 @@ async fn live_cursor_function_tool_round_trip() -> Result<()> {
 /// function tool as the only capability.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn live_cursor_no_workspace() -> Result<()> {
+async fn no_workspace() -> Result<()> {
     let client = connect().await?;
-    let answer: Answer =
-        client
-            .complete(function_tool_request(), no_workspace_tool_host())
-            .await
-            .map_err(|e| anyhow::anyhow!("live cursor no-workspace completion failed: {e}"))?;
+    let answer: Answer = client
+        .complete(tool_request(), no_tool_host())
+        .await
+        .map_err(|e| anyhow::anyhow!("live cursor no-workspace completion failed: {e}"))?;
 
     assert!(
         answer.value.to_string().contains(TOOL_SENTINEL),
@@ -209,17 +202,14 @@ fn secret_request(url: String) -> Request {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn live_cursor_uses_mcp() -> Result<()> {
+async fn uses_mcp() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     tokio::spawn(serve(listener));
 
     let client = connect().await?;
     let answer: Answer = client
-        .complete(
-            secret_request(format!("http://127.0.0.1:{port}/mcp")),
-            local_path_tool_host(temp_workspace("mcp")?),
-        )
+        .complete(secret_request(format!("http://127.0.0.1:{port}/mcp")), no_tool_host())
         .await
         .map_err(|e| anyhow::anyhow!("live cursor MCP completion failed: {e}"))?;
 

@@ -116,7 +116,7 @@ mod tests {
             dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "logo.bin"})), CAP)
                 .await
                 .expect("a binary read is model-visible, not a hard failure");
-        assert!(result.contains("not valid UTF-8"), "unexpected result: {result}");
+        assert!(result.contains("is not UTF-8"), "unexpected result: {result}");
     }
 
     #[tokio::test]

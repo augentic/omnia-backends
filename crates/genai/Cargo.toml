@@ -20,7 +20,7 @@ all-features = true
 
 [dependencies]
 anyhow.workspace = true
-futures.workspace = true
+fromenv.workspace = true
 genai = "0.6.5"
 omnia.workspace = true
 omnia-wasi-model.workspace = true
@@ -28,7 +28,8 @@ serde_json.workspace = true
 tracing.workspace = true
 
 # Integration tests are separate crates and do not inherit the library's normal
-# dependencies, so the ones the live run-2 test (`tests/live.rs`) drives are
+# dependencies, so the ones the live tests (`tests/live.rs`) drive are
 # repeated here.
 [dev-dependencies]
+futures.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -14,24 +14,18 @@ use serde_json::Value;
 /// Arguments accepted by the host-provided `read` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ReadArgs {
-    /// `/`-separated file path relative to the workspace root.
+pub struct ReadArgs {
     path: String,
 }
 
 /// Arguments accepted by the host-provided `list` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ListArgs {
-    /// `/`-separated directory path; omit or leave empty for the workspace root.
-    #[serde(default)]
-    path: String,
+pub struct ListArgs {
+    path: Option<String>,
 }
 
-/// Route one model tool call. The returned `Err` is a hard `call_tool`
-/// failure (undeclared tool, exhausted budget, closed session, oversize
-/// result, timeout) that ends the completion; a tool's own failure text
-/// comes back as `Ok` — model-visible, repairable content.
+/// Route a tool call to the host-injected handler or the session.
 pub async fn dispatch_tool(
     tool_host: &Arc<dyn ToolHost>, call: &ToolCall, max_result_bytes: usize,
 ) -> Result<String> {
@@ -39,8 +33,8 @@ pub async fn dispatch_tool(
     tracing::debug!(tool = %call.fn_name, "tool call");
 
     match call.fn_name.as_str() {
-        "read" => Ok(workspace_read(tool_host, &call.fn_arguments, max_result_bytes).await),
-        "list" => Ok(workspace_list(tool_host, &call.fn_arguments, max_result_bytes).await),
+        "read" => Ok(handle_read(tool_host, &call.fn_arguments, max_result_bytes).await),
+        "list" => Ok(handle_list(tool_host, &call.fn_arguments, max_result_bytes).await),
         _ => {
             let outcome = tool_host
                 .call_tool(call.fn_name.clone(), call.fn_arguments.to_string())
@@ -52,9 +46,7 @@ pub async fn dispatch_tool(
     }
 }
 
-// Bytes must decode as UTF-8 and fit the per-result byte cap before they
-// become prompt content.
-async fn workspace_read(
+async fn handle_read(
     tool_host: &Arc<dyn ToolHost>, arguments: &Value, max_result_bytes: usize,
 ) -> String {
     let ReadArgs { path } = match serde_json::from_value(arguments.clone()) {
@@ -65,33 +57,32 @@ async fn workspace_read(
         Ok(bytes) => bytes,
         Err(error) => return format!("tool `read` failed: {error:#}"),
     };
+
     String::from_utf8(bytes).map_or_else(
-        |_| format!("tool `read` failed: `{path}` is not valid UTF-8 text"),
-        |text| bounded_result("read", text, max_result_bytes),
+        |_| format!("tool `read` failed: `{path}` is not UTF-8"),
+        |text| max_result("read", text, max_result_bytes),
     )
 }
 
-// A JSON array of `{"name", "is_directory"}` entries; a missing or empty
-// `path` lists the workspace root.
-async fn workspace_list(
+async fn handle_list(
     tool_host: &Arc<dyn ToolHost>, arguments: &Value, max_result_bytes: usize,
 ) -> String {
     let ListArgs { path } = match serde_json::from_value(arguments.clone()) {
         Ok(arguments) => arguments,
         Err(error) => return format!("tool `list` failed: invalid arguments: {error}"),
     };
-    let entries = match tool_host.list(path).await {
+    let entries = match tool_host.list(path.unwrap_or_default()).await {
         Ok(entries) => entries,
         Err(error) => return format!("tool `list` failed: {error:#}"),
     };
+
     match serde_json::to_string(&entries) {
-        Ok(json) => bounded_result("list", json, max_result_bytes),
+        Ok(json) => max_result("list", json, max_result_bytes),
         Err(error) => format!("tool `list` failed: {error}"),
     }
 }
 
-// Mirrors the host's per-result byte cap on session tool results.
-fn bounded_result(tool: &str, text: String, max_result_bytes: usize) -> String {
+fn max_result(tool: &str, text: String, max_result_bytes: usize) -> String {
     if text.len() > max_result_bytes {
         return format!(
             "tool `{tool}` failed: result of {} bytes exceeds the {max_result_bytes}-byte cap",
@@ -101,8 +92,6 @@ fn bounded_result(tool: &str, text: String, max_result_bytes: usize) -> String {
     text
 }
 
-// Deliberate unit tests: deterministic, service-free tool routing (CI
-// floor); `tests/live.rs` proves a real provider drives the loop end-to-end.
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -112,8 +101,75 @@ mod tests {
 
     use super::*;
 
-    /// Deterministic stand-in for `BoundToolHost`: an in-memory file map and
-    /// root listing, with a `call_tool` echo that proves session routing.
+    #[tokio::test]
+    async fn read_succeeds() {
+        let result =
+            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "refs.md"})), CAP)
+                .await
+                .expect("a workspace read is never a hard failure");
+        assert_eq!(result, "reference text", "the file body is the tool result");
+    }
+
+    #[tokio::test]
+    async fn binary_read() {
+        let result =
+            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "logo.bin"})), CAP)
+                .await
+                .expect("a binary read is model-visible, not a hard failure");
+        assert!(result.contains("not valid UTF-8"), "unexpected result: {result}");
+    }
+
+    #[tokio::test]
+    async fn oversize_read() {
+        let result =
+            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "refs.md"})), 8)
+                .await
+                .expect("an oversize read is model-visible, not a hard failure");
+        assert!(result.contains("exceeds the 8-byte cap"), "unexpected result: {result}");
+    }
+
+    #[tokio::test]
+    async fn read_missing_file() {
+        let result =
+            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "gone.md"})), CAP)
+                .await
+                .expect("a missing file is model-visible, not a hard failure");
+        assert!(result.starts_with("tool `read` failed:"), "unexpected result: {result}");
+        assert!(result.contains("gone.md"), "the failure names the path: {result}");
+    }
+
+    #[tokio::test]
+    async fn read_missing_path() {
+        let result = dispatch_tool(&workspace_stub(), &tool_call("read", json!({})), CAP)
+            .await
+            .expect("malformed arguments are model-visible, not a hard failure");
+        assert!(result.contains("missing field `path`"), "unexpected result: {result}");
+    }
+
+    #[tokio::test]
+    async fn list_serialization() {
+        let result = dispatch_tool(&workspace_stub(), &tool_call("list", json!({})), CAP)
+            .await
+            .expect("a root listing is never a hard failure");
+        assert_eq!(
+            result,
+            r#"[{"name":"refs","is_directory":true},{"name":"refs.md","is_directory":false}]"#,
+            "entries serialize as a canonical JSON array"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_tool() {
+        let result =
+            dispatch_tool(&workspace_stub(), &tool_call("lookup", json!({"name": "alpha"})), CAP)
+                .await
+                .expect("the session stub answers");
+        assert_eq!(
+            result, r#"session:lookup:{"name":"alpha"}"#,
+            "non-reserved names go through call_tool"
+        );
+    }
+
     #[derive(Debug)]
     struct WorkspaceStub {
         files: HashMap<String, Vec<u8>>,
@@ -181,73 +237,4 @@ mod tests {
     }
 
     const CAP: usize = 1024;
-
-    #[tokio::test]
-    async fn read_routes_host_side() {
-        let result =
-            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "refs.md"})), CAP)
-                .await
-                .expect("a workspace read is never a hard failure");
-        assert_eq!(result, "reference text", "the file body is the tool result");
-    }
-
-    #[tokio::test]
-    async fn binary_read() {
-        let result =
-            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "logo.bin"})), CAP)
-                .await
-                .expect("a binary read is model-visible, not a hard failure");
-        assert!(result.contains("not valid UTF-8"), "unexpected result: {result}");
-    }
-
-    #[tokio::test]
-    async fn oversize_read() {
-        let result =
-            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "refs.md"})), 8)
-                .await
-                .expect("an oversize read is model-visible, not a hard failure");
-        assert!(result.contains("exceeds the 8-byte cap"), "unexpected result: {result}");
-    }
-
-    #[tokio::test]
-    async fn read_missing_file() {
-        let result =
-            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "gone.md"})), CAP)
-                .await
-                .expect("a missing file is model-visible, not a hard failure");
-        assert!(result.starts_with("tool `read` failed:"), "unexpected result: {result}");
-        assert!(result.contains("gone.md"), "the failure names the path: {result}");
-    }
-
-    #[tokio::test]
-    async fn read_missing_path_argument() {
-        let result = dispatch_tool(&workspace_stub(), &tool_call("read", json!({})), CAP)
-            .await
-            .expect("malformed arguments are model-visible, not a hard failure");
-        assert!(result.contains("missing field `path`"), "unexpected result: {result}");
-    }
-
-    #[tokio::test]
-    async fn list_serialization() {
-        let result = dispatch_tool(&workspace_stub(), &tool_call("list", json!({})), CAP)
-            .await
-            .expect("a root listing is never a hard failure");
-        assert_eq!(
-            result,
-            r#"[{"name":"refs","is_directory":true},{"name":"refs.md","is_directory":false}]"#,
-            "entries serialize as a canonical JSON array"
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_tool_routes_to_session() {
-        let result =
-            dispatch_tool(&workspace_stub(), &tool_call("lookup", json!({"name": "alpha"})), CAP)
-                .await
-                .expect("the session stub answers");
-        assert_eq!(
-            result, r#"session:lookup:{"name":"alpha"}"#,
-            "non-reserved names go through call_tool"
-        );
-    }
 }

@@ -15,8 +15,6 @@ use serde_json::Value;
 
 use super::tools::{ListArgs, ReadArgs};
 
-/// Everything one completion derives from the request: the model id, the
-/// provider chat request and options, and the format gate.
 pub struct Turn {
     pub model: String,
     pub chat: ChatRequest,
@@ -27,11 +25,11 @@ pub struct Turn {
 }
 
 impl Turn {
-    /// Translate the request against the lent workspace path.
     pub fn prepare(request: &Request, lent: Option<&Path>, default_model: &str) -> Result<Self> {
         let model = request.model.as_deref().unwrap_or(default_model).to_owned();
         let chat = build_request(request, lent.is_some())?;
         let options = build_options(request)?;
+        
         Ok(Self {
             model,
             chat,
@@ -120,7 +118,6 @@ fn build_options(request: &Request) -> Result<ChatOptions> {
                 schema,
             )))
         }
-        // JSON mode is the strongest portable structured-output hint.
         Format::Json => options.with_response_format(ChatResponseFormat::JsonMode),
         Format::Text => options,
     };
@@ -158,8 +155,6 @@ const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
     }
 }
 
-// Deliberate unit tests: pure request-translation logic (CI floor);
-// `tests/live.rs` proves the mapping against a real provider.
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -204,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn function_tool_advertised() {
+    fn function_tool() {
         let chat = build_request(&request(vec![lookup_tool()]), false)
             .expect("a declared function tool translates");
         let tools = chat.tools.expect("the chat request advertises the tool");
@@ -232,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_tools_advertised() {
+    fn workspace_tools() {
         let turn = Turn::prepare(&request(vec![lookup_tool()]), Some(Path::new("/unused")), "auto")
             .expect("declared and injected tools translate");
         let tools = turn.chat.tools.expect("the chat request advertises the tools");
@@ -248,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn no_workspace_no_injected_tools() {
+    fn no_workspace() {
         let turn =
             Turn::prepare(&request(vec![]), None, "auto").expect("an empty tool list translates");
         assert!(turn.chat.tools.is_none(), "without a workspace lend nothing is advertised");

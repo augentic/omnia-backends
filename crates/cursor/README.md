@@ -58,10 +58,14 @@ function-tool-only (references-style) completions work like genai's.
 
 The model id is taken from each request (`request.model`); an unset value
 falls back to `CURSOR_MODEL`, else `auto` (Cursor's server-side selection).
-Each run is bounded twice: an inactivity window (`CURSOR_INACTIVITY_SECS`,
-default 120s) cancels a run whose stream has gone silent (keepalive frames do
-not count), while the absolute wall-clock cap (`CURSOR_TIMEOUT_SECS`, default
-600s) backstops a run that streams forever. The two errors are distinct
+The request's `generation` controls (temperature, max tokens, effort, …)
+are ignored: `CreateAgent` has no sampling knobs. Each `Send` — the opening
+prompt, and a format-repair if any — is bounded twice: an inactivity window
+(`CURSOR_INACTIVITY_SECS`, default 120s) cancels a run whose stream has gone
+silent (keepalive frames do not count), while the absolute wall-clock cap
+(`CURSOR_TIMEOUT_SECS`, default 600s) backstops a run that streams forever.
+A completion that repairs therefore gets a fresh inactivity window and a
+fresh cap on the second send. The two errors are distinct
 (`inactive for Ns` vs `timed out after Ns (absolute cap …)`).
 `Client::connect()` / `FromEnv` reads the optional `CURSOR_TIMEOUT_SECS`,
 `CURSOR_INACTIVITY_SECS`, and `CURSOR_MODEL`; callers that need different
@@ -102,7 +106,7 @@ let client = Client::connect().await?;
 let client = Client::connect_with(ConnectOptions {
     timeout_secs: 1800,
     inactivity_secs: 120,
-    model: Some("composer-2".into()),
+    model: "composer-2".into(),
 }).await?;
 ```
 
@@ -114,9 +118,10 @@ The full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor
 
 [`tests/live.rs`](tests/live.rs) drives real completions through the
 `wasi-model` boundary: the plain acceptance run, a function-tool round-trip
-proving the custom-tool callback chain, a no-workspace run, and an in-process
-MCP grant. All are `#[ignore]`d so they never spawn a process in CI; run them
-with `cursor-sdk-bridge` installed:
+with a lent workspace, a no-workspace function-tool run, and an in-process
+MCP grant without a lent workspace (so the empty built-in allowlist still
+admits MCP). All are `#[ignore]`d so they never spawn a process in CI; run
+them with `cursor-sdk-bridge` installed:
 
 ```bash
 CURSOR_API_KEY=... \

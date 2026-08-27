@@ -34,6 +34,10 @@ impl Turn {
     /// Returns an error when the workspace cannot be prepared or the request
     /// does not map onto agent options.
     pub fn prepare(request: &Request, lent: Option<&Path>, default_model: &str) -> Result<Self> {
+        if request.generation.is_some() {
+            tracing::debug!("request.generation is ignored (CreateAgent has no sampling controls)");
+        }
+
         let workspace = Workspace::new(lent)?;
         let options = AgentOptions::from_request(request, &workspace, default_model)?;
         let prompt = with_mcp_hint(&request.mcp_servers(), request.to_string());
@@ -126,15 +130,20 @@ impl AgentOptions {
             }
         }
 
-        // request model -> env var -> default model
+        // request.model, else the client's default (CURSOR_MODEL at connect, else auto)
         let model = request.model.as_deref().unwrap_or(default_model).to_owned();
         let api_key = env::var("CURSOR_API_KEY").context("missing CURSOR_API_KEY")?;
+        let path = workspace.path();
+        let cwd = path
+            .to_str()
+            .with_context(|| format!("invalid workspace path {}", path.display()))?
+            .to_owned();
 
         Ok(Self {
             model: ModelSelection { id: model },
             api_key,
             local: LocalAgentOptions {
-                cwd: vec![workspace.path().display().to_string()],
+                cwd: vec![cwd],
                 source: workspace.is_lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
                 custom_tools,
             },
@@ -173,10 +182,62 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
 // mapping is accepted by `tests/live.rs`.
 #[cfg(test)]
 mod tests {
-    use omnia_wasi_model::{Format, Grants, Message, Request, Role};
+    use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};
 
-    use super::Workspace;
+    use super::{Workspace, with_mcp_hint};
     use crate::bridge::AgentOptions;
+
+    #[test]
+    fn workspace_shapes() {
+        with_dummy_key();
+        let options = AgentOptions::from_request(&request(), &lent(), "auto").unwrap();
+        assert!(options.tools.is_none());
+        assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
+
+        let options = AgentOptions::from_request(&request(), &private(), "auto").unwrap();
+        assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
+        assert!(options.local.source.is_none());
+    }
+
+    #[test]
+    fn mcp_hint_skipped() {
+        assert_eq!(with_mcp_hint(&[], "hello".to_owned()), "hello");
+    }
+
+    #[test]
+    fn mcp_hint_names_servers() {
+        let open = Mcp {
+            name: "docs".to_owned(),
+            tools: vec![],
+            url: "http://127.0.0.1:9/mcp".to_owned(),
+        };
+        let limited = Mcp {
+            name: "search".to_owned(),
+            tools: vec!["lookup".to_owned(), "get".to_owned()],
+            url: "http://127.0.0.1:9/mcp".to_owned(),
+        };
+        let prompt = with_mcp_hint(&[&open, &limited], "Q".to_owned());
+        assert!(prompt.contains("- `docs`\n"), "open server is named: {prompt}");
+        assert!(
+            prompt.contains("- `search` (use only: lookup, get)"),
+            "allowlist rides in the hint: {prompt}"
+        );
+        assert!(prompt.ends_with("\n\nQ"), "original prompt is preserved: {prompt}");
+    }
+
+    #[test]
+    fn private_workspace_keeps() {
+        with_dummy_key();
+        let mut request = request();
+        request.tools = vec![Tool::Mcp(Mcp {
+            name: "docs".to_owned(),
+            tools: vec![],
+            url: "http://127.0.0.1:9/mcp".to_owned(),
+        })];
+        let options = AgentOptions::from_request(&request, &private(), "auto").unwrap();
+        assert!(options.mcp_servers.contains_key("docs"));
+        assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
+    }
 
     fn request() -> Request {
         Request {
@@ -201,14 +262,13 @@ mod tests {
         Workspace::Private(tempfile::tempdir().expect("temp cwd"))
     }
 
-    #[test]
-    fn workspace_shapes() {
-        let options = AgentOptions::from_request(&request(), &lent(), "auto").unwrap();
-        assert!(options.tools.is_none());
-        assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
-
-        let options = AgentOptions::from_request(&request(), &private(), "auto").unwrap();
-        assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
-        assert!(options.local.source.is_none());
+    fn with_dummy_key() {
+        static SET: std::sync::Once = std::sync::Once::new();
+        SET.call_once(|| {
+            if std::env::var_os("CURSOR_API_KEY").is_none() {
+                // SAFETY: dummy value set once and never unset; tests only read it.
+                unsafe { std::env::set_var("CURSOR_API_KEY", "test-key") }
+            }
+        });
     }
 }

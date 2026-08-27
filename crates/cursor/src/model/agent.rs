@@ -12,7 +12,7 @@ use omnia_wasi_model::{Answer, Candidate, Format, ToolHost, Transcript, Usage};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
 
-use super::observe::{self, Failure, Completion, EventLog};
+use super::observe::{self, Completion, EventLog, Failure};
 use super::options::{Turn, Workspace};
 use crate::Client;
 use crate::bridge::{Rpc, RunStatus, RunStreamResult};
@@ -196,7 +196,7 @@ impl Drop for Agent {
         let rpc = self.rpc.clone();
         let agent_id = std::mem::take(&mut self.id);
         let run_id = self.live_run.take();
-        
+
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 if let Some(run_id) = run_id

@@ -12,7 +12,7 @@ use omnia_wasi_model::{Answer, Candidate, Format, ToolHost, Transcript, Usage};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep_until};
 
-use super::observe::{self, Completion, EventLog};
+use super::observe::{self, Failure, Completion, EventLog};
 use super::options::{Turn, Workspace};
 use crate::Client;
 use crate::bridge::{Rpc, RunStatus, RunStreamResult};
@@ -87,7 +87,7 @@ impl Agent {
 
         match self.try_complete(&repaired).await? {
             Verdict::Done(answer) => Ok(answer),
-            Verdict::Repair(reason) => bail!("no valid answer after 2 attempts: {reason}"),
+            Verdict::Repair(reason) => Err(Failure::Invalid(reason).into()),
         }
     }
 
@@ -136,14 +136,14 @@ impl Agent {
                 }
                 error = &mut deadline => {
                     self.cancel_live_run();
-                    return Err(error);
+                    return Err(error.into());
                 }
                 reason = self.abort_rx.recv() => {
                     self.cancel_live_run();
-                    bail!(
-                        "completion aborted: {}",
-                        reason.unwrap_or_else(|| "session closed".to_owned())
-                    );
+                    return Err(Failure::Aborted(
+                        reason.unwrap_or_else(|| "session closed".to_owned()),
+                    )
+                    .into());
                 }
             }
         }
@@ -181,23 +181,29 @@ impl Agent {
 
         let rpc = self.rpc.clone();
         let agent_id = self.id.clone();
-
-        tokio::spawn(async move {
-            if let Err(error) = rpc.cancel_run(run_id, agent_id).await {
-                tracing::debug!(%error, "cancel after abandon failed");
-            }
-        });
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(error) = rpc.cancel_run(run_id, agent_id).await {
+                    tracing::debug!(%error, "cancel after abandon failed");
+                }
+            });
+        }
     }
 }
 
 impl Drop for Agent {
     fn drop(&mut self) {
-        self.cancel_live_run();
         let rpc = self.rpc.clone();
         let agent_id = std::mem::take(&mut self.id);
-
+        let run_id = self.live_run.take();
+        
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
+                if let Some(run_id) = run_id
+                    && let Err(error) = rpc.cancel_run(run_id, agent_id.clone()).await
+                {
+                    tracing::debug!(%error, "cancel after abandon failed");
+                }
                 if let Err(error) = rpc.delete_agent(agent_id).await {
                     tracing::debug!(%error, "agent delete failed");
                 }
@@ -208,10 +214,10 @@ impl Drop for Agent {
 
 // One completed turn: the final text plus the observed transcript and usage.
 #[derive(Debug)]
-pub struct Response {
-    pub result: String,
-    pub transcript: Option<Transcript>,
-    pub usage: Option<Usage>,
+struct Response {
+    result: String,
+    transcript: Option<Transcript>,
+    usage: Option<Usage>,
 }
 
 impl Response {
@@ -243,7 +249,7 @@ pub struct Deadlines {
 
 impl Deadlines {
     /// Resolve when a run breaches its inactivity or absolute bound.
-    pub async fn watch(self, mut activity: watch::Receiver<Instant>) -> anyhow::Error {
+    pub async fn watch(self, mut activity: watch::Receiver<Instant>) -> Failure {
         let cap = sleep_until(Instant::now() + self.cap);
         tokio::pin!(cap);
         let mut activity_closed = false;
@@ -255,19 +261,17 @@ impl Deadlines {
 
             tokio::select! {
                 () = &mut cap => {
-                    return anyhow::anyhow!(
-                        "cursor run timed out after {}s (absolute cap exceeded while still active)",
-                        self.cap.as_secs()
-                    );
+                    return Failure::Timeout {
+                        cap_secs: self.cap.as_secs(),
+                    };
                 }
                 () = &mut inactive => {
                     let idle = Instant::now().saturating_duration_since(last_activity).as_secs();
-                    return anyhow::anyhow!(
-                        "cursor run inactive for {idle}s (no stream events; inactivity limit {}s, \
-                         absolute cap {}s)",
-                        self.inactivity.as_secs(),
-                        self.cap.as_secs()
-                    );
+                    return Failure::Inactive {
+                        idle_secs: idle,
+                        inactivity_secs: self.inactivity.as_secs(),
+                        cap_secs: self.cap.as_secs(),
+                    };
                 }
                 changed = activity.changed(), if !activity_closed => {
                     activity_closed = changed.is_err();

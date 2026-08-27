@@ -39,6 +39,8 @@ impl Backend for Client {
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
         ensure!(env::var("CURSOR_API_KEY").is_ok(), "CURSOR_API_KEY must be set");
+        ensure!(options.timeout_secs > 0, "timeout_secs must be greater than 0");
+        ensure!(options.inactivity_secs > 0, "inactivity_secs must be greater than 0");
 
         Ok(Self {
             deadlines: Deadlines {
@@ -69,8 +71,9 @@ mod config {
         /// means Cursor's server-side selection (`auto`).
         #[env(from = "CURSOR_MODEL", default = "auto")]
         pub model: String,
-        /// Absolute wall-clock cap in seconds on one agent run; timed-out
-        /// runs are cancelled.
+        /// Absolute wall-clock cap in seconds on one agent run (the opening
+        /// prompt, or a format-repair); timed-out runs are cancelled. A
+        /// completion that repairs gets a fresh cap on the second send.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
         pub timeout_secs: u64,
         /// Inactivity bound in seconds: a run is cancelled after this long

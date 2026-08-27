@@ -29,8 +29,8 @@ pub async fn from_stderr(lines: &mut Lines<impl AsyncBufRead + Unpin>) -> Result
                 continue;
             };
 
-            let discovery: Discovery = serde_json::from_str(json)
-                .with_context(|| format!("parsing discovery payload: {json}"))?;
+            let discovery: Discovery =
+                serde_json::from_str(json).context("parsing discovery payload")?;
             return Ok(discovery);
         }
 
@@ -89,12 +89,16 @@ impl Discovery {
         let (Some(host), Some(port)) = (&self.host, self.port) else {
             bail!("discovery payload carries neither a url nor host and port");
         };
-        Ok(match host.parse::<IpAddr>() {
+
+        let host = host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host);
+        let url = match host.parse::<IpAddr>() {
             Ok(IpAddr::V6(ip)) => format!("http://[{ip}]:{port}"),
             Ok(ip) => format!("http://{ip}:{port}"),
             Err(_) if host.contains(':') => format!("http://[{host}]:{port}"),
             Err(_) => format!("http://{host}:{port}"),
-        })
+        };
+
+        Ok(url)
     }
 
     /// Prefer an inline token when present; else read `authTokenFile`.
@@ -156,6 +160,15 @@ mod tests {
             r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"::1","port":9}"#,
         )
         .expect("host/port payload parses");
+        assert_eq!(discovery.base_url().expect("base url"), "http://[::1]:9");
+    }
+
+    #[test]
+    fn base_url_ipv6() {
+        let discovery: Discovery = serde_json::from_str(
+            r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"[::1]","port":9}"#,
+        )
+        .expect("pre-bracketed host/port payload parses");
         assert_eq!(discovery.base_url().expect("base url"), "http://[::1]:9");
     }
 

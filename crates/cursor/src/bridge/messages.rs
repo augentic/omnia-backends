@@ -259,14 +259,18 @@ pub struct TokenUsage {
 }
 
 impl From<TokenUsage> for Usage {
-    // Wire counts are `i64`; saturate rather than fail on absurd values.
     fn from(usage: TokenUsage) -> Self {
         Self {
-            input_tokens: u32::try_from(usage.input_tokens).unwrap_or(u32::MAX),
-            output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
-            reasoning_tokens: usage.reasoning_tokens.and_then(|count| u32::try_from(count).ok()),
+            input_tokens: clamp_u32(usage.input_tokens),
+            output_tokens: clamp_u32(usage.output_tokens),
+            reasoning_tokens: usage.reasoning_tokens.map(clamp_u32),
         }
     }
+}
+
+/// Wire counts are `i64`; negatives become 0, values above `u32::MAX` saturate.
+fn clamp_u32(count: i64) -> u32 {
+    u32::try_from(count.clamp(0, i64::from(u32::MAX))).unwrap_or(u32::MAX)
 }
 
 fn flexible_i64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
@@ -280,4 +284,43 @@ fn flexible_i64_opt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option
         Value::String(text) => text.parse().ok(),
         _ => None,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use omnia_wasi_model::Usage;
+
+    use super::TokenUsage;
+
+    fn usage(input: i64, output: i64, reasoning: Option<i64>) -> Usage {
+        Usage::from(TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            reasoning_tokens: reasoning,
+        })
+    }
+
+    #[test]
+    fn token_counts() {
+        assert_eq!(
+            usage(-1, -1, Some(-1)),
+            Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                reasoning_tokens: Some(0),
+            }
+        );
+        let saturated = usage(i64::MAX, i64::MAX, Some(i64::MAX));
+        assert_eq!(saturated.input_tokens, u32::MAX);
+        assert_eq!(saturated.output_tokens, u32::MAX);
+        assert_eq!(saturated.reasoning_tokens, Some(u32::MAX));
+        assert_eq!(
+            usage(7, 3, None),
+            Usage {
+                input_tokens: 7,
+                output_tokens: 3,
+                reasoning_tokens: None,
+            }
+        );
+    }
 }

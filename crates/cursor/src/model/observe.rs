@@ -16,7 +16,7 @@ use crate::bridge::SdkMessage;
 use crate::model::options::Turn;
 
 /// Format kind used as a low-cardinality metric label.
-pub const fn format_name(format: &Format) -> &'static str {
+const fn format_name(format: &Format) -> &'static str {
     match format {
         Format::Text => "text",
         Format::Json => "json",
@@ -129,20 +129,68 @@ impl Drop for Completion {
     }
 }
 
-/// Classify a failed `complete` from the error strings this crate constructs.
-pub fn outcome_of(error: &anyhow::Error) -> &'static str {
-    let message = error.to_string();
-    if message.contains("timed out after") {
-        "timeout"
-    } else if message.contains("inactive for") {
-        "inactive"
-    } else if message.contains("completion aborted:") {
-        "abort"
-    } else if message.contains("no valid answer after") {
-        "invalid"
-    } else {
-        "error"
+/// A completion failure this crate constructs. [`outcome_of`] downcasts this
+/// so metric labels do not depend on message wording.
+#[derive(Debug)]
+pub enum Failure {
+    /// Absolute wall-clock cap exceeded while the stream was still active.
+    Timeout {
+        /// The cap in seconds, from connect options.
+        cap_secs: u64,
+    },
+    /// No stream events within the inactivity window.
+    Inactive {
+        /// Observed idle span in seconds.
+        idle_secs: u64,
+        /// Configured inactivity limit in seconds.
+        inactivity_secs: u64,
+        /// Configured absolute cap in seconds.
+        cap_secs: u64,
+    },
+    /// Hard tool-host failure (or a closed abort channel).
+    Aborted(String),
+    /// Format gate rejected both the first answer and the repair.
+    Invalid(String),
+}
+
+impl Failure {
+    pub const fn outcome(&self) -> &'static str {
+        match self {
+            Self::Timeout { .. } => "timeout",
+            Self::Inactive { .. } => "inactive",
+            Self::Aborted(_) => "abort",
+            Self::Invalid(_) => "invalid",
+        }
     }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout { cap_secs } => write!(
+                f,
+                "cursor run timed out after {cap_secs}s (absolute cap exceeded while still active)"
+            ),
+            Self::Inactive {
+                idle_secs,
+                inactivity_secs,
+                cap_secs,
+            } => write!(
+                f,
+                "cursor run inactive for {idle_secs}s (no stream events; inactivity limit \
+                 {inactivity_secs}s, absolute cap {cap_secs}s)"
+            ),
+            Self::Aborted(reason) => write!(f, "completion aborted: {reason}"),
+            Self::Invalid(reason) => write!(f, "no valid answer after 2 attempts: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for Failure {}
+
+/// Classify a failed `complete` from a [`Failure`] when present.
+pub fn outcome_of(error: &anyhow::Error) -> &'static str {
+    error.downcast_ref::<Failure>().map_or("error", Failure::outcome)
 }
 
 /// The first string found under any of `keys`, tolerating both `snake_case`
@@ -276,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_calls_rebuild_the_transcript() {
+    fn tool_calls() {
         let log = observe_all(&[
             json!({ "type": "system", "message": { "subtype": "init", "run_id": "r-1" } }),
             json!({ "type": "tool_call", "message": {
@@ -299,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn sdk_status_spelling_is_understood() {
+    fn sdk_status_spelling() {
         let log = observe_all(&[
             json!({ "type": "tool_call", "message": {
                 "status": "running", "toolCallId": "c1",
@@ -316,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn status_message_is_kept_for_error_reporting() {
+    fn status_message() {
         let log = observe_all(&[
             json!({ "type": "status", "message": { "runId": "r-2", "message": "model overloaded" } }),
         ]);
@@ -325,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn garbled_payloads_are_skipped() {
+    fn garbled_payloads() {
         let log = observe_all(&[
             json!({ "type": "assistant", "message": null }),
             json!({ "type": "thinking", "message": { "subtype": "delta", "text": null } }),
@@ -335,28 +383,26 @@ mod tests {
     }
 
     #[test]
-    fn outcome_of_classifies_crate_errors() {
-        assert_eq!(
-            super::outcome_of(&anyhow::anyhow!(
-                "cursor run timed out after 600s (absolute cap exceeded while still active)"
-            )),
-            "timeout"
-        );
-        assert_eq!(
-            super::outcome_of(&anyhow::anyhow!(
-                "cursor run inactive for 120s (no stream events; inactivity limit 120s, \
-                 absolute cap 600s)"
-            )),
-            "inactive"
-        );
-        assert_eq!(
-            super::outcome_of(&anyhow::anyhow!("completion aborted: session closed")),
-            "abort"
-        );
-        assert_eq!(
-            super::outcome_of(&anyhow::anyhow!("no valid answer after 2 attempts: not json")),
-            "invalid"
-        );
+    fn classify_crate_errors() {
+        use super::Failure;
+
+        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
+        assert_eq!(super::outcome_of(&timeout), "timeout");
+
+        let inactive: anyhow::Error = Failure::Inactive {
+            idle_secs: 120,
+            inactivity_secs: 120,
+            cap_secs: 600,
+        }
+        .into();
+        assert_eq!(super::outcome_of(&inactive), "inactive");
+
+        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
+        assert_eq!(super::outcome_of(&aborted), "abort");
+
+        let invalid: anyhow::Error = Failure::Invalid("not json".to_owned()).into();
+        assert_eq!(super::outcome_of(&invalid), "invalid");
+
         assert_eq!(super::outcome_of(&anyhow::anyhow!("bridge RPC failed")), "error");
     }
 }

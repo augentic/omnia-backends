@@ -35,9 +35,7 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
         // generate model request
         let request = completion::Request {
             model: None,
-            system: Some(
-                "Answer strictly from the `lifecycle` tool. Do not guess.".to_string(),
-            ),
+            system: Some("Answer strictly from the `lifecycle` tool. Do not guess.".to_string()),
             messages: vec![Message {
                 role: Role::User,
                 content: "Call the `lifecycle` tool and state the stages an item moves \

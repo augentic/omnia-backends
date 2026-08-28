@@ -95,7 +95,7 @@ impl Endpoint {
         };
 
         Ok(Self {
-            url: format!("http://{addr}{PATH}"),
+            url: format!("http://{addr}"),
             handler,
             server,
         })

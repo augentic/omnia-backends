@@ -1,21 +1,19 @@
 //! # Cursor example — session guest
 //!
-//! A `wasi:cli/command` reactor that **imports** `omnia:model/completion` and
-//! calls `create` once when the host drives `wasi:cli/run`. The prompt
-//! declares a `widget_lifecycle` function tool; the guest answers each
-//! `tool-call` with a `ToolResult` so the cursor backend can feed that extra
-//! information back to the agent.
+//! A `wasi:cli/command` guest that asks the model one question and declares
+//! one function tool, `widget_lifecycle`. When the bridge-managed Cursor
+//! agent calls the tool, the guest answers over the session's `results`
+//! stream with a `ToolResult` — the extra information the agent needs.
 //!
-//! It reads `wasi:filesystem/preopens` and lends the `.` mount (the
-//! `[[mount]]` in `config.toml`) through `grants.workspace`; the host
-//! resolves it to the node-local working tree the spawned agent edits.
+//! The raw `omnia:model/completion` bindings are used so the `calls` and
+//! `results` streams are visible; most guests use `omnia_guest::model`'s
+//! `Model::complete_with`, which runs the same loop behind a closure.
 
 #![cfg(target_arch = "wasm32")]
 
-use std::future::IntoFuture;
-
-use omnia_wasi_model::completion::{self, Format, Grants, Tool, WorkspaceGrant};
-use omnia_wasi_model::prompt::Sections;
+use omnia_wasi_model::completion::{
+    self, Format, Function, Grants, Message, Role, Tool, ToolCall, ToolResult, WorkspaceGrant,
+};
 use omnia_wasi_model::wit_stream;
 use serde_json::json;
 use wasip3::filesystem::preopens;
@@ -24,10 +22,8 @@ struct CliGuest;
 wasip3::cli::command::export!(CliGuest);
 
 impl wasip3::exports::cli::run::Guest for CliGuest {
-    #[omnia_wasi_otel::instrument(name = "cursor_example_run")]
     async fn run() -> Result<(), ()> {
-        // `directories` must outlive `create` — the lent `workspace` borrows
-        // one of its descriptors.
+        // pass the `.` mount as the agent's working tree
         let directories = preopens::get_directories();
         let workspace = directories.iter().find_map(|(dir, name)| {
             (name == ".").then_some(WorkspaceGrant {
@@ -36,78 +32,70 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
             })
         });
 
-        tracing::info!(
-            workspace = workspace.is_some(),
-            tool = "widget_lifecycle",
-            "cursor example completion"
-        );
-
-        let (system, messages) = Sections {
-            role: Some("a terse technical writer".to_string()),
-            task: "Call the `widget_lifecycle` tool and state the stages a widget moves \
-                   through, in order."
-                .to_string(),
-            ..Sections::default()
-        }
-        .channels(Some("You answer strictly from the `widget_lifecycle` tool. Do not guess."));
-
+        // generate model request
         let request = completion::Request {
             model: None,
-            system,
-            messages,
+            system: Some(
+                "Answer strictly from the `lifecycle` tool. Do not guess.".to_string(),
+            ),
+            messages: vec![Message {
+                role: Role::User,
+                content: "Call the `lifecycle` tool and state the stages an item moves \
+                          through, in order."
+                    .to_string(),
+            }],
             generation: None,
             format: Format::Text,
-            tools: vec![Tool::Function(completion::Function {
-                name: "widget_lifecycle".to_string(),
-                description: "Return the ordered lifecycle stages a widget moves through."
-                    .to_string(),
+            tools: vec![Tool::Function(Function {
+                name: "lifecycle".to_string(),
+                description: "Lifecycle stages".to_string(),
                 parameters: json!({ "type": "object", "properties": {} }).to_string(),
             })],
             grants: Grants { workspace },
         };
 
-        let (mut results, results_rx) = wit_stream::new::<completion::ToolResult>();
-        let answer = match completion::create(request, results_rx).await {
-            Ok(session) => {
-                // "callbacks" from cursorbackend while processing the request
-                let completion::Session { mut calls, reply } = session;
-                let calls_loop = async {
-                    while let Some(call) = calls.next().await {
-                        tracing::info!(tool = call.name, "cursor example tool call");
-                        let output = match call.name.as_str() {
-                            "widget_lifecycle" => Ok(json!({
-                                "stages": ["draft", "assembled", "shipped"],
-                                "note": "Widgets never move backwards.",
-                            })
-                            .to_string()),
-                            other => Err(format!("unknown tool `{other}`")),
-                        };
+        // create a `ToolResult` stream for writing tool results to
+        let (mut writer, reader) = wit_stream::new::<ToolResult>();
 
-                        // write the output to cursor backend's results stream
-                        let _ =
-                            results.write_one(completion::ToolResult { id: call.id, output }).await;
-                    }
-                };
-
-                match futures::join!(calls_loop, IntoFuture::into_future(reply)) {
-                    ((), Ok(reply)) => {
-                        tracing::info!("cursor example answered");
-                        reply.answer
-                    }
-                    ((), Err(error)) => {
-                        tracing::warn!(?error, "cursor example completion failed");
-                        format!("error: {error:?}")
-                    }
-                }
-            }
-
+        // make the model request, passing the request and the stream reader
+        let session = match completion::create(request, reader).await {
+            Ok(session) => session,
             Err(error) => {
-                tracing::warn!(?error, "cursor example completion failed");
-                format!("error: {error:?}")
+                println!("error: {error:?}");
+                return Ok(());
             }
         };
 
-        println!("{answer}");
+        // get the tool calls stream and the reply future from the session
+        let completion::Session { mut calls, reply } = session;
+
+        // process tool calls, replying with tool results to the stream shared with the host
+        let tool_loop = async {
+            while let Some(call) = calls.next().await {
+                println!("{call:?}");
+                let ToolCall { id, name, .. } = call;
+
+                let output = match name.as_str() {
+                    "lifecycle" => Ok(json!({
+                        "stages": ["draft", "assembled", "shipped"],
+                        "note": "Lifecycle never moves backwards.",
+                    })
+                    .to_string()),
+                    _ => Err(format!("Unknown tool: {name}")),
+                };
+
+                // write the response to the stream
+                let _ = writer.write_one(ToolResult { id, output }).await;
+            }
+        };
+
+        // run the tool loop and the reply together until the reply is ready
+        let ((), outcome) = futures::join!(tool_loop, async { reply.await });
+        match outcome {
+            Ok(reply) => println!("{}", reply.answer),
+            Err(error) => println!("error: {error:?}"),
+        }
+
         Ok(())
     }
 }

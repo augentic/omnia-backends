@@ -386,7 +386,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::proto::{CallCustomToolRequest, CallCustomToolResponse, value_to_struct};
-    use super::{Endpoint, to_json};
+    use super::{Endpoint, PATH, to_json};
 
     #[test]
     fn to_json_policy() {
@@ -590,13 +590,10 @@ mod tests {
 
     /// One raw HTTP/1.1 exchange, so the framing is under test control.
     async fn exchange(url: &str, headers: &str, body: &[u8]) -> (u16, String, Vec<u8>) {
-        let (host, path) = url
-            .strip_prefix("http://")
-            .and_then(|rest| rest.split_once('/'))
-            .expect("callback url shape");
+        let host = url.strip_prefix("http://").expect("callback url shape");
         let mut socket = TcpStream::connect(host).await.expect("connect");
         let head =
-            format!("POST /{path} HTTP/1.1\r\nHost: {host}\r\n{headers}Connection: close\r\n\r\n");
+            format!("POST {PATH} HTTP/1.1\r\nHost: {host}\r\n{headers}Connection: close\r\n\r\n");
         socket.write_all(head.as_bytes()).await.expect("write head");
         socket.write_all(body).await.expect("write body");
 

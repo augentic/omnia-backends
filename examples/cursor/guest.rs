@@ -38,9 +38,7 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
             system: Some("Answer strictly from the `lifecycle` tool. Do not guess.".to_string()),
             messages: vec![Message {
                 role: Role::User,
-                content: "Call the `lifecycle` tool and state the stages an item moves \
-                          through, in order."
-                    .to_string(),
+                content: "Call the `lifecycle` tool and state the stages returned".to_string(),
             }],
             generation: None,
             format: Format::Text,
@@ -91,7 +89,7 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
         let ((), outcome) = futures::join!(tool_loop, async { reply.await });
         match outcome {
             Ok(reply) => println!("{}", reply.answer),
-            Err(error) => println!("error: {error:?}"),
+            Err(err) => println!("error: {err:?}"),
         }
 
         Ok(())

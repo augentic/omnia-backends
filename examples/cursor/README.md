@@ -4,7 +4,8 @@ Live model completion via `[omnia-cursor](../../crates/cursor)`: the guest calls
 
 ## Prerequisites
 
-[cursor-sdk-bridge](https://github.com/cursor/sdk-bridge) installed and a `CURSOR_API_KEY`.
+- [cursor-sdk-bridge](https://github.com/cursor/sdk-bridge) on `PATH`
+- `CURSOR_API_KEY`
 
 ### Installing cursor-sdk-bridge
 

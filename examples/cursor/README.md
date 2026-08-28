@@ -1,8 +1,28 @@
 # Cursor Example
 
-Live model completion via `[omnia-cursor](../../crates/cursor)`: the guest calls `create` once (command mode) with a `docs` MCP grant. The same guest also exports `wasi:http` serving a small read-only MCP documentation server, so the bridge-managed Cursor agent answers the prompt by calling back into the guest's own MCP tools.
+Live model completion via `[omnia-cursor](../../crates/cursor)`: the guest calls `create` with a `lifecycle` function tool.
 
-Requires a sibling `[omnia](https://github.com/augentic/omnia)` checkout (this workspace patches the `omnia` crates to `../omnia/crates/*`), `[cursor-sdk-bridge](https://github.com/cursor/sdk-bridge)` on `PATH`, and `CURSOR_API_KEY` set.
+## Prerequisites
+
+- [cursor-sdk-bridge](https://github.com/cursor/sdk-bridge) on `PATH`
+- `CURSOR_API_KEY`
+
+### Installing cursor-sdk-bridge
+
+Install notes are in the [bridge docs](https://cursor.com/docs/sdk/bridge). To put the latest standalone binary on `PATH` via `~/.local/bin` (darwin/arm64; swap the asset suffix for `linux-x64`, `darwin-x64`, …):
+
+```bash
+# download and install
+curl -fsSL -o /tmp/cursor-sdk-bridge.tar.gz \
+  https://github.com/cursor/sdk-bridge/releases/latest/download/cursor-sdk-bridge-standalone-darwin-arm64.tar.gz \
+  && tar -xzf /tmp/cursor-sdk-bridge.tar.gz -C /tmp \
+  && install /tmp/bin/cursor-sdk-bridge ~/.local/bin/cursor-sdk-bridge
+
+# verify
+cursor-sdk-bridge --help
+```
+
+
 
 ## Build and run
 
@@ -15,7 +35,7 @@ mkdir -p examples/cursor/workspace
 
 # set Cursor API key
 export CURSOR_API_KEY=<cursor API key>
-export RUST_LOG=info,omnia_cursor=debug,cursor_wasm=debug,opentelemetry_sdk=off
+export RUST_LOG=info,omnia_cursor=debug,opentelemetry_sdk=off
 
 # run the host (no config)
 cargo run --example cursor -- run ./target/wasm32-wasip2/debug/examples/cursor_wasm.wasm --mount path=examples/cursor/workspace,name=.,writable
@@ -24,17 +44,16 @@ cargo run --example cursor -- run ./target/wasm32-wasip2/debug/examples/cursor_w
 cargo run --example cursor -- run --config examples/cursor/config.toml
 ```
 
-The guest's `docs` MCP grant carries its endpoint URL directly (`http://localhost:8080/mcp` in `guest.rs`), pointing back at the guest's own HTTP export — as the sole HTTP-exporting guest it is the catch-all route, and the MCP router matches every path. The mount (`--mount`, or `[[mount]]` in `config.toml`) preopens `examples/cursor/workspace` as the tree named `.`; the guest lends it through `grants.workspace` and the cursor backend resolves it to the working tree the agent runs in.
+
+
+## Host-to-guest tool calls
+
+`wasi-model` implements guest-defined tools using two streams rather than direct callbacks. The host sends `ToolCall` values to the guest through the session’s `calls` stream, while the guest returns corresponding `ToolResult` values through a second stream it creates.
+
+To open a completion session, the guest creates the result stream, retains its writable end, and passes the readable end to `create`. The host returns a `reply` future and the `calls` stream. While awaiting the reply, the guest handles each tool call and writes a result with the same correlation ID, allowing the host to resume the completion.
+
+The mount (`--mount`, or `[[mount]]` in `config.toml`) preopens `examples/cursor/workspace` as the tree named `.`; the guest lends it through `grants.workspace` and the cursor backend resolves it to the working tree the agent runs in.
 
 ## Test
 
-The run command drives `wasi:cli/run` once, which calls `create` and prints the answer — expect the widget lifecycle stages, sourced from the MCP docs tools.
-
-## MCP servers
-
-MCP wiring is opt-in per completion and spans two layers:
-
-1. **Prompt grant** — the guest names a server in `tools` and supplies its endpoint `url` (here, `docs` → `http://localhost:8080/mcp` in `guest.rs`). Only granted servers are wired into the agent.
-2. **HTTP serving** — that endpoint must resolve to a running MCP server. Here it is the same guest's `wasi:http` export (`omnia_guest::mcp::router`); it could equally be a separate guest behind a `routes.http` prefix, or any external server.
-
-When a completion runs, `omnia-cursor` reads the grant's `url` and passes it inline as the agent's `mcp_servers` through the bridge's `CreateAgent` call — nothing is written into the workspace.
+The run command drives `wasi:cli/run` once, which opens a completion session, answers the function-tool call, and prints the answer — expect a `tool call: widget_lifecycle` line, then the widget lifecycle stages (`draft`, `assembled`, `shipped`), sourced from the `ToolResult`.

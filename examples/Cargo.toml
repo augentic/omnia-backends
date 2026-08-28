@@ -44,9 +44,7 @@ tracing.workspace = true
 tracing-subscriber = "0.3.23"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-axum = { workspace = true, features = ["macros"] }
+futures.workspace = true
 omnia-guest = "0.35.0"
-serde.workspace = true
-tracing.workspace = true
 wasip3 = { version = "0.8.0", features = ["http-compat"] }
 wit-bindgen = { version = "0.61.1", features = ["async-spawn"] }

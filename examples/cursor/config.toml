@@ -9,5 +9,3 @@ source.path = "../../target/wasm32-wasip2/debug/examples/cursor_wasm.wasm"
 name = "."
 path = "workspace"
 writable = true
-
-# Add `routes.http = ["/mcp"]` to the [[guest]] entry above to route by prefix.

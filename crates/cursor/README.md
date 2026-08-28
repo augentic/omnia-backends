@@ -112,7 +112,7 @@ let client = Client::connect_with(ConnectOptions {
 
 ## End-to-end example
 
-The full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor). It composes the `ask` guest (calls `create`) with the omnia [`mcp`](https://github.com/augentic/omnia/tree/main/examples/mcp) docs guest under one HTTP server.
+The full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor). The guest declares a function tool and answers each session `tool-call` with a `ToolResult`.
 
 ## Live tests
 

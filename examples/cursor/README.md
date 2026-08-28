@@ -4,25 +4,8 @@ Live model completion via `[omnia-cursor](../../crates/cursor)`: the guest calls
 
 ## Prerequisites
 
-- [cursor-sdk-bridge](https://github.com/cursor/sdk-bridge) on `PATH`
+- [cursor-sdk-bridge](https://github.com/cursor/sdk-bridge). See [below](#installing-cursor-sdk-bridge) for installation.
 - `CURSOR_API_KEY`
-
-### Installing cursor-sdk-bridge
-
-Install notes are in the [bridge docs](https://cursor.com/docs/sdk/bridge). To put the latest standalone binary on `PATH` via `~/.local/bin` (darwin/arm64; swap the asset suffix for `linux-x64`, `darwin-x64`, …):
-
-```bash
-# download and install
-curl -fsSL -o /tmp/cursor-sdk-bridge.tar.gz \
-  https://github.com/cursor/sdk-bridge/releases/latest/download/cursor-sdk-bridge-standalone-darwin-arm64.tar.gz \
-  && tar -xzf /tmp/cursor-sdk-bridge.tar.gz -C /tmp \
-  && install /tmp/bin/cursor-sdk-bridge ~/.local/bin/cursor-sdk-bridge
-
-# verify
-cursor-sdk-bridge --help
-```
-
-
 
 ## Build and run
 
@@ -44,8 +27,6 @@ cargo run --example cursor -- run ./target/wasm32-wasip2/debug/examples/cursor_w
 cargo run --example cursor -- run --config examples/cursor/config.toml
 ```
 
-
-
 ## Host-to-guest tool calls
 
 `wasi-model` implements guest-defined tools using two streams rather than direct callbacks. The host sends `ToolCall` values to the guest through the session’s `calls` stream, while the guest returns corresponding `ToolResult` values through a second stream it creates.
@@ -57,3 +38,18 @@ The mount (`--mount`, or `[[mount]]` in `config.toml`) preopens `examples/cursor
 ## Test
 
 The run command drives `wasi:cli/run` once, which opens a completion session, answers the function-tool call, and prints the answer — expect a `tool call: widget_lifecycle` line, then the widget lifecycle stages (`draft`, `assembled`, `shipped`), sourced from the `ToolResult`.
+
+## Installing cursor-sdk-bridge
+
+Install notes are in the [bridge docs](https://cursor.com/docs/sdk/bridge). To put the latest standalone binary on `PATH` via `~/.local/bin` (darwin/arm64; swap the asset suffix for `linux-x64`, `darwin-x64`, …):
+
+```bash
+# download and install
+curl -fsSL -o /tmp/cursor-sdk-bridge.tar.gz \
+  https://github.com/cursor/sdk-bridge/releases/latest/download/cursor-sdk-bridge-standalone-darwin-arm64.tar.gz \
+  && tar -xzf /tmp/cursor-sdk-bridge.tar.gz -C /tmp \
+  && install /tmp/bin/cursor-sdk-bridge ~/.local/bin/cursor-sdk-bridge
+
+# verify
+cursor-sdk-bridge --help
+```

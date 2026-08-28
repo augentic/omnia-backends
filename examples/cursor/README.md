@@ -4,7 +4,9 @@ Live model completion via `[omnia-cursor](../../crates/cursor)`: the guest calls
 
 ## Prerequisites
 
-[cursor-sdk-bridge](https://github.com/cursor/sdk-bridge) on `PATH`, and a `CURSOR_API_KEY`.
+[cursor-sdk-bridge](https://github.com/cursor/sdk-bridge) installed and a `CURSOR_API_KEY`.
+
+### Installing cursor-sdk-bridge
 
 Install notes are in the [bridge docs](https://cursor.com/docs/sdk/bridge). To put the latest standalone binary on `PATH` via `~/.local/bin` (darwin/arm64; swap the asset suffix for `linux-x64`, `darwin-x64`, …):
 
@@ -40,6 +42,8 @@ cargo run --example cursor -- run ./target/wasm32-wasip2/debug/examples/cursor_w
 # run the host (with config)
 cargo run --example cursor -- run --config examples/cursor/config.toml
 ```
+
+
 
 ## Host-to-guest tool calls
 

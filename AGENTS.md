@@ -6,8 +6,11 @@
 interfaces (Azure Blob/Table/Vault/Identity, Postgres, Redis, NATS, Kafka,
 MongoDB, OpenTelemetry, and the `genai`/`cursor` model backends). Each crate
 implements the corresponding `omnia` `WasiXxxCtx` trait against a real service.
-The `omnia` runtime is consumed from the sibling checkout via a
-`[patch.crates-io]` on `../omnia/crates/*`.
+The exception is `omnia-wasm-pkg`: it ships the plugin loader's registry
+`Acquire` value (wasm-pkg-client over a digest-keyed content store), not a
+`WasiXxxCtx` backend, and its CI tests run offline over wasm-pkg-client's
+`local` backend. The `omnia` runtime is consumed from the sibling checkout via
+a `[patch.crates-io]` on `../omnia/crates/*`.
 
 ## Key commands
 

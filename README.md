@@ -20,10 +20,11 @@ MSRV: Rust 1.97. Each release line pairs with a specific omnia line — the curr
 | [`omnia-opentelemetry`](crates/opentelemetry) | `wasi-otel`                                         | OpenTelemetry Collector (gRPC) |
 | [`omnia-postgres`](crates/postgres)           | `wasi-sql`                                          | PostgreSQL                     |
 | [`omnia-redis`](crates/redis)                 | `wasi-keyvalue`                                     | Redis                          |
+| [`omnia-wasm-pkg`](crates/wasm-pkg)           | `omnia:plugins/loader` acquisition                  | wasm-pkg / OCI registries      |
 
 ## Architecture
 
-Every crate implements the `omnia::Backend` trait (connection management, configured from environment variables) plus the `WasiXxxCtx` context trait for each WASI interface it serves. Backends are wired into a host runtime through the `omnia::runtime!` macro and connect at startup. See [`docs/Architecture.md`](docs/Architecture.md) for details, and the Omnia repo's [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md) for wiring instructions and configuration.
+Every crate implements the `omnia::Backend` trait (connection management, configured from environment variables) plus the `WasiXxxCtx` context trait for each WASI interface it serves. The exception is `omnia-wasm-pkg`, which ships a composition-root `Acquire` value for the plugin loader (registry fetch plus a digest-keyed content store) rather than a WASI host backend. Backends are wired into a host runtime through the `omnia::runtime!` macro and connect at startup. See [`docs/Architecture.md`](docs/Architecture.md) for details, and the Omnia repo's [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md) for wiring instructions and configuration.
 
 ## Testing
 

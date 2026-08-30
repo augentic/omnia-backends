@@ -213,8 +213,8 @@ user-login = "sunfishcode"
 user-name = "Dan Gohman"
 
 [[publisher.flate2]]
-version = "1.1.9"
-when = "2026-02-03"
+version = "1.1.10"
+when = "2026-08-28"
 user-id = 980
 user-login = "Byron"
 user-name = "Sebastian Thiel"
@@ -273,8 +273,8 @@ user-login = "seanmonstar"
 user-name = "Sean McArthur"
 
 [[publisher.hyper]]
-version = "1.11.0"
-when = "2026-07-20"
+version = "1.11.1"
+when = "2026-08-28"
 user-id = 359
 user-login = "seanmonstar"
 user-name = "Sean McArthur"
@@ -301,8 +301,8 @@ user-login = "cuviper"
 user-name = "Josh Stone"
 
 [[publisher.indexmap]]
-version = "2.14.0"
-when = "2026-04-09"
+version = "2.14.1"
+when = "2026-08-28"
 user-id = 539
 user-login = "cuviper"
 user-name = "Josh Stone"
@@ -2254,11 +2254,6 @@ delta = "1.0.1 -> 1.0.3"
 who = "David Cook <dcook@divviup.org>"
 criteria = "safe-to-deploy"
 delta = "1.0.3 -> 1.0.4"
-
-[[audits.isrg.audits.cpufeatures]]
-who = "David Cook <dcook@divviup.org>"
-criteria = "safe-to-deploy"
-delta = "0.2.17 -> 0.3.0"
 
 [[audits.isrg.audits.fiat-crypto]]
 who = "David Cook <dcook@divviup.org>"

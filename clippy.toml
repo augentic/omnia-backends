@@ -28,6 +28,7 @@ allowed-duplicate-crates = [
   "indexmap",
   "io-lifetimes",
   "jsonschema",
+  "miniz_oxide",
   "prettyplease",
   "prost",
   "prost-derive",

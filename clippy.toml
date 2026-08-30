@@ -49,7 +49,6 @@ allowed-duplicate-crates = [
   "untrusted",
   "wasi",
   "wasm-encoder",
-  "wasm-metadata",
   "wasmparser",
   "wast",
   "webpki-roots",
@@ -64,6 +63,4 @@ allowed-duplicate-crates = [
   "windows_x86_64_gnullvm",
   "windows_x86_64_msvc",
   "wit-bindgen",
-  "wit-component",
-  "wit-parser",
 ]

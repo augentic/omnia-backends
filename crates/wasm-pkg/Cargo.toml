@@ -1,6 +1,6 @@
 [package]
-name = "omnia-azure-table"
-description = "Azure backend table storage provider implementing wasi-docstore"
+name = "omnia-wasm-pkg"
+description = "Registry acquirer for omnia's plugin loader over wasm-pkg-client"
 readme = "README.md"
 authors.workspace = true
 categories.workspace = true
@@ -12,8 +12,6 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
-[lib]
-
 [lints]
 workspace = true
 
@@ -22,20 +20,18 @@ all-features = true
 
 [dependencies]
 anyhow.workspace = true
-base64ct.workspace = true
-chrono.workspace = true
-fromenv.workspace = true
+bytes.workspace = true
 futures.workspace = true
-hmac = "0.13.0"
 omnia.workspace = true
-omnia-wasi-docstore.workspace = true
-reqwest = { version = "0.13.4", features = ["json", "rustls"] }
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["fs", "rt", "sync"] }
 tracing.workspace = true
-urlencoding.workspace = true
+wasm-pkg-client.workspace = true
 
-# The live test (`tests/live.rs`) is a separate crate; it needs tokio's test
-# runtime, which the library dependencies do not enable.
+# Acquisition is a future; the test suite needs a runtime.
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wat.workspace = true

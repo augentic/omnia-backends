@@ -10,6 +10,7 @@ doc-valid-idents = [
 ]
 
 allowed-duplicate-crates = [
+  "base64",
   "bitflags",
   "block-buffer",
   "const-oid",
@@ -21,6 +22,7 @@ allowed-duplicate-crates = [
   "embedded-io",
   "fallible-iterator",
   "fancy-regex",
+  "foldhash",
   "fraction",
   "getrandom",
   "indexmap",
@@ -43,10 +45,12 @@ allowed-duplicate-crates = [
   "syn",
   "thiserror",
   "thiserror-impl",
+  "untrusted",
   "wasi",
   "wasm-encoder",
   "wasm-metadata",
   "wasmparser",
+  "wast",
   "webpki-roots",
   "windows-sys",
   "windows-targets",

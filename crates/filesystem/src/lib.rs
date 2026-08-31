@@ -2,6 +2,7 @@
 
 mod blobstore;
 mod keyvalue;
+mod plugins;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -82,3 +82,55 @@ async fn ranged_reads() -> Result<()> {
     client.delete_container(container).await?;
     Ok(())
 }
+
+/// Plugin-store round-trip over the dedicated `omnia-plugins` container:
+/// content by digest, release records per registry, and disjointness from a
+/// guest container named `plugins`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
+async fn plugin_store_round_trip() -> Result<()> {
+    use omnia::{PluginStore, ReleaseRecord};
+    use sha2::{Digest as _, Sha256};
+
+    let client = <Client as Backend>::connect().await?;
+
+    let bytes = format!("component-{}", std::process::id()).into_bytes();
+    let hash = Sha256::digest(&bytes);
+    let mut digest = String::from("sha256:");
+    for byte in hash {
+        use std::fmt::Write as _;
+        let _ = write!(digest, "{byte:02x}");
+    }
+
+    // Content round-trips by digest.
+    client.put_content(&digest, &bytes).await?;
+    assert_eq!(client.get_content(&digest).await?.as_deref(), Some(bytes.as_slice()));
+
+    // A mismatched write is refused before it reaches the service.
+    let err = client.put_content(&digest, b"other bytes").await.expect_err("must refuse");
+    assert!(err.to_string().contains("refusing to persist"), "unexpected error: {err}");
+
+    // Release records are scoped per registry.
+    let record = ReleaseRecord {
+        version: "1.2.3".to_string(),
+        content_digest: digest.clone(),
+    };
+    client.put_release("omnia.host", "emery:intent", &record).await?;
+    assert_eq!(
+        client.get_release("omnia.host", "emery:intent", "1.2.3").await?,
+        Some(record.clone())
+    );
+    assert_eq!(client.get_release("registry.example", "emery:intent", "1.2.3").await?, None);
+
+    // A guest container named `plugins` shares nothing with the store's
+    // own `omnia-plugins` container.
+    let guest: std::sync::Arc<dyn Container> =
+        client.create_container("plugins".to_string()).await?;
+    let names = guest.list_objects().await?;
+    assert!(
+        !names.iter().any(|name| name.starts_with("content/")),
+        "guest container must not see plugin store blobs: {names:?}"
+    );
+    client.delete_container("plugins".to_string()).await?;
+    Ok(())
+}

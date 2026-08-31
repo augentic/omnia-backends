@@ -6,20 +6,19 @@ Pairs with omnia 0.35.x.
 
 ### Added
 
-- `omnia-wasm-pkg`: registry acquirer batteries for omnia's plugin loader.
-  `RegistryAcquire` implements the core `Acquire` trait over wasm-pkg-client —
-  exact versions only (never "latest"), an empty base configuration so the
-  compiled binary alone attests reachable endpoints, per-load registry
-  overrides, and every result verified against the registry's content digest
-  before it is returned. `ContentStore` is the optional digest-keyed
-  content-addressed store behind wasm-pkg-client's `CachingClient`:
-  verify-before-persist writes (temp-file plus atomic rename), per-registry
-  release records, raw wasm only; a cacheless acquirer remains a valid
-  deployment. `AcquireExt::or` composes acquirers by location kind
-  (`MountAcquire.or(RegistryAcquire::new("omnia.host").cached_at(...))`) —
-  unsupported locations fall through, real failures never do.
-
+- `omnia-filesystem` and `omnia-azure-blob` implement `omnia::PluginStore`,
+  the digest-keyed store behind omnia's registry acquirer: content entries
+  shared across registries, release records scoped per registry,
+  verify-before-persist writes. Each impl owns a tree disjoint from guest
+  storage by construction — a `plugins/` subtree beside `blobstore/` and
+  `keyvalue/` on the filesystem, a dedicated `omnia-plugins` container on
+  Azure.
 ### Changed
+
+- `omnia-wasm-pkg` is deleted before it ever shipped: registry acquisition
+  (`RegistryAcquire`, path/registry composition, the digest-verify story) was
+  absorbed into omnia's `omnia-plugin` crate, re-exported from `omnia`. This
+  repository's role in plugin loading is the `PluginStore` impls above.
 
 ---
 

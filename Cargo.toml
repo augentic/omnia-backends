@@ -21,10 +21,15 @@ unused_extern_crates = "warn"
 
 [workspace.lints.clippy]
 # https://doc.rust-lang.org/stable/clippy/index.html
-all = "warn"      # correctness, suspicious, style, complexity, perf
-cargo = "warn"
-nursery = "warn"
-pedantic = "warn"
+all = { level = "warn", priority = -1 }      # correctness, suspicious, style, complexity, perf
+cargo = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# wasm-pkg-client's transitive tree (via omnia's omnia-plugin) pins dependency
+# versions conflicting with wasmtime's; deduplication is upstream territory, so
+# the whole workspace accepts the duplication.
+multiple_crate_versions = "allow"
 
 # Cherry-picked lints are from the `restriction` lint group in order to drive up
 # consistency, quality, and brevity
@@ -80,8 +85,6 @@ tempfile = "3.27.0"
 tokio = { version = "1.53.1", default-features = false }
 tracing = "0.1.44"
 urlencoding = "2.1.3"
-wasm-pkg-client = "0.16.1"
-wat = "1.258.0"
 
 omnia = "0.35.0"
 omnia-wasi-blobstore = "0.35.0"

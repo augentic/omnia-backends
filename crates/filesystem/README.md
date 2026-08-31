@@ -1,11 +1,12 @@
 # omnia-filesystem
 
-Filesystem provider for `wasi:blobstore` and `wasi:keyvalue`: durable, local,
-network-free storage over one shared root directory — the local-first
-counterpart to the network-service backends (Azure Blob, Redis, MongoDB,
-NATS). One `Client` serves both interfaces from disjoint subtrees of the
-root (`blobstore/` and `keyvalue/`), so same-named containers and buckets
-never collide.
+Filesystem provider for `wasi:blobstore` and `wasi:keyvalue`, plus the
+plugin loader's `PluginStore`: durable, local, network-free storage over one
+shared root directory — the local-first counterpart to the network-service
+backends (Azure Blob, Redis, MongoDB, NATS). One `Client` serves every
+surface from disjoint subtrees of the root (`blobstore/`, `keyvalue/`, and
+`plugins/`), so same-named containers and buckets never collide — and no
+guest container or bucket name can reach the plugin store.
 
 ## Blobstore
 
@@ -34,6 +35,22 @@ never collide.
   values are 8-byte big-endian `i64`.
 - Scope: the lock serializes writers within one host process; a single
   process owns the root (the same assumption the blobstore makes).
+
+## Plugin store
+
+`Client` also implements `omnia::PluginStore`, the digest-keyed store behind
+omnia's registry acquirer, under the `plugins/` subtree:
+
+- Content entries land at `plugins/content/<sha256:hex>` and are shared
+  across registries — the digest is the identity. Writes are
+  verify-before-persist (bytes that do not hash to their key are refused)
+  and atomic (temp-file + rename), matching the blobstore's guarantees.
+- Release records land at
+  `plugins/releases/<registry>/<package>-<version>.json`, scoped per
+  registry so an endpoint override is never answered from another
+  registry's record.
+- The subtree is a sibling of `blobstore/` and `keyvalue/`: guest storage
+  cannot name its way into the plugin store, by construction.
 
 ## Configuration
 

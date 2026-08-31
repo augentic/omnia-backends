@@ -72,16 +72,20 @@ impl WasiKeyValueCtx for Client {
 | `kafka`         | Apache Kafka            | messaging                               |
 | `mongodb`       | MongoDB                 | blobstore                               |
 | `postgres`      | PostgreSQL              | sql                                     |
-| `azure-blob`    | Azure Blob Storage      | blobstore                               |
+| `filesystem`    | Local filesystem        | keyvalue, blobstore, plugin store       |
+| `azure-blob`    | Azure Blob Storage      | blobstore, plugin store                 |
 | `azure-id`      | Azure Managed Identity  | identity                                |
 | `azure-vault`   | Azure Key Vault         | vault                                   |
 | `azure-table`   | Azure Table Storage     | docstore                                |
 | `opentelemetry` | OTEL Collector          | otel                                    |
 | `genai`         | LLM provider APIs       | model                                   |
 | `cursor`        | `cursor-sdk-bridge`     | model                                   |
-| `wasm-pkg`      | wasm-pkg / OCI registries | plugin loader acquisition (`Acquire`) |
 
 No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; those use Omnia's in-tree defaults.
+
+### Plugin store
+
+`filesystem` and `azure-blob` additionally implement `omnia::PluginStore` — the digest-keyed store behind omnia's registry acquirer (the `runtime!` macro's plugin cache). Each impl owns a tree disjoint from guest storage by construction: `filesystem` writes a `plugins/` subtree beside `blobstore/` and `keyvalue/`; `azure-blob` writes a dedicated container it names itself (`omnia-plugins`). Content entries are shared across registries (the digest is the identity); release records are scoped per registry. Verification of served bytes lives in the acquirer — the store impls only refuse writes whose bytes do not hash to their digest key.
 
 ### Model backends
 
@@ -90,9 +94,9 @@ The two `wasi-model` backends serve `omnia:model/completion` requests and differ
 - **`genai`** calls provider APIs (OpenAI, Anthropic, Gemini, Groq, Ollama, ...) in-process via the [`genai`](https://crates.io/crates/genai) SDK, advertising the request's declared function tools — plus the host-injected `read`/`list` workspace tools when the guest lent a workspace — and driving the bounded session tool loop: `read`/`list` execute host-side through the `ToolHost` workspace capability, every other call goes through `ToolHost::call_tool`. Provider API keys are read from the environment at call time. MCP tool grants are rejected — use `cursor` for those.
 - **`cursor`** spawns one [`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge) process per client and creates one bridge-managed agent per completion, running an agentic session inside the workspace the guest granted (or a private empty directory, tools-only, when none is lent). Guest-declared function tools are declared as SDK custom tools; the bridge calls them back on the backend's loopback `CallCustomTool` server, which routes into the session through `ToolHost::call_tool`. MCP server grants pass inline as the agent's `mcp_servers`. Requires `cursor-sdk-bridge` on `PATH` and `CURSOR_API_KEY`.
 
-### The registry acquirer
+### Registry acquisition
 
-`omnia-wasm-pkg` is the one crate that is not a `Backend`/`WasiXxxCtx` implementation. It ships `RegistryAcquire` — an implementation of core omnia's `Acquire` trait over [wasm-pkg-client](https://github.com/bytecodealliance/wasm-pkg-tools) — plus `ContentStore`, a digest-keyed, verify-before-persist content-addressed store, and `AcquireExt::or` for composing acquirers (paths first, then registry). It is compiled in at the composition root through the `runtime!` macro's `plugins: { acquire: ... }` key and serves the host side of guest-requested plugin loading; see the crate [README](../crates/wasm-pkg/README.md).
+Registry acquisition itself is not a backend: omnia's `RegistryAcquire` (the `omnia-plugin` crate, re-exported from `omnia`) fetches and verifies packages, compiled in at the composition root through the `runtime!` macro's `plugins:` block. This repository only supplies `PluginStore` stores for it (see [Plugin store](#plugin-store) above).
 
 ## Wiring a backend into a host runtime
 

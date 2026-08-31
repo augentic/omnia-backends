@@ -86,19 +86,19 @@ tokio = { version = "1.53.1", default-features = false }
 tracing = "0.1.44"
 urlencoding = "2.1.3"
 
-omnia = "0.36.0"
-omnia-core = { version = "0.36.0", default-features = false }
-omnia-plugin = "0.36.0"
-omnia-wasi-blobstore = "0.36.0"
-omnia-wasi-docstore = "0.36.0"
-omnia-wasi-http = "0.36.0"
-omnia-wasi-identity = { version = "0.36.0", default-features = false }
-omnia-wasi-keyvalue = "0.36.0"
-omnia-wasi-messaging = "0.36.0"
-omnia-wasi-model = "0.36.0"
-omnia-wasi-otel = "0.36.0"
-omnia-wasi-sql = { version = "0.36.0", default-features = false }
-omnia-wasi-vault = "0.36.0"
+omnia = "0.35.0"
+omnia-core = { version = "0.35.0", default-features = false }
+omnia-plugin = "0.35.0"
+omnia-wasi-blobstore = "0.35.0"
+omnia-wasi-docstore = "0.35.0"
+omnia-wasi-http = "0.35.0"
+omnia-wasi-identity = { version = "0.35.0", default-features = false }
+omnia-wasi-keyvalue = "0.35.0"
+omnia-wasi-messaging = "0.35.0"
+omnia-wasi-model = "0.35.0"
+omnia-wasi-otel = "0.35.0"
+omnia-wasi-sql = { version = "0.35.0", default-features = false }
+omnia-wasi-vault = "0.35.0"
 
 wrpc-transport = "0.29.0"
 wrpc-wasmtime = "0.1.0"

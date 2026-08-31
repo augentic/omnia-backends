@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod blobstore;
-mod plugins;
+mod plugin;
 
 use std::fmt::Debug;
 use std::sync::Arc;

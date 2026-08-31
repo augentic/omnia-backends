@@ -23,7 +23,7 @@ MSRV: Rust 1.97. Each release line pairs with a specific omnia line — the curr
 
 ## Architecture
 
-Every crate implements the `omnia::Backend` trait (connection management, configured from environment variables) plus the `WasiXxxCtx` context trait for each WASI interface it serves. `omnia-filesystem` and `omnia-azure-blob` additionally implement `omnia::PluginStore`, the digest-keyed store behind omnia's registry acquirer (registry acquisition itself lives in omnia). Backends are wired into a host runtime through the `omnia::runtime!` macro and connect at startup. See [`docs/Architecture.md`](docs/Architecture.md) for details, and the Omnia repo's [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md) for wiring instructions and configuration.
+Every crate implements the `omnia::Backend` trait (connection management, configured from environment variables) plus the `WasiXxxCtx` context trait for each WASI interface it serves. `omnia-filesystem` and `omnia-azure-blob` additionally implement `omnia_plugin::ContentStore` and `omnia_plugin::ReleaseStore` (the `PluginStore` bound behind omnia's registry acquirer; registry acquisition itself lives in omnia). Backends are wired into a host runtime through the `omnia::runtime!` macro and connect at startup. See [`docs/Architecture.md`](docs/Architecture.md) for details, and the Omnia repo's [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md) for wiring instructions and configuration.
 
 ## Testing
 

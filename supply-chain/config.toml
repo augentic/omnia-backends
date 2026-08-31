@@ -1354,10 +1354,6 @@ criteria = "safe-to-deploy"
 version = "1.2.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.simdutf8]]
-version = "0.1.5"
-criteria = "safe-to-deploy"
-
 [[exemptions.siphasher]]
 version = "1.0.3"
 criteria = "safe-to-deploy"

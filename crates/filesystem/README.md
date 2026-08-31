@@ -1,7 +1,7 @@
 # omnia-filesystem
 
 Filesystem provider for `wasi:blobstore` and `wasi:keyvalue`, plus the
-plugin loader's `PluginStore`: durable, local, network-free storage over one
+plugin loader's `ContentStore` and `ReleaseStore`: durable, local, network-free storage over one
 shared root directory — the local-first counterpart to the network-service
 backends (Azure Blob, Redis, MongoDB, NATS). One `Client` serves every
 surface from disjoint subtrees of the root (`blobstore/`, `keyvalue/`, and
@@ -38,8 +38,9 @@ guest container or bucket name can reach the plugin store.
 
 ## Plugin store
 
-`Client` also implements `omnia::PluginStore`, the digest-keyed store behind
-omnia's registry acquirer, under the `plugins/` subtree:
+`Client` also implements `omnia_plugin::ContentStore` and
+`omnia_plugin::ReleaseStore`, the digest-keyed store behind omnia's
+registry acquirer, under the `plugins/` subtree:
 
 - Content entries land at `plugins/content/<sha256:hex>` and are shared
   across registries — the digest is the identity. Writes are

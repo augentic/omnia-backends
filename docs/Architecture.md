@@ -85,7 +85,7 @@ No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; thos
 
 ### Plugin store
 
-`filesystem` and `azure-blob` additionally implement `omnia::PluginStore` — the digest-keyed store behind omnia's registry acquirer (the `runtime!` macro's plugin cache). Each impl owns a tree disjoint from guest storage by construction: `filesystem` writes a `plugins/` subtree beside `blobstore/` and `keyvalue/`; `azure-blob` writes a dedicated container it names itself (`omnia-plugins`). Content entries are shared across registries (the digest is the identity); release records are scoped per registry. Verification of served bytes lives in the acquirer — the store impls only refuse writes whose bytes do not hash to their digest key.
+`filesystem` and `azure-blob` additionally implement `omnia_plugin::ContentStore` and `omnia_plugin::ReleaseStore` — the two halves of the `PluginStore` bound behind omnia's registry acquirer (the `runtime!` macro's plugin cache). Each impl owns a tree disjoint from guest storage by construction: `filesystem` writes a `plugins/` subtree beside `blobstore/` and `keyvalue/`; `azure-blob` writes a dedicated container it names itself (`omnia-plugins`). Content entries are shared across registries (the digest is the identity); release records are scoped per registry. Verification of served bytes lives in the acquirer — the content impls only refuse writes whose bytes do not hash to their digest key.
 
 ### Model backends
 
@@ -96,7 +96,7 @@ The two `wasi-model` backends serve `omnia:model/completion` requests and differ
 
 ### Registry acquisition
 
-Registry acquisition itself is not a backend: omnia's `RegistryAcquire` (the `omnia-plugin` crate, re-exported from `omnia`) fetches and verifies packages, compiled in at the composition root through the `runtime!` macro's `plugins:` block. This repository only supplies `PluginStore` stores for it (see [Plugin store](#plugin-store) above).
+Registry acquisition itself is not a backend: omnia's `RegistryClient` (the `omnia-plugin` crate, re-exported from `omnia`) fetches and verifies packages, compiled in at the composition root through the `runtime!` macro's `plugins:` block. This repository only supplies the `ContentStore` / `ReleaseStore` impls for it (see [Plugin store](#plugin-store) above).
 
 ## Wiring a backend into a host runtime
 

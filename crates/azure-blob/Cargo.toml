@@ -28,9 +28,9 @@ azure_storage_blob.workspace = true
 fromenv.workspace = true
 futures.workspace = true
 omnia.workspace = true
+omnia-plugin.workspace = true
 omnia-wasi-blobstore.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tracing.workspace = true
 
 # The live test (`tests/live.rs`) is a separate crate; it needs tokio's test

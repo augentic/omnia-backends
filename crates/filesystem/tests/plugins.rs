@@ -1,25 +1,13 @@
 //! Filesystem plugin-store contract tests.
 
-use std::fmt::Write as _;
-
-use omnia::{PluginStore, ReleaseRecord};
 use omnia_filesystem::Client;
+use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore, sha256_digest as digest_of};
 use omnia_wasi_blobstore::{Bytes, WasiBlobstoreCtx};
 use omnia_wasi_keyvalue::WasiKeyValueCtx;
-use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 
 fn client(root: &TempDir) -> Client {
     Client::open(root.path()).expect("open")
-}
-
-fn digest_of(bytes: &[u8]) -> String {
-    let hash = Sha256::digest(bytes);
-    let mut digest = String::from("sha256:");
-    for byte in hash {
-        let _ = write!(digest, "{byte:02x}");
-    }
-    digest
 }
 
 fn record(bytes: &[u8]) -> ReleaseRecord {
@@ -36,15 +24,15 @@ async fn content_round_trip() {
 
     let bytes = b"component bytes";
     let digest = digest_of(bytes);
-    assert_eq!(store.get_content(&digest).await.expect("get"), None);
+    assert_eq!(store.content(&digest).await.expect("get"), None);
 
     store.put_content(&digest, bytes).await.expect("put");
-    assert_eq!(store.get_content(&digest).await.expect("get").as_deref(), Some(bytes.as_slice()));
+    assert_eq!(store.content(&digest).await.expect("get").as_deref(), Some(bytes.as_slice()));
 
     // Entries survive a reopen (the store is durable, not process state).
     drop(store);
     let store = client(&root);
-    assert_eq!(store.get_content(&digest).await.expect("get").as_deref(), Some(bytes.as_slice()));
+    assert_eq!(store.content(&digest).await.expect("get").as_deref(), Some(bytes.as_slice()));
 }
 
 #[tokio::test]
@@ -55,7 +43,7 @@ async fn mismatched_content_refused() {
     let digest = digest_of(b"the real bytes");
     let err = store.put_content(&digest, b"other bytes").await.expect_err("must refuse");
     assert!(err.to_string().contains("refusing to persist"), "unexpected error: {err}");
-    assert_eq!(store.get_content(&digest).await.expect("get"), None, "no entry lands");
+    assert_eq!(store.content(&digest).await.expect("get"), None, "no entry lands");
 }
 
 #[tokio::test]
@@ -63,12 +51,12 @@ async fn release_round_trip() {
     let root = TempDir::new().expect("tempdir");
     let store = client(&root);
 
-    assert_eq!(store.get_release("omnia.host", "emery:intent", "1.2.3").await.expect("get"), None);
+    assert_eq!(store.release("omnia.host", "emery:intent", "1.2.3").await.expect("get"), None);
 
     let record = record(b"component bytes");
     store.put_release("omnia.host", "emery:intent", &record).await.expect("put");
     assert_eq!(
-        store.get_release("omnia.host", "emery:intent", "1.2.3").await.expect("get"),
+        store.release("omnia.host", "emery:intent", "1.2.3").await.expect("get"),
         Some(record.clone())
     );
 
@@ -79,7 +67,7 @@ async fn release_round_trip() {
     };
     store.put_release("omnia.host", "emery:intent", &repinned).await.expect("re-put");
     assert_eq!(
-        store.get_release("omnia.host", "emery:intent", "1.2.3").await.expect("get"),
+        store.release("omnia.host", "emery:intent", "1.2.3").await.expect("get"),
         Some(repinned)
     );
 }
@@ -94,7 +82,7 @@ async fn releases_scoped_per_registry() {
 
     // An endpoint override is never answered from another registry's record.
     assert_eq!(
-        store.get_release("registry.example", "emery:intent", "1.2.3").await.expect("get"),
+        store.release("registry.example", "emery:intent", "1.2.3").await.expect("get"),
         None
     );
 
@@ -108,7 +96,7 @@ async fn releases_scoped_per_registry() {
     };
     store.put_release("registry.example", "emery:intent", &other).await.expect("put");
     assert_eq!(
-        store.get_content(&digest_of(bytes)).await.expect("get").as_deref(),
+        store.content(&digest_of(bytes)).await.expect("get").as_deref(),
         Some(bytes.as_slice())
     );
 }
@@ -130,7 +118,7 @@ async fn plugins_tree_disjoint_from_guest_storage() {
     let bucket = store.open_bucket("plugins".to_string()).await.expect("open bucket");
     bucket.set("content".to_string(), b"kv".to_vec()).await.expect("set");
 
-    assert_eq!(store.get_content(&digest).await.expect("get").as_deref(), Some(bytes.as_slice()));
+    assert_eq!(store.content(&digest).await.expect("get").as_deref(), Some(bytes.as_slice()));
     assert_eq!(
         container.list_objects().await.expect("list"),
         ["content"],

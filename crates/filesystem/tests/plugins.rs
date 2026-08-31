@@ -1,25 +1,13 @@
 //! Filesystem plugin-store contract tests.
 
-use std::fmt::Write as _;
-
 use omnia_filesystem::Client;
-use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore};
+use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore, sha256_digest as digest_of};
 use omnia_wasi_blobstore::{Bytes, WasiBlobstoreCtx};
 use omnia_wasi_keyvalue::WasiKeyValueCtx;
-use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 
 fn client(root: &TempDir) -> Client {
     Client::open(root.path()).expect("open")
-}
-
-fn digest_of(bytes: &[u8]) -> String {
-    let hash = Sha256::digest(bytes);
-    let mut digest = String::from("sha256:");
-    for byte in hash {
-        let _ = write!(digest, "{byte:02x}");
-    }
-    digest
 }
 
 fn record(bytes: &[u8]) -> ReleaseRecord {

@@ -8,14 +8,11 @@
 //! scoped per registry. Writes are verify-before-persist; a blob PUT is
 //! atomic on the service side.
 
-use std::fmt::Write as _;
-
 use anyhow::{Context as _, Result, bail};
 use azure_core::http::{RequestContent, StatusCode};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
-use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore};
-use sha2::{Digest as _, Sha256};
+use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore, sha256_digest};
 
 use crate::Client;
 
@@ -105,17 +102,6 @@ fn content_name(digest: &str) -> String {
 
 fn release_name(registry: &str, package: &str, version: &str) -> String {
     format!("releases/{registry}/{package}-{version}.json")
-}
-
-/// Hash `bytes` into their canonical `sha256:<hex>` digest string.
-fn sha256_digest(bytes: &[u8]) -> String {
-    let hash = Sha256::digest(bytes);
-    let mut digest = String::with_capacity("sha256:".len() + 2 * hash.len());
-    digest.push_str("sha256:");
-    for byte in hash {
-        let _ = write!(digest, "{byte:02x}");
-    }
-    digest
 }
 
 /// Read a blob's bytes; any 404 (blob or container) is an absent entry.

@@ -8,14 +8,12 @@
 //! complete or absent, never torn. The subtree is a sibling of `blobstore/`
 //! and `keyvalue/`, so no guest container or bucket name can reach it.
 
-use std::fmt::Write as _;
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use futures::future::BoxFuture;
-use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore};
-use sha2::{Digest as _, Sha256};
+use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore, sha256_digest};
 
 use crate::{Client, blocking};
 
@@ -81,17 +79,6 @@ fn content_path(root: &Path, digest: &str) -> PathBuf {
 
 fn release_path(root: &Path, registry: &str, package: &str, version: &str) -> PathBuf {
     root.join("plugins").join("releases").join(registry).join(format!("{package}-{version}.json"))
-}
-
-/// Hash `bytes` into their canonical `sha256:<hex>` digest string.
-fn sha256_digest(bytes: &[u8]) -> String {
-    let hash = Sha256::digest(bytes);
-    let mut digest = String::with_capacity("sha256:".len() + 2 * hash.len());
-    digest.push_str("sha256:");
-    for byte in hash {
-        let _ = write!(digest, "{byte:02x}");
-    }
-    digest
 }
 
 fn maybe_read(path: &Path) -> Result<Option<Vec<u8>>> {

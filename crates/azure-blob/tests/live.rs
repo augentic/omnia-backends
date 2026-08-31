@@ -89,7 +89,7 @@ async fn ranged_reads() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
 async fn plugin_store_round_trip() -> Result<()> {
-    use omnia::{PluginStore, ReleaseRecord};
+    use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore};
     use sha2::{Digest as _, Sha256};
 
     let client = <Client as Backend>::connect().await?;
@@ -103,11 +103,11 @@ async fn plugin_store_round_trip() -> Result<()> {
     }
 
     // Content round-trips by digest.
-    client.put_content(&digest, &bytes).await?;
-    assert_eq!(client.get_content(&digest).await?.as_deref(), Some(bytes.as_slice()));
+    ContentStore::put(&client, &digest, &bytes).await?;
+    assert_eq!(ContentStore::get(&client, &digest).await?.as_deref(), Some(bytes.as_slice()));
 
     // A mismatched write is refused before it reaches the service.
-    let err = client.put_content(&digest, b"other bytes").await.expect_err("must refuse");
+    let err = ContentStore::put(&client, &digest, b"other bytes").await.expect_err("must refuse");
     assert!(err.to_string().contains("refusing to persist"), "unexpected error: {err}");
 
     // Release records are scoped per registry.
@@ -115,12 +115,15 @@ async fn plugin_store_round_trip() -> Result<()> {
         version: "1.2.3".to_string(),
         content_digest: digest.clone(),
     };
-    client.put_release("omnia.host", "emery:intent", &record).await?;
+    ReleaseStore::put(&client, "omnia.host", "emery:intent", &record).await?;
     assert_eq!(
-        client.get_release("omnia.host", "emery:intent", "1.2.3").await?,
+        ReleaseStore::get(&client, "omnia.host", "emery:intent", "1.2.3").await?,
         Some(record.clone())
     );
-    assert_eq!(client.get_release("registry.example", "emery:intent", "1.2.3").await?, None);
+    assert_eq!(
+        ReleaseStore::get(&client, "registry.example", "emery:intent", "1.2.3").await?,
+        None
+    );
 
     // A guest container named `plugins` shares nothing with the store's
     // own `omnia-plugins` container.

@@ -2,13 +2,15 @@
 
 mod blobstore;
 mod keyvalue;
-mod plugins;
+mod plugin;
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures::FutureExt as _;
+use futures::future::BoxFuture;
 use omnia::Backend;
 use tracing::instrument;
 
@@ -36,11 +38,9 @@ impl Client {
     /// Returns an error when the root cannot be created or resolved.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        std::fs::create_dir_all(&root)
-            .with_context(|| format!("creating filesystem root `{}`", root.display()))?;
-        let root = root
-            .canonicalize()
-            .with_context(|| format!("resolving filesystem root `{}`", root.display()))?;
+        fs::create_dir_all(&root).context("creating root directory")?;
+        let root = root.canonicalize().context("canonicalizing root directory")?;
+
         Ok(Self {
             root,
             locks: Arc::default(),
@@ -70,7 +70,7 @@ impl omnia::FromEnv for ConnectOptions {
 
 fn blocking<T: Send + 'static>(
     task: impl FnOnce() -> Result<T> + Send + 'static,
-) -> futures::future::BoxFuture<'static, Result<T>> {
+) -> BoxFuture<'static, Result<T>> {
     async move { tokio::task::spawn_blocking(task).await? }.boxed()
 }
 
@@ -79,17 +79,17 @@ fn segment_ok(segment: &str) -> bool {
 }
 
 fn collect(dir: &Path, prefix: &str, names: &mut Vec<String>) -> Result<()> {
-    for entry in std::fs::read_dir(dir).with_context(|| format!("listing `{}`", dir.display()))? {
+    for entry in fs::read_dir(dir).context("issue reading directory")? {
         let entry = entry?;
         let name = entry.file_name();
-        // This API cannot create non-UTF-8 names.
+
         let Some(name) = name.to_str() else {
             continue;
         };
-        // Ignore atomic-write temp files.
         if prefix.is_empty() && name.starts_with(".tmp") {
             continue;
         }
+
         let rel = if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") };
         let kind = entry.file_type()?;
         if kind.is_dir() {

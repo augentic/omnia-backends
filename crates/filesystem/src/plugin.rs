@@ -1,4 +1,5 @@
-//! `PluginStore` backed by a `plugins/` subtree of the store root.
+//! [`ContentStore`] and [`ReleaseStore`] backed by a `plugins/` subtree of
+//! the store root.
 //!
 //! Content entries are keyed by their `sha256:<hex>` digest and shared across
 //! registries; release records are scoped per registry. Writes are
@@ -8,25 +9,25 @@
 //! and `keyvalue/`, so no guest container or bucket name can reach it.
 
 use std::fmt::Write as _;
-use std::io::Write as _;
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use futures::future::BoxFuture;
-use omnia::{PluginStore, ReleaseRecord};
+use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore};
 use sha2::{Digest as _, Sha256};
 
 use crate::{Client, blocking};
 
-impl PluginStore for Client {
-    fn get_content<'a>(&'a self, digest: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>>> {
+impl ContentStore for Client {
+    fn get<'a>(&'a self, digest: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>>> {
         tracing::trace!("getting plugin content: {digest}");
         let path = content_path(&self.root, digest);
 
-        blocking(move || read_optional(&path))
+        blocking(move || maybe_read(&path))
     }
 
-    fn put_content<'a>(&'a self, digest: &'a str, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
+    fn put<'a>(&'a self, digest: &'a str, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
         tracing::trace!("putting plugin content: {digest}");
         let path = content_path(&self.root, digest);
         let digest = digest.to_owned();
@@ -42,15 +43,17 @@ impl PluginStore for Client {
             write_atomic(&path, &bytes)
         })
     }
+}
 
-    fn get_release<'a>(
+impl ReleaseStore for Client {
+    fn get<'a>(
         &'a self, registry: &'a str, package: &'a str, version: &'a str,
     ) -> BoxFuture<'a, Result<Option<ReleaseRecord>>> {
         tracing::trace!("getting plugin release: {package}@{version} from {registry}");
         let path = release_path(&self.root, registry, package, version);
 
         blocking(move || {
-            let Some(bytes) = read_optional(&path)? else {
+            let Some(bytes) = maybe_read(&path)? else {
                 return Ok(None);
             };
             let record = serde_json::from_slice(&bytes).context("decoding release record")?;
@@ -58,7 +61,7 @@ impl PluginStore for Client {
         })
     }
 
-    fn put_release<'a>(
+    fn put<'a>(
         &'a self, registry: &'a str, package: &'a str, record: &'a ReleaseRecord,
     ) -> BoxFuture<'a, Result<()>> {
         tracing::trace!("putting plugin release: {package}@{} in {registry}", record.version);
@@ -91,11 +94,11 @@ fn sha256_digest(bytes: &[u8]) -> String {
     digest
 }
 
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+fn maybe_read(path: &Path) -> Result<Option<Vec<u8>>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("reading store entry `{}`", path.display())),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).context("reading store entry"),
     }
 }
 

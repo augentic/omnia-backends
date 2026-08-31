@@ -29,6 +29,7 @@ impl WasiKeyValueCtx for Client {
             let dir = bucket_dir(&root, &identifier)?;
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("creating bucket `{identifier}`"))?;
+
             Ok(Arc::new(FsBucket {
                 name: identifier,
                 dir,

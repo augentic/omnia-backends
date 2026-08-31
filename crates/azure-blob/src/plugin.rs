@@ -1,4 +1,5 @@
-//! `PluginStore` backed by a dedicated Azure Blob container.
+//! [`ContentStore`] and [`ReleaseStore`] backed by a dedicated Azure Blob
+//! container.
 //!
 //! The store owns the `omnia-plugins` container — a name the impl chooses,
 //! never an operator input — so guest `wasi:blobstore` containers map
@@ -13,7 +14,7 @@ use anyhow::{Context as _, Result, bail};
 use azure_core::http::{RequestContent, StatusCode};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
-use omnia::{PluginStore, ReleaseRecord};
+use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore};
 use sha2::{Digest as _, Sha256};
 
 use crate::Client;
@@ -22,15 +23,15 @@ use crate::Client;
 /// because the store names it itself.
 const STORE_CONTAINER: &str = "omnia-plugins";
 
-impl PluginStore for Client {
-    fn get_content<'a>(&'a self, digest: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>>> {
+impl ContentStore for Client {
+    fn get<'a>(&'a self, digest: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>>> {
         tracing::trace!("getting plugin content: {digest}");
         let blob = self.service.blob_client(STORE_CONTAINER, &content_name(digest));
 
         async move { read_optional(&blob).await }.boxed()
     }
 
-    fn put_content<'a>(&'a self, digest: &'a str, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
+    fn put<'a>(&'a self, digest: &'a str, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
         tracing::trace!("putting plugin content: {digest}");
         let blob = self.service.blob_client(STORE_CONTAINER, &content_name(digest));
 
@@ -48,8 +49,10 @@ impl PluginStore for Client {
         }
         .boxed()
     }
+}
 
-    fn get_release<'a>(
+impl ReleaseStore for Client {
+    fn get<'a>(
         &'a self, registry: &'a str, package: &'a str, version: &'a str,
     ) -> BoxFuture<'a, Result<Option<ReleaseRecord>>> {
         tracing::trace!("getting plugin release: {package}@{version} from {registry}");
@@ -66,7 +69,7 @@ impl PluginStore for Client {
         .boxed()
     }
 
-    fn put_release<'a>(
+    fn put<'a>(
         &'a self, registry: &'a str, package: &'a str, record: &'a ReleaseRecord,
     ) -> BoxFuture<'a, Result<()>> {
         tracing::trace!("putting plugin release: {package}@{} in {registry}", record.version);

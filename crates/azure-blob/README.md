@@ -3,14 +3,15 @@
 [![crates.io](https://img.shields.io/crates/v/omnia-azure-blob.svg)](https://crates.io/crates/omnia-azure-blob)
 [![docs.rs](https://docs.rs/omnia-azure-blob/badge.svg)](https://docs.rs/omnia-azure-blob)
 
-Azure Blob Storage blobstore backend for the Omnia WASI runtime, implementing the `wasi-blobstore` interface and the plugin loader's `PluginStore`.
+Azure Blob Storage blobstore backend for the Omnia WASI runtime, implementing the `wasi-blobstore` interface and the plugin loader's `ContentStore` and `ReleaseStore`.
 
 Maps blobstore containers to Azure Blob containers and blobs to block blobs using the official `azure_storage_blob` SDK.
 
 ## Plugin store
 
-`Client` also implements `omnia::PluginStore`, the digest-keyed store behind
-omnia's registry acquirer, in a dedicated container the backend names itself:
+`Client` also implements `omnia_plugin::ContentStore` and
+`omnia_plugin::ReleaseStore`, the digest-keyed store behind omnia's
+registry acquirer, in a dedicated container the backend names itself:
 `omnia-plugins`. Content blobs are keyed `content/<sha256:hex>` and shared
 across registries; release records are keyed
 `releases/<registry>/<package>-<version>.json`, scoped per registry. Writes

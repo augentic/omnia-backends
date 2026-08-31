@@ -96,7 +96,7 @@ The two `wasi-model` backends serve `omnia:model/completion` requests and differ
 
 ### Registry acquisition
 
-Registry acquisition itself is not a backend: omnia's `RegistryAcquire` (the `omnia-plugin` crate, re-exported from `omnia`) fetches and verifies packages, compiled in at the composition root through the `runtime!` macro's `plugins:` block. This repository only supplies the `ContentStore` / `ReleaseStore` impls for it (see [Plugin store](#plugin-store) above).
+Registry acquisition itself is not a backend: omnia's `RegistryClient` (the `omnia-plugin` crate, re-exported from `omnia`) fetches and verifies packages, compiled in at the composition root through the `runtime!` macro's `plugins:` block. This repository only supplies the `ContentStore` / `ReleaseStore` impls for it (see [Plugin store](#plugin-store) above).
 
 ## Wiring a backend into a host runtime
 

@@ -86,50 +86,53 @@ tokio = { version = "1.53.1", default-features = false }
 tracing = "0.1.44"
 urlencoding = "2.1.3"
 
-omnia = "0.35.0"
-omnia-plugin = "0.35.0"
-omnia-wasi-blobstore = "0.35.0"
-omnia-wasi-docstore = "0.35.0"
-omnia-wasi-http = "0.35.0"
-omnia-wasi-identity = { version = "0.35.0", default-features = false }
-omnia-wasi-keyvalue = "0.35.0"
-omnia-wasi-messaging = "0.35.0"
-omnia-wasi-model = "0.35.0"
-omnia-wasi-otel = "0.35.0"
-omnia-wasi-sql = { version = "0.35.0", default-features = false }
-omnia-wasi-vault = "0.35.0"
+omnia = "0.36.0"
+omnia-core = { version = "0.36.0", default-features = false }
+omnia-plugin = "0.36.0"
+omnia-wasi-blobstore = "0.36.0"
+omnia-wasi-docstore = "0.36.0"
+omnia-wasi-http = "0.36.0"
+omnia-wasi-identity = { version = "0.36.0", default-features = false }
+omnia-wasi-keyvalue = "0.36.0"
+omnia-wasi-messaging = "0.36.0"
+omnia-wasi-model = "0.36.0"
+omnia-wasi-otel = "0.36.0"
+omnia-wasi-sql = { version = "0.36.0", default-features = false }
+omnia-wasi-vault = "0.36.0"
 
 wrpc-transport = "0.29.0"
 wrpc-wasmtime = "0.1.0"
 
 [patch.crates-io]
-omnia = { git = "https://github.com/augentic/omnia.git" }
+# omnia = { git = "https://github.com/augentic/omnia.git" }
+# omnia-core = { git = "https://github.com/augentic/omnia.git" }
 # omnia-plugin = { git = "https://github.com/augentic/omnia.git" }
-omnia-guest = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-docstore = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-http = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-identity = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-messaging = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-model = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-otel = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-sql = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-vault = { git = "https://github.com/augentic/omnia.git" }
+# omnia-guest = { git = "https://github.com/augentic/omnia.git" }
+# omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia.git" }
+# omnia-wasi-docstore = { git = "https://github.com/augentic/omnia.git" }
+# omnia-wasi-http = { git = "https://github.com/augentic/omnia.git" }
+# omnia-wasi-identity = { git = "https://github.com/augentic/omnia.git" }
+# omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia.git" }
+# omnia-wasi-messaging = { git = "https://github.com/augentic/omnia.git" }
+# omnia-wasi-model = { git = "https://github.com/augentic/omnia.git" }
+# omnia-wasi-otel = { git = "https://github.com/augentic/omnia.git" }
+# omnia-wasi-sql = { git = "https://github.com/augentic/omnia.git" }
+# omnia-wasi-vault = { git = "https://github.com/augentic/omnia.git" }
 
-# omnia = { path = "../omnia/crates/omnia" }
+omnia = { path = "../omnia/crates/omnia" }
+omnia-core = { path = "../omnia/crates/omnia-core" }
 omnia-plugin = { path = "../omnia/crates/omnia-plugin" }
-# omnia-guest = { path = "../omnia/crates/omnia-guest" }
-# omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
-# omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
-# omnia-wasi-http = { path = "../omnia/crates/wasi-http" }
-# omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }
-# omnia-wasi-keyvalue = { path = "../omnia/crates/wasi-keyvalue" }
-# omnia-wasi-messaging = { path = "../omnia/crates/wasi-messaging" }
-# omnia-wasi-model = { path = "../omnia/crates/wasi-model" }
-# omnia-wasi-otel = { path = "../omnia/crates/wasi-otel" }
-# omnia-wasi-sql = { path = "../omnia/crates/wasi-sql" }
-# omnia-wasi-vault = { path = "../omnia/crates/wasi-vault" }
+omnia-guest = { path = "../omnia/crates/omnia-guest" }
+omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
+omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
+omnia-wasi-http = { path = "../omnia/crates/wasi-http" }
+omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }
+omnia-wasi-keyvalue = { path = "../omnia/crates/wasi-keyvalue" }
+omnia-wasi-messaging = { path = "../omnia/crates/wasi-messaging" }
+omnia-wasi-model = { path = "../omnia/crates/wasi-model" }
+omnia-wasi-otel = { path = "../omnia/crates/wasi-otel" }
+omnia-wasi-sql = { path = "../omnia/crates/wasi-sql" }
+omnia-wasi-vault = { path = "../omnia/crates/wasi-vault" }
 
 wrpc-transport = { git = "https://github.com/bytecodealliance/wrpc" }
 wrpc-wasmtime = { git = "https://github.com/bytecodealliance/wrpc" }

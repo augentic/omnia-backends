@@ -97,11 +97,11 @@ async fn plugin_store_round_trip() -> Result<()> {
     let digest = sha256_digest(&bytes);
 
     // Content round-trips by digest.
-    ContentStore::put(&client, &digest, &bytes).await?;
-    assert_eq!(ContentStore::get(&client, &digest).await?.as_deref(), Some(bytes.as_slice()));
+    client.put_content(&digest, &bytes).await?;
+    assert_eq!(client.content(&digest).await?.as_deref(), Some(bytes.as_slice()));
 
     // A mismatched write is refused before it reaches the service.
-    let err = ContentStore::put(&client, &digest, b"other bytes").await.expect_err("must refuse");
+    let err = client.put_content(&digest, b"other bytes").await.expect_err("must refuse");
     assert!(err.to_string().contains("refusing to persist"), "unexpected error: {err}");
 
     // Release records are scoped per registry.
@@ -109,15 +109,9 @@ async fn plugin_store_round_trip() -> Result<()> {
         version: "1.2.3".to_string(),
         content_digest: digest.clone(),
     };
-    ReleaseStore::put(&client, "omnia.host", "emery:intent", &record).await?;
-    assert_eq!(
-        ReleaseStore::get(&client, "omnia.host", "emery:intent", "1.2.3").await?,
-        Some(record.clone())
-    );
-    assert_eq!(
-        ReleaseStore::get(&client, "registry.example", "emery:intent", "1.2.3").await?,
-        None
-    );
+    client.put_release("omnia.host", "emery:intent", &record).await?;
+    assert_eq!(client.release("omnia.host", "emery:intent", "1.2.3").await?, Some(record.clone()));
+    assert_eq!(client.release("registry.example", "emery:intent", "1.2.3").await?, None);
 
     // A guest container named `plugins` shares nothing with the store's
     // own `omnia-plugins` container.

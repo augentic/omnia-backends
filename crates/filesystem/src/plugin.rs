@@ -18,14 +18,14 @@ use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore, sha256_digest};
 use crate::{Client, blocking};
 
 impl ContentStore for Client {
-    fn get<'a>(&'a self, digest: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>>> {
+    fn content<'a>(&'a self, digest: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>>> {
         tracing::trace!("getting plugin content: {digest}");
         let path = content_path(&self.root, digest);
 
         blocking(move || maybe_read(&path))
     }
 
-    fn put<'a>(&'a self, digest: &'a str, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
+    fn put_content<'a>(&'a self, digest: &'a str, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>> {
         tracing::trace!("putting plugin content: {digest}");
         let path = content_path(&self.root, digest);
         let digest = digest.to_owned();
@@ -44,7 +44,7 @@ impl ContentStore for Client {
 }
 
 impl ReleaseStore for Client {
-    fn get<'a>(
+    fn release<'a>(
         &'a self, registry: &'a str, package: &'a str, version: &'a str,
     ) -> BoxFuture<'a, Result<Option<ReleaseRecord>>> {
         tracing::trace!("getting plugin release: {package}@{version} from {registry}");
@@ -59,7 +59,7 @@ impl ReleaseStore for Client {
         })
     }
 
-    fn put<'a>(
+    fn put_release<'a>(
         &'a self, registry: &'a str, package: &'a str, record: &'a ReleaseRecord,
     ) -> BoxFuture<'a, Result<()>> {
         tracing::trace!("putting plugin release: {package}@{} in {registry}", record.version);

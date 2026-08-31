@@ -24,21 +24,15 @@ async fn content_round_trip() {
 
     let bytes = b"component bytes";
     let digest = digest_of(bytes);
-    assert_eq!(ContentStore::get(&store, &digest).await.expect("get"), None);
+    assert_eq!(store.content(&digest).await.expect("get"), None);
 
-    ContentStore::put(&store, &digest, bytes).await.expect("put");
-    assert_eq!(
-        ContentStore::get(&store, &digest).await.expect("get").as_deref(),
-        Some(bytes.as_slice())
-    );
+    store.put_content(&digest, bytes).await.expect("put");
+    assert_eq!(store.content(&digest).await.expect("get").as_deref(), Some(bytes.as_slice()));
 
     // Entries survive a reopen (the store is durable, not process state).
     drop(store);
     let store = client(&root);
-    assert_eq!(
-        ContentStore::get(&store, &digest).await.expect("get").as_deref(),
-        Some(bytes.as_slice())
-    );
+    assert_eq!(store.content(&digest).await.expect("get").as_deref(), Some(bytes.as_slice()));
 }
 
 #[tokio::test]
@@ -47,9 +41,9 @@ async fn mismatched_content_refused() {
     let store = client(&root);
 
     let digest = digest_of(b"the real bytes");
-    let err = ContentStore::put(&store, &digest, b"other bytes").await.expect_err("must refuse");
+    let err = store.put_content(&digest, b"other bytes").await.expect_err("must refuse");
     assert!(err.to_string().contains("refusing to persist"), "unexpected error: {err}");
-    assert_eq!(ContentStore::get(&store, &digest).await.expect("get"), None, "no entry lands");
+    assert_eq!(store.content(&digest).await.expect("get"), None, "no entry lands");
 }
 
 #[tokio::test]
@@ -57,15 +51,12 @@ async fn release_round_trip() {
     let root = TempDir::new().expect("tempdir");
     let store = client(&root);
 
-    assert_eq!(
-        ReleaseStore::get(&store, "omnia.host", "emery:intent", "1.2.3").await.expect("get"),
-        None
-    );
+    assert_eq!(store.release("omnia.host", "emery:intent", "1.2.3").await.expect("get"), None);
 
     let record = record(b"component bytes");
-    ReleaseStore::put(&store, "omnia.host", "emery:intent", &record).await.expect("put");
+    store.put_release("omnia.host", "emery:intent", &record).await.expect("put");
     assert_eq!(
-        ReleaseStore::get(&store, "omnia.host", "emery:intent", "1.2.3").await.expect("get"),
+        store.release("omnia.host", "emery:intent", "1.2.3").await.expect("get"),
         Some(record.clone())
     );
 
@@ -74,9 +65,9 @@ async fn release_round_trip() {
         content_digest: digest_of(b"rebuilt bytes"),
         ..record
     };
-    ReleaseStore::put(&store, "omnia.host", "emery:intent", &repinned).await.expect("re-put");
+    store.put_release("omnia.host", "emery:intent", &repinned).await.expect("re-put");
     assert_eq!(
-        ReleaseStore::get(&store, "omnia.host", "emery:intent", "1.2.3").await.expect("get"),
+        store.release("omnia.host", "emery:intent", "1.2.3").await.expect("get"),
         Some(repinned)
     );
 }
@@ -87,25 +78,25 @@ async fn releases_scoped_per_registry() {
     let store = client(&root);
 
     let record = record(b"component bytes");
-    ReleaseStore::put(&store, "omnia.host", "emery:intent", &record).await.expect("put");
+    store.put_release("omnia.host", "emery:intent", &record).await.expect("put");
 
     // An endpoint override is never answered from another registry's record.
     assert_eq!(
-        ReleaseStore::get(&store, "registry.example", "emery:intent", "1.2.3").await.expect("get"),
+        store.release("registry.example", "emery:intent", "1.2.3").await.expect("get"),
         None
     );
 
     // Content stays shared: the digest is the identity, whichever registry's
     // release points at it.
     let bytes = b"component bytes";
-    ContentStore::put(&store, &digest_of(bytes), bytes).await.expect("put content");
+    store.put_content(&digest_of(bytes), bytes).await.expect("put content");
     let other = ReleaseRecord {
         version: "1.2.3".to_string(),
         content_digest: digest_of(bytes),
     };
-    ReleaseStore::put(&store, "registry.example", "emery:intent", &other).await.expect("put");
+    store.put_release("registry.example", "emery:intent", &other).await.expect("put");
     assert_eq!(
-        ContentStore::get(&store, &digest_of(bytes)).await.expect("get").as_deref(),
+        store.content(&digest_of(bytes)).await.expect("get").as_deref(),
         Some(bytes.as_slice())
     );
 }
@@ -117,10 +108,8 @@ async fn plugins_tree_disjoint_from_guest_storage() {
 
     let bytes = b"component bytes";
     let digest = digest_of(bytes);
-    ContentStore::put(&store, &digest, bytes).await.expect("put content");
-    ReleaseStore::put(&store, "omnia.host", "emery:intent", &record(bytes))
-        .await
-        .expect("put release");
+    store.put_content(&digest, bytes).await.expect("put content");
+    store.put_release("omnia.host", "emery:intent", &record(bytes)).await.expect("put release");
 
     // A guest container or bucket named `plugins` lands under `blobstore/`
     // or `keyvalue/`, never the plugins tree — same-name writes coexist.
@@ -129,10 +118,7 @@ async fn plugins_tree_disjoint_from_guest_storage() {
     let bucket = store.open_bucket("plugins".to_string()).await.expect("open bucket");
     bucket.set("content".to_string(), b"kv".to_vec()).await.expect("set");
 
-    assert_eq!(
-        ContentStore::get(&store, &digest).await.expect("get").as_deref(),
-        Some(bytes.as_slice())
-    );
+    assert_eq!(store.content(&digest).await.expect("get").as_deref(), Some(bytes.as_slice()));
     assert_eq!(
         container.list_objects().await.expect("list"),
         ["content"],

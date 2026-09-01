@@ -85,7 +85,7 @@ No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; thos
 
 ### Plugin store
 
-`filesystem` and `azure-blob` additionally implement `omnia_plugin::ContentStore` and `omnia_plugin::ReleaseStore` — the two halves of the `PluginStore` bound behind omnia's registry acquirer (the `runtime!` macro's plugin cache). Each impl owns a tree disjoint from guest storage by construction: `filesystem` writes a `plugins/` subtree beside `blobstore/` and `keyvalue/`; `azure-blob` writes a dedicated container it names itself (`omnia-plugins`). Content entries are shared across registries (the digest is the identity); release records are scoped per registry. Verification of served bytes lives in the acquirer — the content impls only refuse writes whose bytes do not hash to their digest key.
+`filesystem` and `azure-blob` additionally implement `omnia_plugin::ContentStore` and `omnia_plugin::ReleaseStore` — the store bound behind omnia's registry acquirer (the `runtime!` macro's plugin cache). Each impl owns a tree disjoint from guest storage by construction: `filesystem` writes a `plugins/` subtree beside `blobstore/` and `keyvalue/`; `azure-blob` writes a dedicated container it names itself (`omnia-plugins`). Content entries are shared across registries (the digest is the identity); release records are scoped per registry. Verification of served bytes lives in the acquirer — the content impls only refuse writes whose bytes do not hash to their digest key.
 
 ### Model backends
 

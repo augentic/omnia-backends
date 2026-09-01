@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use futures::future::BoxFuture;
-use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore, sha256_digest};
+use omnia_core::sha256_digest;
+use omnia_plugin::{ContentStore, ReleaseStore};
 
 use crate::{Client, blocking};
 
@@ -46,7 +47,7 @@ impl ContentStore for Client {
 impl ReleaseStore for Client {
     fn release<'a>(
         &'a self, registry: &'a str, package: &'a str, version: &'a str,
-    ) -> BoxFuture<'a, Result<Option<ReleaseRecord>>> {
+    ) -> BoxFuture<'a, Result<Option<String>>> {
         tracing::trace!("getting plugin release: {package}@{version} from {registry}");
         let path = release_path(&self.root, registry, package, version);
 
@@ -54,22 +55,19 @@ impl ReleaseStore for Client {
             let Some(bytes) = maybe_read(&path)? else {
                 return Ok(None);
             };
-            let record = serde_json::from_slice(&bytes).context("decoding release record")?;
-            Ok(Some(record))
+            let digest = String::from_utf8(bytes).context("decoding release record")?;
+            Ok(Some(digest))
         })
     }
 
     fn put_release<'a>(
-        &'a self, registry: &'a str, package: &'a str, record: &'a ReleaseRecord,
+        &'a self, registry: &'a str, package: &'a str, version: &'a str, digest: &'a str,
     ) -> BoxFuture<'a, Result<()>> {
-        tracing::trace!("putting plugin release: {package}@{} in {registry}", record.version);
-        let path = release_path(&self.root, registry, package, &record.version);
-        let record = record.clone();
+        tracing::trace!("putting plugin release: {package}@{version} in {registry}");
+        let path = release_path(&self.root, registry, package, version);
+        let digest = digest.to_owned();
 
-        blocking(move || {
-            let bytes = serde_json::to_vec(&record).context("encoding release record")?;
-            write_atomic(&path, &bytes)
-        })
+        blocking(move || write_atomic(&path, digest.as_bytes()))
     }
 }
 
@@ -78,7 +76,7 @@ fn content_path(root: &Path, digest: &str) -> PathBuf {
 }
 
 fn release_path(root: &Path, registry: &str, package: &str, version: &str) -> PathBuf {
-    root.join("plugins").join("releases").join(registry).join(format!("{package}-{version}.json"))
+    root.join("plugins").join("releases").join(registry).join(format!("{package}-{version}"))
 }
 
 fn maybe_read(path: &Path) -> Result<Option<Vec<u8>>> {

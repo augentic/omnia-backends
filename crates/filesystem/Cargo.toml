@@ -23,6 +23,7 @@ anyhow.workspace = true
 fromenv.workspace = true
 futures.workspace = true
 omnia.workspace = true
+omnia-core.workspace = true
 omnia-plugin.workspace = true
 omnia-wasi-blobstore.workspace = true
 omnia-wasi-keyvalue.workspace = true

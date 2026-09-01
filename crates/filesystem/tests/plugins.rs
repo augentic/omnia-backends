@@ -1,7 +1,8 @@
 //! Filesystem plugin-store contract tests.
 
+use omnia_core::sha256_digest as digest_of;
 use omnia_filesystem::Client;
-use omnia_plugin::{ContentStore, ReleaseStore, sha256_digest as digest_of};
+use omnia_plugin::{ContentStore, ReleaseStore};
 use omnia_wasi_blobstore::{Bytes, WasiBlobstoreCtx};
 use omnia_wasi_keyvalue::WasiKeyValueCtx;
 use tempfile::TempDir;

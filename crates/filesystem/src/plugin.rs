@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use futures::future::BoxFuture;
-use omnia_plugin::{ContentStore, ReleaseStore, sha256_digest};
+use omnia_core::sha256_digest;
+use omnia_plugin::{ContentStore, ReleaseStore};
 
 use crate::{Client, blocking};
 

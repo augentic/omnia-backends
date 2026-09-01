@@ -89,7 +89,8 @@ async fn ranged_reads() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
 async fn plugin_store_round_trip() -> Result<()> {
-    use omnia_plugin::{ContentStore, ReleaseStore, sha256_digest};
+    use omnia_core::sha256_digest;
+    use omnia_plugin::{ContentStore, ReleaseStore};
 
     let client = <Client as Backend>::connect().await?;
 

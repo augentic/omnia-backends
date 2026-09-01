@@ -12,7 +12,8 @@ use anyhow::{Context as _, Result, bail};
 use azure_core::http::{RequestContent, StatusCode};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
-use omnia_plugin::{ContentStore, ReleaseStore, sha256_digest};
+use omnia_core::sha256_digest;
+use omnia_plugin::{ContentStore, ReleaseStore};
 
 use crate::Client;
 

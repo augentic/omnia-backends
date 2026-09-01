@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, bail};
 use azure_core::http::{RequestContent, StatusCode};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
-use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore, sha256_digest};
+use omnia_plugin::{ContentStore, ReleaseStore, sha256_digest};
 
 use crate::Client;
 
@@ -51,7 +51,7 @@ impl ContentStore for Client {
 impl ReleaseStore for Client {
     fn release<'a>(
         &'a self, registry: &'a str, package: &'a str, version: &'a str,
-    ) -> BoxFuture<'a, Result<Option<ReleaseRecord>>> {
+    ) -> BoxFuture<'a, Result<Option<String>>> {
         tracing::trace!("getting plugin release: {package}@{version} from {registry}");
         let blob =
             self.service.blob_client(STORE_CONTAINER, &release_name(registry, package, version));
@@ -60,24 +60,22 @@ impl ReleaseStore for Client {
             let Some(bytes) = read_optional(&blob).await? else {
                 return Ok(None);
             };
-            let record = serde_json::from_slice(&bytes).context("decoding release record")?;
-            Ok(Some(record))
+            let digest = String::from_utf8(bytes).context("decoding release record")?;
+            Ok(Some(digest))
         }
         .boxed()
     }
 
     fn put_release<'a>(
-        &'a self, registry: &'a str, package: &'a str, record: &'a ReleaseRecord,
+        &'a self, registry: &'a str, package: &'a str, version: &'a str, digest: &'a str,
     ) -> BoxFuture<'a, Result<()>> {
-        tracing::trace!("putting plugin release: {package}@{} in {registry}", record.version);
-        let blob = self
-            .service
-            .blob_client(STORE_CONTAINER, &release_name(registry, package, &record.version));
+        tracing::trace!("putting plugin release: {package}@{version} in {registry}");
+        let blob =
+            self.service.blob_client(STORE_CONTAINER, &release_name(registry, package, version));
 
         async move {
-            let bytes = serde_json::to_vec(record).context("encoding release record")?;
             self.ensure_store_container().await?;
-            let content = RequestContent::from(bytes);
+            let content = RequestContent::from(digest.as_bytes().to_vec());
             blob.upload(content, None).await.context("uploading release record")?;
             Ok(())
         }
@@ -101,7 +99,7 @@ fn content_name(digest: &str) -> String {
 }
 
 fn release_name(registry: &str, package: &str, version: &str) -> String {
-    format!("releases/{registry}/{package}-{version}.json")
+    format!("releases/{registry}/{package}-{version}")
 }
 
 /// Read a blob's bytes; any 404 (blob or container) is an absent entry.

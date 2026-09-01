@@ -89,7 +89,7 @@ async fn ranged_reads() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
 async fn plugin_store_round_trip() -> Result<()> {
-    use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore, sha256_digest};
+    use omnia_plugin::{ContentStore, ReleaseStore, sha256_digest};
 
     let client = <Client as Backend>::connect().await?;
 
@@ -105,12 +105,8 @@ async fn plugin_store_round_trip() -> Result<()> {
     assert!(err.to_string().contains("refusing to persist"), "unexpected error: {err}");
 
     // Release records are scoped per registry.
-    let record = ReleaseRecord {
-        version: "1.2.3".to_string(),
-        content_digest: digest.clone(),
-    };
-    client.put_release("omnia.host", "emery:intent", &record).await?;
-    assert_eq!(client.release("omnia.host", "emery:intent", "1.2.3").await?, Some(record.clone()));
+    client.put_release("omnia.host", "emery:intent", "1.2.3", &digest).await?;
+    assert_eq!(client.release("omnia.host", "emery:intent", "1.2.3").await?, Some(digest.clone()));
     assert_eq!(client.release("registry.example", "emery:intent", "1.2.3").await?, None);
 
     // A guest container named `plugins` shares nothing with the store's

@@ -8,7 +8,7 @@ MongoDB, OpenTelemetry, and the `genai`/`cursor` model backends). Each crate
 implements the corresponding `omnia` `WasiXxxCtx` trait against a real service.
 `omnia-filesystem` and `omnia-azure-blob` additionally implement
 `omnia_plugin::ContentStore` and `omnia_plugin::ReleaseStore` (the
-`PluginStore` bound behind the `RegistryClient` acquirer);
+store bound behind the `RegistryClient` acquirer);
 registry acquisition itself lives in `omnia-plugin`. The `omnia` runtime is consumed
 via `[patch.crates-io]` entries pointing at the omnia git repository (or a
 sibling `../omnia/crates/*` checkout by switching the commented path patches).

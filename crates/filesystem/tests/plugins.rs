@@ -1,20 +1,13 @@
 //! Filesystem plugin-store contract tests.
 
 use omnia_filesystem::Client;
-use omnia_plugin::{ContentStore, ReleaseRecord, ReleaseStore, sha256_digest as digest_of};
+use omnia_plugin::{ContentStore, ReleaseStore, sha256_digest as digest_of};
 use omnia_wasi_blobstore::{Bytes, WasiBlobstoreCtx};
 use omnia_wasi_keyvalue::WasiKeyValueCtx;
 use tempfile::TempDir;
 
 fn client(root: &TempDir) -> Client {
     Client::open(root.path()).expect("open")
-}
-
-fn record(bytes: &[u8]) -> ReleaseRecord {
-    ReleaseRecord {
-        version: "1.2.3".to_string(),
-        content_digest: digest_of(bytes),
-    }
 }
 
 #[tokio::test]
@@ -53,19 +46,16 @@ async fn release_round_trip() {
 
     assert_eq!(store.release("omnia.host", "emery:intent", "1.2.3").await.expect("get"), None);
 
-    let record = record(b"component bytes");
-    store.put_release("omnia.host", "emery:intent", &record).await.expect("put");
+    let digest = digest_of(b"component bytes");
+    store.put_release("omnia.host", "emery:intent", "1.2.3", &digest).await.expect("put");
     assert_eq!(
         store.release("omnia.host", "emery:intent", "1.2.3").await.expect("get"),
-        Some(record.clone())
+        Some(digest)
     );
 
     // A re-put overwrites the record in place.
-    let repinned = ReleaseRecord {
-        content_digest: digest_of(b"rebuilt bytes"),
-        ..record
-    };
-    store.put_release("omnia.host", "emery:intent", &repinned).await.expect("re-put");
+    let repinned = digest_of(b"rebuilt bytes");
+    store.put_release("omnia.host", "emery:intent", "1.2.3", &repinned).await.expect("re-put");
     assert_eq!(
         store.release("omnia.host", "emery:intent", "1.2.3").await.expect("get"),
         Some(repinned)
@@ -77,8 +67,8 @@ async fn releases_scoped_per_registry() {
     let root = TempDir::new().expect("tempdir");
     let store = client(&root);
 
-    let record = record(b"component bytes");
-    store.put_release("omnia.host", "emery:intent", &record).await.expect("put");
+    let digest = digest_of(b"component bytes");
+    store.put_release("omnia.host", "emery:intent", "1.2.3", &digest).await.expect("put");
 
     // An endpoint override is never answered from another registry's record.
     assert_eq!(
@@ -90,11 +80,7 @@ async fn releases_scoped_per_registry() {
     // release points at it.
     let bytes = b"component bytes";
     store.put_content(&digest_of(bytes), bytes).await.expect("put content");
-    let other = ReleaseRecord {
-        version: "1.2.3".to_string(),
-        content_digest: digest_of(bytes),
-    };
-    store.put_release("registry.example", "emery:intent", &other).await.expect("put");
+    store.put_release("registry.example", "emery:intent", "1.2.3", &digest).await.expect("put");
     assert_eq!(
         store.content(&digest_of(bytes)).await.expect("get").as_deref(),
         Some(bytes.as_slice())
@@ -109,7 +95,7 @@ async fn plugins_tree_disjoint_from_guest_storage() {
     let bytes = b"component bytes";
     let digest = digest_of(bytes);
     store.put_content(&digest, bytes).await.expect("put content");
-    store.put_release("omnia.host", "emery:intent", &record(bytes)).await.expect("put release");
+    store.put_release("omnia.host", "emery:intent", "1.2.3", &digest).await.expect("put release");
 
     // A guest container or bucket named `plugins` lands under `blobstore/`
     // or `keyvalue/`, never the plugins tree — same-name writes coexist.

@@ -3648,7 +3648,6 @@ dependencies = [
  "omnia",
  "omnia-plugin",
  "omnia-wasi-blobstore",
- "serde_json",
  "tokio",
  "tracing",
 ]
@@ -3773,7 +3772,6 @@ dependencies = [
  "omnia-plugin",
  "omnia-wasi-blobstore",
  "omnia-wasi-keyvalue",
- "serde_json",
  "tempfile",
  "tokio",
  "tracing",

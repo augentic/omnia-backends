@@ -26,7 +26,6 @@ omnia.workspace = true
 omnia-plugin.workspace = true
 omnia-wasi-blobstore.workspace = true
 omnia-wasi-keyvalue.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true

@@ -20,7 +20,7 @@ use tokio::time::{Instant, sleep, sleep_until, timeout};
 use super::observe::{self, Completion, EventLog, Failure};
 use super::options::{Turn, Workspace};
 use crate::Client;
-use crate::bridge::{Bridge, EXIT_GRACE, RunStatus, RunStreamResult};
+use crate::bridge::{Bridge, EXIT_OBSERVE, RunStatus, RunStreamResult};
 use crate::endpoint::Attached;
 use crate::pool::Lease;
 
@@ -283,14 +283,15 @@ async fn on_bridge<T>(
     }
 }
 
-// A socket fails before the watcher sees the process go; give the exit a
-// moment to be observed so it is reported as the exit, not a transport
-// error. An attached bridge is never seen to die, so its error stands.
+// A socket fails before the watcher publishes the exit: `watch_child`
+// spends up to `EXIT_GRACE` draining stderr first, so the observe budget
+// is that window plus one of its own. An attached bridge is never seen to
+// die, so its error stands.
 async fn exit_or(bridge: &Bridge, error: anyhow::Error) -> anyhow::Error {
     if !bridge.is_owned() {
         return error;
     }
-    match timeout(EXIT_GRACE, bridge.died()).await {
+    match timeout(EXIT_OBSERVE, bridge.died()).await {
         Ok(exit) => Failure::BridgeExited(exit).into(),
         Err(_elapsed) => error,
     }
@@ -431,6 +432,8 @@ mod tests {
     use tokio::time::{Duration, Instant, sleep};
 
     use super::{Deadlines, MAX_ROUNDS};
+    use crate::bridge::{Bridge, EXIT_GRACE, Exit};
+    use crate::model::observe;
     use crate::model::options::with_dummy_key;
     use crate::{Client, ConnectOptions};
 
@@ -764,5 +767,31 @@ mod tests {
             "one touch at 100s moves the kill to 100s + the 120s window"
         );
         assert!(error.to_string().contains("inactive for 120s"), "unexpected: {error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exit_or_after_full_drain() {
+        let (bridge, tx) = Bridge::pending();
+        let wait = super::exit_or(&bridge, anyhow::anyhow!("connection reset"));
+        tokio::pin!(wait);
+
+        // The watcher spends this window draining stderr before it publishes.
+        tokio::select! {
+            biased;
+            _ = &mut wait => panic!("one EXIT_GRACE is still the drain, not the observe budget"),
+            () = sleep(EXIT_GRACE) => {}
+        }
+
+        tx.send(Some(Exit::default())).expect("receiver lives");
+        let error = wait.await;
+        assert_eq!(observe::outcome_of(&error), "bridge_exit", "{error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exit_or_unanswered() {
+        let (bridge, _tx) = Bridge::pending();
+        let error = super::exit_or(&bridge, anyhow::anyhow!("connection reset")).await;
+        assert_eq!(error.to_string(), "connection reset");
+        assert_eq!(observe::outcome_of(&error), "error");
     }
 }

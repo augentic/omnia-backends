@@ -34,10 +34,15 @@ use tokio::time::timeout;
 use crate::endpoint::Endpoint;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a bridge whose socket just failed is given to be seen exiting,
-/// so the failure is reported as the exit rather than a transport error —
-/// and how long its stderr pipe is given to hand over its last lines.
+/// How long the stderr pipe is given to hand over its last lines after the
+/// process exits — and how long a handshake waits for `child.wait`. A
+/// grandchild that inherited the pipe can hold it open, so this is a bound,
+/// not a wait for EOF.
 pub const EXIT_GRACE: Duration = Duration::from_millis(250);
+/// How long a socket failure waits to observe [`Bridge::died`]. The watcher
+/// may spend a full [`EXIT_GRACE`] draining stderr before it publishes, so
+/// this is that window plus its own observe budget.
+pub const EXIT_OBSERVE: Duration = EXIT_GRACE.saturating_mul(2);
 const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
 /// One `sdk.v1` bridge: a spawned `cursor-sdk-bridge` process this client
@@ -173,6 +178,20 @@ impl Bridge {
                 }
             }
         }
+    }
+
+    /// An owned bridge whose exit the test publishes.
+    #[cfg(test)]
+    pub(crate) fn pending() -> (Self, watch::Sender<Option<Exit>>) {
+        let (exit_tx, exit) = watch::channel(None);
+        (
+            Self {
+                rpc: Rpc::unbound(),
+                exit,
+                shutdown: Some(Arc::new(Notify::new())),
+            },
+            exit_tx,
+        )
     }
 
     /// Shut a spawned bridge down and wait for it to exit; an attached

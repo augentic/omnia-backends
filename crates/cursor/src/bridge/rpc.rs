@@ -52,6 +52,16 @@ impl std::fmt::Debug for Rpc {
 }
 
 impl Rpc {
+    /// Bind without a handshake — tests that never issue an RPC.
+    #[cfg(test)]
+    pub(crate) fn unbound() -> Self {
+        Self {
+            hyper: HyperClient::builder(TokioExecutor::new()).build_http(),
+            base: String::new(),
+            bearer: String::new(),
+        }
+    }
+
     /// Bind to `base` and prove the bridge answers `sdk.v1`.
     pub async fn connect(base: String, token: &str) -> Result<Self> {
         let rpc = Self {

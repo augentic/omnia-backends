@@ -3,12 +3,14 @@
 //! rearms, an absolute wall-clock cap, the callback's abort signal, and the
 //! bridge's own exit. No call waits on the bridge unbounded, so one that is
 //! alive but silent unblocks the guest. An unanswered `CreateAgent` keeps
-//! its lease only to close and delete a late id; an attached bridge would
-//! otherwise keep the agent after lease drop. An abandoned run is
-//! cancelled best-effort. After the turn, the agent is closed and deleted
-//! against the create-time cwd, each call bounded and all of them skipped
-//! once the bridge is gone; `Drop` is only a fallback. The lease the agent
-//! runs on outlives that teardown, so the bridge closes only after it.
+//! its lease for one more inactivity window, only to close and delete a
+//! late id (an attached bridge would otherwise keep the agent after lease
+//! drop); silent past that, the slot reopens with nothing torn down. An
+//! abandoned run is cancelled best-effort. After the turn, the agent is
+//! closed and deleted against the create-time cwd, each call bounded and
+//! all of them skipped once the bridge is gone; `Drop` is only a fallback.
+//! The lease the agent runs on outlives that teardown, so the bridge closes
+//! only after it.
 
 use std::env;
 use std::sync::Arc;
@@ -72,7 +74,7 @@ impl Agent {
             BridgeWait::Unanswered { method, secs } => {
                 // Dropping CreateAgent here would lose a late id. An attached
                 // bridge outlives the lease and would keep that agent.
-                reap_late_create(lease, cwd, turn.workspace, create);
+                reap_late_create(lease, cwd, turn.workspace, client.deadlines.inactivity, create);
                 let error = anyhow!("bridge RPC `{method}` unanswered after {secs}s");
                 completion.finish(observe::outcome_of(&error));
                 return Err(error);
@@ -309,16 +311,18 @@ enum BridgeWait<T> {
 // The inactivity bound already unblocked the guest. Finish CreateAgent so a
 // late id can be closed and deleted; the lease rides along so a spawned
 // bridge is not killed first, and an attached one cannot keep the agent.
+// The lease is the slot, so this wait is bounded too — one more window —
+// or a bridge that stays alive and silent would hold the slot for good.
 fn reap_late_create(
-    lease: Arc<Lease>, cwd: String, workspace: Workspace,
+    lease: Arc<Lease>, cwd: String, workspace: Workspace, limit: Duration,
     create: impl Future<Output = Result<String>> + Send + 'static,
 ) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
     };
     handle.spawn(async move {
-        match create.await {
-            Ok(id) if !id.is_empty() => {
+        match timeout(limit, create).await {
+            Ok(Ok(id)) if !id.is_empty() => {
                 Release {
                     lease,
                     id,
@@ -329,8 +333,12 @@ fn reap_late_create(
                 .run()
                 .await;
             }
-            Ok(_) => tracing::debug!("late CreateAgent returned an empty agent id"),
-            Err(error) => tracing::debug!(%error, "abandoned CreateAgent failed"),
+            Ok(Ok(_)) => tracing::debug!("late CreateAgent returned an empty agent id"),
+            Ok(Err(error)) => tracing::debug!(%error, "abandoned CreateAgent failed"),
+            Err(_elapsed) => tracing::warn!(
+                secs = limit.as_secs(),
+                "late CreateAgent still unanswered; its slot reopens with no agent torn down"
+            ),
         }
     });
 }
@@ -505,12 +513,12 @@ mod tests {
     /// `Send` number `n` with `replies[n]` (the last reply repeats) and
     /// records each text sent.
     async fn scripted(replies: &[&str]) -> (Client, Sends, Deletes) {
-        let (client, sends, deletes, _closes) = scripted_on(replies, None, DEADLINES).await;
+        let (client, sends, deletes, _closes) = scripted_on(replies, None, DEADLINES, 4).await;
         (client, sends, deletes)
     }
 
     async fn scripted_on(
-        replies: &[&str], create_hold: Option<Arc<Notify>>, deadlines: Deadlines,
+        replies: &[&str], create_hold: Option<Arc<Notify>>, deadlines: Deadlines, max_agents: usize,
     ) -> (Client, Sends, Deletes, Closes) {
         with_dummy_key();
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind loopback");
@@ -532,7 +540,7 @@ mod tests {
             model: "auto".to_owned(),
             timeout_secs: deadlines.cap.as_secs(),
             inactivity_secs: deadlines.inactivity.as_secs(),
-            max_agents: 4,
+            max_agents,
             bridge_bin: "cursor-sdk-bridge".to_owned(),
             bridge_url: Some(format!("http://{addr}")),
             bridge_token: Some("test-token".to_owned()),
@@ -838,7 +846,7 @@ mod tests {
             cap: Duration::from_secs(10),
         };
         let (client, _sends, deletes, closes) =
-            scripted_on(&["unused"], Some(Arc::clone(&hold)), deadlines).await;
+            scripted_on(&["unused"], Some(Arc::clone(&hold)), deadlines, 4).await;
         let check = Check::rejecting(usize::MAX);
         let error =
             client.complete(request(false), check.host()).await.expect_err("CreateAgent timed out");
@@ -874,6 +882,43 @@ mod tests {
             "CloseAgent uses the late id"
         );
         assert_scoped_delete(&deletes);
+    }
+
+    #[tokio::test]
+    async fn create_never_answered_frees_slot() {
+        // Never notified: the bridge stays alive and never answers.
+        let hold = Arc::new(Notify::new());
+        let deadlines = Deadlines {
+            inactivity: Duration::from_secs(1),
+            cap: Duration::from_secs(10),
+        };
+        let (client, _sends, deletes, closes) =
+            scripted_on(&["unused"], Some(hold), deadlines, 1).await;
+        let check = Check::rejecting(usize::MAX);
+        let started = Instant::now();
+
+        let error =
+            client.complete(request(false), check.host()).await.expect_err("CreateAgent timed out");
+        assert!(error.to_string().contains("unanswered after 1s"), "{error}");
+
+        // The reap keeps the only slot for one more window, then gives it up:
+        // the second completion must reach its own CreateAgent rather than
+        // queue on the slot forever.
+        let error = tokio::time::timeout(
+            Duration::from_secs(8),
+            client.complete(request(false), check.host()),
+        )
+        .await
+        .expect("the slot reopens once the reap gives up on CreateAgent")
+        .expect_err("the second CreateAgent timed out too");
+        assert!(error.to_string().contains("unanswered after 1s"), "{error}");
+        assert!(
+            started.elapsed() >= 3 * deadlines.inactivity,
+            "the reap waits a full window before the slot reopens: {:?}",
+            started.elapsed()
+        );
+        assert!(closes.lock().expect("closes lock").is_empty(), "no id arrived to close");
+        assert!(deletes.lock().expect("deletes lock").is_empty(), "no id arrived to delete");
     }
 
     #[tokio::test(start_paused = true)]

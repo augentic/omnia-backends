@@ -24,9 +24,11 @@ Pairs with omnia 0.35.x.
   stderr, instead of stalling it to the inactivity deadline, and the
   agent's teardown RPCs are skipped on a dead bridge. No RPC waits on a
   bridge unbounded: `CreateAgent` and the head of `Send` fall under the
-  inactivity window, the connect handshake and each teardown call have
-  bounds of their own, so a bridge that is alive but silent gives its slot
-  back. `ConnectOptions::bridge_bin` (`CURSOR_BRIDGE_BIN`) names the
+  inactivity window (an unanswered `CreateAgent` keeps its slot for one
+  more window, so a late id is still closed and deleted), the connect
+  handshake and each teardown call have bounds of their own, so a bridge
+  that is alive but silent gives its slot back.
+  `ConnectOptions::bridge_bin` (`CURSOR_BRIDGE_BIN`) names the
   executable; `bridge_url` + `bridge_token` (`CURSOR_BRIDGE_URL`,
   `CURSOR_BRIDGE_TOKEN`) attach to a loopback `http://` bridge another
   process manages instead of spawning — a non-loopback URL is rejected

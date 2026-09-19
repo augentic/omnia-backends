@@ -54,9 +54,11 @@ process. The last lines the process wrote to stderr are logged at DEBUG only
 — they are untrusted subprocess output and never reach WARN or the error a
 guest sees. A bridge
 that stays alive but stops answering is bounded too: no call waits on it
-longer than the inactivity window, and the teardown calls after a
-completion are bounded at a few seconds each, so a silent bridge frees its
-slot instead of holding it. `Client::connect()` still fails fast when the
+longer than the inactivity window (an unanswered `CreateAgent` keeps its
+slot for one more window, so a late id can still be closed and deleted),
+and the teardown calls after a completion are bounded at a few seconds
+each, so a silent bridge frees its slot instead of holding it.
+`Client::connect()` still fails fast when the
 binary is missing or broken — it binds the loopback callback endpoint with
 a fresh bearer token, then spawns and closes one probe bridge — and every
 spawn passes a private `--state-root` so no durable agent state lands in

@@ -29,7 +29,7 @@ serde_json.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 anyhow.workspace = true
-cfg-if = "1.0.4"
+cfg-if = "1.0.5"
 dotenvy = "0.15.7"
 omnia.workspace = true
 omnia-azure-blob = { path = "../crates/azure-blob" }
@@ -44,6 +44,6 @@ tracing-subscriber = "0.3.23"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures.workspace = true
-omnia-guest = "0.36.0"
-wasip3 = { version = "0.8.0", features = ["http-compat"] }
-wit-bindgen = { version = "0.61.1", features = ["async-spawn"] }
+omnia-sdk = "0.36.0"
+wasip3 = { version = "0.9.0", features = ["http-compat"] }
+wit-bindgen = { version = "0.62.0", features = ["async-spawn"] }

@@ -6,7 +6,7 @@
 //! stream with a `ToolResult` — the extra information the agent needs.
 //!
 //! The raw `omnia:model/completion` bindings are used so the `calls` and
-//! `results` streams are visible; most guests use `omnia_guest::model`'s
+//! `results` streams are visible; most guests use `omnia_sdk::model`'s
 //! `Model::complete_with`, which runs the same loop behind a closure.
 
 #![cfg(target_arch = "wasm32")]

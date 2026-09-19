@@ -2,17 +2,19 @@
 //! terminal result, bounded by an inactivity deadline that stream progress
 //! rearms, an absolute wall-clock cap, the callback's abort signal, and the
 //! bridge's own exit. No call waits on the bridge unbounded, so one that is
-//! alive but silent frees its slot. An abandoned run is cancelled
-//! best-effort. After the turn, the agent is closed and deleted against the
-//! create-time cwd, each call bounded and all of them skipped once the
-//! bridge is gone; `Drop` is only a fallback. The lease the agent runs on
-//! outlives that teardown, so the bridge closes only after it.
+//! alive but silent unblocks the guest. An unanswered `CreateAgent` keeps
+//! its lease only to close and delete a late id; an attached bridge would
+//! otherwise keep the agent after lease drop. An abandoned run is
+//! cancelled best-effort. After the turn, the agent is closed and deleted
+//! against the create-time cwd, each call bounded and all of them skipped
+//! once the bridge is gone; `Drop` is only a fallback. The lease the agent
+//! runs on outlives that teardown, so the bridge closes only after it.
 
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep, sleep_until, timeout};
@@ -55,23 +57,34 @@ impl Agent {
         let cwd = turn.options.local.cwd.first().cloned().unwrap_or_default();
 
         let bridge = lease.bridge();
-        let create = bridge.rpc().create_agent(turn.options);
-        let created =
-            match on_bridge(bridge, "CreateAgent", client.deadlines.inactivity, create).await {
-                Ok(created) => created,
-                Err(error) => {
-                    completion.finish(observe::outcome_of(&error));
-                    return Err(error);
-                }
-            };
+        let rpc = bridge.rpc().clone();
+        let mut create = Box::pin(async move {
+            rpc.create_agent(turn.options).await.map(|created| created.agent_id)
+        });
+        let id = match on_bridge(bridge, "CreateAgent", client.deadlines.inactivity, &mut create)
+            .await
+        {
+            BridgeWait::Ready(Ok(id)) => id,
+            BridgeWait::Ready(Err(error)) => {
+                completion.finish(observe::outcome_of(&error));
+                return Err(error);
+            }
+            BridgeWait::Unanswered { method, secs } => {
+                // Dropping CreateAgent here would lose a late id. An attached
+                // bridge outlives the lease and would keep that agent.
+                reap_late_create(lease, cwd, turn.workspace, create);
+                let error = anyhow!("bridge RPC `{method}` unanswered after {secs}s");
+                completion.finish(observe::outcome_of(&error));
+                return Err(error);
+            }
+        };
 
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
-        let attached =
-            client.pool.attach(created.agent_id.clone(), Arc::clone(&tool_host), abort_tx);
+        let attached = client.pool.attach(id.clone(), Arc::clone(&tool_host), abort_tx);
 
         Ok(Self {
             lease,
-            id: created.agent_id,
+            id,
             cwd,
             deadlines: client.deadlines,
             prompt: turn.prompt,
@@ -264,23 +277,62 @@ impl Agent {
     }
 }
 
-/// Run one RPC against the bridge's exit and a bound: the exit wins the
-/// race, an RPC that failed as the process was going is reported as the
-/// exit too, and one still unanswered after `limit` fails.
+/// One bounded bridge RPC: the future is borrowed so a timeout can still
+/// finish it. Dropping `CreateAgent` on the bound would lose a late id.
 async fn on_bridge<T>(
-    bridge: &Bridge, method: &str, limit: Duration, rpc: impl Future<Output = Result<T>>,
-) -> Result<T> {
+    bridge: &Bridge, method: &'static str, limit: Duration,
+    rpc: &mut (impl Future<Output = Result<T>> + Unpin),
+) -> BridgeWait<T> {
     let died = bridge.died();
     tokio::pin!(died);
     let result = tokio::select! {
-        result = rpc => result,
-        exit = &mut died => return Err(Failure::BridgeExited(exit).into()),
-        () = sleep(limit) => bail!("bridge RPC `{method}` unanswered after {}s", limit.as_secs()),
+        result = &mut *rpc => result,
+        exit = &mut died => return BridgeWait::Ready(Err(Failure::BridgeExited(exit).into())),
+        () = sleep(limit) => {
+            return BridgeWait::Unanswered {
+                method,
+                secs: limit.as_secs(),
+            };
+        }
     };
     match result {
-        Ok(value) => Ok(value),
-        Err(error) => Err(exit_or(bridge, error).await),
+        Ok(value) => BridgeWait::Ready(Ok(value)),
+        Err(error) => BridgeWait::Ready(Err(exit_or(bridge, error).await)),
     }
+}
+
+enum BridgeWait<T> {
+    Ready(Result<T>),
+    Unanswered { method: &'static str, secs: u64 },
+}
+
+// The inactivity bound already unblocked the guest. Finish CreateAgent so a
+// late id can be closed and deleted; the lease rides along so a spawned
+// bridge is not killed first, and an attached one cannot keep the agent.
+fn reap_late_create(
+    lease: Arc<Lease>, cwd: String, workspace: Workspace,
+    create: impl Future<Output = Result<String>> + Send + 'static,
+) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async move {
+        match create.await {
+            Ok(id) if !id.is_empty() => {
+                Release {
+                    lease,
+                    id,
+                    cwd,
+                    run_id: None,
+                    workspace: Some(workspace),
+                }
+                .run()
+                .await;
+            }
+            Ok(_) => tracing::debug!("late CreateAgent returned an empty agent id"),
+            Err(error) => tracing::debug!(%error, "abandoned CreateAgent failed"),
+        }
+    });
 }
 
 // A socket fails before the watcher publishes the exit: `watch_child`
@@ -428,7 +480,7 @@ mod tests {
     };
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
-    use tokio::sync::watch;
+    use tokio::sync::{Notify, watch};
     use tokio::time::{Duration, Instant, sleep};
 
     use super::{Deadlines, MAX_ROUNDS};
@@ -446,23 +498,40 @@ mod tests {
     type Sends = Arc<Mutex<Vec<String>>>;
     /// Every `DeleteAgent` body, so cleanup can assert the create-time cwd.
     type Deletes = Arc<Mutex<Vec<Value>>>;
+    /// Every `CloseAgent` id, so a late create can assert it was reaped.
+    type Closes = Arc<Mutex<Vec<String>>>;
 
     /// A client attached to a loopback `sdk.v1` bridge whose agent answers
     /// `Send` number `n` with `replies[n]` (the last reply repeats) and
     /// records each text sent.
     async fn scripted(replies: &[&str]) -> (Client, Sends, Deletes) {
+        let (client, sends, deletes, _closes) = scripted_on(replies, None, DEADLINES).await;
+        (client, sends, deletes)
+    }
+
+    async fn scripted_on(
+        replies: &[&str], create_hold: Option<Arc<Notify>>, deadlines: Deadlines,
+    ) -> (Client, Sends, Deletes, Closes) {
         with_dummy_key();
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind loopback");
         let addr = listener.local_addr().expect("local address");
         let replies: Arc<Vec<String>> = Arc::new(replies.iter().map(|r| (*r).to_owned()).collect());
         let sends = Sends::default();
         let deletes = Deletes::default();
-        tokio::spawn(serve(listener, replies, Arc::clone(&sends), Arc::clone(&deletes)));
+        let closes = Closes::default();
+        tokio::spawn(serve(
+            listener,
+            replies,
+            Arc::clone(&sends),
+            Arc::clone(&deletes),
+            Arc::clone(&closes),
+            create_hold,
+        ));
 
         let client = Client::connect_with(ConnectOptions {
             model: "auto".to_owned(),
-            timeout_secs: DEADLINES.cap.as_secs(),
-            inactivity_secs: DEADLINES.inactivity.as_secs(),
+            timeout_secs: deadlines.cap.as_secs(),
+            inactivity_secs: deadlines.inactivity.as_secs(),
             max_agents: 4,
             bridge_bin: "cursor-sdk-bridge".to_owned(),
             bridge_url: Some(format!("http://{addr}")),
@@ -470,25 +539,37 @@ mod tests {
         })
         .await
         .expect("the scripted bridge answers the handshake");
-        (client, sends, deletes)
+        (client, sends, deletes, closes)
     }
 
     async fn serve(
         listener: TcpListener, replies: Arc<Vec<String>>, sends: Sends, deletes: Deletes,
+        closes: Closes, create_hold: Option<Arc<Notify>>,
     ) {
         while let Ok((stream, _)) = listener.accept().await {
             let replies = Arc::clone(&replies);
             let sends = Arc::clone(&sends);
             let deletes = Arc::clone(&deletes);
+            let closes = Arc::clone(&closes);
+            let create_hold = create_hold.clone();
             tokio::spawn(async move {
                 let service = service_fn(move |request: hyper::Request<Incoming>| {
                     let replies = Arc::clone(&replies);
                     let sends = Arc::clone(&sends);
                     let deletes = Arc::clone(&deletes);
+                    let closes = Arc::clone(&closes);
+                    let create_hold = create_hold.clone();
                     async move {
                         let path = request.uri().path().to_owned();
                         let body = request.into_body().collect().await?.to_bytes();
-                        Ok::<_, hyper::Error>(procedure(&path, &body, &replies, &sends, &deletes))
+                        if path == "/sdk.v1.SdkAgentService/CreateAgent"
+                            && let Some(hold) = &create_hold
+                        {
+                            hold.notified().await;
+                        }
+                        Ok::<_, hyper::Error>(procedure(
+                            &path, &body, &replies, &sends, &deletes, &closes,
+                        ))
                     }
                 });
                 let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await;
@@ -500,6 +581,7 @@ mod tests {
     /// minimally; `Send` records the text and streams the scripted result.
     fn procedure(
         path: &str, body: &[u8], replies: &[String], sends: &Sends, deletes: &Deletes,
+        closes: &Closes,
     ) -> hyper::Response<Full<Bytes>> {
         let (content_type, body) = match path {
             "/sdk.v1.SdkBridgeControlService/GetVersion" => (
@@ -508,6 +590,15 @@ mod tests {
             ),
             "/sdk.v1.SdkAgentService/CreateAgent" => {
                 ("application/json", json!({ "agentId": "agent-1" }).to_string().into_bytes())
+            }
+            "/sdk.v1.SdkAgentService/CloseAgent" => {
+                let request: Value =
+                    serde_json::from_slice(body).expect("a JSON CloseAgentRequest");
+                closes
+                    .lock()
+                    .expect("closes lock")
+                    .push(request["agentId"].as_str().unwrap_or_default().to_owned());
+                ("application/json", b"{}".to_vec())
             }
             "/sdk.v1.SdkAgentService/Send" => {
                 // The request rides as one Connect envelope: a 5-byte prefix,
@@ -529,7 +620,7 @@ mod tests {
                 deletes.lock().expect("deletes lock").push(request);
                 ("application/json", b"{}".to_vec())
             }
-            // Ping, Shutdown, CancelRun, CloseAgent
+            // Ping, Shutdown, CancelRun
             _ => ("application/json", b"{}".to_vec()),
         };
         hyper::Response::builder()
@@ -712,6 +803,76 @@ mod tests {
         assert!(correction.contains("## Findings\n\nnot it"), "the last correction: {correction}");
         assert_eq!(check.candidates().len(), MAX_ROUNDS, "every round offered a candidate");
         assert_eq!(sends.lock().expect("sends lock").len(), MAX_ROUNDS);
+        assert_scoped_delete(&deletes);
+    }
+
+    #[tokio::test]
+    async fn on_bridge_timeout_leaves_rpc() {
+        let (bridge, _tx) = Bridge::pending();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut rpc = Box::pin(async move {
+            rx.await.expect("sender lives");
+            Ok::<_, anyhow::Error>("agent-late".to_owned())
+        });
+        let waited =
+            super::on_bridge(&bridge, "CreateAgent", Duration::from_millis(30), &mut rpc).await;
+        assert!(
+            matches!(
+                waited,
+                super::BridgeWait::Unanswered {
+                    method: "CreateAgent",
+                    ..
+                }
+            ),
+            "timeout must not consume the RPC"
+        );
+        tx.send(()).expect("rpc lives");
+        assert_eq!(rpc.await.expect("the late id is still available"), "agent-late");
+    }
+
+    #[tokio::test]
+    async fn create_timeout_reaps_late_agent() {
+        let hold = Arc::new(Notify::new());
+        let deadlines = Deadlines {
+            inactivity: Duration::from_secs(1),
+            cap: Duration::from_secs(10),
+        };
+        let (client, _sends, deletes, closes) =
+            scripted_on(&["unused"], Some(Arc::clone(&hold)), deadlines).await;
+        let check = Check::rejecting(usize::MAX);
+        let error =
+            client.complete(request(false), check.host()).await.expect_err("CreateAgent timed out");
+        assert!(
+            error.to_string().contains("unanswered after 1s"),
+            "the inactivity kill names the unanswered RPC: {error}"
+        );
+        assert!(
+            deletes.lock().expect("deletes lock").is_empty(),
+            "reap must not run before the late CreateAgent answers"
+        );
+        assert!(closes.lock().expect("closes lock").is_empty());
+
+        hold.notify_one();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let n = deletes.lock().expect("deletes lock").len();
+            if n == 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "late agent was not closed and deleted: closes={:?} deletes={:?}",
+                closes.lock().expect("closes lock"),
+                deletes.lock().expect("deletes lock"),
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            closes.lock().expect("closes lock").as_slice(),
+            ["agent-1"],
+            "CloseAgent uses the late id"
+        );
         assert_scoped_delete(&deletes);
     }
 

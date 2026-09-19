@@ -101,8 +101,9 @@ mod config {
         /// The bridge executable, by name on `PATH` or by path.
         #[env(from = "CURSOR_BRIDGE_BIN", default = "cursor-sdk-bridge")]
         pub bridge_bin: String,
-        /// Attach to a running bridge at this Connect base URL instead of
-        /// spawning one per agent.
+        /// Attach to a running loopback bridge at this Connect base URL
+        /// instead of spawning one per agent. Must be `http://` to
+        /// `127.0.0.1`, `[::1]`, or `localhost`.
         #[env(from = "CURSOR_BRIDGE_URL")]
         pub bridge_url: Option<String>,
         /// Bearer token of the attached bridge (its ready line's token).

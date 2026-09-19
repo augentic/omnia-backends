@@ -28,9 +28,11 @@ Pairs with omnia 0.35.x.
   bounds of their own, so a bridge that is alive but silent gives its slot
   back. `ConnectOptions::bridge_bin` (`CURSOR_BRIDGE_BIN`) names the
   executable; `bridge_url` + `bridge_token` (`CURSOR_BRIDGE_URL`,
-  `CURSOR_BRIDGE_TOKEN`) attach to a bridge another process manages
-  instead of spawning, and a request declaring function tools is rejected
-  there (the callbacks would reach the bridge's owner, not this client).
+  `CURSOR_BRIDGE_TOKEN`) attach to a loopback `http://` bridge another
+  process manages instead of spawning — a non-loopback URL is rejected
+  before any RPC, so the bearer token and API key never leave the host —
+  and a request declaring function tools is rejected there (the callbacks
+  would reach the bridge's owner, not this client).
   Spawn time is `cursor_bridge_spawn_ms`, spawn failures are
   `cursor_bridge_spawn_failures`, and a spawn that does not complete its
   handshake fails with the exit status, the failing step, and the tail of

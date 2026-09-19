@@ -14,7 +14,7 @@ mod messages;
 mod rpc;
 
 use std::process::{ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -26,7 +26,7 @@ pub use messages::{
 pub use rpc::Rpc;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader, Lines};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStderr, Command};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -35,9 +35,8 @@ use crate::endpoint::Endpoint;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the stderr pipe is given to hand over its last lines after the
-/// process exits — and how long a handshake waits for `child.wait`. A
-/// grandchild that inherited the pipe can hold it open, so this is a bound,
-/// not a wait for EOF.
+/// process exits. A grandchild that inherited the pipe can hold it open, so
+/// this is a bound, not a wait for EOF.
 pub const EXIT_GRACE: Duration = Duration::from_millis(250);
 /// How long a socket failure waits to observe [`Bridge::died`]. The watcher
 /// may spend a full [`EXIT_GRACE`] draining stderr before it publishes, so
@@ -49,11 +48,37 @@ const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "G
 /// watches, or an attached one it does not own.
 #[derive(Debug)]
 pub struct Bridge {
-    rpc: Rpc,
+    rpc: Arc<OnceLock<Rpc>>,
     // `None` while the process runs; an attached bridge stays there.
     exit: watch::Receiver<Option<Exit>>,
     // Wakes the watcher into a graceful shutdown; `None` for an attached bridge.
     shutdown: Option<Arc<Notify>>,
+}
+
+/// A spawned process whose ready-line handshake has not finished.
+///
+/// The [`Bridge`] is already watched, so the caller can occupy the agent
+/// slot before [`PendingHandshake::complete`] returns.
+pub struct Started {
+    pub bridge: Bridge,
+    pub handshake: PendingHandshake,
+    pub pid: Option<u32>,
+    pub at: Instant,
+}
+
+/// Stderr scan and RPC connect for a [`Started`] process.
+pub struct PendingHandshake {
+    bin: String,
+    lines: Lines<BufReader<ChildStderr>>,
+    tail: Arc<Tail>,
+    io: Arc<HandshakeIo>,
+    exit: watch::Receiver<Option<Exit>>,
+}
+
+/// Shared with the watcher: drain and RPC are filled in after the ready line.
+struct HandshakeIo {
+    drained: Mutex<Option<JoinHandle<()>>>,
+    rpc: Arc<OnceLock<Rpc>>,
 }
 
 /// How a spawned bridge ended: the exit status, when the wait reported one.
@@ -62,10 +87,72 @@ pub struct Exit {
     pub status: Option<ExitStatus>,
 }
 
+impl PendingHandshake {
+    /// Finish the ready-line scan and bind `sdk.v1`. The process is already
+    /// watched; the caller holds the slot across this wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ready line never arrives or the RPC
+    /// handshake fails.
+    pub async fn complete(mut self) -> Result<()> {
+        let discovery = match discovery::from_stderr(&mut self.lines, &self.tail).await {
+            Ok(discovery) => discovery,
+            Err(error) => {
+                return Err(handshake_failure(&self.bin, error, self.exit, &self.tail).await);
+            }
+        };
+        let drained = drain_stderr(self.lines, Arc::clone(&self.tail));
+        *self.io.drained.lock().unwrap_or_else(PoisonError::into_inner) = Some(drained);
+
+        let rpc = match discovery.into_rpc().await {
+            Ok(rpc) => rpc,
+            Err(error) => {
+                return Err(handshake_failure(&self.bin, error, self.exit, &self.tail).await);
+            }
+        };
+        let _ = self.io.rpc.set(rpc);
+        Ok(())
+    }
+}
+
 impl Bridge {
     /// Spawn `bin` registered against `callback` and handshake it.
     pub async fn spawn(bin: &str, callback: &Endpoint) -> Result<Self> {
-        let started = Instant::now();
+        let Started {
+            bridge,
+            handshake,
+            pid,
+            at,
+        } = Self::start(bin, callback)?;
+        match handshake.complete().await {
+            Ok(()) => {
+                tracing::info!(
+                    pid,
+                    histogram.cursor_bridge_spawn_ms = elapsed_ms(at),
+                    "cursor-sdk-bridge spawned"
+                );
+                Ok(bridge)
+            }
+            Err(error) => {
+                bridge.close().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Start `bin` and watch it. The ready-line handshake is left on the
+    /// returned [`Started`] so a pool lease can occupy the slot first.
+    ///
+    /// There is no `.await` after `Command::spawn`, so cancelling this
+    /// function cannot leave a process without a watcher.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state root cannot be created or `bin`
+    /// cannot be spawned.
+    pub fn start(bin: &str, callback: &Endpoint) -> Result<Started> {
+        let at = Instant::now();
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-")
             .tempdir()
@@ -89,62 +176,66 @@ impl Bridge {
         let mut child = command.spawn().with_context(|| format!("issue spawning `{bin}`"))?;
         let pid = child.id();
 
-        // drain stdout
         let stdout = child.stdout.take().expect("stdout");
         drain(BufReader::new(stdout).lines(), "stdout");
 
-        // scan stderr for the discovery line, keeping whatever else it says
         let stderr = child.stderr.take().expect("stderr");
-        let mut lines = BufReader::new(stderr).lines();
+        let lines = BufReader::new(stderr).lines();
         let tail = Arc::new(Tail::default());
-        let discovery = match discovery::from_stderr(&mut lines, &tail).await {
-            Ok(discovery) => discovery,
-            Err(error) => return Err(handshake_failure(bin, error, &mut child, &tail).await),
-        };
-        let drained = drain_stderr(lines, Arc::clone(&tail));
 
-        let rpc = match discovery.into_rpc().await {
-            Ok(rpc) => rpc,
-            Err(error) => return Err(handshake_failure(bin, error, &mut child, &tail).await),
-        };
-
+        let rpc = Arc::new(OnceLock::new());
+        let io = Arc::new(HandshakeIo {
+            drained: Mutex::new(None),
+            rpc: Arc::clone(&rpc),
+        });
         let (exit_tx, exit) = watch::channel(None);
         let shutdown = Arc::new(Notify::new());
-        let spawned = Spawned {
-            child,
-            drained,
-            tail,
-            state_root,
-        };
-        tokio::spawn(watch_child(spawned, rpc.clone(), Arc::clone(&shutdown), exit_tx));
+        tokio::spawn(watch_child(
+            Spawned {
+                child,
+                tail: Arc::clone(&tail),
+                state_root,
+                io: Arc::clone(&io),
+            },
+            Arc::clone(&shutdown),
+            exit_tx,
+        ));
 
-        tracing::info!(
+        Ok(Started {
+            bridge: Self {
+                rpc,
+                exit: exit.clone(),
+                shutdown: Some(shutdown),
+            },
+            handshake: PendingHandshake {
+                bin: bin.to_owned(),
+                lines,
+                tail,
+                io,
+                exit,
+            },
             pid,
-            histogram.cursor_bridge_spawn_ms = elapsed_ms(started),
-            "cursor-sdk-bridge spawned"
-        );
-        Ok(Self {
-            rpc,
-            exit,
-            shutdown: Some(shutdown),
+            at,
         })
     }
 
-    /// Join a bridge already listening at `base`, owned and shut down by
-    /// whoever started it.
+    /// Join a loopback bridge already listening at `base`, owned and shut
+    /// down by whoever started it.
     pub async fn attach(base: String, token: &str) -> Result<Self> {
         // No watcher publishes for it: the sender is gone, so the bridge is
         // never seen to die and `died` pends.
         let (_, exit) = watch::channel(None);
+        let rpc = Arc::new(OnceLock::new());
+        let _ = rpc.set(Rpc::connect(base, token).await?);
         Ok(Self {
-            rpc: Rpc::connect(base, token).await?,
+            rpc,
             exit,
             shutdown: None,
         })
     }
 
-    pub const fn rpc(&self) -> &Rpc {
-        &self.rpc
+    pub fn rpc(&self) -> &Rpc {
+        self.rpc.get().expect("the bridge handshake has completed")
     }
 
     /// Whether this client spawned the process and shuts it down.
@@ -184,9 +275,11 @@ impl Bridge {
     #[cfg(test)]
     pub(crate) fn pending() -> (Self, watch::Sender<Option<Exit>>) {
         let (exit_tx, exit) = watch::channel(None);
+        let rpc = Arc::new(OnceLock::new());
+        let _ = rpc.set(Rpc::unbound());
         (
             Self {
-                rpc: Rpc::unbound(),
+                rpc,
                 exit,
                 shutdown: Some(Arc::new(Notify::new())),
             },
@@ -216,22 +309,27 @@ impl Drop for Bridge {
 // A spawned process and what it leaves behind.
 struct Spawned {
     child: Child,
-    drained: JoinHandle<()>,
     tail: Arc<Tail>,
     state_root: TempDir,
+    io: Arc<HandshakeIo>,
 }
 
 // Wait for a shutdown request or the process's own exit, publish how it
 // ended either way, then release the state root.
 async fn watch_child(
-    mut spawned: Spawned, rpc: Rpc, shutdown: Arc<Notify>, exit_tx: watch::Sender<Option<Exit>>,
+    mut spawned: Spawned, shutdown: Arc<Notify>, exit_tx: watch::Sender<Option<Exit>>,
 ) {
     let (status, crashed) = tokio::select! {
         // an exit in the same tick as a close is still an exit
         biased;
         waited = spawned.child.wait() => (waited.ok(), true),
         () = shutdown.notified() => {
-            let _ = timeout(SHUTDOWN_TIMEOUT, rpc.shutdown()).await;
+            if let Some(rpc) = spawned.io.rpc.get() {
+                let _ = timeout(SHUTDOWN_TIMEOUT, rpc.shutdown()).await;
+            } else {
+                // Handshake never bound RPC: nothing to ask, so kill now.
+                let _ = spawned.child.start_kill();
+            }
             let status = match timeout(SHUTDOWN_TIMEOUT, spawned.child.wait()).await {
                 Ok(waited) => waited.ok(),
                 Err(_elapsed) => {
@@ -245,7 +343,10 @@ async fn watch_child(
 
     // The pipe may still hold the bridge's last lines; a grandchild that
     // inherited it can also hold it open, so do not wait for EOF.
-    let _ = timeout(EXIT_GRACE, &mut spawned.drained).await;
+    let drained = spawned.io.drained.lock().unwrap_or_else(PoisonError::into_inner).take();
+    if let Some(drained) = drained {
+        let _ = timeout(EXIT_GRACE, drained).await;
+    }
     let exit = Exit { status };
     if crashed {
         tracing::warn!(
@@ -259,12 +360,26 @@ async fn watch_child(
     drop(spawned.state_root);
 }
 
-// The handshake error, with the bridge's exit status when it already exited.
-// What it wrote to stderr goes to DEBUG only, never into the error.
+// The handshake error, with the bridge's exit status when the watcher has
+// already published one. What it wrote to stderr goes to DEBUG only, never
+// into the error.
 async fn handshake_failure(
-    bin: &str, error: anyhow::Error, child: &mut Child, tail: &Tail,
+    bin: &str, error: anyhow::Error, mut exit: watch::Receiver<Option<Exit>>, tail: &Tail,
 ) -> anyhow::Error {
-    let status = timeout(EXIT_GRACE, child.wait()).await.ok().and_then(Result::ok);
+    let status = timeout(EXIT_OBSERVE, async {
+        loop {
+            let state = *exit.borrow_and_update();
+            if let Some(ended) = state {
+                return ended;
+            }
+            if exit.changed().await.is_err() {
+                return Exit::default();
+            }
+        }
+    })
+    .await
+    .ok()
+    .and_then(|ended| ended.status);
     log_stderr(tail);
     status.map_or_else(
         || anyhow::anyhow!("`{bin}` did not complete the handshake ({error:#})"),

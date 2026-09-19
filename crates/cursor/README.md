@@ -95,7 +95,8 @@ waits its turn (first come, first served; the wait is recorded as
 starts once the slot is held). The bridge executable is
 `CURSOR_BRIDGE_BIN` (default `cursor-sdk-bridge`, resolved on `PATH`; a
 path works too). Alternatively, attach to a bridge some other process
-manages by setting both `CURSOR_BRIDGE_URL` (its Connect base URL) and
+manages by setting both `CURSOR_BRIDGE_URL` (its Connect base URL — must
+be `http://` to `127.0.0.1`, `[::1]`, or `localhost`) and
 `CURSOR_BRIDGE_TOKEN` (the token from its ready line): nothing is spawned,
 every agent — still at most `CURSOR_MAX_AGENTS` at once — shares that one
 bridge, and its lifetime and exit are its owner's concern. Function-tool

@@ -12,7 +12,7 @@ use std::time::Instant;
 use omnia_wasi_model::{ToolTurn, Transcript, Usage};
 use serde_json::Value;
 
-use crate::bridge::{Exit, SdkMessage, status_text, with_stderr};
+use crate::bridge::{Exit, SdkMessage, status_text};
 use crate::model::options::Turn;
 
 /// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
@@ -172,10 +172,9 @@ impl std::fmt::Display for Failure {
                  {inactivity_secs}s, absolute cap {cap_secs}s)"
             ),
             Self::Aborted(reason) => write!(f, "completion aborted: {reason}"),
-            Self::BridgeExited(exit) => f.write_str(&with_stderr(
-                format!("cursor-sdk-bridge exited ({}) during the run", status_text(exit.status)),
-                &exit.stderr,
-            )),
+            Self::BridgeExited(exit) => {
+                write!(f, "cursor-sdk-bridge exited ({}) during the run", status_text(exit.status))
+            }
         }
     }
 }
@@ -403,13 +402,6 @@ mod tests {
         let exited: anyhow::Error = Failure::BridgeExited(Exit::default()).into();
         assert_eq!(super::outcome_of(&exited), "bridge_exit");
         assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown) during the run");
-
-        let exited: anyhow::Error = Failure::BridgeExited(Exit {
-            status: None,
-            stderr: "  boom".to_owned(),
-        })
-        .into();
-        assert!(exited.to_string().ends_with("during the run; stderr:\n  boom"), "{exited}");
 
         let rejected: anyhow::Error =
             omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();

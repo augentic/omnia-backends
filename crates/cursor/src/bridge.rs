@@ -3,9 +3,11 @@
 //! A bridge is spawned with the tool-callback registration flags and a
 //! client-owned state root, handshaken by scanning stderr for the
 //! `cursor-sdk-bridge ready ` line, and watched until it exits — on request
-//! through [`Bridge::close`], or on its own, which [`Bridge::died`] reports
-//! along with the last lines it wrote to stderr. [`Bridge::attach`] joins a
-//! bridge some other process manages instead.
+//! through [`Bridge::close`], or on its own, which [`Bridge::died`] reports.
+//! The last lines it wrote to stderr are untrusted subprocess output: they
+//! are logged at DEBUG for operators and never carried into WARN events or
+//! the error messages callers see. [`Bridge::attach`] joins a bridge some
+//! other process manages instead.
 
 mod discovery;
 mod messages;
@@ -49,12 +51,10 @@ pub struct Bridge {
     shutdown: Option<Arc<Notify>>,
 }
 
-/// How a spawned bridge ended: the exit status, when the wait reported one,
-/// and the last lines it wrote to stderr.
-#[derive(Clone, Debug, Default)]
+/// How a spawned bridge ended: the exit status, when the wait reported one.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Exit {
     pub status: Option<ExitStatus>,
-    pub stderr: String,
 }
 
 impl Bridge {
@@ -159,7 +159,7 @@ impl Bridge {
         let owned = self.is_owned();
         async move {
             loop {
-                let state = exit.borrow_and_update().clone();
+                let state = *exit.borrow_and_update();
                 if let Some(exit) = state {
                     return exit;
                 }
@@ -227,48 +227,45 @@ async fn watch_child(
     // The pipe may still hold the bridge's last lines; a grandchild that
     // inherited it can also hold it open, so do not wait for EOF.
     let _ = timeout(EXIT_GRACE, &mut spawned.drained).await;
-    let exit = Exit {
-        status,
-        stderr: spawned.tail.to_string(),
-    };
+    let exit = Exit { status };
     if crashed {
         tracing::warn!(
             status = %status_text(exit.status),
-            stderr = %exit.stderr,
             monotonic_counter.cursor_bridge_exits = 1_u64,
             "cursor-sdk-bridge exited"
         );
+        log_stderr(&spawned.tail);
     }
     let _ = exit_tx.send(Some(exit));
     drop(spawned.state_root);
 }
 
-// The handshake error, with the bridge's exit status when it already exited
-// and what it wrote to stderr — one message, so the stderr tail comes last.
+// The handshake error, with the bridge's exit status when it already exited.
+// What it wrote to stderr goes to DEBUG only, never into the error.
 async fn handshake_failure(
     bin: &str, error: anyhow::Error, child: &mut Child, tail: &Tail,
 ) -> anyhow::Error {
     let status = timeout(EXIT_GRACE, child.wait()).await.ok().and_then(Result::ok);
-    let lead = status.map_or_else(
-        || format!("`{bin}` did not complete the handshake ({error:#})"),
-        |status| format!("`{bin}` exited ({status}) during the handshake ({error:#})"),
-    );
-    anyhow::anyhow!(with_stderr(lead, &tail.to_string()))
+    log_stderr(tail);
+    status.map_or_else(
+        || anyhow::anyhow!("`{bin}` did not complete the handshake ({error:#})"),
+        |status| anyhow::anyhow!("`{bin}` exited ({status}) during the handshake ({error:#})"),
+    )
+}
+
+// The bridge's stderr is untrusted and may carry workspace paths, provider
+// error context, or session fragments: DEBUG is the only sink it reaches.
+fn log_stderr(tail: &Tail) {
+    let stderr = tail.to_string();
+    if !stderr.is_empty() {
+        tracing::debug!(%stderr, "cursor-sdk-bridge stderr tail");
+    }
 }
 
 /// An exit status for a log line or message: `status unknown` when the wait
 /// itself failed.
 pub fn status_text(status: Option<ExitStatus>) -> String {
     status.map_or_else(|| "status unknown".to_owned(), |status| status.to_string())
-}
-
-/// `lead`, then the stderr tail on its own lines when there is one.
-pub fn with_stderr(mut lead: String, stderr: &str) -> String {
-    if !stderr.is_empty() {
-        lead.push_str("; stderr:\n");
-        lead.push_str(stderr);
-    }
-    lead
 }
 
 pub fn elapsed_ms(since: Instant) -> u64 {

@@ -49,8 +49,10 @@ Each live agent runs in its own bridge process, spawned for the completion
 and shut down after it (graceful `Shutdown` RPC, then kill): a bridge that
 crashes takes one completion with it, reported as the typed
 `cursor-sdk-bridge exited (…) during the run` (metric outcome `bridge_exit`)
-carrying the last lines the process wrote to stderr, rather than as the
-next completion's stall, and a retry lands on a fresh process. A bridge
+rather than as the next completion's stall, and a retry lands on a fresh
+process. The last lines the process wrote to stderr are logged at DEBUG only
+— they are untrusted subprocess output and never reach WARN or the error a
+guest sees. A bridge
 that stays alive but stops answering is bounded too: no call waits on it
 longer than the inactivity window, and the teardown calls after a
 completion are bounded at a few seconds each, so a silent bridge frees its
@@ -61,7 +63,7 @@ spawn passes a private `--state-root` so no durable agent state lands in
 `~/.cursor`, registers the callback endpoint, parses the bridge's stderr
 discovery line, and verifies the endpoint with `Ping`/`GetVersion`
 (`sdk.v1`). A spawn that never completes that handshake fails with the
-process's exit status, the step that failed, and the tail of its stderr.
+process's exit status and the step that failed; its stderr tail is at DEBUG.
 
 ## Configuration
 

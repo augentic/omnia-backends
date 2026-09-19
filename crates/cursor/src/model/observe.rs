@@ -7,13 +7,12 @@
 //! lines and tracing-opentelemetry metric fields.
 
 use std::collections::HashMap;
-use std::process::ExitStatus;
 use std::time::Instant;
 
 use omnia_wasi_model::{ToolTurn, Transcript, Usage};
 use serde_json::Value;
 
-use crate::bridge::{SdkMessage, status_text};
+use crate::bridge::{Exit, SdkMessage, status_text, with_stderr};
 use crate::model::options::Turn;
 
 /// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
@@ -142,10 +141,7 @@ pub enum Failure {
     /// Hard tool-host failure (or a closed abort channel).
     Aborted(String),
     /// The bridge process exited while the completion was running on it.
-    BridgeExited {
-        /// The exit status, when the wait on the process reported one.
-        status: Option<ExitStatus>,
-    },
+    BridgeExited(Exit),
 }
 
 impl Failure {
@@ -154,7 +150,7 @@ impl Failure {
             Self::Timeout { .. } => "timeout",
             Self::Inactive { .. } => "inactive",
             Self::Aborted(_) => "abort",
-            Self::BridgeExited { .. } => "bridge_exit",
+            Self::BridgeExited(_) => "bridge_exit",
         }
     }
 }
@@ -176,9 +172,10 @@ impl std::fmt::Display for Failure {
                  {inactivity_secs}s, absolute cap {cap_secs}s)"
             ),
             Self::Aborted(reason) => write!(f, "completion aborted: {reason}"),
-            Self::BridgeExited { status } => {
-                write!(f, "cursor-sdk-bridge exited ({}) during the run", status_text(*status))
-            }
+            Self::BridgeExited(exit) => f.write_str(&with_stderr(
+                format!("cursor-sdk-bridge exited ({}) during the run", status_text(exit.status)),
+                &exit.stderr,
+            )),
         }
     }
 }
@@ -387,6 +384,7 @@ mod tests {
     #[test]
     fn classify_crate_errors() {
         use super::Failure;
+        use crate::bridge::Exit;
 
         let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
         assert_eq!(super::outcome_of(&timeout), "timeout");
@@ -402,9 +400,16 @@ mod tests {
         let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
         assert_eq!(super::outcome_of(&aborted), "abort");
 
-        let exited: anyhow::Error = Failure::BridgeExited { status: None }.into();
+        let exited: anyhow::Error = Failure::BridgeExited(Exit::default()).into();
         assert_eq!(super::outcome_of(&exited), "bridge_exit");
-        assert!(exited.to_string().contains("exited (status unknown)"), "{exited}");
+        assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown) during the run");
+
+        let exited: anyhow::Error = Failure::BridgeExited(Exit {
+            status: None,
+            stderr: "  boom".to_owned(),
+        })
+        .into();
+        assert!(exited.to_string().ends_with("during the run; stderr:\n  boom"), "{exited}");
 
         let rejected: anyhow::Error =
             omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();

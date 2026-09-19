@@ -49,15 +49,19 @@ Each live agent runs in its own bridge process, spawned for the completion
 and shut down after it (graceful `Shutdown` RPC, then kill): a bridge that
 crashes takes one completion with it, reported as the typed
 `cursor-sdk-bridge exited (…) during the run` (metric outcome `bridge_exit`)
-rather than as the next completion's stall, and a retry lands on a fresh
-process. `Client::connect()` still fails fast when the binary is missing or
-broken — it binds the loopback callback endpoint with a fresh bearer token,
-then spawns and closes one probe bridge — and every spawn passes a private
-`--state-root` so no durable agent state lands in `~/.cursor`, registers
-the callback endpoint, parses the bridge's stderr discovery line, and
-verifies the endpoint with `Ping`/`GetVersion` (`sdk.v1`). A spawn that
-never reaches its ready line fails with the process's exit status and the
-tail of what it wrote to stderr.
+carrying the last lines the process wrote to stderr, rather than as the
+next completion's stall, and a retry lands on a fresh process. A bridge
+that stays alive but stops answering is bounded too: no call waits on it
+longer than the inactivity window, and the teardown calls after a
+completion are bounded at a few seconds each, so a silent bridge frees its
+slot instead of holding it. `Client::connect()` still fails fast when the
+binary is missing or broken — it binds the loopback callback endpoint with
+a fresh bearer token, then spawns and closes one probe bridge — and every
+spawn passes a private `--state-root` so no durable agent state lands in
+`~/.cursor`, registers the callback endpoint, parses the bridge's stderr
+discovery line, and verifies the endpoint with `Ping`/`GetVersion`
+(`sdk.v1`). A spawn that never completes that handshake fails with the
+process's exit status, the step that failed, and the tail of its stderr.
 
 ## Configuration
 
@@ -94,8 +98,8 @@ manages by setting both `CURSOR_BRIDGE_URL` (its Connect base URL) and
 every agent — still at most `CURSOR_MAX_AGENTS` at once — shares that one
 bridge, and its lifetime and exit are its owner's concern. Function-tool
 callbacks reach whatever `--tool-callback-url` the external bridge was
-started with, not this client, so a request that declares function tools
-needs spawn mode.
+started with, not this client, so a request that declares function tools is
+rejected before any RPC in attach mode; it needs spawn mode.
 
 `Client::connect()` / `FromEnv` reads the optional `CURSOR_TIMEOUT_SECS`,
 `CURSOR_INACTIVITY_SECS`, `CURSOR_MODEL`, `CURSOR_MAX_AGENTS`,
@@ -167,11 +171,12 @@ process.
 `wasi-model` boundary: the plain acceptance run, a function-tool round-trip
 with a lent workspace, a no-workspace function-tool run, an in-process MCP
 grant without a lent workspace (so the empty built-in allowlist still admits
-MCP), and the guest `check` loop (a stand-in check rejects the first answer
+MCP), the guest `check` loop (a stand-in check rejects the first answer
 with a correction the agent must follow on its own session, and one that
-rejects both proves the typed `budget-exhausted`). All are `#[ignore]`d so
-they never spawn a process in CI; run them with `cursor-sdk-bridge`
-installed:
+rejects both proves the typed `budget-exhausted`), and a four-way fan-out
+that holds four bridge processes at once through the pool, the shape
+`emery` puts up when it extracts in parallel. All are `#[ignore]`d so they
+never spawn a process in CI; run them with `cursor-sdk-bridge` installed:
 
 ```bash
 CURSOR_API_KEY=... \

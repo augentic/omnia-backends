@@ -3,8 +3,9 @@
 //! A bridge is spawned with the tool-callback registration flags and a
 //! client-owned state root, handshaken by scanning stderr for the
 //! `cursor-sdk-bridge ready ` line, and watched until it exits — on request
-//! through [`Bridge::close`], or on its own, which [`Bridge::died`] reports.
-//! [`Bridge::attach`] joins a bridge some other process manages instead.
+//! through [`Bridge::close`], or on its own, which [`Bridge::died`] reports
+//! along with the last lines it wrote to stderr. [`Bridge::attach`] joins a
+//! bridge some other process manages instead.
 
 mod discovery;
 mod messages;
@@ -25,12 +26,15 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader, Lines};
 use tokio::process::{Child, Command};
 use tokio::sync::{Notify, watch};
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use crate::endpoint::Endpoint;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a bridge whose socket just failed is given to be seen exiting,
-/// so the failure is reported as the exit rather than a transport error.
+/// so the failure is reported as the exit rather than a transport error —
+/// and how long its stderr pipe is given to hand over its last lines.
 pub const EXIT_GRACE: Duration = Duration::from_millis(250);
 const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
@@ -39,15 +43,18 @@ const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "G
 #[derive(Debug)]
 pub struct Bridge {
     rpc: Rpc,
-    exit: watch::Receiver<Exit>,
+    // `None` while the process runs; an attached bridge stays there.
+    exit: watch::Receiver<Option<Exit>>,
     // Wakes the watcher into a graceful shutdown; `None` for an attached bridge.
     shutdown: Option<Arc<Notify>>,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Exit {
-    Running,
-    Exited(Option<ExitStatus>),
+/// How a spawned bridge ended: the exit status, when the wait reported one,
+/// and the last lines it wrote to stderr.
+#[derive(Clone, Debug, Default)]
+pub struct Exit {
+    pub status: Option<ExitStatus>,
+    pub stderr: String,
 }
 
 impl Bridge {
@@ -81,23 +88,30 @@ impl Bridge {
         let stdout = child.stdout.take().expect("stdout");
         drain(BufReader::new(stdout).lines(), "stdout");
 
-        // scan stderr for the discovery line
+        // scan stderr for the discovery line, keeping whatever else it says
         let stderr = child.stderr.take().expect("stderr");
         let mut lines = BufReader::new(stderr).lines();
-        let mut tail = Tail::default();
-        let discovery = match discovery::from_stderr(&mut lines, &mut tail).await {
+        let tail = Arc::new(Tail::default());
+        let discovery = match discovery::from_stderr(&mut lines, &tail).await {
             Ok(discovery) => discovery,
             Err(error) => return Err(handshake_failure(bin, error, &mut child, &tail).await),
         };
+        let drained = drain_stderr(lines, Arc::clone(&tail));
 
-        // drain stderr
-        drain(lines, "stderr");
+        let rpc = match discovery.into_rpc().await {
+            Ok(rpc) => rpc,
+            Err(error) => return Err(handshake_failure(bin, error, &mut child, &tail).await),
+        };
 
-        let rpc = discovery.into_rpc().await?;
-
-        let (exit_tx, exit) = watch::channel(Exit::Running);
+        let (exit_tx, exit) = watch::channel(None);
         let shutdown = Arc::new(Notify::new());
-        tokio::spawn(watch_child(child, rpc.clone(), Arc::clone(&shutdown), exit_tx, state_root));
+        let spawned = Spawned {
+            child,
+            drained,
+            tail,
+            state_root,
+        };
+        tokio::spawn(watch_child(spawned, rpc.clone(), Arc::clone(&shutdown), exit_tx));
 
         tracing::info!(
             pid,
@@ -116,7 +130,7 @@ impl Bridge {
     pub async fn attach(base: String, token: &str) -> Result<Self> {
         // No watcher publishes for it: the sender is gone, so the bridge is
         // never seen to die and `died` pends.
-        let (_, exit) = watch::channel(Exit::Running);
+        let (_, exit) = watch::channel(None);
         Ok(Self {
             rpc: Rpc::connect(base, token).await?,
             exit,
@@ -128,22 +142,33 @@ impl Bridge {
         &self.rpc
     }
 
-    /// Whether a spawned bridge has exited.
-    pub fn is_dead(&self) -> bool {
-        matches!(*self.exit.borrow(), Exit::Exited(_))
+    /// Whether this client spawned the process and shuts it down.
+    pub const fn is_owned(&self) -> bool {
+        self.shutdown.is_some()
     }
 
-    /// Resolves with the exit status once a spawned bridge exits; an
-    /// attached bridge is never observed to.
-    pub fn died(&self) -> impl Future<Output = Option<ExitStatus>> + Send + 'static {
+    /// Whether a spawned bridge has exited.
+    pub fn is_dead(&self) -> bool {
+        self.exit.borrow().is_some()
+    }
+
+    /// Resolves once a spawned bridge exits; an attached bridge is never
+    /// observed to.
+    pub fn died(&self) -> impl Future<Output = Exit> + Send + 'static {
         let mut exit = self.exit.clone();
+        let owned = self.is_owned();
         async move {
             loop {
-                let state = *exit.borrow_and_update();
-                if let Exit::Exited(status) = state {
-                    return status;
+                let state = exit.borrow_and_update().clone();
+                if let Some(exit) = state {
+                    return exit;
                 }
                 if exit.changed().await.is_err() {
+                    // The watcher is gone. An owned process went with it
+                    // (`kill_on_drop`); an attached one is nobody's to see.
+                    if owned {
+                        return Exit::default();
+                    }
                     std::future::pending::<()>().await;
                 }
             }
@@ -169,35 +194,53 @@ impl Drop for Bridge {
     }
 }
 
-// Wait for a shutdown request or the process's own exit, publish the exit
-// status either way, then release the state root.
-async fn watch_child(
-    mut child: Child, rpc: Rpc, shutdown: Arc<Notify>, exit: watch::Sender<Exit>,
+// A spawned process and what it leaves behind.
+struct Spawned {
+    child: Child,
+    drained: JoinHandle<()>,
+    tail: Arc<Tail>,
     state_root: TempDir,
+}
+
+// Wait for a shutdown request or the process's own exit, publish how it
+// ended either way, then release the state root.
+async fn watch_child(
+    mut spawned: Spawned, rpc: Rpc, shutdown: Arc<Notify>, exit_tx: watch::Sender<Option<Exit>>,
 ) {
-    let status = tokio::select! {
+    let (status, crashed) = tokio::select! {
+        // an exit in the same tick as a close is still an exit
+        biased;
+        waited = spawned.child.wait() => (waited.ok(), true),
         () = shutdown.notified() => {
-            let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, rpc.shutdown()).await;
-            match tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait()).await {
+            let _ = timeout(SHUTDOWN_TIMEOUT, rpc.shutdown()).await;
+            let status = match timeout(SHUTDOWN_TIMEOUT, spawned.child.wait()).await {
                 Ok(waited) => waited.ok(),
                 Err(_elapsed) => {
-                    let _ = child.start_kill();
-                    child.wait().await.ok()
+                    let _ = spawned.child.start_kill();
+                    spawned.child.wait().await.ok()
                 }
-            }
-        }
-        waited = child.wait() => {
-            let status = waited.ok();
-            tracing::warn!(
-                status = %status_text(status),
-                monotonic_counter.cursor_bridge_exits = 1_u64,
-                "cursor-sdk-bridge exited"
-            );
-            status
+            };
+            (status, false)
         }
     };
-    let _ = exit.send(Exit::Exited(status));
-    drop(state_root);
+
+    // The pipe may still hold the bridge's last lines; a grandchild that
+    // inherited it can also hold it open, so do not wait for EOF.
+    let _ = timeout(EXIT_GRACE, &mut spawned.drained).await;
+    let exit = Exit {
+        status,
+        stderr: spawned.tail.to_string(),
+    };
+    if crashed {
+        tracing::warn!(
+            status = %status_text(exit.status),
+            stderr = %exit.stderr,
+            monotonic_counter.cursor_bridge_exits = 1_u64,
+            "cursor-sdk-bridge exited"
+        );
+    }
+    let _ = exit_tx.send(Some(exit));
+    drop(spawned.state_root);
 }
 
 // The handshake error, with the bridge's exit status when it already exited
@@ -205,16 +248,12 @@ async fn watch_child(
 async fn handshake_failure(
     bin: &str, error: anyhow::Error, child: &mut Child, tail: &Tail,
 ) -> anyhow::Error {
-    let status = tokio::time::timeout(EXIT_GRACE, child.wait()).await.ok().and_then(Result::ok);
-    let mut detail = status.map_or_else(
-        || format!("`{bin}` did not become ready ({error:#})"),
-        |status| format!("`{bin}` exited ({status}) before its ready line ({error:#})"),
+    let status = timeout(EXIT_GRACE, child.wait()).await.ok().and_then(Result::ok);
+    let lead = status.map_or_else(
+        || format!("`{bin}` did not complete the handshake ({error:#})"),
+        |status| format!("`{bin}` exited ({status}) during the handshake ({error:#})"),
     );
-    if !tail.is_empty() {
-        detail.push_str("; stderr:\n");
-        detail.push_str(&tail.to_string());
-    }
-    anyhow::anyhow!(detail)
+    anyhow::anyhow!(with_stderr(lead, &tail.to_string()))
 }
 
 /// An exit status for a log line or message: `status unknown` when the wait
@@ -223,15 +262,36 @@ pub fn status_text(status: Option<ExitStatus>) -> String {
     status.map_or_else(|| "status unknown".to_owned(), |status| status.to_string())
 }
 
+/// `lead`, then the stderr tail on its own lines when there is one.
+pub fn with_stderr(mut lead: String, stderr: &str) -> String {
+    if !stderr.is_empty() {
+        lead.push_str("; stderr:\n");
+        lead.push_str(stderr);
+    }
+    lead
+}
+
 pub fn elapsed_ms(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-// Drain stdout/stderr so the child process never blocks.
+// Drain stdout so the child process never blocks.
 fn drain(mut lines: Lines<impl AsyncBufRead + Unpin + Send + 'static>, label: &'static str) {
     tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
             tracing::debug!(%line, stream = label, "bridge output");
         }
     });
+}
+
+// Drain stderr likewise, keeping the last lines for an exit report.
+fn drain_stderr(
+    mut lines: Lines<impl AsyncBufRead + Unpin + Send + 'static>, tail: Arc<Tail>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::debug!(%line, stream = "stderr", "bridge output");
+            tail.push(line);
+        }
+    })
 }

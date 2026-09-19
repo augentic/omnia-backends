@@ -1,10 +1,12 @@
 //! A bridge-managed agent: `send` drives a turn's run stream to its
 //! terminal result, bounded by an inactivity deadline that stream progress
 //! rearms, an absolute wall-clock cap, the callback's abort signal, and the
-//! bridge's own exit. An abandoned run is cancelled best-effort. After the
-//! turn, the agent is closed and deleted against the create-time cwd (skipped
-//! once the bridge is gone); `Drop` is only a fallback. The lease the agent
-//! runs on outlives that teardown, so the bridge closes only after it.
+//! bridge's own exit. No call waits on the bridge unbounded, so one that is
+//! alive but silent frees its slot. An abandoned run is cancelled
+//! best-effort. After the turn, the agent is closed and deleted against the
+//! create-time cwd, each call bounded and all of them skipped once the
+//! bridge is gone; `Drop` is only a fallback. The lease the agent runs on
+//! outlives that teardown, so the bridge closes only after it.
 
 use std::env;
 use std::sync::Arc;
@@ -13,7 +15,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
 use tokio::sync::{mpsc, watch};
-use tokio::time::{Instant, sleep_until, timeout};
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 
 use super::observe::{self, Completion, EventLog, Failure};
 use super::options::{Turn, Workspace};
@@ -25,6 +27,9 @@ use crate::pool::Lease;
 // Candidates offered to the guest's check before the round budget ends the
 // completion: the opening prompt plus one correction on the same agent.
 const MAX_ROUNDS: usize = 2;
+// Teardown is best-effort: a bridge that will not answer it does not keep
+// its slot for longer than this per call.
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Agent {
     lease: Arc<Lease>,
@@ -50,13 +55,15 @@ impl Agent {
         let cwd = turn.options.local.cwd.first().cloned().unwrap_or_default();
 
         let bridge = lease.bridge();
-        let created = match on_bridge(bridge, bridge.rpc().create_agent(turn.options)).await {
-            Ok(created) => created,
-            Err(error) => {
-                completion.finish(observe::outcome_of(&error));
-                return Err(error);
-            }
-        };
+        let create = bridge.rpc().create_agent(turn.options);
+        let created =
+            match on_bridge(bridge, "CreateAgent", client.deadlines.inactivity, create).await {
+                Ok(created) => created,
+                Err(error) => {
+                    completion.finish(observe::outcome_of(&error));
+                    return Err(error);
+                }
+            };
 
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let attached =
@@ -129,17 +136,25 @@ impl Agent {
     }
 
     async fn send(&mut self, text: &str) -> Result<Response> {
-        let mut stream = {
-            let bridge = self.lease.bridge();
-            on_bridge(bridge, bridge.rpc().send(self.id.clone(), text.to_owned())).await?
-        };
-
+        // Both bounds run from the `Send` call itself, so a bridge that takes
+        // the request and never opens the stream is an inactivity failure.
         let (activity_tx, activity_rx) = watch::channel(Instant::now());
         let deadline = self.deadlines.watch(activity_rx);
         tokio::pin!(deadline);
         // Owns its watch, so it does not borrow `self` across the loop.
         let died = self.lease.bridge().died();
         tokio::pin!(died);
+
+        let mut stream = tokio::select! {
+            stream = self.lease.bridge().rpc().send(self.id.clone(), text.to_owned()) => {
+                match stream {
+                    Ok(stream) => stream,
+                    Err(error) => return Err(exit_or(self.lease.bridge(), error).await),
+                }
+            }
+            error = &mut deadline => return Err(error.into()),
+            exit = &mut died => return Err(Failure::BridgeExited(exit).into()),
+        };
 
         let mut log = EventLog::default();
         let mut outcome: Option<RunStreamResult> = None;
@@ -176,10 +191,10 @@ impl Agent {
                     )
                     .into());
                 }
-                status = &mut died => {
+                exit = &mut died => {
                     // the run died with its process; nothing is left to cancel
                     self.live_run = None;
-                    return Err(Failure::BridgeExited { status }.into());
+                    return Err(Failure::BridgeExited(exit).into());
                 }
             }
         }
@@ -223,9 +238,7 @@ impl Agent {
         let agent_id = self.id.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                if let Err(error) = rpc.cancel_run(run_id, agent_id).await {
-                    tracing::debug!(%error, "cancel after abandon failed");
-                }
+                teardown("CancelRun", rpc.cancel_run(run_id, agent_id)).await;
             });
         }
     }
@@ -251,14 +264,18 @@ impl Agent {
     }
 }
 
-/// Run one RPC against the bridge's exit: the exit wins the race, and an RPC
-/// that failed as the process was going is reported as the exit too.
-async fn on_bridge<T>(bridge: &Bridge, rpc: impl Future<Output = Result<T>>) -> Result<T> {
+/// Run one RPC against the bridge's exit and a bound: the exit wins the
+/// race, an RPC that failed as the process was going is reported as the
+/// exit too, and one still unanswered after `limit` fails.
+async fn on_bridge<T>(
+    bridge: &Bridge, method: &str, limit: Duration, rpc: impl Future<Output = Result<T>>,
+) -> Result<T> {
     let died = bridge.died();
     tokio::pin!(died);
     let result = tokio::select! {
         result = rpc => result,
-        status = &mut died => return Err(Failure::BridgeExited { status }.into()),
+        exit = &mut died => return Err(Failure::BridgeExited(exit).into()),
+        () = sleep(limit) => bail!("bridge RPC `{method}` unanswered after {}s", limit.as_secs()),
     };
     match result {
         Ok(value) => Ok(value),
@@ -267,11 +284,24 @@ async fn on_bridge<T>(bridge: &Bridge, rpc: impl Future<Output = Result<T>>) -> 
 }
 
 // A socket fails before the watcher sees the process go; give the exit a
-// moment to be observed so it is reported as the exit, not a transport error.
+// moment to be observed so it is reported as the exit, not a transport
+// error. An attached bridge is never seen to die, so its error stands.
 async fn exit_or(bridge: &Bridge, error: anyhow::Error) -> anyhow::Error {
+    if !bridge.is_owned() {
+        return error;
+    }
     match timeout(EXIT_GRACE, bridge.died()).await {
-        Ok(status) => Failure::BridgeExited { status }.into(),
+        Ok(exit) => Failure::BridgeExited(exit).into(),
         Err(_elapsed) => error,
+    }
+}
+
+// One best-effort teardown call: a failure is logged, a silence is bounded.
+async fn teardown(method: &'static str, rpc: impl Future<Output = Result<()>>) {
+    match timeout(TEARDOWN_TIMEOUT, rpc).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::debug!(%error, method, "agent teardown call failed"),
+        Err(_elapsed) => tracing::warn!(method, "agent teardown call unanswered"),
     }
 }
 
@@ -293,18 +323,12 @@ impl Release {
             tracing::debug!(agent = %self.id, "bridge exited; skipping agent teardown");
         } else {
             let rpc = bridge.rpc();
-            if let Some(run_id) = self.run_id
-                && let Err(error) = rpc.cancel_run(run_id, self.id.clone()).await
-            {
-                tracing::debug!(%error, "cancel after abandon failed");
+            if let Some(run_id) = self.run_id {
+                teardown("CancelRun", rpc.cancel_run(run_id, self.id.clone())).await;
             }
-            if let Err(error) = rpc.close_agent(self.id.clone()).await {
-                tracing::debug!(%error, "agent close failed");
-            }
+            teardown("CloseAgent", rpc.close_agent(self.id.clone())).await;
             let api_key = env::var("CURSOR_API_KEY").unwrap_or_default();
-            if let Err(error) = rpc.delete_agent(self.id, self.cwd, api_key).await {
-                tracing::debug!(%error, "agent delete failed");
-            }
+            teardown("DeleteAgent", rpc.delete_agent(self.id, self.cwd, api_key)).await;
         }
         drop(self.workspace);
     }

@@ -20,13 +20,21 @@ Pairs with omnia 0.35.x.
   teardown is done. The bridge reports its own exit: a process that dies
   mid-run fails that completion with the typed
   `cursor-sdk-bridge exited (…) during the run` (outcome `bridge_exit`,
-  counter `cursor_bridge_exits`) instead of stalling it to the inactivity
-  deadline, and the agent's teardown RPCs are skipped on a dead bridge.
-  `ConnectOptions::bridge_bin` (`CURSOR_BRIDGE_BIN`) names the executable;
-  `bridge_url` + `bridge_token` (`CURSOR_BRIDGE_URL`, `CURSOR_BRIDGE_TOKEN`)
-  attach to a bridge another process manages instead of spawning. Spawn
-  time is `cursor_bridge_spawn_ms`, and a spawn that exits before its ready
-  line fails with the exit status and the tail of its stderr.
+  counter `cursor_bridge_exits`), carrying the last lines it wrote to
+  stderr, instead of stalling it to the inactivity deadline, and the
+  agent's teardown RPCs are skipped on a dead bridge. No RPC waits on a
+  bridge unbounded: `CreateAgent` and the head of `Send` fall under the
+  inactivity window, the connect handshake and each teardown call have
+  bounds of their own, so a bridge that is alive but silent gives its slot
+  back. `ConnectOptions::bridge_bin` (`CURSOR_BRIDGE_BIN`) names the
+  executable; `bridge_url` + `bridge_token` (`CURSOR_BRIDGE_URL`,
+  `CURSOR_BRIDGE_TOKEN`) attach to a bridge another process manages
+  instead of spawning, and a request declaring function tools is rejected
+  there (the callbacks would reach the bridge's owner, not this client).
+  Spawn time is `cursor_bridge_spawn_ms`, spawn failures are
+  `cursor_bridge_spawn_failures`, and a spawn that does not complete its
+  handshake fails with the exit status, the failing step, and the tail of
+  its stderr.
 
 ### Changed
 

@@ -68,9 +68,18 @@ impl Pool {
             Arc::clone(&self.permits).acquire_owned().await.context("the agent pool is closed")?;
         tracing::info!(histogram.cursor_lease_wait_ms = elapsed_ms(queued), "agent slot acquired");
 
-        // A spawn failure drops the permit with it.
         let bridge = match &self.source {
-            Source::Spawn { bin } => Arc::new(Bridge::spawn(bin, &self.endpoint).await?),
+            Source::Spawn { bin } => match Bridge::spawn(bin, &self.endpoint).await {
+                Ok(bridge) => Arc::new(bridge),
+                // the permit drops with the error; the caller reports it
+                Err(error) => {
+                    tracing::warn!(
+                        monotonic_counter.cursor_bridge_spawn_failures = 1_u64,
+                        "cursor-sdk-bridge failed to spawn"
+                    );
+                    return Err(error);
+                }
+            },
             Source::Attached(bridge) => Arc::clone(bridge),
         };
         Ok(Arc::new(Lease {
@@ -112,10 +121,14 @@ impl Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         let permit = self.permit.take();
+        // A shared bridge is not ours to close: the slot reopens now.
+        if !self.bridge.is_owned() {
+            return;
+        }
         let bridge = Arc::clone(&self.bridge);
         if let Ok(handle) = Handle::try_current() {
             // The permit rides along so the slot reopens only once the
-            // process is gone (an attached bridge closes as a no-op).
+            // process is gone.
             handle.spawn(async move {
                 bridge.close().await;
                 drop(bridge);

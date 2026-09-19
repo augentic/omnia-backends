@@ -9,6 +9,8 @@
 //! use the Connect envelope — a 1-byte flag plus a 4-byte big-endian length
 //! per message, with flag `0x02` marking the JSON `EndStreamResponse`.
 
+use std::time::Duration;
+
 use anyhow::{Context as _, Result, bail, ensure};
 use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt as _, Full};
@@ -31,6 +33,9 @@ use super::messages::{
 const END_STREAM: u8 = 0x02;
 /// Envelope flag bit marking a compressed frame (never negotiated here).
 const COMPRESSED: u8 = 0x01;
+/// Bound on the handshake (`Ping`, then `GetVersion`) that proves a bridge
+/// answers; a spawned bridge is already past its ready line by then.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A cloneable `sdk.v1` client bound to one bridge endpoint and bearer token.
 #[derive(Clone)]
@@ -54,10 +59,19 @@ impl Rpc {
             base,
             bearer: format!("Bearer {token}"),
         };
-        rpc.ping().await?;
-        let version = rpc.get_version().await?;
+        let version = tokio::time::timeout(CONNECT_TIMEOUT, async {
+            rpc.ping().await?;
+            rpc.get_version().await
+        })
+        .await
+        .map_err(|_elapsed| {
+            anyhow::anyhow!(
+                "bridge did not answer the handshake within {}s",
+                CONNECT_TIMEOUT.as_secs()
+            )
+        })??;
         ensure!(version.protocol_version == "sdk.v1", "unsupported protocol version");
-        tracing::info!(?version.capabilities, "ready");
+        tracing::debug!(?version.capabilities, "ready");
         Ok(rpc)
     }
 

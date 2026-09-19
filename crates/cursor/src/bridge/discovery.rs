@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -24,7 +25,7 @@ const TAIL_LINES: usize = 20;
 // Scan stderr for the ready line and parse its JSON payload; the lines
 // skipped on the way are kept in `tail` for a failure report.
 pub async fn from_stderr(
-    lines: &mut Lines<impl AsyncBufRead + Unpin>, tail: &mut Tail,
+    lines: &mut Lines<impl AsyncBufRead + Unpin>, tail: &Tail,
 ) -> Result<Discovery> {
     tokio::time::timeout(TIMEOUT, async {
         while let Some(line) = lines.next_line().await.context("reading stderr")? {
@@ -46,32 +47,30 @@ pub async fn from_stderr(
     .map_err(|_elapsed| anyhow!("no ready line within {}s", TIMEOUT.as_secs()))?
 }
 
-/// The last few stderr lines that were not the ready line.
+/// The last few lines the bridge wrote to stderr (the ready line aside),
+/// shared between the reader and whoever reports how the process ended.
 #[derive(Debug, Default)]
-pub struct Tail(VecDeque<String>);
+pub struct Tail(Mutex<VecDeque<String>>);
 
 impl Tail {
-    fn push(&mut self, line: String) {
-        if self.0.len() == TAIL_LINES {
-            self.0.pop_front();
+    pub fn push(&self, line: String) {
+        let mut lines = self.lock();
+        if lines.len() == TAIL_LINES {
+            lines.pop_front();
         }
-        self.0.push_back(line);
+        lines.push_back(line);
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+    fn lock(&self) -> MutexGuard<'_, VecDeque<String>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 impl std::fmt::Display for Tail {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (index, line) in self.0.iter().enumerate() {
-            if index > 0 {
-                writeln!(f)?;
-            }
-            write!(f, "  {line}")?;
-        }
-        Ok(())
+        let text =
+            self.lock().iter().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
+        f.write_str(&text)
     }
 }
 
@@ -159,8 +158,8 @@ mod tests {
 
     #[test]
     fn tail_bounded() {
-        let mut tail = Tail::default();
-        assert!(tail.is_empty());
+        let tail = Tail::default();
+        assert!(tail.to_string().is_empty());
         for index in 0..TAIL_LINES + 5 {
             tail.push(format!("line {index}"));
         }

@@ -116,6 +116,35 @@ async fn live_cursor_completes() -> Result<()> {
     Ok(())
 }
 
+/// Four completions pending together, the way `emery_sdk::extract` puts its
+/// seams up: one bridge process per agent on the pooled client, none held
+/// two, and every answer arrives. `connect()` leaves `max_agents` at four,
+/// so nothing here queues.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
+async fn live_fanout() -> Result<()> {
+    const AGENTS: usize = 4;
+    let client = connect().await?;
+    let pending: Vec<_> = (0..AGENTS)
+        .map(|_| {
+            let client = client.clone();
+            tokio::spawn(async move { client.complete(verdict_request(), no_tool_host()).await })
+        })
+        .collect();
+
+    for (index, pending) in pending.into_iter().enumerate() {
+        let answer = pending
+            .await?
+            .map_err(|e| anyhow::anyhow!("live cursor fan-out completion {index} failed: {e}"))?;
+        let value = object(&answer);
+        assert!(
+            value.get("verdict").and_then(Value::as_str).is_some(),
+            "completion {index} must carry a string verdict: {value}"
+        );
+    }
+    Ok(())
+}
+
 /// A request whose only path to the answer is the `lookup` function tool the
 /// stub session answers with [`TOOL_SENTINEL`].
 fn tool_request() -> Request {

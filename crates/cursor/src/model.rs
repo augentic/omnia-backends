@@ -21,7 +21,8 @@ use std::sync::Arc;
 
 use agent::Agent;
 pub use agent::Deadlines;
-use omnia_wasi_model::{Answer, FutureResult, Request, ToolHost, WasiModelCtx};
+use anyhow::ensure;
+use omnia_wasi_model::{Answer, FutureResult, Request, Tool, ToolHost, WasiModelCtx};
 use options::Turn;
 use tracing::{Instrument, info_span};
 
@@ -33,6 +34,14 @@ impl WasiModelCtx for Client {
 
         Box::pin(
             async move {
+                // An attached bridge calls back whoever started it, never
+                // this client, so a function tool could not be answered.
+                ensure!(
+                    !client.pool.is_attached()
+                        || !request.tools.iter().any(|tool| matches!(tool, Tool::Function(_))),
+                    "function tools are unreachable through an attached bridge (its \
+                     --tool-callback-url is its owner's); spawn one instead"
+                );
                 // A request that cannot be shaped fails before it queues for
                 // a slot; the deadlines start inside `create`, after the wait.
                 let turn = Turn::prepare(&request, tool_host.local_path(), &client.model)?;

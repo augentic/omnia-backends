@@ -4,6 +4,7 @@
 //! fields are forward-compatible additions and ignored; the whole line is
 //! never logged (older bridges inline `authToken`).
 
+use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -14,18 +15,23 @@ use tokio::io::{AsyncBufRead, Lines};
 
 use super::rpc::Rpc;
 
-pub const BRIDGE_BIN: &str = "cursor-sdk-bridge";
+// The ready line is always spelled with the upstream name, whatever the
+// executable is called locally.
+const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 const TIMEOUT: Duration = Duration::from_secs(30);
+const TAIL_LINES: usize = 20;
 
-// Scan stderr for the ready line and parse its JSON payload.
-pub async fn from_stderr(lines: &mut Lines<impl AsyncBufRead + Unpin>) -> Result<Discovery> {
-    let ready_prefix = format!("{BRIDGE_BIN} ready ");
-
+// Scan stderr for the ready line and parse its JSON payload; the lines
+// skipped on the way are kept in `tail` for a failure report.
+pub async fn from_stderr(
+    lines: &mut Lines<impl AsyncBufRead + Unpin>, tail: &mut Tail,
+) -> Result<Discovery> {
     tokio::time::timeout(TIMEOUT, async {
         while let Some(line) = lines.next_line().await.context("reading stderr")? {
             // look for "ready" line
-            let Some(json) = line.strip_prefix(&ready_prefix) else {
+            let Some(json) = line.strip_prefix(READY_PREFIX) else {
                 tracing::debug!(line = %line, "stderr");
+                tail.push(line);
                 continue;
             };
 
@@ -38,6 +44,35 @@ pub async fn from_stderr(lines: &mut Lines<impl AsyncBufRead + Unpin>) -> Result
     })
     .await
     .map_err(|_elapsed| anyhow!("no ready line within {}s", TIMEOUT.as_secs()))?
+}
+
+/// The last few stderr lines that were not the ready line.
+#[derive(Debug, Default)]
+pub struct Tail(VecDeque<String>);
+
+impl Tail {
+    fn push(&mut self, line: String) {
+        if self.0.len() == TAIL_LINES {
+            self.0.pop_front();
+        }
+        self.0.push_back(line);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Display for Tail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, line) in self.0.iter().enumerate() {
+            if index > 0 {
+                writeln!(f)?;
+            }
+            write!(f, "  {line}")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -120,7 +155,20 @@ impl Discovery {
 // `tests/live.rs` proves the spawn-and-handshake path against a real bridge.
 #[cfg(test)]
 mod tests {
-    use super::Discovery;
+    use super::{Discovery, TAIL_LINES, Tail};
+
+    #[test]
+    fn tail_bounded() {
+        let mut tail = Tail::default();
+        assert!(tail.is_empty());
+        for index in 0..TAIL_LINES + 5 {
+            tail.push(format!("line {index}"));
+        }
+        let text = tail.to_string();
+        assert_eq!(text.lines().count(), TAIL_LINES);
+        assert!(text.starts_with("  line 5\n"), "the oldest lines are dropped: {text}");
+        assert!(text.ends_with(&format!("  line {}", TAIL_LINES + 4)), "{text}");
+    }
 
     #[test]
     fn discovery_parsed() {

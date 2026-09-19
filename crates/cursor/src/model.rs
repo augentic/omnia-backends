@@ -9,7 +9,9 @@
 //! One `Send` stream produces the answer; when the request asks for a
 //! `check`, the answer is offered to the guest through [`ToolHost::check`]
 //! and a rejection sends the guest's correction on the same agent, whose
-//! session already carries the prompt and the rejected answer.
+//! session already carries the prompt and the rejected answer. Each agent
+//! runs on a leased bridge from the client's pool, taken before it is
+//! created and released once its teardown is done.
 
 mod agent;
 mod observe;
@@ -31,8 +33,11 @@ impl WasiModelCtx for Client {
 
         Box::pin(
             async move {
+                // A request that cannot be shaped fails before it queues for
+                // a slot; the deadlines start inside `create`, after the wait.
                 let turn = Turn::prepare(&request, tool_host.local_path(), &client.model)?;
-                Agent::create(&client, turn, tool_host).await?.complete().await
+                let lease = client.pool.lease().await?;
+                Agent::create(&client, lease, turn, tool_host).await?.complete().await
             }
             .instrument(info_span!("complete")),
         )

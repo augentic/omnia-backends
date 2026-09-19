@@ -39,18 +39,25 @@ MSRV: Rust 1.97
 ## Requirements
 
 The [`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge) executable
-must be on `PATH`, and `CURSOR_API_KEY`
+must be on `PATH` (or named by `CURSOR_BRIDGE_BIN`), and `CURSOR_API_KEY`
 must be set — the bridge protocol authenticates every agent with an explicit
 key, so a prior `cursor-agent login` no longer suffices. The key is read from
 the environment per completion; it is never stored on `Client` /
 `ConnectOptions`, logged, or recorded into fixtures.
 
-`Client::connect()` spawns one bridge process (fail-fast if it is missing or
-broken): it passes a private `--state-root` so no durable agent state lands
-in `~/.cursor`, registers the loopback callback endpoint with a fresh bearer
-token, parses the bridge's stderr discovery line, and verifies the endpoint
-with `Ping`/`GetVersion` (`sdk.v1`). Dropping the last `Client` clone shuts
-the bridge down (graceful `Shutdown` RPC, then kill).
+Each live agent runs in its own bridge process, spawned for the completion
+and shut down after it (graceful `Shutdown` RPC, then kill): a bridge that
+crashes takes one completion with it, reported as the typed
+`cursor-sdk-bridge exited (…) during the run` (metric outcome `bridge_exit`)
+rather than as the next completion's stall, and a retry lands on a fresh
+process. `Client::connect()` still fails fast when the binary is missing or
+broken — it binds the loopback callback endpoint with a fresh bearer token,
+then spawns and closes one probe bridge — and every spawn passes a private
+`--state-root` so no durable agent state lands in `~/.cursor`, registers
+the callback endpoint, parses the bridge's stderr discovery line, and
+verifies the endpoint with `Ping`/`GetVersion` (`sdk.v1`). A spawn that
+never reaches its ready line fails with the process's exit status and the
+tail of what it wrote to stderr.
 
 ## Configuration
 
@@ -74,9 +81,27 @@ silent (keepalive frames do not count), while the absolute wall-clock cap
 A completion that is corrected therefore gets a fresh inactivity window and
 a fresh cap on the second send. The two errors are distinct
 (`inactive for Ns` vs `timed out after Ns (absolute cap …)`).
+
+Concurrency is bounded by `CURSOR_MAX_AGENTS` (default 4): that many agents
+live at once, each in its own bridge process, and a further completion
+waits its turn (first come, first served; the wait is recorded as
+`cursor_lease_wait_ms`, apart from the completion's own duration, which
+starts once the slot is held). The bridge executable is
+`CURSOR_BRIDGE_BIN` (default `cursor-sdk-bridge`, resolved on `PATH`; a
+path works too). Alternatively, attach to a bridge some other process
+manages by setting both `CURSOR_BRIDGE_URL` (its Connect base URL) and
+`CURSOR_BRIDGE_TOKEN` (the token from its ready line): nothing is spawned,
+every agent — still at most `CURSOR_MAX_AGENTS` at once — shares that one
+bridge, and its lifetime and exit are its owner's concern. Function-tool
+callbacks reach whatever `--tool-callback-url` the external bridge was
+started with, not this client, so a request that declares function tools
+needs spawn mode.
+
 `Client::connect()` / `FromEnv` reads the optional `CURSOR_TIMEOUT_SECS`,
-`CURSOR_INACTIVITY_SECS`, and `CURSOR_MODEL`; callers that need different
-bounds or a default model pass `ConnectOptions` to `connect_with`.
+`CURSOR_INACTIVITY_SECS`, `CURSOR_MODEL`, `CURSOR_MAX_AGENTS`,
+`CURSOR_BRIDGE_BIN`, `CURSOR_BRIDGE_URL`, and `CURSOR_BRIDGE_TOKEN`; callers
+that need different bounds, a default model, or another pool shape pass
+`ConnectOptions` to `connect_with`.
 
 MCP servers are supplied per-request: a prompt's `mcp` grant carries the
 endpoint `url` directly, passed inline through `CreateAgent`'s `mcp_servers`.
@@ -105,15 +130,22 @@ For direct or embedded use, connect it yourself:
 use omnia::Backend;
 use omnia_cursor::{Client, ConnectOptions};
 
-// CURSOR_TIMEOUT_SECS / CURSOR_INACTIVITY_SECS / CURSOR_MODEL when set;
-// else a 600s cap, a 120s inactivity window, and Cursor-chosen model.
+// CURSOR_TIMEOUT_SECS / CURSOR_INACTIVITY_SECS / CURSOR_MODEL /
+// CURSOR_MAX_AGENTS / CURSOR_BRIDGE_BIN when set; else a 600s cap, a 120s
+// inactivity window, a Cursor-chosen model, and up to four agents, each in
+// its own `cursor-sdk-bridge` process.
 let client = Client::connect().await?;
 
-// Explicit bounds and default model for long-running judgment legs.
+// Explicit bounds, default model, and pool shape for long-running judgment
+// legs; `bridge_url` + `bridge_token` instead attach to a running bridge.
 let client = Client::connect_with(ConnectOptions {
     timeout_secs: 1800,
     inactivity_secs: 120,
     model: "composer-2".into(),
+    max_agents: 2,
+    bridge_bin: "cursor-sdk-bridge".into(),
+    bridge_url: None,
+    bridge_token: None,
 }).await?;
 ```
 
@@ -124,10 +156,12 @@ The full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor
 ## Tests
 
 The agent loop's unit tests (in `src/model/agent.rs`) run the guest `check`
-loop against a scripted loopback `sdk.v1` bridge — accept, correct-then-accept
-(the correction alone is the next `Send` on the same agent), and exhaust (the
-typed `budget-exhausted` carrying the last correction) — so the loop is covered
-on every `make test` without a bridge process.
+loop against a scripted loopback `sdk.v1` bridge the client attaches to
+(`bridge_url` + `bridge_token`, the same path a shared external bridge uses)
+— accept, correct-then-accept (the correction alone is the next `Send` on the
+same agent), and exhaust (the typed `budget-exhausted` carrying the last
+correction) — so the loop is covered on every `make test` without a bridge
+process.
 
 [`tests/live.rs`](tests/live.rs) drives real completions through the
 `wasi-model` boundary: the plain acceptance run, a function-tool round-trip

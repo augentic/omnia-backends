@@ -38,6 +38,10 @@ async fn connect() -> Result<Client> {
         timeout_secs: 120,
         inactivity_secs: 120,
         model: "auto".to_owned(),
+        max_agents: 4,
+        bridge_bin: "cursor-sdk-bridge".to_owned(),
+        bridge_url: None,
+        bridge_token: None,
     })
     .await
 }

@@ -31,7 +31,7 @@ use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-use crate::endpoint::Endpoint;
+use crate::endpoint::Registration;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the stderr pipe is given to hand over its last lines after the
@@ -118,7 +118,7 @@ impl PendingHandshake {
 
 impl Bridge {
     /// Spawn `bin` registered against `callback` and handshake it.
-    pub async fn spawn(bin: &str, callback: &Endpoint) -> Result<Self> {
+    pub async fn spawn(bin: &str, callback: &Registration) -> Result<Self> {
         let Started {
             bridge,
             handshake,
@@ -141,8 +141,9 @@ impl Bridge {
         }
     }
 
-    /// Start `bin` and watch it. The ready-line handshake is left on the
-    /// returned [`Started`] so a pool lease can occupy the slot first.
+    /// Start `bin` calling back as `callback`, and watch it. The ready-line
+    /// handshake is left on the returned [`Started`] so a pool lease can
+    /// occupy the slot first.
     ///
     /// There is no `.await` after `Command::spawn`, so cancelling this
     /// function cannot leave a process without a watcher.
@@ -151,7 +152,7 @@ impl Bridge {
     ///
     /// Returns an error when the state root cannot be created or `bin`
     /// cannot be spawned.
-    pub fn start(bin: &str, callback: &Endpoint) -> Result<Started> {
+    pub fn start(bin: &str, callback: &Registration) -> Result<Started> {
         let at = Instant::now();
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-")

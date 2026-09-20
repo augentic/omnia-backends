@@ -59,12 +59,14 @@ slot for one more window, so a late id can still be closed and deleted),
 and the teardown calls after a completion are bounded at a few seconds
 each, so a silent bridge frees its slot instead of holding it.
 `Client::connect()` still fails fast when the
-binary is missing or broken — it binds the loopback callback endpoint with
-a fresh bearer token, then spawns and closes one probe bridge — and every
-spawn passes a private `--state-root` so no durable agent state lands in
-`~/.cursor`, registers the callback endpoint, parses the bridge's stderr
-discovery line, and verifies the endpoint with `Ping`/`GetVersion`
-(`sdk.v1`). A spawn that never completes that handshake fails with the
+binary is missing or broken — it binds the loopback callback endpoint, then
+spawns and closes one probe bridge — and every spawn passes a private
+`--state-root` so no durable agent state lands in `~/.cursor`, registers
+with the callback endpoint under its own bearer token (agent ids are each
+process's own to choose, so a callback routes by the token that carries it
+as well as the id it names, and the token is revoked once the process is
+gone), parses the bridge's stderr discovery line, and verifies the endpoint
+with `Ping`/`GetVersion` (`sdk.v1`). A spawn that never completes that handshake fails with the
 process's exit status and the step that failed; its stderr tail is at DEBUG.
 
 ## Configuration

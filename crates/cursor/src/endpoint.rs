@@ -2,17 +2,19 @@
 //! guest-declared function tool, and the call routes into the completion's
 //! session through [`ToolHost::call_tool`].
 //!
-//! The server binds `127.0.0.1:0`, requires the bearer token handed to the
-//! bridge at spawn, and accepts both Connect unary codecs (the bridge picks
-//! the content type). Budgets, per-call timeouts, oversize checks, and id
-//! correlation are enforced host-side inside `call_tool`; the sessions map
-//! here is a thin `agent_id -> session` table.
+//! The server binds `127.0.0.1:0` and accepts both Connect unary codecs (the
+//! bridge picks the content type). Each bridge process is registered under
+//! its own bearer token, and that token selects the process's own agent
+//! table: agent ids are the bridge's to choose, so two live processes may
+//! pick the same one, and a callback routes by the token it carries as well
+//! as the id it names. Budgets, per-call timeouts, oversize checks, and id
+//! correlation are enforced host-side inside `call_tool`.
 
 mod proto;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -46,22 +48,18 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Bind `127.0.0.1:0` with a fresh bearer token and start serving.
+    /// Bind `127.0.0.1:0` and start serving.
     ///
     /// # Errors
     ///
-    /// Returns an error when the loopback bind fails or the system random
-    /// source is unavailable.
+    /// Returns an error when the loopback bind fails.
     pub async fn bind() -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .context("binding the tool-callback listener")?;
         let addr = listener.local_addr().context("reading the tool-callback address")?;
 
-        let handler = Arc::new(Handler {
-            token: gen_token()?,
-            sessions: Sessions::default(),
-        });
+        let handler = Arc::new(Handler::default());
 
         let server = {
             let handler = Arc::clone(&handler);
@@ -102,22 +100,23 @@ impl Endpoint {
         })
     }
 
-    /// Route callbacks for `agent_id` into `tool_host` until the returned
-    /// guard drops.
-    pub fn attach(
-        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
-    ) -> Attached {
-        self.handler.attach(agent_id, tool_host, abort)
-    }
-
-    /// The full callback URL handed to the bridge (`--tool-callback-url`).
-    pub fn url(&self) -> &str {
-        &self.url
-    }
-
-    /// The bearer token handed to the bridge (`--tool-callback-auth-token`).
-    pub fn token(&self) -> &str {
-        &self.handler.token
+    /// Register one bridge process: a fresh bearer token for it to call
+    /// back with, and its own agent table behind that token. Dropping the
+    /// registration revokes the token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the system random source is unavailable.
+    pub fn register(&self) -> Result<Registration> {
+        let token = gen_token()?;
+        let sessions = Arc::new(Sessions::default());
+        self.handler.bridges().insert(token.clone(), Arc::clone(&sessions));
+        Ok(Registration {
+            handler: Arc::clone(&self.handler),
+            url: self.url.clone(),
+            token,
+            sessions,
+        })
     }
 }
 
@@ -127,7 +126,56 @@ impl Drop for Endpoint {
     }
 }
 
-/// Live completions by `agent_id`.
+/// One bridge process's callback identity: the URL and bearer token it is
+/// started with, and the agents routed under that token.
+#[must_use]
+pub struct Registration {
+    handler: Arc<Handler>,
+    url: String,
+    token: String,
+    sessions: Arc<Sessions>,
+}
+
+impl Registration {
+    /// The full callback URL handed to the bridge (`--tool-callback-url`).
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The bearer token handed to the bridge (`--tool-callback-auth-token`).
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Route this bridge's callbacks for `agent_id` into `tool_host` until
+    /// the returned guard drops.
+    pub fn attach(
+        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
+    ) -> Attached {
+        self.sessions.insert(agent_id.clone(), Session { tool_host, abort });
+        Attached {
+            sessions: Arc::clone(&self.sessions),
+            agent_id,
+        }
+    }
+}
+
+impl std::fmt::Debug for Registration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registration")
+            .field("url", &self.url)
+            .field("sessions", &self.sessions)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.handler.bridges().remove(&self.token);
+    }
+}
+
+/// One bridge's live completions by `agent_id`.
 #[derive(Debug, Default)]
 struct Sessions {
     entries: Mutex<HashMap<String, Session>>,
@@ -146,7 +194,7 @@ impl Sessions {
         self.lock().get(agent_id).cloned()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, Session>> {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -163,37 +211,37 @@ struct Session {
 /// Detaches its agent on drop.
 #[must_use]
 pub struct Attached {
-    handler: Arc<Handler>,
+    sessions: Arc<Sessions>,
     agent_id: String,
 }
 
 impl Drop for Attached {
     fn drop(&mut self) {
-        self.handler.sessions.remove(&self.agent_id);
+        self.sessions.remove(&self.agent_id);
     }
 }
 
+#[derive(Default)]
 struct Handler {
-    token: String,
-    sessions: Sessions,
+    /// Registered bridge processes' agent tables, by bearer token.
+    bridges: Mutex<HashMap<String, Arc<Sessions>>>,
 }
 
 impl std::fmt::Debug for Handler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Handler").field("sessions", &self.sessions).finish_non_exhaustive()
+        f.debug_struct("Handler").field("bridges", &self.bridges().len()).finish()
     }
 }
 
 impl Handler {
-    fn attach(
-        self: &Arc<Self>, agent_id: String, tool_host: Arc<dyn ToolHost>,
-        abort: mpsc::UnboundedSender<String>,
-    ) -> Attached {
-        self.sessions.insert(agent_id.clone(), Session { tool_host, abort });
-        Attached {
-            handler: Arc::clone(self),
-            agent_id,
-        }
+    fn bridges(&self) -> MutexGuard<'_, HashMap<String, Arc<Sessions>>> {
+        self.bridges.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The agent table of the bridge whose bearer token the request carries.
+    fn authorize(&self, headers: &HeaderMap) -> Option<Arc<Sessions>> {
+        let token = headers.get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?;
+        self.bridges().get(token).cloned()
     }
 
     async fn handle(&self, request: http::Request<Incoming>) -> Reply {
@@ -202,20 +250,23 @@ impl Handler {
         // Reject on the head alone — no body byte of an unauthenticated
         // request is ever buffered — but discard the body before answering:
         // closing with unread bytes turns the reply into a TCP reset.
-        let rejection = if parts.method != Method::POST {
-            Some(connect_error(StatusCode::METHOD_NOT_ALLOWED, "unimplemented", "POST required"))
+        let admitted = if parts.method != Method::POST {
+            Err(connect_error(StatusCode::METHOD_NOT_ALLOWED, "unimplemented", "POST required"))
         } else if parts.uri.path() != PATH {
-            Some(connect_error(StatusCode::NOT_FOUND, "not_found", "unknown callback path"))
-        } else if !self.authorized(&parts.headers) {
-            Some(connect_error(StatusCode::UNAUTHORIZED, "unauthenticated", "bad bearer token"))
+            Err(connect_error(StatusCode::NOT_FOUND, "not_found", "unknown callback path"))
         } else {
-            None
+            self.authorize(&parts.headers).ok_or_else(|| {
+                connect_error(StatusCode::UNAUTHORIZED, "unauthenticated", "bad bearer token")
+            })
         };
 
-        if let Some(reply) = rejection {
-            let _ = tokio::time::timeout(DRAIN_TIMEOUT, drain(body, MAX_BODY_BYTES)).await;
-            return reply;
-        }
+        let sessions = match admitted {
+            Ok(sessions) => sessions,
+            Err(reply) => {
+                let _ = tokio::time::timeout(DRAIN_TIMEOUT, drain(body, MAX_BODY_BYTES)).await;
+                return reply;
+            }
+        };
 
         let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
             Ok(collected) => collected.to_bytes(),
@@ -235,61 +286,56 @@ impl Handler {
             }
         };
 
-        self.call_tool(&parts.headers, body).await
+        call_tool(&sessions, &parts.headers, body).await
     }
+}
 
-    fn authorized(&self, headers: &HeaderMap) -> bool {
-        headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()).is_some_and(|value| {
-            value.strip_prefix("Bearer ").is_some_and(|token| token == self.token)
-        })
-    }
+// Execute one decoded callback against the calling bridge's agent table.
+async fn call_tool(sessions: &Sessions, headers: &HeaderMap, body: Bytes) -> Reply {
+    let content_type =
+        headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
+    let codec = if content_type.contains("json") {
+        Codec::Json
+    } else if content_type.contains("proto") {
+        Codec::Proto
+    } else {
+        return connect_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unknown",
+            &format!("unsupported content type `{content_type}`"),
+        );
+    };
 
-    async fn call_tool(&self, headers: &HeaderMap, body: Bytes) -> Reply {
-        let content_type =
-            headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
-        let codec = if content_type.contains("json") {
-            Codec::Json
-        } else if content_type.contains("proto") {
-            Codec::Proto
-        } else {
+    let call = match ToolCall::decode(codec, &body) {
+        Ok(call) => call,
+        Err(error) => {
             return connect_error(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "unknown",
-                &format!("unsupported content type `{content_type}`"),
+                StatusCode::BAD_REQUEST,
+                "invalid_argument",
+                &format!("{error:#}"),
             );
-        };
+        }
+    };
 
-        let call = match ToolCall::decode(codec, &body) {
-            Ok(call) => call,
-            Err(error) => {
-                return connect_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_argument",
-                    &format!("{error:#}"),
-                );
-            }
-        };
+    let Some(session) = sessions.lookup(&call.agent_id) else {
+        return connect_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            &format!("no live completion for agent `{}`", call.agent_id),
+        );
+    };
 
-        let Some(session) = self.sessions.lookup(&call.agent_id) else {
-            return connect_error(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                &format!("no live completion for agent `{}`", call.agent_id),
-            );
-        };
+    let arguments = call.args.to_string();
+    tracing::info!(monotonic_counter.cursor_custom_tool_calls = 1_u64, "custom tool callback");
+    tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
 
-        let arguments = call.args.to_string();
-        tracing::info!(monotonic_counter.cursor_custom_tool_calls = 1_u64, "custom tool callback");
-        tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
-
-        match session.tool_host.call_tool(call.tool_name.clone(), arguments).await {
-            Ok(Ok(output)) => respond(codec, &to_json(&output)),
-            Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
-            Err(error) => {
-                let message = format!("tool `{}` failed: {error:#}", call.tool_name);
-                let _ = session.abort.send(message.clone());
-                connect_error(StatusCode::CONFLICT, "aborted", &message)
-            }
+    match session.tool_host.call_tool(call.tool_name.clone(), arguments).await {
+        Ok(Ok(output)) => respond(codec, &to_json(&output)),
+        Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
+        Err(error) => {
+            let message = format!("tool `{}` failed: {error:#}", call.tool_name);
+            let _ = session.abort.send(message.clone());
+            connect_error(StatusCode::CONFLICT, "aborted", &message)
         }
     }
 }
@@ -409,7 +455,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::proto::{CallCustomToolRequest, CallCustomToolResponse, value_to_struct};
-    use super::{Endpoint, PATH, to_json};
+    use super::{Attached, Endpoint, PATH, Registration, to_json};
 
     #[test]
     fn to_json_policy() {
@@ -426,11 +472,11 @@ mod tests {
             json!({ "toolName": "lookup", "args": { "q": "x" }, "agentId": "agent-1" }).to_string();
         let headers = format!(
             "{}Content-Type: application/json\r\nContent-Length: {}\r\n",
-            bearer(&harness.endpoint),
+            bearer(&harness.registration),
             body.len()
         );
         let (status, _, payload) =
-            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
+            exchange(harness.registration.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 200);
         let response: Value = serde_json::from_slice(&payload).expect("json response");
         assert_eq!(response["result"]["echo"][0], "lookup");
@@ -452,9 +498,9 @@ mod tests {
 
         let headers = format!(
             "{}Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n",
-            bearer(&harness.endpoint)
+            bearer(&harness.registration)
         );
-        let (status, _, payload) = exchange(harness.endpoint.url(), &headers, &body).await;
+        let (status, _, payload) = exchange(harness.registration.url(), &headers, &body).await;
         assert_eq!(status, 200);
         let response: Value = serde_json::from_slice(&payload).expect("json response");
         assert_eq!(response["result"]["echo"][0], "lookup");
@@ -473,10 +519,10 @@ mod tests {
         let body = request.encode_to_vec();
         let headers = format!(
             "{}Content-Type: application/proto\r\nContent-Length: {}\r\n",
-            bearer(&harness.endpoint),
+            bearer(&harness.registration),
             body.len()
         );
-        let (status, head, payload) = exchange(harness.endpoint.url(), &headers, &body).await;
+        let (status, head, payload) = exchange(harness.registration.url(), &headers, &body).await;
         assert_eq!(status, 200);
         assert!(head.to_ascii_lowercase().contains("content-type: application/proto"), "{head}");
         let response = CallCustomToolResponse::decode(payload.as_slice()).expect("proto response");
@@ -491,11 +537,11 @@ mod tests {
             json!({ "toolName": "repairable", "args": {}, "agentId": "agent-1" }).to_string();
         let headers = format!(
             "{}Content-Type: application/json\r\nContent-Length: {}\r\n",
-            bearer(&harness.endpoint),
+            bearer(&harness.registration),
             body.len()
         );
         let (status, _, payload) =
-            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
+            exchange(harness.registration.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 200, "a repairable failure is a successful callback");
         let response: Value = serde_json::from_slice(&payload).expect("json response");
         assert_eq!(response["result"]["error"], "bad arguments");
@@ -507,11 +553,11 @@ mod tests {
         let body = json!({ "toolName": "hard", "args": {}, "agentId": "agent-1" }).to_string();
         let headers = format!(
             "{}Content-Type: application/json\r\nContent-Length: {}\r\n",
-            bearer(&harness.endpoint),
+            bearer(&harness.registration),
             body.len()
         );
         let (status, _, payload) =
-            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
+            exchange(harness.registration.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 409);
         let response: Value = serde_json::from_slice(&payload).expect("connect error json");
         assert_eq!(response["code"], "aborted");
@@ -525,11 +571,11 @@ mod tests {
         let body = json!({ "toolName": "lookup", "args": {}, "agentId": "ghost" }).to_string();
         let headers = format!(
             "{}Content-Type: application/json\r\nContent-Length: {}\r\n",
-            bearer(&harness.endpoint),
+            bearer(&harness.registration),
             body.len()
         );
         let (status, _, payload) =
-            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
+            exchange(harness.registration.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 404);
         let response: Value = serde_json::from_slice(&payload).expect("connect error json");
         assert_eq!(response["code"], "not_found");
@@ -544,7 +590,7 @@ mod tests {
             body.len()
         );
         let (status, _, payload) =
-            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
+            exchange(harness.registration.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 401);
         let response: Value = serde_json::from_slice(&payload).expect("connect error json");
         assert_eq!(response["code"], "unauthenticated");
@@ -564,7 +610,7 @@ mod tests {
             body.len()
         );
         let (status, _, payload) =
-            exchange(harness.endpoint.url(), &headers, body.as_bytes()).await;
+            exchange(harness.registration.url(), &headers, body.as_bytes()).await;
         assert_eq!(status, 401);
         let response: Value = serde_json::from_slice(&payload).expect("connect error json");
         assert_eq!(response["code"], "unauthenticated");
@@ -573,8 +619,8 @@ mod tests {
     #[tokio::test]
     async fn dropped_attached() {
         let harness = serve_agent("agent-1").await;
-        let url = harness.endpoint.url().to_owned();
-        let token = bearer(&harness.endpoint);
+        let url = harness.registration.url().to_owned();
+        let token = bearer(&harness.registration);
         drop(harness.attached);
 
         let body = json!({ "toolName": "lookup", "args": {}, "agentId": "agent-1" }).to_string();
@@ -584,19 +630,81 @@ mod tests {
         assert_eq!(status, 404, "a finished completion no longer routes callbacks");
     }
 
-    /// Echoes `call_tool` back, or fails per the requested tool name.
+    #[tokio::test]
+    async fn same_id_on_two_bridges() {
+        // Spawned bridges choose agent ids independently, so two live
+        // processes may both be running `agent-1`.
+        let endpoint = Endpoint::bind().await.expect("bind endpoint");
+        let first = endpoint.register().expect("register the first bridge");
+        let second = endpoint.register().expect("register the second bridge");
+        assert_ne!(first.token(), second.token(), "each bridge calls back with its own token");
+        let (first_tx, _first_rx) = mpsc::unbounded_channel();
+        let (second_tx, _second_rx) = mpsc::unbounded_channel();
+        let first_attached = first.attach("agent-1".to_owned(), stub("first"), first_tx);
+        let _second_attached = second.attach("agent-1".to_owned(), stub("second"), second_tx);
+
+        let (status, response) = call(&first, "agent-1").await;
+        assert_eq!(status, 200);
+        assert_eq!(response["result"]["host"], "first", "the first bridge reaches its own host");
+        let (status, response) = call(&second, "agent-1").await;
+        assert_eq!(status, 200);
+        assert_eq!(response["result"]["host"], "second", "the second bridge reaches its own host");
+
+        // The earlier completion ending must not take the later one's route.
+        drop(first_attached);
+        let (status, response) = call(&first, "agent-1").await;
+        assert_eq!(status, 404, "the finished completion is gone: {response}");
+        let (status, response) = call(&second, "agent-1").await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["result"]["host"], "second", "the later completion is untouched");
+    }
+
+    #[tokio::test]
+    async fn dropped_registration() {
+        let endpoint = Endpoint::bind().await.expect("bind endpoint");
+        let gone = endpoint.register().expect("register the closed bridge");
+        let live = endpoint.register().expect("register the live bridge");
+        let (gone_tx, _gone_rx) = mpsc::unbounded_channel();
+        let (live_tx, _live_rx) = mpsc::unbounded_channel();
+        // The guard outliving the registration is not enough to route.
+        let _gone_attached = gone.attach("agent-1".to_owned(), stub("gone"), gone_tx);
+        let _live_attached = live.attach("agent-1".to_owned(), stub("live"), live_tx);
+        let url = gone.url().to_owned();
+        let token = bearer(&gone);
+        drop(gone);
+
+        let body = json!({ "toolName": "lookup", "args": {}, "agentId": "agent-1" }).to_string();
+        let headers =
+            format!("{token}Content-Type: application/json\r\nContent-Length: {}\r\n", body.len());
+        let (status, _, payload) = exchange(&url, &headers, body.as_bytes()).await;
+        assert_eq!(status, 401, "a closed bridge's token is revoked");
+        let response: Value = serde_json::from_slice(&payload).expect("connect error json");
+        assert_eq!(response["code"], "unauthenticated");
+
+        let (status, response) = call(&live, "agent-1").await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["result"]["host"], "live");
+    }
+
+    /// Echoes `call_tool` back with the stub's label, or fails per the
+    /// requested tool name.
     #[derive(Debug)]
-    struct SessionStub;
+    struct SessionStub(&'static str);
+
+    fn stub(label: &'static str) -> Arc<dyn ToolHost> {
+        Arc::new(SessionStub(label))
+    }
 
     impl ToolHost for SessionStub {
         fn call_tool(
             &self, name: String, arguments: String,
         ) -> FutureResult<Result<String, String>> {
+            let host = self.0;
             Box::pin(async move {
                 match name.as_str() {
                     "repairable" => Ok(Err("bad arguments".to_owned())),
                     "hard" => Err(anyhow::anyhow!("tool budget exhausted")),
-                    _ => Ok(Ok(json!({ "echo": [name, arguments] }).to_string())),
+                    _ => Ok(Ok(json!({ "echo": [name, arguments], "host": host }).to_string())),
                 }
             })
         }
@@ -619,20 +727,35 @@ mod tests {
     }
 
     struct Harness {
-        endpoint: Endpoint,
-        attached: super::Attached,
+        _endpoint: Endpoint,
+        registration: Registration,
+        attached: Attached,
         abort_rx: mpsc::UnboundedReceiver<String>,
     }
 
     async fn serve_agent(agent_id: &str) -> Harness {
         let endpoint = Endpoint::bind().await.expect("bind endpoint");
+        let registration = endpoint.register().expect("register a bridge");
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
-        let attached = endpoint.attach(agent_id.to_owned(), Arc::new(SessionStub), abort_tx);
+        let attached = registration.attach(agent_id.to_owned(), stub("stub"), abort_tx);
         Harness {
-            endpoint,
+            _endpoint: endpoint,
+            registration,
             attached,
             abort_rx,
         }
+    }
+
+    /// One JSON `lookup` callback for `agent_id` under `registration`'s token.
+    async fn call(registration: &Registration, agent_id: &str) -> (u16, Value) {
+        let body = json!({ "toolName": "lookup", "args": {}, "agentId": agent_id }).to_string();
+        let headers = format!(
+            "{}Content-Type: application/json\r\nContent-Length: {}\r\n",
+            bearer(registration),
+            body.len()
+        );
+        let (status, _, payload) = exchange(registration.url(), &headers, body.as_bytes()).await;
+        (status, serde_json::from_slice(&payload).expect("json response"))
     }
 
     /// One raw HTTP/1.1 exchange, so the framing is under test control.
@@ -671,7 +794,7 @@ mod tests {
         out
     }
 
-    fn bearer(endpoint: &Endpoint) -> String {
-        format!("Authorization: Bearer {}\r\n", endpoint.token())
+    fn bearer(registration: &Registration) -> String {
+        format!("Authorization: Bearer {}\r\n", registration.token())
     }
 }

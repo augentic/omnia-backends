@@ -2,10 +2,11 @@
 //!
 //! A completion takes a [`Lease`] before it creates its agent: a permit for
 //! one of the `max_agents` slots plus the bridge the agent runs on — a
-//! freshly spawned process, or the one external bridge every lease shares
-//! in attach mode. Dropping the last handle to a lease closes a spawned
-//! bridge and only then returns the permit, so a slot never reopens while
-//! its process is still around.
+//! freshly spawned process, registered with the callback endpoint under its
+//! own token so its callbacks route to its own agent, or the one external
+//! bridge every lease shares in attach mode. Dropping the last handle to a
+//! lease closes a spawned bridge and only then returns the permit, so a
+//! slot never reopens while its process is still around.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,7 +18,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 use crate::ConnectOptions;
 use crate::bridge::{Bridge, elapsed_ms};
-use crate::endpoint::{Attached, Endpoint};
+use crate::endpoint::{Attached, Endpoint, Registration};
 
 #[derive(Debug)]
 pub struct Pool {
@@ -31,8 +32,10 @@ pub struct Pool {
 enum Source {
     /// A fresh process per lease.
     Spawn { bin: String },
-    /// Every lease shares this externally managed bridge.
-    Attached(Arc<Bridge>),
+    /// Every lease shares this externally managed bridge, one registered
+    /// process; it calls back its owner, never this client, so the token
+    /// is never handed out.
+    Attached { bridge: Arc<Bridge>, registration: Arc<Registration> },
 }
 
 impl Pool {
@@ -42,11 +45,13 @@ impl Pool {
     pub async fn connect(options: &ConnectOptions) -> Result<Self> {
         let endpoint = Endpoint::bind().await?;
         let source = match (&options.bridge_url, &options.bridge_token) {
-            (Some(url), Some(token)) => {
-                Source::Attached(Arc::new(Bridge::attach(url.clone(), token).await?))
-            }
+            (Some(url), Some(token)) => Source::Attached {
+                bridge: Arc::new(Bridge::attach(url.clone(), token).await?),
+                registration: Arc::new(endpoint.register()?),
+            },
             (None, None) => {
-                Bridge::spawn(&options.bridge_bin, &endpoint).await?.close().await;
+                let probe = endpoint.register()?;
+                Bridge::spawn(&options.bridge_bin, &probe).await?.close().await;
                 Source::Spawn {
                     bin: options.bridge_bin.clone(),
                 }
@@ -69,12 +74,14 @@ impl Pool {
         tracing::info!(histogram.cursor_lease_wait_ms = elapsed_ms(queued), "agent slot acquired");
 
         match &self.source {
-            Source::Attached(bridge) => Ok(Arc::new(Lease {
+            Source::Attached { bridge, registration } => Ok(Arc::new(Lease {
                 permit: Some(permit),
                 bridge: Arc::clone(bridge),
+                registration: Arc::clone(registration),
             })),
             Source::Spawn { bin } => {
-                let started = match Bridge::start(bin, &self.endpoint) {
+                let registration = Arc::new(self.endpoint.register()?);
+                let started = match Bridge::start(bin, &registration) {
                     Ok(started) => started,
                     Err(error) => {
                         tracing::warn!(
@@ -90,6 +97,7 @@ impl Pool {
                 let lease = Lease {
                     permit: Some(permit),
                     bridge: Arc::new(started.bridge),
+                    registration,
                 };
                 if let Err(error) = started.handshake.complete().await {
                     tracing::warn!(
@@ -108,20 +116,12 @@ impl Pool {
         }
     }
 
-    /// Route callbacks for `agent_id` into `tool_host` until the returned
-    /// guard drops.
-    pub fn attach(
-        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
-    ) -> Attached {
-        self.endpoint.attach(agent_id, tool_host, abort)
-    }
-
     pub const fn max_agents(&self) -> usize {
         self.max_agents
     }
 
     pub const fn is_attached(&self) -> bool {
-        matches!(self.source, Source::Attached(_))
+        matches!(self.source, Source::Attached { .. })
     }
 }
 
@@ -130,11 +130,22 @@ impl Pool {
 pub struct Lease {
     permit: Option<OwnedSemaphorePermit>,
     bridge: Arc<Bridge>,
+    // The bridge's callback identity: the spawned process's own, or the one
+    // every lease on an attached bridge shares.
+    registration: Arc<Registration>,
 }
 
 impl Lease {
     pub fn bridge(&self) -> &Bridge {
         &self.bridge
+    }
+
+    /// Route the bridge's callbacks for `agent_id` into `tool_host` until
+    /// the returned guard drops.
+    pub fn attach(
+        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
+    ) -> Attached {
+        self.registration.attach(agent_id, tool_host, abort)
     }
 }
 
@@ -146,17 +157,19 @@ impl Drop for Lease {
             return;
         }
         let bridge = Arc::clone(&self.bridge);
+        let registration = Arc::clone(&self.registration);
         if let Ok(handle) = Handle::try_current() {
-            // The permit rides along so the slot reopens only once the
-            // process is gone.
+            // The token stays valid until the process is gone, and the
+            // permit rides along so the slot reopens only then.
             handle.spawn(async move {
                 bridge.close().await;
                 drop(bridge);
+                drop(registration);
                 drop(permit);
             });
         }
-        // Without a runtime both drop here; the bridge's own `Drop` still
-        // asks the watcher for the shutdown.
+        // Without a runtime all three drop here; the bridge's own `Drop`
+        // still asks the watcher for the shutdown.
     }
 }
 

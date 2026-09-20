@@ -82,7 +82,7 @@ impl Agent {
         };
 
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
-        let attached = client.pool.attach(id.clone(), Arc::clone(&tool_host), abort_tx);
+        let attached = lease.attach(id.clone(), Arc::clone(&tool_host), abort_tx);
 
         Ok(Self {
             lease,

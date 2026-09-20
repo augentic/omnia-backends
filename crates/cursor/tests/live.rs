@@ -13,6 +13,7 @@
 
 mod support;
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -28,6 +29,7 @@ use support::{
     serve,
 };
 use tokio::net::TcpListener;
+use tracing_subscriber::layer::SubscriberExt as _;
 
 /// How long the pool may take to reopen every slot once the answers are in:
 /// each lease's process is shut down and waited for first.
@@ -184,6 +186,105 @@ async fn stress_fanout() -> Result<()> {
         fanout(&client, 4).await.with_context(|| format!("fan-out round {round}"))?;
     }
     Ok(())
+}
+
+/// The pids of every `cursor-sdk-bridge spawned` event, in order.
+#[derive(Clone, Default)]
+struct SpawnedPids(Arc<Mutex<Vec<u32>>>);
+
+impl SpawnedPids {
+    fn pids(&self) -> Vec<u32> {
+        self.0.lock().expect("pids lock").clone()
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpawnedPids {
+    fn on_event(
+        &self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut spawn = Spawn::default();
+        event.record(&mut spawn);
+        if spawn.spawned
+            && let Some(pid) = spawn.pid
+        {
+            self.0.lock().expect("pids lock").push(pid);
+        }
+    }
+}
+
+#[derive(Default)]
+struct Spawn {
+    pid: Option<u32>,
+    spawned: bool,
+}
+
+impl tracing::field::Visit for Spawn {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "pid" {
+            self.pid = u32::try_from(value).ok();
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" && format!("{value:?}").contains("cursor-sdk-bridge spawned") {
+            self.spawned = true;
+        }
+    }
+}
+
+/// A real bridge `kill -9`ed under its opening run: the completion restarts
+/// on a fresh process and still answers. The probe is the first spawn, the
+/// completion's own process the second, the restart the third.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
+async fn bridge_killed_mid_run_recovers() -> Result<()> {
+    let pids = SpawnedPids::default();
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(pids.clone()))
+        .expect("this test owns the process's subscriber");
+
+    // One slot, so the restart also proves the dead lease is reaped first.
+    let client = Client::connect_with(ConnectOptions {
+        timeout_secs: 120,
+        inactivity_secs: 120,
+        model: "auto".to_owned(),
+        max_agents: 1,
+        bridge_bin: "cursor-sdk-bridge".to_owned(),
+        bridge_url: None,
+        bridge_token: None,
+    })
+    .await?;
+    let completion = {
+        let client = client.clone();
+        tokio::spawn(async move { client.complete(verdict_request(), no_tool_host()).await })
+    };
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while pids.pids().len() < 2 {
+        anyhow::ensure!(tokio::time::Instant::now() < deadline, "no second bridge spawned");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let victim = pids.pids()[1];
+    // A moment for `CreateAgent` and `Send` to go out, well short of a
+    // real answer.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let killed = std::process::Command::new("kill").args(["-9", &victim.to_string()]).status()?;
+    anyhow::ensure!(killed.success(), "kill -9 {victim} failed: {killed}");
+
+    let answer = completion
+        .await?
+        .map_err(|e| anyhow::anyhow!("the completion did not recover from the kill: {e:#}"))?;
+    let value = object(&answer);
+    assert!(
+        value.get("verdict").and_then(Value::as_str).is_some(),
+        "the recovered answer must carry a string verdict: {value}"
+    );
+    let pids = pids.pids();
+    anyhow::ensure!(
+        pids.len() == 3,
+        "expected the probe, the killed process, and the restart; saw {pids:?} (did the kill land \
+         after the answer?)"
+    );
+    await_idle(&client, 1).await
 }
 
 /// Two completions at once on one *attached* bridge — two agents on one

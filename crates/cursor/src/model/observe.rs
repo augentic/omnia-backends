@@ -12,7 +12,7 @@ use std::time::Instant;
 use omnia_wasi_model::{ToolTurn, Transcript, Usage};
 use serde_json::Value;
 
-use crate::bridge::{Exit, SdkMessage, status_text};
+use crate::bridge::{Exit, SdkMessage, TransportError, status_text};
 use crate::model::options::Turn;
 
 /// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
@@ -120,9 +120,14 @@ impl Drop for Completion {
     }
 }
 
-/// A completion failure this crate constructs. [`outcome_of`] downcasts this
-/// so metric labels do not depend on message wording.
+/// How a completion this backend ran came to fail, by variant rather than
+/// by message.
+///
+/// `complete`'s error downcasts to one of these — or to a
+/// [`TransportError`], or to the typed `budget-exhausted` a rejected check
+/// ends on.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Failure {
     /// Absolute wall-clock cap exceeded while the stream was still active.
     Timeout {
@@ -140,11 +145,15 @@ pub enum Failure {
     },
     /// Hard tool-host failure (or a closed abort channel).
     Aborted(String),
-    /// The bridge process exited while the completion was running on it.
+    /// The spawned bridge process exited while the completion was running
+    /// on it.
     BridgeExited(Exit),
 }
 
 impl Failure {
+    /// The `outcome` label the `cursor_completions` counter carries for
+    /// this failure.
+    #[must_use]
     pub const fn outcome(&self) -> &'static str {
         match self {
             Self::Timeout { .. } => "timeout",
@@ -181,16 +190,30 @@ impl std::fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
-/// Classify a failed `complete`: a [`Failure`] by variant, the typed
-/// `budget-exhausted` a rejected check ends on, anything else `error`.
+/// Classify a failed `complete`: a [`Failure`] by variant, a
+/// [`TransportError`] as `transport`, the typed `budget-exhausted` a
+/// rejected check ends on, anything else `error`.
 pub fn outcome_of(error: &anyhow::Error) -> &'static str {
     if let Some(failure) = error.downcast_ref::<Failure>() {
         return failure.outcome();
+    }
+    if error.downcast_ref::<TransportError>().is_some() {
+        return "transport";
     }
     match error.downcast_ref::<omnia_wasi_model::Error>() {
         Some(omnia_wasi_model::Error::BudgetExhausted(_)) => "exhausted",
         _ => "error",
     }
+}
+
+/// Whether the bridge, or the socket to it, was lost under the completion:
+/// the process exited, or an RPC failed below Connect. Neither says anything
+/// about the prompt, so a fresh bridge may be given it again; a Connect
+/// error, an end-stream error, or a run that ended in a failing status is
+/// the bridge answering, and is not.
+pub fn lost_bridge(error: &anyhow::Error) -> bool {
+    matches!(error.downcast_ref::<Failure>(), Some(Failure::BridgeExited(_)))
+        || error.downcast_ref::<TransportError>().is_some()
 }
 
 /// Reconstructs the tool transcript and run metadata from the SDK stream.
@@ -309,7 +332,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::EventLog;
-    use crate::bridge::SdkMessage;
+    use crate::bridge::{SdkMessage, TransportError};
 
     fn observe_all(events: &[Value]) -> EventLog {
         let mut log = EventLog::default();
@@ -403,10 +426,48 @@ mod tests {
         assert_eq!(super::outcome_of(&exited), "bridge_exit");
         assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown) during the run");
 
+        let transport: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
+        assert_eq!(super::outcome_of(&transport), "transport");
+
         let rejected: anyhow::Error =
             omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
         assert_eq!(super::outcome_of(&rejected), "exhausted");
 
         assert_eq!(super::outcome_of(&anyhow::anyhow!("bridge RPC failed")), "error");
+    }
+
+    #[test]
+    fn lost_bridge_classes() {
+        use super::Failure;
+        use crate::bridge::Exit;
+
+        let exited: anyhow::Error = Failure::BridgeExited(Exit::default()).into();
+        assert!(super::lost_bridge(&exited));
+        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+        let socket: anyhow::Error =
+            TransportError::io("SdkAgentService/Send", "reading the stream", reset).into();
+        assert!(super::lost_bridge(&socket));
+        let torn: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
+        assert!(super::lost_bridge(&torn));
+
+        // The bridge answered, in one way or another.
+        let inactive: anyhow::Error = Failure::Inactive {
+            idle_secs: 120,
+            inactivity_secs: 120,
+            cap_secs: 600,
+        }
+        .into();
+        assert!(!super::lost_bridge(&inactive));
+        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
+        assert!(!super::lost_bridge(&timeout));
+        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
+        assert!(!super::lost_bridge(&aborted));
+        let rejected: anyhow::Error =
+            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
+        assert!(!super::lost_bridge(&rejected));
+        assert!(!super::lost_bridge(&anyhow::anyhow!(
+            "bridge RPC `SdkAgentService/Send` failed (500 Internal Server Error, internal): boom"
+        )));
+        assert!(!super::lost_bridge(&anyhow::anyhow!("cursor run error: model overloaded")));
     }
 }

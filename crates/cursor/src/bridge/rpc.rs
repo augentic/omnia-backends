@@ -8,6 +8,12 @@
 //! codec with bearer auth. Unary calls are plain JSON bodies; server streams
 //! use the Connect envelope — a 1-byte flag plus a 4-byte big-endian length
 //! per message, with flag `0x02` marking the JSON `EndStreamResponse`.
+//!
+//! Failures come in three classes a caller can tell apart: a Connect error
+//! (the bridge answered with a status and code), an end-stream error (the
+//! run stream closed with an error frame), and a [`TransportError`] — the
+//! socket, the HTTP layer, or the framing gave out below Connect, so the
+//! bridge is not known to have seen the call at all.
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -38,6 +44,79 @@ const COMPRESSED: u8 = 0x01;
 /// Bound on the handshake (`Ping`, then `GetVersion`) that proves a bridge
 /// answers; a spawned bridge is already past its ready line by then.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A failure below the Connect protocol on one bridge RPC.
+///
+/// The request could not be sent, the response or run stream could not be
+/// read, or the stream ended inside a frame: the bridge never answered the
+/// call, unlike a Connect error (`failed (status, code)`) or an end-stream
+/// error, both of which are the bridge answering.
+#[derive(Debug)]
+pub struct TransportError {
+    method: String,
+    cause: Cause,
+}
+
+#[derive(Debug)]
+enum Cause {
+    /// The HTTP client or the socket failed while `doing`.
+    Io { doing: &'static str, source: Box<dyn std::error::Error + Send + Sync + 'static> },
+    /// The body ended with a partial envelope still buffered.
+    Truncated { buffered: usize },
+}
+
+impl TransportError {
+    pub(crate) fn io(
+        method: &str, doing: &'static str, source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            method: method.to_owned(),
+            cause: Cause::Io {
+                doing,
+                source: Box::new(source),
+            },
+        }
+    }
+
+    pub(crate) fn truncated(method: &str, buffered: usize) -> Self {
+        Self {
+            method: method.to_owned(),
+            cause: Cause::Truncated { buffered },
+        }
+    }
+
+    /// The `Service/Method` the failure struck.
+    #[must_use]
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+}
+
+// The source is left to `Error::source`, so an `{error:#}` chain names it
+// once.
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.cause {
+            Cause::Io { doing, .. } => {
+                write!(f, "bridge RPC `{}` transport failed {doing}", self.method)
+            }
+            Cause::Truncated { buffered } => write!(
+                f,
+                "bridge RPC `{}` stream ended mid-frame ({buffered} bytes buffered)",
+                self.method
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.cause {
+            Cause::Io { source, .. } => Some(source.as_ref()),
+            Cause::Truncated { .. } => None,
+        }
+    }
+}
 
 /// A cloneable `sdk.v1` client bound to one bridge endpoint and bearer token.
 #[derive(Clone)]
@@ -158,7 +237,7 @@ impl Rpc {
             .into_body()
             .collect()
             .await
-            .with_context(|| format!("reading `{method}` response"))?
+            .map_err(|error| TransportError::io(method, "reading the response", error))?
             .to_bytes();
         serde_json::from_slice(&bytes).with_context(|| format!("decoding `{method}` response"))
     }
@@ -186,7 +265,7 @@ impl Rpc {
             .hyper
             .request(self.post(method, content_type, body)?)
             .await
-            .with_context(|| format!("bridge RPC `{method}`"))?;
+            .map_err(|error| TransportError::io(method, "sending the request", error))?;
 
         let status = response.status();
         if status.is_success() {
@@ -196,7 +275,7 @@ impl Rpc {
             .into_body()
             .collect()
             .await
-            .with_context(|| format!("reading `{method}` response"))?
+            .map_err(|error| TransportError::io(method, "reading the error response", error))?
             .to_bytes();
         Err(connect_error(method, status, &bytes))
     }
@@ -348,23 +427,22 @@ struct FrameStream {
 
 impl FrameStream {
     /// The next envelope, or `None` when the body ends cleanly at a frame
-    /// boundary. Fails on transport errors, a truncated frame, or a
-    /// compressed frame (compression is never negotiated).
+    /// boundary. Fails with a [`TransportError`] on a socket failure or a
+    /// truncated frame, and plainly on a compressed frame (compression is
+    /// never negotiated).
     async fn next(&mut self) -> Result<Option<Frame>> {
         loop {
             if let Some(frame) = decode_frame(&mut self.buffer)? {
                 return Ok(Some(frame));
             }
             let Some(chunk) = self.body.frame().await else {
-                ensure!(
-                    self.buffer.is_empty(),
-                    "bridge RPC `{}` stream ended mid-frame ({} bytes buffered)",
-                    self.method,
-                    self.buffer.len()
-                );
+                if !self.buffer.is_empty() {
+                    return Err(TransportError::truncated(&self.method, self.buffer.len()).into());
+                }
                 return Ok(None);
             };
-            let chunk = chunk.with_context(|| format!("reading `{}` stream", self.method))?;
+            let chunk = chunk
+                .map_err(|error| TransportError::io(&self.method, "reading the stream", error))?;
             if let Ok(data) = chunk.into_data() {
                 self.buffer.extend_from_slice(&data);
             }
@@ -411,11 +489,72 @@ fn end_stream_error(method: &str, payload: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
+    use hyper_util::client::legacy::Client as HyperClient;
+    use hyper_util::rt::TokioExecutor;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
 
     use super::{
-        already_gone, connect_error, decode_frame, end_stream_error, envelope,
+        Rpc, TransportError, already_gone, connect_error, decode_frame, end_stream_error, envelope,
         require_loopback_http,
     };
+
+    /// A client bound to `addr` with no handshake.
+    fn rpc_at(addr: std::net::SocketAddr) -> Rpc {
+        Rpc {
+            hyper: HyperClient::builder(TokioExecutor::new()).build_http(),
+            base: format!("http://{addr}"),
+            bearer: "Bearer test".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_port() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind loopback");
+        let addr = listener.local_addr().expect("local address");
+        drop(listener);
+
+        let error = rpc_at(addr).ping().await.expect_err("nothing listens there");
+        let transport = error
+            .downcast_ref::<TransportError>()
+            .unwrap_or_else(|| panic!("a socket failure is typed: {error:?}"));
+        assert_eq!(transport.method(), "SdkBridgeControlService/Ping");
+        assert!(error.chain().count() >= 2, "the hyper source is kept: {error:?}");
+    }
+
+    #[tokio::test]
+    async fn stream_truncated_mid_frame() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind loopback");
+        let addr = listener.local_addr().expect("local address");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("one connection");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).await;
+            // A well-formed chunked body that ends three bytes into an
+            // envelope: clean at the HTTP layer, torn at the Connect one.
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/connect+json\r\n\
+                      transfer-encoding: chunked\r\n\r\n3\r\n\x00\x00\x00\r\n0\r\n\r\n",
+                )
+                .await
+                .expect("the response is written");
+            // Hold the socket until the client is done, so no reset races
+            // the response.
+            while stream.read(&mut request).await.is_ok_and(|read| read > 0) {}
+        });
+
+        let mut run = rpc_at(addr)
+            .send("agent-1".to_owned(), "hi".to_owned())
+            .await
+            .expect("the response head is a success");
+        let error = run.next().await.expect_err("three bytes are not a frame");
+        let transport = error
+            .downcast_ref::<TransportError>()
+            .unwrap_or_else(|| panic!("a torn frame is typed: {error:?}"));
+        assert_eq!(transport.method(), "SdkAgentService/Send");
+        assert!(error.to_string().contains("mid-frame (3 bytes buffered)"), "{error}");
+    }
 
     #[test]
     fn loopback_http_accepted() {

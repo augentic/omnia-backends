@@ -43,6 +43,24 @@ Pairs with omnia 0.36.x.
   `cursor_bridge_spawn_failures`, and a spawn that does not complete its
   handshake fails with the exit status and the step that failed; its
   stderr tail, likewise, is at DEBUG only.
+- `omnia-cursor` survives a bridge that dies under the opening of a
+  completion: when `CreateAgent` or the opening `Send` fails because the
+  process exited or its socket failed below Connect, and no candidate has
+  yet reached the guest's `check`, the dead lease is released and the
+  prompt goes once more on a fresh one — exactly one restart per
+  `complete`, logged at WARN (`completion restarting on a fresh bridge`)
+  and counted as `cursor_bridge_restarts`; the second attempt's result is
+  final. A loss after a candidate, a deadline, an abort, a Connect or
+  end-stream error, and a lease failure stand as they are. Failures below
+  Connect are now the typed `TransportError` (outcome `transport`),
+  distinct from a Connect error and from an end-stream error; `Failure`,
+  `Exit`, and `TransportError` are public so callers match on types rather
+  than messages, and `WasiModelCtx::complete` documents them. The bridge
+  exit WARN names the process (`pid`, `uptime_ms`, `status_text` such as
+  `signal: 9 (SIGKILL)`) and the run on it (`run_in_flight`, `silent_ms`),
+  and the spawned bridge's `CURSOR_SDK_BRIDGE_LOG` passthrough is
+  documented. The `expect_error` guest scenario gains a `check` flag for a
+  failure that must strike after a candidate reached the guest.
 - `omnia-genai` gains `ConnectOptions::endpoint` (`GENAI_ENDPOINT`): a base
   URL every request goes to in place of the provider's own — the
   self-hosted-gateway option. The request keeps the shape of the provider

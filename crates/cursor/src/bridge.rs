@@ -3,11 +3,13 @@
 //! A bridge is spawned with the tool-callback registration flags and a
 //! client-owned state root, handshaken by scanning stderr for the
 //! `cursor-sdk-bridge ready ` line, and watched until it exits — on request
-//! through [`Bridge::close`], or on its own, which [`Bridge::died`] reports.
-//! The last lines it wrote to stderr are untrusted subprocess output: they
-//! are logged at DEBUG for operators and never carried into WARN events or
-//! the error messages callers see. [`Bridge::attach`] joins a bridge some
-//! other process manages instead.
+//! through [`Bridge::close`], or on its own, which [`Bridge::died`] reports
+//! and the watcher logs at WARN with the pid, the uptime, the exit status,
+//! and whether a run was in flight and for how long its stream had been
+//! silent. The last lines it wrote to stderr are untrusted subprocess
+//! output: they are logged at DEBUG for operators and never carried into
+//! WARN events or the error messages callers see. [`Bridge::attach`] joins
+//! a bridge some other process manages instead.
 
 mod discovery;
 mod messages;
@@ -23,7 +25,7 @@ pub use messages::{
     AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
     RunStatus, RunStreamResult, SdkMessage, ToolList,
 };
-pub use rpc::Rpc;
+pub use rpc::{Rpc, TransportError};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, BufReader, Lines};
 use tokio::process::{Child, ChildStderr, Command};
@@ -53,6 +55,32 @@ pub struct Bridge {
     exit: watch::Receiver<Option<Exit>>,
     // Wakes the watcher into a graceful shutdown; `None` for an attached bridge.
     shutdown: Option<Arc<Notify>>,
+    // The run in flight on this bridge, for the watcher's exit report.
+    run: Arc<RunWatch>,
+}
+
+/// The activity clock of the run in flight on a bridge: the agent's `Send`
+/// hands over a receiver whose sender lives as long as the run does.
+#[derive(Debug, Default)]
+struct RunWatch(Mutex<Option<watch::Receiver<tokio::time::Instant>>>);
+
+impl RunWatch {
+    fn set(&self, activity: watch::Receiver<tokio::time::Instant>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(activity);
+    }
+
+    /// Whether a run is in flight, and how long its stream has been silent.
+    fn snapshot(&self) -> (bool, Option<u64>) {
+        let guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        match guard.as_ref() {
+            // A closed channel is a `Send` that has returned.
+            Some(activity) if activity.has_changed().is_ok() => {
+                let silent = activity.borrow().elapsed().as_millis();
+                (true, Some(u64::try_from(silent).unwrap_or(u64::MAX)))
+            }
+            _ => (false, None),
+        }
+    }
 }
 
 /// A spawned process whose ready-line handshake has not finished.
@@ -81,10 +109,13 @@ struct HandshakeIo {
     rpc: Arc<OnceLock<Rpc>>,
 }
 
-/// How a spawned bridge ended: the exit status, when the wait reported one.
+/// How a spawned bridge ended.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Exit {
+    /// The exit status, when the wait reported one.
     pub status: Option<ExitStatus>,
+    /// The process id, when the spawn reported one.
+    pub pid: Option<u32>,
 }
 
 impl PendingHandshake {
@@ -159,6 +190,10 @@ impl Bridge {
             .tempdir()
             .context("creating state root")?;
 
+        // The rest of the environment is inherited — `CURSOR_SDK_BRIDGE_LOG`
+        // included, so an operator can turn the bridge's own logging up
+        // from outside — bar the git identity, which would point the agent
+        // at the host's repository rather than its cwd.
         let mut command = Command::new(bin);
         command
             .kill_on_drop(true)
@@ -189,14 +224,18 @@ impl Bridge {
             drained: Mutex::new(None),
             rpc: Arc::clone(&rpc),
         });
+        let run = Arc::new(RunWatch::default());
         let (exit_tx, exit) = watch::channel(None);
         let shutdown = Arc::new(Notify::new());
         tokio::spawn(watch_child(
             Spawned {
                 child,
+                pid,
+                started: at,
                 tail: Arc::clone(&tail),
                 state_root,
                 io: Arc::clone(&io),
+                run: Arc::clone(&run),
             },
             Arc::clone(&shutdown),
             exit_tx,
@@ -207,6 +246,7 @@ impl Bridge {
                 rpc,
                 exit: exit.clone(),
                 shutdown: Some(shutdown),
+                run,
             },
             handshake: PendingHandshake {
                 bin: bin.to_owned(),
@@ -232,11 +272,19 @@ impl Bridge {
             rpc,
             exit,
             shutdown: None,
+            run: Arc::default(),
         })
     }
 
     pub fn rpc(&self) -> &Rpc {
         self.rpc.get().expect("the bridge handshake has completed")
+    }
+
+    /// Hand the watcher the activity clock of the run about to go over this
+    /// bridge, so an uninvited exit reports whether a run was in flight and
+    /// how long its stream had been silent. The sender's life is the run's.
+    pub fn watch_run(&self, activity: watch::Receiver<tokio::time::Instant>) {
+        self.run.set(activity);
     }
 
     /// Whether this client spawned the process and shuts it down.
@@ -294,9 +342,14 @@ impl Drop for Bridge {
 // A spawned process and what it leaves behind.
 struct Spawned {
     child: Child,
+    // `Child::id` is `None` once the process has been reaped, so the pid is
+    // kept from the spawn for the exit report.
+    pid: Option<u32>,
+    started: Instant,
     tail: Arc<Tail>,
     state_root: TempDir,
     io: Arc<HandshakeIo>,
+    run: Arc<RunWatch>,
 }
 
 // Wait for a shutdown request or the process's own exit, publish how it
@@ -325,6 +378,11 @@ async fn watch_child(
             (status, false)
         }
     };
+    // Taken as the exit is seen, before the drain below: the agent's
+    // `Send` is still pending on the socket, so this is the run's state at
+    // the moment the process went.
+    let (run_in_flight, silent_ms) = spawned.run.snapshot();
+    let uptime_ms = elapsed_ms(spawned.started);
 
     // The pipe may still hold the bridge's last lines; a grandchild that
     // inherited it can also hold it open, so do not wait for EOF.
@@ -332,10 +390,17 @@ async fn watch_child(
     if let Some(drained) = drained {
         let _ = timeout(EXIT_GRACE, drained).await;
     }
-    let exit = Exit { status };
+    let exit = Exit {
+        status,
+        pid: spawned.pid,
+    };
     if crashed {
         tracing::warn!(
-            status = %status_text(exit.status),
+            pid = spawned.pid,
+            uptime_ms,
+            status_text = %status_text(exit.status),
+            run_in_flight,
+            silent_ms,
             monotonic_counter.cursor_bridge_exits = 1_u64,
             "cursor-sdk-bridge exited"
         );
@@ -410,4 +475,42 @@ fn drain_stderr(
             tail.push(line);
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::ExitStatus;
+    use std::time::Duration;
+
+    use tokio::sync::watch;
+
+    use super::{RunWatch, status_text};
+
+    // The crash WARN and `Failure::BridgeExited` both lean on std naming
+    // the signal, so a bare number here would be a regression.
+    #[test]
+    fn status_text_names_the_signal() {
+        assert_eq!(status_text(Some(ExitStatus::from_raw(9))), "signal: 9 (SIGKILL)");
+        assert_eq!(status_text(Some(ExitStatus::from_raw(3 << 8))), "exit status: 3");
+        assert_eq!(status_text(None), "status unknown");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_watch_follows_the_send() {
+        let run = RunWatch::default();
+        assert_eq!(run.snapshot(), (false, None), "nothing has been sent yet");
+
+        let (activity, rx) = watch::channel(tokio::time::Instant::now());
+        run.set(rx);
+        tokio::time::advance(Duration::from_millis(1500)).await;
+        assert_eq!(run.snapshot(), (true, Some(1500)), "a run in flight, silent since it began");
+
+        activity.send_replace(tokio::time::Instant::now());
+        tokio::time::advance(Duration::from_millis(200)).await;
+        assert_eq!(run.snapshot(), (true, Some(200)), "an event rearms the silence");
+
+        drop(activity);
+        assert_eq!(run.snapshot(), (false, None), "the `Send` has returned");
+    }
 }

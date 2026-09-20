@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
+pub use bridge::{Exit, TransportError};
+pub use model::Failure;
 use omnia::Backend;
 use tracing::instrument;
 

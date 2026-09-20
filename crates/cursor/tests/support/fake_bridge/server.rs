@@ -26,7 +26,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, oneshot};
 use tokio::time::sleep;
 
-use super::log::{Kind, Recorder, Rpc};
+use super::log::{Kind, Log, Recorder, Rpc};
 use super::proto::{
     CallCustomToolRequest, CallCustomToolResponse, struct_to_value, value_to_struct,
 };
@@ -142,6 +142,31 @@ impl Server {
 
     pub fn find<T>(&self, pick: impl Fn(&Fault) -> Option<T>) -> Option<T> {
         self.faults().find_map(pick)
+    }
+
+    // A peer's `Send` is recorded before its init event is observed; wait
+    // that extra beat so the client notes the run id while we still hold
+    // the winner.
+    async fn await_peer(&self, rpc: Rpc) {
+        let Some(path) = self.recorder.log_path() else {
+            return;
+        };
+        let me = self.process.unwrap_or(0);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            if Log::read(path)
+                .events
+                .iter()
+                .any(|event| event.process != me && event.rpc() == Some(rpc))
+            {
+                sleep(Duration::from_millis(100)).await;
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 
     // Whether the nth call of some RPC is the one a counted fault targets.
@@ -393,6 +418,12 @@ impl Server {
     ) -> Outcome {
         if self.has(&Fault::Hang(Point::Stream)) {
             std::future::pending::<()>().await;
+        }
+        if let Some(rpc) = self.find(|fault| match fault {
+            Fault::WaitForPeer(rpc) => Some(*rpc),
+            _ => None,
+        }) {
+            self.await_peer(rpc).await;
         }
         if self.has(&Fault::Park(Point::Stream)) {
             tokio::select! {

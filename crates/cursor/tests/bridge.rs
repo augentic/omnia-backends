@@ -291,12 +291,15 @@ async fn abandon_during_teardown() {
 
 #[tokio::test]
 async fn abandon_while_queued() {
-    // Three completions on two slots: process 1 answers, process 2 hangs
-    // mid-run, and the third completion is still waiting for a permit when
-    // the guest drops it. The winner's process lingers after `Shutdown` so
-    // its slot is not back before the drop.
+    // Three completions on two slots: process 1 answers once process 2
+    // has opened a run, process 2 hangs mid-run, and the third is still
+    // waiting for a permit when the guest drops it. `Send` is recorded
+    // before the stream's first event is observed, so a winner that
+    // answers at once can drop the loser with no run id to cancel.
+    // Lingering after `Shutdown` keeps the third completion queued.
     let fake = Spawnable::new(
         &Config::echo()
+            .fault_on(1, Fault::WaitForPeer(Rpc::Send))
             .fault_on(1, Fault::LingerOnShutdown(1500))
             .fault_on(2, Fault::Hang(Point::Stream)),
     );

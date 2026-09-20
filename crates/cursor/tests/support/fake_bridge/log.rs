@@ -124,6 +124,11 @@ impl Recorder {
         self.process
     }
 
+    /// The shared JSONL log a spawned process appends to.
+    pub fn log_path(&self) -> Option<&Path> {
+        self.file.as_deref()
+    }
+
     pub fn record(&self, kind: Kind, agent: Option<&str>, arg: Value) {
         let event = self.event(kind, agent, arg);
         if let Some(path) = &self.file {

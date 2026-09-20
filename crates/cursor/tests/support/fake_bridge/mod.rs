@@ -88,6 +88,9 @@ pub enum Fault {
     /// Answer `Shutdown`, then stay up this many milliseconds before
     /// exiting: the lease's slot stays held for that long.
     LingerOnShutdown(u64),
+    /// Hold the run's answer until another spawned process has recorded
+    /// this RPC. In-process (no shared log) this is a no-op.
+    WaitForPeer(Rpc),
 }
 
 /// A fault and the spawned process it targets: 1-based in start order

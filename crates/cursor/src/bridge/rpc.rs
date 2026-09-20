@@ -9,8 +9,12 @@
 //! use the Connect envelope — a 1-byte flag plus a 4-byte big-endian length
 //! per message, with flag `0x02` marking the JSON `EndStreamResponse`.
 
+use std::net::IpAddr;
+use std::time::Duration;
+
 use anyhow::{Context as _, Result, bail, ensure};
 use bytes::{Bytes, BytesMut};
+use http::Uri;
 use http_body_util::{BodyExt as _, Full};
 use hyper::body::Incoming;
 use hyper::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -31,6 +35,9 @@ use super::messages::{
 const END_STREAM: u8 = 0x02;
 /// Envelope flag bit marking a compressed frame (never negotiated here).
 const COMPRESSED: u8 = 0x01;
+/// Bound on the handshake (`Ping`, then `GetVersion`) that proves a bridge
+/// answers; a spawned bridge is already past its ready line by then.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A cloneable `sdk.v1` client bound to one bridge endpoint and bearer token.
 #[derive(Clone)]
@@ -47,17 +54,39 @@ impl std::fmt::Debug for Rpc {
 }
 
 impl Rpc {
+    /// Bind without a handshake — tests that never issue an RPC.
+    #[cfg(test)]
+    pub(crate) fn unbound() -> Self {
+        Self {
+            hyper: HyperClient::builder(TokioExecutor::new()).build_http(),
+            base: String::new(),
+            bearer: String::new(),
+        }
+    }
+
     /// Bind to `base` and prove the bridge answers `sdk.v1`.
     pub async fn connect(base: String, token: &str) -> Result<Self> {
+        // The client is HTTP-only: refuse anything that is not loopback
+        // before the bearer token or `DeleteAgent`'s API key go on the wire.
+        require_loopback_http(&base)?;
         let rpc = Self {
             hyper: HyperClient::builder(TokioExecutor::new()).build_http(),
             base,
             bearer: format!("Bearer {token}"),
         };
-        rpc.ping().await?;
-        let version = rpc.get_version().await?;
+        let version = tokio::time::timeout(CONNECT_TIMEOUT, async {
+            rpc.ping().await?;
+            rpc.get_version().await
+        })
+        .await
+        .map_err(|_elapsed| {
+            anyhow::anyhow!(
+                "bridge did not answer the handshake within {}s",
+                CONNECT_TIMEOUT.as_secs()
+            )
+        })??;
         ensure!(version.protocol_version == "sdk.v1", "unsupported protocol version");
-        tracing::info!(?version.capabilities, "ready");
+        tracing::debug!(?version.capabilities, "ready");
         Ok(rpc)
     }
 
@@ -192,6 +221,30 @@ impl Rpc {
             .body(Full::new(Bytes::from(body)))
             .with_context(|| format!("building `{method}` request"))
     }
+}
+
+/// `http://` to a loopback host: IP literal in `127.0.0.0/8` or `::1`, or
+/// the name `localhost`. Anything else would send credentials in the clear.
+fn require_loopback_http(base: &str) -> Result<()> {
+    let uri: Uri = base.parse().context("parsing bridge URL")?;
+    ensure!(
+        uri.scheme() == Some(&http::uri::Scheme::HTTP),
+        "bridge URL must use the http scheme (the client has no TLS)"
+    );
+    if let Some(authority) = uri.authority() {
+        ensure!(!authority.as_str().contains('@'), "bridge URL must not include userinfo");
+    }
+    let host = uri.host().context("bridge URL must include a host")?;
+    ensure!(is_loopback_host(host), "bridge URL must target a loopback host");
+    Ok(())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let host = host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host);
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Wrap one message in the Connect streaming envelope.
@@ -362,13 +415,57 @@ fn end_stream_error(method: &str, payload: &[u8]) -> Result<()> {
     bail!("bridge RPC `{method}` stream failed ({code}): {message}")
 }
 
-// Deliberate unit tests: pure envelope framing and error decoding (CI floor);
-// `tests/live.rs` proves the client against a real bridge.
+// Deliberate unit tests: loopback attach URL, envelope framing, and error
+// decoding (CI floor); `tests/live.rs` proves the client against a real bridge.
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
 
-    use super::{already_gone, connect_error, decode_frame, end_stream_error, envelope};
+    use super::{
+        already_gone, connect_error, decode_frame, end_stream_error, envelope,
+        require_loopback_http,
+    };
+
+    #[test]
+    fn loopback_http_accepted() {
+        for url in [
+            "http://127.0.0.1",
+            "http://127.0.0.1:9",
+            "http://127.1.2.3:9",
+            "http://[::1]:9",
+            "http://localhost:9",
+            "http://LOCALHOST:9",
+        ] {
+            require_loopback_http(url).unwrap_or_else(|error| panic!("{url}: {error}"));
+        }
+    }
+
+    #[test]
+    fn loopback_http_rejected() {
+        for (url, needle) in [
+            ("http://192.0.2.1:9", "loopback"),
+            ("http://8.8.8.8:9", "loopback"),
+            ("http://0.0.0.0:9", "loopback"),
+            ("http://[::ffff:8.8.8.8]:9", "loopback"),
+            ("http://example.com:9", "loopback"),
+            ("http://127.0.0.1.example.com:9", "loopback"),
+            ("http://localhost.example.com:9", "loopback"),
+            ("https://127.0.0.1:9", "http scheme"),
+            ("http://user:token@127.0.0.1:9", "userinfo"),
+            ("not a url", "parsing"),
+        ] {
+            let error = require_loopback_http(url).expect_err(url);
+            assert!(error.to_string().contains(needle), "{url}: expected {needle:?} in {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_non_loopback_before_io() {
+        let error = super::Rpc::connect("http://192.0.2.1:9".into(), "secret")
+            .await
+            .expect_err("a remote host is rejected before any RPC");
+        assert!(error.to_string().contains("loopback"), "{error}");
+    }
 
     #[test]
     fn envelope_prefix() {

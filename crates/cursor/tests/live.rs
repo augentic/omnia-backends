@@ -8,10 +8,14 @@
 //! All tests are `#[ignore]`d so they never run or spawn a process in CI; run
 //! them with `cargo nextest run --run-ignored all` (or `cargo test --
 //! --ignored`) alongside an installed `cursor-sdk-bridge` and a `CURSOR_API_KEY`.
+//! `upstream_tripwire` additionally needs a hand-started bridge named by
+//! `CURSOR_BRIDGE_URL` and `CURSOR_BRIDGE_TOKEN`.
 
 mod support;
 
-use anyhow::Result;
+use std::time::Duration;
+
+use anyhow::{Context as _, Result};
 use omnia::Backend as _;
 use omnia_cursor::{Client, ConnectOptions};
 use omnia_wasi_model::{
@@ -24,6 +28,24 @@ use support::{
     serve,
 };
 use tokio::net::TcpListener;
+
+/// How long the pool may take to reopen every slot once the answers are in:
+/// each lease's process is shut down and waited for first.
+const REOPEN: Duration = Duration::from_secs(15);
+
+/// Wait for every slot to reopen — every spawned process gone.
+async fn await_idle(client: &Client, slots: usize) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + REOPEN;
+    while client.idle_slots() != slots {
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "{} of {slots} slots idle after {REOPEN:?}: a lease did not release",
+            client.idle_slots()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
 
 /// The answer text as the JSON object the prompts ask for.
 fn object(answer: &Answer) -> Value {
@@ -116,16 +138,10 @@ async fn live_cursor_completes() -> Result<()> {
     Ok(())
 }
 
-/// Four completions pending together, the way `emery_sdk::extract` puts its
-/// seams up: one bridge process per agent on the pooled client, none held
-/// two, and every answer arrives. `connect()` leaves `max_agents` at four,
-/// so nothing here queues.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn live_fanout() -> Result<()> {
-    const AGENTS: usize = 4;
-    let client = connect().await?;
-    let pending: Vec<_> = (0..AGENTS)
+/// `agents` completions pending together on `client`: every answer arrives
+/// and carries a verdict, then every slot reopens.
+async fn fanout(client: &Client, agents: usize) -> Result<()> {
+    let pending: Vec<_> = (0..agents)
         .map(|_| {
             let client = client.clone();
             tokio::spawn(async move { client.complete(verdict_request(), no_tool_host()).await })
@@ -142,7 +158,59 @@ async fn live_fanout() -> Result<()> {
             "completion {index} must carry a string verdict: {value}"
         );
     }
+    await_idle(client, agents).await
+}
+
+/// Four completions pending together, the way `emery_sdk::extract` puts its
+/// seams up: one bridge process per agent on the pooled client, none held
+/// two, every answer arrives, and every slot is back once they have.
+/// `connect()` leaves `max_agents` at four, so nothing here queues.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
+async fn live_fanout() -> Result<()> {
+    let client = connect().await?;
+    fanout(&client, 4).await
+}
+
+/// `live_fanout` twenty times over on one client: a bridge that exits
+/// under the fan-out fails its completion with `cursor-sdk-bridge exited`,
+/// and a lease that does not release leaves a slot closed for the next
+/// round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; slow (20 fan-outs); run with --run-ignored"]
+async fn stress_fanout() -> Result<()> {
+    let client = connect().await?;
+    for round in 0..20 {
+        fanout(&client, 4).await.with_context(|| format!("fan-out round {round}"))?;
+    }
     Ok(())
+}
+
+/// Two completions at once on one *attached* bridge — two agents on one
+/// process, which the pool never does. Red today by design: the upstream
+/// bridge dies of a double-close (`EXC_GUARD`, wait status 9) with two live
+/// agents, and since an attached bridge is never seen to die, both
+/// completions fail as transport errors while the crash report is the
+/// evidence. Green means a bridge release fixed it, and an
+/// `agents_per_bridge` knob is worth adding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live tripwire: needs a running cursor-sdk-bridge named by CURSOR_BRIDGE_URL and \
+            CURSOR_BRIDGE_TOKEN, plus CURSOR_API_KEY; run with --run-ignored"]
+async fn upstream_tripwire() -> Result<()> {
+    let bridge_url = std::env::var("CURSOR_BRIDGE_URL").context("CURSOR_BRIDGE_URL is unset")?;
+    let bridge_token =
+        std::env::var("CURSOR_BRIDGE_TOKEN").context("CURSOR_BRIDGE_TOKEN is unset")?;
+    let client = Client::connect_with(ConnectOptions {
+        timeout_secs: 120,
+        inactivity_secs: 60,
+        model: "auto".to_owned(),
+        max_agents: 2,
+        bridge_bin: "cursor-sdk-bridge".to_owned(),
+        bridge_url: Some(bridge_url),
+        bridge_token: Some(bridge_token),
+    })
+    .await?;
+    fanout(&client, 2).await
 }
 
 /// A request whose only path to the answer is the `lookup` function tool the

@@ -169,29 +169,74 @@ The full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor
 
 ## Tests
 
-The agent loop's unit tests (in `src/model/agent.rs`) run the guest `check`
-loop against a scripted loopback `sdk.v1` bridge the client attaches to
-(`bridge_url` + `bridge_token`, the same path a shared external bridge uses)
-— accept, correct-then-accept (the correction alone is the next `Send` on the
-same agent), and exhaust (the typed `budget-exhausted` carrying the last
-correction) — so the loop is covered on every `make test` without a bridge
-process.
+Three tiers. The first two run on every `cargo nextest run -p omnia-cursor
+--all-features` with no bridge installed and no key; the third is the real
+bridge, by hand.
 
-[`tests/live.rs`](tests/live.rs) drives real completions through the
-`wasi-model` boundary: the plain acceptance run, a function-tool round-trip
-with a lent workspace, a no-workspace function-tool run, an in-process MCP
-grant without a lent workspace (so the empty built-in allowlist still admits
-MCP), the guest `check` loop (a stand-in check rejects the first answer
-with a correction the agent must follow on its own session, and one that
-rejects both proves the typed `budget-exhausted`), and a four-way fan-out
-that holds four bridge processes at once through the pool, the shape
-`emery` puts up when it extracts in parallel. All are `#[ignore]`d so they
-never spawn a process in CI; run them with `cursor-sdk-bridge` installed:
+**Tier 1 — the fake bridge.** [`tests/support/fake_bridge`](tests/support/fake_bridge)
+is a protocol-faithful `cursor-sdk-bridge`: bearer-checked `sdk.v1` Connect
+RPCs, `agent-<n>` ids counted per process (so two processes hand out the
+same id, as the real one does), `Send` as an enveloped run stream, and
+`CallCustomTool` posted back to this crate's own callback endpoint. It has
+two mounts — served in-process for attach mode, where a test can park a
+request at any point of an agent's life and release it, and built as the
+`fake-cursor-sdk-bridge` binary (feature `fake-bridge`) for spawn mode,
+where the client starts one process per lease and every process appends to
+one JSONL log the test folds back into per-process histories. A scripted
+`Config` decides the reply (`Echo`, `Replies`, `Tool`, `Paced`) and the
+faults (hang or park at a point, exit or `SIGKILL` on the nth call, a
+missing, refused, or non-loopback ready line, a reset stream, an empty id,
+a failing close), each fault aimed at one spawned process or all of them.
+
+**Tier 2 — guests through the runtime.** Every scenario is a guest
+component from [`crates/test-programs`](../test-programs) run through
+`omnia_test::host::Deployment` over an `omnia_cursor::Client`, so what is
+asserted is the guest-visible contract; the test then asserts the fake's
+per-agent RPC sequence and that the pool's slots are all back
+(`Client::idle_slots`, a hidden probe). [`tests/model.rs`](tests/model.rs)
+is one row per guest program (`foreach_model!` fails to compile when a
+program has no row): echo, the three `check` outcomes, tool round-trips in
+every callback codec, a repairable and an undeclared tool, fan-out over
+four processes, tool fan-out where every process calls its agent `agent-1`,
+and a fan-out whose losers are dropped mid-run.
+[`tests/bridge.rs`](tests/bridge.rs) is the lifecycle and fault matrix:
+option validation, a completion dropped at every point it can be waiting
+(handshake, pre-ready, create, pre-stream, teardown, and still queued for a
+slot), pooling and the late-create reap, the inactivity and cap deadlines,
+process death before and after the ready line and mid-run, a bridge that
+hangs on `Ping`, `CloseAgent`, or `Shutdown`, attach mode, a reset stream,
+the callback endpoint's rejections and token revocation, and a check that
+the ready line and its token never reach a log. Guests are compiled by the
+`test-programs` build script; there is no separate `--target` build to run.
+
+**Tier 3 — the real bridge.** [`tests/live.rs`](tests/live.rs) drives real
+completions through the `wasi-model` boundary: the plain acceptance run, a
+function-tool round-trip with a lent workspace, a no-workspace function-tool
+run, an in-process MCP grant, the guest `check` loop, a four-way fan-out
+that holds four bridge processes at once and then sees every slot reopen,
+and `stress_fanout`, that fan-out twenty times over (a bridge that exits
+under load fails its completion with `cursor-sdk-bridge exited`). All are
+`#[ignore]`d so they never spawn a process in CI; run them with
+`cursor-sdk-bridge` installed:
 
 ```bash
 CURSOR_API_KEY=... \
-  cargo nextest run -p omnia-cursor --run-ignored all
+  cargo nextest run -p omnia-cursor --all-features --run-ignored all
 ```
+
+Add `CURSOR_SDK_BRIDGE_LOG=1` when a live failure needs the bridge's
+per-RPC stderr; the client logs the tail of it at DEBUG.
+
+`upstream_tripwire` is the one live test that is red on purpose. It
+attaches to a bridge you start by hand (`CURSOR_BRIDGE_URL` and
+`CURSOR_BRIDGE_TOKEN` from its ready line) with `max_agents = 2` and runs
+two completions at once — two agents on one process, which the pool never
+does. Today the upstream bridge dies of a double-close (`EXC_GUARD`, wait
+status 9) with two live agents; an attached bridge is never seen to die,
+so both completions fail as transport errors and the crash report is the
+evidence. Red means one process still cannot host two agents and the
+one-process-per-agent pool stays as it is. Green means a bridge release has
+fixed it, and an `agents_per_bridge` knob is worth adding.
 
 ## License
 

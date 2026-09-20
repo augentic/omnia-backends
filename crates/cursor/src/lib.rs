@@ -24,6 +24,17 @@ pub struct Client {
     pool: Arc<Pool>,
 }
 
+impl Client {
+    /// Agent slots no completion holds right now: `max_agents` when the
+    /// pool is idle. A slot reopens only once its bridge process is gone,
+    /// so this is the test suites' probe for a lease fully released.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn idle_slots(&self) -> usize {
+        self.pool.idle_slots()
+    }
+}
+
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")

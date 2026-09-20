@@ -18,6 +18,11 @@ workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+# The protocol-faithful fake `cursor-sdk-bridge` the e2e suites spawn and
+# attach to (`fake-cursor-sdk-bridge`), and the suites themselves.
+fake-bridge = ["dep:libc", "http-body-util/channel", "tokio/rt-multi-thread"]
+
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
@@ -27,6 +32,7 @@ http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1", "server"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
+libc = { workspace = true, optional = true }
 # Pinned to the local omnia 0.36.0 line via the workspace `[patch.crates-io]`
 # override (the `omnia-wasi-model` host crate is unreleased on crates.io).
 omnia.workspace = true
@@ -41,4 +47,26 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tracing.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
+omnia-test = { workspace = true, features = ["host"] }
+test-programs.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "test-util", "time"] }
+tracing-subscriber.workspace = true
+
+# The fake bridge is a binary of this package so the suites find it through
+# `CARGO_BIN_EXE_fake-cursor-sdk-bridge`; it shares its source with the
+# in-process mount under `tests/support/fake_bridge`.
+[[bin]]
+name = "fake-cursor-sdk-bridge"
+path = "tests/support/fake_bridge/main.rs"
+required-features = ["fake-bridge"]
+test = false
+doc = false
+
+[[test]]
+name = "model"
+required-features = ["fake-bridge"]
+
+[[test]]
+name = "bridge"
+required-features = ["fake-bridge"]

@@ -125,7 +125,7 @@ impl Drop for Completion {
 ///
 /// `complete`'s error downcasts to one of these — or to a
 /// [`TransportError`], or to the typed `budget-exhausted` a rejected check
-/// ends on. [`outcome_of`] labels the metric outcome the same way.
+/// ends on.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Failure {

@@ -5,6 +5,12 @@
 //! succeeds, `fanout_abandon` when the guest must drop a completion — then
 //! asserts the fake's per-agent RPC sequence and the pool whole again
 //! within a stated bound. No row drives `Client::complete` from the test.
+//!
+//! The restart rows (under "Process death" and "Transport") pin the one
+//! retry the client makes: a bridge lost before any candidate reached the
+//! guest is given up, and the prompt goes once more to a fresh lease; a
+//! second loss, a loss after a candidate, or a run that merely stalls is
+//! the failure as it stands.
 
 mod support;
 
@@ -16,7 +22,7 @@ use omnia::Backend as _;
 use omnia_cursor::{Client, ConnectOptions};
 use serde_json::json;
 use support::fake_bridge::{
-    self, Config, FakeBridge, Fault, History as _, Log, Point, Process, Rpc, Spawnable, Then,
+    self, Config, Event, FakeBridge, Fault, History as _, Log, Point, Process, Rpc, Spawnable, Then,
 };
 use support::harness::{
     AT_ONCE, CALLBACK_PATH, REOPEN, STARTUP, attach_options, attached, await_idle,
@@ -68,6 +74,35 @@ fn without_cancel(sequence: &[Rpc]) -> Vec<Rpc> {
 fn killed(process: &Process) {
     assert!(!process.alive(), "process {} (pid {}) is still up", process.number, process.pid);
     assert_eq!(process.count(Rpc::Shutdown), 0, "process {} was killed, not asked", process.number);
+}
+
+/// The `Failure::BridgeExited` detail a `SIGKILL`ed bridge fails with.
+const KILLED: &str = "cursor-sdk-bridge exited (signal: 9 (SIGKILL)) during the run";
+/// The full sequence of a completion that answered.
+const ANSWERED: [Rpc; 4] = [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent];
+
+/// The two workers a restarted completion leaves behind, in start order.
+fn restarted(log: &Log) -> (Process, Process) {
+    let mut workers = log.workers().into_iter();
+    let (first, second) = (workers.next(), workers.next());
+    assert!(workers.next().is_none(), "at most one restart per completion: {}", log.summary());
+    let first = first.expect("a first attempt");
+    let second = second.unwrap_or_else(|| panic!("no second attempt: {}", log.summary()));
+    (first, second)
+}
+
+/// The second attempt began only once the first attempt's process was
+/// gone: with one slot, the restart waits for the dead lease to be reaped.
+fn restarted_after(first: &Process, second: &Process) {
+    let first_last = first.events.last().map(Event::at).expect("the first attempt recorded");
+    let second_first = second.events.first().map(Event::at).expect("the second attempt recorded");
+    assert!(
+        second_first >= first_last,
+        "process {} started {:?} before process {} was done",
+        second.number,
+        first_last.duration_since(second_first).unwrap_or_default(),
+        first.number
+    );
 }
 
 // ------------------------------------------------------------------------
@@ -501,42 +536,106 @@ async fn slow_stream_rearms() {
 // ------------------------------------------------------------------------
 
 #[tokio::test]
-async fn bridge_dies_mid_run() {
+async fn bridge_killed_on_send_restarts() {
+    // Process 1 dies as the opening `Send` begins: no candidate has been
+    // offered, so the prompt goes once more, on process 2, and the guest
+    // gets its answer.
+    let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::KillOnSend(1)));
+    let client = spawning(&fake, 1).await;
+    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
+    await_idle(&client, 1).await;
+
+    let log = fake.log();
+    let (first, second) = restarted(&log);
+    let (_, sequence) = sole_agent(&first);
+    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send], "{}", first.summary());
+    killed(&first);
+    let (_, sequence) = sole_agent(&second);
+    assert_eq!(sequence, ANSWERED, "{}", second.summary());
+    assert!(second.ended_with(Rpc::Shutdown));
+    restarted_after(&first, &second);
+}
+
+#[tokio::test]
+async fn bridge_exited_on_create_restarts() {
+    let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::ExitOnCreate(1)));
+    let client = spawning(&fake, 1).await;
+    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
+    await_idle(&client, 1).await;
+
+    let log = fake.log();
+    let (first, second) = restarted(&log);
+    // The fake exits before it records the create.
+    assert_eq!(first.count(Rpc::CreateAgent), 0, "{}", first.summary());
+    killed(&first);
+    let (_, sequence) = sole_agent(&second);
+    assert_eq!(sequence, ANSWERED, "{}", second.summary());
+    assert!(second.ended_with(Rpc::Shutdown));
+    restarted_after(&first, &second);
+}
+
+#[tokio::test]
+async fn bridge_killed_twice_fails() {
+    // Every process dies on its opening `Send`: one restart, then the
+    // second exit stands. The socket resets as each process dies; the typed
+    // exit wins over the transport error, and what the processes wrote to
+    // stderr stays out.
     let fake = Spawnable::new(&Config::echo().fault(Fault::KillOnSend(1)));
     let client = spawning(&fake, 1).await;
-    // The socket resets as the process dies; the typed exit wins over the
-    // transport error, and what the process wrote to stderr stays out.
-    expect_error(
-        "cursor-sdk-bridge exited (signal: 9 (SIGKILL)) during the run",
-        &["without:fake-bridge marker"],
-        &client,
-    )
-    .await;
+    expect_error(KILLED, &["without:fake-bridge marker"], &client).await;
     // Teardown is skipped on a dead bridge: no `TEARDOWN_TIMEOUT` is paid.
     await_idle_within(&client, 1, AT_ONCE).await;
 
     let log = fake.log();
-    let (_, sequence) = sole_agent(&log);
-    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send]);
-    killed(&log.workers()[0]);
+    let (first, second) = restarted(&log);
+    for process in [&first, &second] {
+        let (_, sequence) = sole_agent(process);
+        assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send], "{}", process.summary());
+        killed(process);
+    }
 }
 
 #[tokio::test]
-async fn died_before_create() {
-    let fake = Spawnable::new(&Config::echo().fault(Fault::ExitOnCreate(1)));
+async fn killed_after_candidate_fails() {
+    // The first candidate reached the guest's check and was rejected; the
+    // process dies on the correction's `Send`. The guest has seen this
+    // agent, so the prompt is not offered again.
+    let fake =
+        Spawnable::new(&Config::replies(["alpha", "beta"]).fault_on(1, Fault::KillOnSend(2)));
     let client = spawning(&fake, 1).await;
-    expect_error(
-        &format!("exited (exit status: {}) during the run", fake_bridge::EXIT_ON_CREATE),
-        &[],
-        &client,
-    )
-    .await;
+    expect_error(KILLED, &["check"], &client).await;
     await_idle_within(&client, 1, AT_ONCE).await;
 
     let log = fake.log();
-    assert_eq!(log.count(Rpc::CreateAgent), 0, "the process died as the create began");
-    assert_eq!(log.count(Rpc::CloseAgent), 0);
-    killed(&log.workers()[0]);
+    let workers = log.workers();
+    assert_eq!(workers.len(), 1, "no restart after a candidate: {}", log.summary());
+    let (_, sequence) = sole_agent(&log);
+    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::Send]);
+    let sends = log.saw(Rpc::Send);
+    assert!(
+        sends[1].text("text").contains("rejects every candidate"),
+        "the second send carried the guest's correction: {}",
+        sends[1].arg
+    );
+    killed(&workers[0]);
+}
+
+#[tokio::test]
+async fn inactive_run_not_restarted() {
+    // A bridge that stays up and silent is not a lost bridge: the run is
+    // cancelled at the inactivity bound and the failure stands.
+    let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Stream)));
+    let client = connect(spawn_options(&fake, with_window(WINDOW, 1))).await;
+    expect_error("inactive for 1s", &[], &client).await;
+    await_idle(&client, 1).await;
+
+    let log = fake.log();
+    let workers = log.workers();
+    assert_eq!(workers.len(), 1, "no restart on a stall: {}", log.summary());
+    let (_, sequence) = sole_agent(&log);
+    assert_eq!(log.count(Rpc::CancelRun), 1, "{sequence:?}");
+    assert_eq!(without_cancel(&sequence), ANSWERED);
+    assert!(workers[0].ended_with(Rpc::Shutdown));
 }
 
 #[tokio::test]
@@ -691,33 +790,72 @@ async fn close_500() {
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
 }
 
-/// The stream is reset after its first frame: the transport error stands
-/// (the bridge is alive), and the run id noted before the reset is
-/// cancelled before the agent is torn down.
-async fn stream_reset(client: &Client, log: impl Fn() -> Log + Sync) {
-    expect_error("reading `SdkAgentService/Send` stream", &[], client).await;
-    await_idle(client, 1).await;
-    let (_, sequence) = sole_agent(&log());
-    assert_eq!(
-        sequence,
-        [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::CloseAgent, Rpc::DeleteAgent]
-    );
+/// The first attempt's stream was reset after its first frame: the run id
+/// that frame carried is cancelled before the agent is torn down.
+const RESET: [Rpc; 5] =
+    [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::CloseAgent, Rpc::DeleteAgent];
+
+#[tokio::test]
+async fn stream_reset_restarts() {
+    // Process 1 resets its opening run's stream and stays up: the socket
+    // failure alone is the lost bridge. Its agent is torn down and the
+    // process asked to go before the restart takes the slot.
+    let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::ResetStream(1)));
+    let client = spawning(&fake, 1).await;
+    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
+    await_idle(&client, 1).await;
+
+    let log = fake.log();
+    let (first, second) = restarted(&log);
+    let (_, sequence) = sole_agent(&first);
+    assert_eq!(sequence, RESET, "{}", first.summary());
+    assert_eq!(first.saw(Rpc::CancelRun)[0].text("runId"), "run-1");
+    assert!(first.ended_with(Rpc::Shutdown), "{}", first.summary());
+    let (_, sequence) = sole_agent(&second);
+    assert_eq!(sequence, ANSWERED, "{}", second.summary());
+    assert!(second.ended_with(Rpc::Shutdown));
+    restarted_after(&first, &second);
 }
 
 #[tokio::test]
-async fn stream_reset_attached() {
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::ResetStream(1))).await;
-    let client = attached(&fake, 1).await;
-    stream_reset(&client, || fake.log()).await;
-}
-
-#[tokio::test]
-async fn stream_reset_spawned() {
+async fn stream_reset_twice_fails() {
+    // Every process resets its opening stream: the second transport failure
+    // is the guest's, typed below Connect.
     let fake = Spawnable::new(&Config::echo().fault(Fault::ResetStream(1)));
     let client = spawning(&fake, 1).await;
-    stream_reset(&client, || fake.log()).await;
-    // The process outlived the reset and was asked to go.
-    assert!(fake.log().workers()[0].ended_with(Rpc::Shutdown));
+    expect_error(
+        "bridge RPC `SdkAgentService/Send` transport failed reading the stream",
+        &[],
+        &client,
+    )
+    .await;
+    await_idle(&client, 1).await;
+
+    let log = fake.log();
+    let (first, second) = restarted(&log);
+    for process in [&first, &second] {
+        let (_, sequence) = sole_agent(process);
+        assert_eq!(sequence, RESET, "{}", process.summary());
+        assert!(process.ended_with(Rpc::Shutdown), "{}", process.summary());
+    }
+}
+
+#[tokio::test]
+async fn attached_stream_reset_restarts() {
+    // An attached bridge is never seen to die, so the restart here rides
+    // on the transport class alone; the fresh lease is a second agent on
+    // the same bridge, which is nobody's to shut down.
+    let fake = FakeBridge::serve(Config::echo().fault(Fault::ResetStream(1))).await;
+    let client = attached(&fake, 1).await;
+    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
+    await_idle(&client, 1).await;
+
+    let log = fake.log();
+    assert_eq!(log.agents(), ["agent-1", "agent-2"], "{}", log.summary());
+    assert_eq!(log.sequence("agent-1"), RESET);
+    assert_eq!(log.saw(Rpc::CancelRun)[0].text("runId"), "run-1");
+    assert_eq!(log.sequence("agent-2"), ANSWERED);
+    assert_eq!(log.count(Rpc::Shutdown), 0, "an attached bridge is never shut down");
 }
 
 // ------------------------------------------------------------------------

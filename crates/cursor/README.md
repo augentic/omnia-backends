@@ -47,12 +47,40 @@ the environment per completion; it is never stored on `Client` /
 
 Each live agent runs in its own bridge process, spawned for the completion
 and shut down after it (graceful `Shutdown` RPC, then kill): a bridge that
-crashes takes one completion with it, reported as the typed
+crashes fails the completion running on it with the typed
 `cursor-sdk-bridge exited (…) during the run` (metric outcome `bridge_exit`)
-rather than as the next completion's stall, and a retry lands on a fresh
-process. The last lines the process wrote to stderr are logged at DEBUG only
-— they are untrusted subprocess output and never reach WARN or the error a
-guest sees. A bridge
+rather than as the next completion's stall. The exit is logged at WARN with
+the process's `pid`, its `uptime_ms`, the `status_text` (`signal: 9
+(SIGKILL)`, `exit status: 7`), whether a `run_in_flight` was on it, and how
+long that run's stream had been `silent_ms`, and counted as
+`cursor_bridge_exits`. The last lines the process wrote to stderr are logged
+at DEBUG only — they are untrusted subprocess output and never reach WARN or
+the error a guest sees.
+
+A bridge lost under the *opening* of a completion is not the prompt's
+doing, so the completion restarts once: when `CreateAgent` or the opening
+`Send` fails because the process exited (`Failure::BridgeExited`) or its
+socket failed below Connect (`TransportError` — the request could not be
+sent, the stream reset, or it ended mid-frame), and no candidate has yet
+reached the guest, the dead lease is released, a fresh one is taken (with
+one slot that means waiting for the dead process to be reaped), and the
+original prompt is sent again with fresh deadlines. The restart is logged at
+WARN (`completion restarting on a fresh bridge`, with the first attempt's
+`outcome`, `error`, and `pid` when the process is known) and counted as
+`cursor_bridge_restarts`; the second attempt's result is final, whatever it
+is. Nothing else restarts: a failure after the guest's `check` has seen a
+candidate (the guest would be offered a candidate twice), an inactivity or
+cap deadline, a guest abort, `budget-exhausted`, a Connect or end-stream
+error (the bridge answered), a lease that could not be taken, or a request
+that could not be shaped all stand as they are. Each attempt is its own
+agent on its own bridge, so the `completion started` / `completion` INFO
+lines and the `cursor_completions` counter are per attempt: a restarted
+call produces two pairs inside one `complete` span, the first ending
+`bridge_exit` or `transport`, with the restart WARN between them, and
+`attempts` on those lines still counts the sends on that one agent. A
+follow-up worth doing when the bridge exposes it: resuming a run in flight
+(`ObserveRun` / `WaitLiveRun`) on the new process instead of re-sending
+the prompt. A bridge
 that stays alive but stops answering is bounded too: no call waits on it
 longer than the inactivity window, and the teardown calls after a
 completion are bounded at a few seconds each, so a silent bridge frees its
@@ -115,7 +143,16 @@ rejected before any RPC in attach mode; it needs spawn mode.
 `CURSOR_INACTIVITY_SECS`, `CURSOR_MODEL`, `CURSOR_MAX_AGENTS`,
 `CURSOR_BRIDGE_BIN`, `CURSOR_BRIDGE_URL`, and `CURSOR_BRIDGE_TOKEN`; callers
 that need different bounds, a default model, or another pool shape pass
-`ConnectOptions` to `connect_with`.
+`ConnectOptions` to `connect_with`. A spawned bridge inherits the host's
+environment (bar the `GIT_*` identity variables, which would point the
+agent at the host's repository), so the bridge's own `CURSOR_SDK_BRIDGE_LOG`
+passes straight through: set it on the host process to have every spawned
+bridge log its RPCs to stderr, where this crate records them at DEBUG.
+
+A caller that needs to tell failures apart matches on the types `complete`'s
+error downcasts to — `Failure::{Timeout, Inactive, Aborted, BridgeExited}`,
+`TransportError`, and `omnia_wasi_model::Error::BudgetExhausted` — rather
+than on message text; `Exit` is the process status a `BridgeExited` carries.
 
 MCP servers are supplied per-request: a prompt's `mcp` grant carries the
 endpoint `url` directly, passed inline through `CreateAgent`'s `mcp_servers`.
@@ -203,19 +240,28 @@ and a fan-out whose losers are dropped mid-run.
 option validation, a completion dropped at every point it can be waiting
 (handshake, pre-ready, create, pre-stream, teardown, and still queued for a
 slot), pooling and the late-create reap, the inactivity and cap deadlines,
-process death before and after the ready line and mid-run, a bridge that
-hangs on `Ping`, `CloseAgent`, or `Shutdown`, attach mode, a reset stream,
-the callback endpoint's rejections and token revocation, and a check that
-the ready line and its token never reach a log. Guests are compiled by the
-`test-programs` build script; there is no separate `--target` build to run.
+process death before the ready line, the restart matrix (a bridge killed on
+the opening `Send` or exited on `CreateAgent` restarts once on a fresh
+process that answers; killed twice fails with the typed exit; killed after
+the guest's `check` has seen a candidate is not restarted; a run that stalls
+mid-stream is cancelled, not restarted; a stream reset restarts on a fresh
+process — spawned, once the reset one has been asked to go, and attached,
+as a second agent on the same bridge — and reset twice fails with the typed
+transport error), a bridge that hangs on `Ping`, `CloseAgent`, or
+`Shutdown`, attach mode, the callback endpoint's rejections and token
+revocation, and a check that the ready line and its token never reach a
+log. Guests are compiled by the `test-programs` build script; there is no
+separate `--target` build to run.
 
 **Tier 3 — the real bridge.** [`tests/live.rs`](tests/live.rs) drives real
 completions through the `wasi-model` boundary: the plain acceptance run, a
 function-tool round-trip with a lent workspace, a no-workspace function-tool
 run, an in-process MCP grant, the guest `check` loop, a four-way fan-out
 that holds four bridge processes at once and then sees every slot reopen,
-and `stress_fanout`, that fan-out twenty times over (a bridge that exits
-under load fails its completion with `cursor-sdk-bridge exited`). All are
+`stress_fanout`, that fan-out twenty times over (a bridge that exits
+under load fails its completion with `cursor-sdk-bridge exited`), and
+`bridge_killed_mid_run_recovers`, which `kill -9`s a real bridge under its
+opening run and sees the completion answer from the restart. All are
 `#[ignore]`d so they never spawn a process in CI; run them with
 `cursor-sdk-bridge` installed:
 

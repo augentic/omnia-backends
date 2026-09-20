@@ -16,6 +16,10 @@
 //! task of its own too, whether the turn ended or the agent was dropped
 //! mid-way; `complete` waits for it, and the lease rides on it, so the
 //! bridge closes only after.
+//!
+//! A failed agent reports itself as [`Unanswered`]: the error, and whether
+//! it struck before any candidate had been offered to the guest, which is
+//! what lets the caller run the prompt again on a fresh agent.
 
 use std::env;
 use std::sync::Arc;
@@ -102,13 +106,13 @@ impl Agent {
         })
     }
 
-    pub async fn complete(mut self) -> Result<Answer> {
+    pub async fn complete(mut self) -> Result<Answer, Unanswered> {
         let result = self.run().await;
         let attempts = self.completion.as_ref().map_or(0, Completion::attempts);
         let outcome = match &result {
             Ok(_) if attempts > 1 => "corrected",
             Ok(_) => "ok",
-            Err(error) => observe::outcome_of(error),
+            Err(unanswered) => observe::outcome_of(&unanswered.error),
         };
         if let Some(completion) = self.completion.take() {
             completion.finish(outcome);
@@ -121,13 +125,19 @@ impl Agent {
         result
     }
 
-    async fn run(&mut self) -> Result<Answer> {
+    async fn run(&mut self) -> Result<Answer, Unanswered> {
         let mut prompt = std::mem::take(&mut self.prompt);
         for round in 1..=MAX_ROUNDS {
             if let Some(completion) = &mut self.completion {
                 completion.new_attempt();
             }
-            let response = self.send(&prompt).await?;
+            // A candidate is only offered after a `Send` succeeds, so the
+            // opening round's failure is one the guest has seen nothing of.
+            let response = match self.send(&prompt).await {
+                Ok(response) => response,
+                Err(error) if round == 1 => return Err(Unanswered::before_candidate(error)),
+                Err(error) => return Err(Unanswered::settled(error)),
+            };
             if let Some(completion) = &mut self.completion {
                 let tools = response.transcript.as_ref().map_or(0, |t| t.turns.len());
                 completion.record(response.result.len(), tools, response.usage.as_ref());
@@ -138,13 +148,13 @@ impl Agent {
                 return Ok(response.answer(candidate));
             }
 
-            match self.tool_host.check(candidate.clone()).await? {
+            match self.tool_host.check(candidate.clone()).await.map_err(Unanswered::settled)? {
                 Ok(()) => return Ok(response.answer(candidate)),
                 // The agent keeps its session, so the correction alone is
                 // the next prompt; on the last round it is the typed
                 // failure the guest sees.
                 Err(correction) if round == MAX_ROUNDS => {
-                    bail!(Error::BudgetExhausted(correction));
+                    return Err(Unanswered::settled(Error::BudgetExhausted(correction).into()));
                 }
                 Err(correction) => {
                     tracing::debug!(%correction, "check rejected the candidate");
@@ -152,13 +162,16 @@ impl Agent {
                 }
             }
         }
-        unreachable!("every round returns or bails")
+        unreachable!("every round returns")
     }
 
     async fn send(&mut self, text: &str) -> Result<Response> {
         // Both bounds run from the `Send` call itself, so a bridge that takes
         // the request and never opens the stream is an inactivity failure.
         let (activity_tx, activity_rx) = watch::channel(Instant::now());
+        // Should the process die under this run, its exit report says how
+        // long the stream had been silent.
+        self.lease.bridge().watch_run(activity_rx.clone());
         let deadline = self.deadlines.watch(activity_rx);
         tokio::pin!(deadline);
         // Owns its watch, so it does not borrow `self` across the loop.
@@ -275,6 +288,49 @@ impl Agent {
             run_id: self.live_run.take(),
             workspace: self.workspace.take(),
         })
+    }
+}
+
+/// A completion that produced no answer: the failure, and whether it struck
+/// before any candidate had been offered to the guest — in `CreateAgent` or
+/// the opening `Send`.
+pub struct Unanswered {
+    pub error: anyhow::Error,
+    before_candidate: bool,
+}
+
+impl Unanswered {
+    /// A failure in `CreateAgent` or the opening `Send`: the guest has seen
+    /// nothing of this agent.
+    pub const fn before_candidate(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            before_candidate: true,
+        }
+    }
+
+    /// A failure to report as it stands.
+    pub const fn settled(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            before_candidate: false,
+        }
+    }
+
+    /// Whether a fresh agent may be given the prompt once more: the bridge
+    /// or its socket was lost before any candidate reached the guest, so
+    /// nothing has been said about the prompt and no candidate would be
+    /// offered twice.
+    pub fn restartable(&self) -> bool {
+        self.before_candidate && observe::lost_bridge(&self.error)
+    }
+
+    /// The process that died under the completion, when that is the failure.
+    pub fn pid(&self) -> Option<u32> {
+        match self.error.downcast_ref::<Failure>() {
+            Some(Failure::BridgeExited(exit)) => exit.pid,
+            _ => None,
+        }
     }
 }
 

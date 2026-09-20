@@ -2,15 +2,20 @@
 //! terminal result, bounded by an inactivity deadline that stream progress
 //! rearms, an absolute wall-clock cap, the callback's abort signal, and the
 //! bridge's own exit. No call waits on the bridge unbounded, so one that is
-//! alive but silent unblocks the guest. An unanswered `CreateAgent` keeps
-//! its lease for one more inactivity window, only to close and delete a
-//! late id (an attached bridge would otherwise keep the agent after lease
-//! drop); silent past that, the slot reopens with nothing torn down. An
-//! abandoned run is cancelled best-effort. After the turn, the agent is
-//! closed and deleted against the create-time cwd, each call bounded and
-//! all of them skipped once the bridge is gone; `Drop` is only a fallback.
-//! The lease the agent runs on outlives that teardown, so the bridge closes
-//! only after it.
+//! alive but silent unblocks the guest.
+//!
+//! The completion future is the guest's to drop at any `.await`, so no RPC
+//! that hands an agent over runs on it. `CreateAgent` runs on a task of its
+//! own that holds the lease and owns the id it returns: a completion that
+//! stops waiting — at the inactivity bound, or dropped — leaves an agent
+//! the task closes and deletes itself (an attached bridge would otherwise
+//! keep it), and a bridge silent for one more window gives the slot back
+//! with nothing to tear down. Teardown — the abandoned run cancelled
+//! best-effort, then close and delete against the create-time cwd, each
+//! call bounded and all of them skipped once the bridge is gone — runs on a
+//! task of its own too, whether the turn ended or the agent was dropped
+//! mid-way; `complete` waits for it, and the lease rides on it, so the
+//! bridge closes only after.
 
 use std::env;
 use std::sync::Arc;
@@ -18,13 +23,15 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
-use tokio::sync::{mpsc, watch};
+use tokio::runtime::Handle;
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
 
 use super::observe::{self, Completion, EventLog, Failure};
 use super::options::{Turn, Workspace};
 use crate::Client;
-use crate::bridge::{Bridge, EXIT_OBSERVE, RunStatus, RunStreamResult};
+use crate::bridge::{AgentOptions, Bridge, EXIT_OBSERVE, RunStatus, RunStreamResult};
 use crate::endpoint::Attached;
 use crate::pool::Lease;
 
@@ -56,26 +63,20 @@ impl Agent {
         client: &Client, lease: Arc<Lease>, turn: Turn, tool_host: Arc<dyn ToolHost>,
     ) -> Result<Self> {
         let completion = Completion::start(&turn);
-        let cwd = turn.options.local.cwd.first().cloned().unwrap_or_default();
+        let Turn {
+            options,
+            workspace,
+            prompt,
+            format,
+            check,
+        } = turn;
+        let cwd = options.local.cwd.first().cloned().unwrap_or_default();
 
-        let bridge = lease.bridge();
-        let rpc = bridge.rpc().clone();
-        let mut create = Box::pin(async move {
-            rpc.create_agent(turn.options).await.map(|created| created.agent_id)
-        });
-        let id = match on_bridge(bridge, "CreateAgent", client.deadlines.inactivity, &mut create)
-            .await
-        {
-            BridgeWait::Ready(Ok(id)) => id,
-            BridgeWait::Ready(Err(error)) => {
-                completion.finish(observe::outcome_of(&error));
-                return Err(error);
-            }
-            BridgeWait::Unanswered { method, secs } => {
-                // Dropping CreateAgent here would lose a late id. An attached
-                // bridge outlives the lease and would keep that agent.
-                reap_late_create(lease, cwd, turn.workspace, client.deadlines.inactivity, create);
-                let error = anyhow!("bridge RPC `{method}` unanswered after {secs}s");
+        let window = client.deadlines.inactivity;
+        let creating = Creating::spawn(Arc::clone(&lease), options, workspace, cwd.clone(), window);
+        let Created { id, workspace } = match creating.claim(lease.bridge(), window).await {
+            Ok(created) => created,
+            Err(error) => {
                 completion.finish(observe::outcome_of(&error));
                 return Err(error);
             }
@@ -89,15 +90,15 @@ impl Agent {
             id,
             cwd,
             deadlines: client.deadlines,
-            prompt: turn.prompt,
-            format: turn.format,
-            check: turn.check,
+            prompt,
+            format,
+            check,
             tool_host,
             live_run: None,
             abort_rx,
             completion: Some(completion),
             _attached: attached,
-            workspace: Some(turn.workspace),
+            workspace: Some(workspace),
         })
     }
 
@@ -112,7 +113,11 @@ impl Agent {
         if let Some(completion) = self.completion.take() {
             completion.finish(outcome);
         }
-        self.dispose().await;
+        // The answer waits on the teardown; a completion dropped here leaves
+        // it running, `Drop` having nothing left to release.
+        if let Some(teardown) = self.take_release().and_then(Release::spawn) {
+            let _ = teardown.await;
+        }
         result
     }
 
@@ -251,16 +256,10 @@ impl Agent {
 
         let rpc = bridge.rpc().clone();
         let agent_id = self.id.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if let Ok(handle) = Handle::try_current() {
             handle.spawn(async move {
                 teardown("CancelRun", rpc.cancel_run(run_id, agent_id)).await;
             });
-        }
-    }
-
-    async fn dispose(&mut self) {
-        if let Some(release) = self.take_release() {
-            release.run().await;
         }
     }
 
@@ -279,68 +278,84 @@ impl Agent {
     }
 }
 
-/// One bounded bridge RPC: the future is borrowed so a timeout can still
-/// finish it. Dropping `CreateAgent` on the bound would lose a late id.
-async fn on_bridge<T>(
-    bridge: &Bridge, method: &'static str, limit: Duration,
-    rpc: &mut (impl Future<Output = Result<T>> + Unpin),
-) -> BridgeWait<T> {
-    let died = bridge.died();
-    tokio::pin!(died);
-    let result = tokio::select! {
-        result = &mut *rpc => result,
-        exit = &mut died => return BridgeWait::Ready(Err(Failure::BridgeExited(exit).into())),
-        () = sleep(limit) => {
-            return BridgeWait::Unanswered {
-                method,
-                secs: limit.as_secs(),
-            };
-        }
-    };
-    match result {
-        Ok(value) => BridgeWait::Ready(Ok(value)),
-        Err(error) => BridgeWait::Ready(Err(exit_or(bridge, error).await)),
-    }
+/// `CreateAgent` on a task of its own, which holds the lease and owns the
+/// id it returns: a completion that stops waiting — at the inactivity
+/// bound, or dropped — leaves an agent the task closes and deletes itself.
+struct Creating(oneshot::Receiver<Result<Created>>);
+
+/// A created agent and the workspace its cwd points into.
+struct Created {
+    id: String,
+    workspace: Workspace,
 }
 
-enum BridgeWait<T> {
-    Ready(Result<T>),
-    Unanswered { method: &'static str, secs: u64 },
-}
-
-// The inactivity bound already unblocked the guest. Finish CreateAgent so a
-// late id can be closed and deleted; the lease rides along so a spawned
-// bridge is not killed first, and an attached one cannot keep the agent.
-// The lease is the slot, so this wait is bounded too — one more window —
-// or a bridge that stays alive and silent would hold the slot for good.
-fn reap_late_create(
-    lease: Arc<Lease>, cwd: String, workspace: Workspace, limit: Duration,
-    create: impl Future<Output = Result<String>> + Send + 'static,
-) {
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
-    handle.spawn(async move {
-        match timeout(limit, create).await {
-            Ok(Ok(id)) if !id.is_empty() => {
-                Release {
-                    lease,
-                    id,
-                    cwd,
-                    run_id: None,
-                    workspace: Some(workspace),
+impl Creating {
+    // The lease is the slot, so the task's wait is bounded too: the window
+    // the completion waits, then one more for a late id — or a bridge that
+    // stays alive and silent would hold the slot for good.
+    fn spawn(
+        lease: Arc<Lease>, options: AgentOptions, workspace: Workspace, cwd: String,
+        window: Duration,
+    ) -> Self {
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let rpc = lease.bridge().rpc().clone();
+            let limit = window.saturating_mul(2);
+            let outcome = match timeout(limit, rpc.create_agent(options)).await {
+                Ok(Ok(created)) if created.agent_id.is_empty() => {
+                    Err(anyhow!("bridge RPC `CreateAgent` returned an empty agent id"))
                 }
-                .run()
-                .await;
+                Ok(Ok(created)) => Ok(Created {
+                    id: created.agent_id,
+                    workspace,
+                }),
+                Ok(Err(error)) => Err(error),
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        secs = limit.as_secs(),
+                        "CreateAgent still unanswered; its slot reopens with no agent torn down"
+                    );
+                    return;
+                }
+            };
+            match tx.send(outcome) {
+                Ok(()) => {}
+                // Nobody waiting: the completion timed out or was dropped, so
+                // the agent is this task's to tear down.
+                Err(Ok(unclaimed)) => {
+                    Release {
+                        lease,
+                        id: unclaimed.id,
+                        cwd,
+                        run_id: None,
+                        workspace: Some(unclaimed.workspace),
+                    }
+                    .run()
+                    .await;
+                }
+                Err(Err(error)) => tracing::debug!(%error, "abandoned CreateAgent failed"),
             }
-            Ok(Ok(_)) => tracing::debug!("late CreateAgent returned an empty agent id"),
-            Ok(Err(error)) => tracing::debug!(%error, "abandoned CreateAgent failed"),
-            Err(_elapsed) => tracing::warn!(
-                secs = limit.as_secs(),
-                "late CreateAgent still unanswered; its slot reopens with no agent torn down"
-            ),
+        });
+        Self(rx)
+    }
+
+    /// The id, within `window`; past it the agent is the task's.
+    async fn claim(self, bridge: &Bridge, window: Duration) -> Result<Created> {
+        let died = bridge.died();
+        tokio::pin!(died);
+        tokio::select! {
+            outcome = self.0 => match outcome {
+                Ok(Ok(created)) => Ok(created),
+                Ok(Err(error)) => Err(exit_or(bridge, error).await),
+                Err(_closed) => Err(anyhow!("bridge RPC `CreateAgent` ended without an outcome")),
+            },
+            exit = &mut died => Err(Failure::BridgeExited(exit).into()),
+            () = sleep(window) => Err(anyhow!(
+                "bridge RPC `CreateAgent` unanswered after {}s",
+                window.as_secs()
+            )),
         }
-    });
+    }
 }
 
 // A socket fails before the watcher publishes the exit: `watch_child`
@@ -378,6 +393,12 @@ struct Release {
 }
 
 impl Release {
+    /// Run on a task of its own, so the caller's fate does not cut the
+    /// teardown short; `None` without a runtime.
+    fn spawn(self) -> Option<JoinHandle<()>> {
+        Handle::try_current().ok().map(|handle| handle.spawn(self.run()))
+    }
+
     async fn run(self) {
         let bridge = self.lease.bridge();
         if bridge.is_dead() {
@@ -397,11 +418,8 @@ impl Release {
 
 impl Drop for Agent {
     fn drop(&mut self) {
-        let Some(release) = self.take_release() else {
-            return;
-        };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(release.run());
+        if let Some(release) = self.take_release() {
+            release.spawn();
         }
     }
 }
@@ -509,6 +527,39 @@ mod tests {
     /// Every `CloseAgent` id, so a late create can assert it was reaped.
     type Closes = Arc<Mutex<Vec<String>>>;
 
+    /// Holds every request for one `SdkAgentService` method until opened,
+    /// and reports that one is waiting.
+    struct Gate {
+        method: &'static str,
+        arrived: Notify,
+        release: Notify,
+    }
+
+    impl Gate {
+        fn on(method: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                method,
+                arrived: Notify::new(),
+                release: Notify::new(),
+            })
+        }
+
+        async fn hold(&self, path: &str) {
+            if path == format!("/sdk.v1.SdkAgentService/{}", self.method) {
+                self.arrived.notify_one();
+                self.release.notified().await;
+            }
+        }
+
+        async fn arrived(&self) {
+            self.arrived.notified().await;
+        }
+
+        fn open(&self) {
+            self.release.notify_one();
+        }
+    }
+
     /// A client attached to a loopback `sdk.v1` bridge whose agent answers
     /// `Send` number `n` with `replies[n]` (the last reply repeats) and
     /// records each text sent.
@@ -518,7 +569,7 @@ mod tests {
     }
 
     async fn scripted_on(
-        replies: &[&str], create_hold: Option<Arc<Notify>>, deadlines: Deadlines, max_agents: usize,
+        replies: &[&str], gate: Option<Arc<Gate>>, deadlines: Deadlines, max_agents: usize,
     ) -> (Client, Sends, Deletes, Closes) {
         with_dummy_key();
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind loopback");
@@ -533,7 +584,7 @@ mod tests {
             Arc::clone(&sends),
             Arc::clone(&deletes),
             Arc::clone(&closes),
-            create_hold,
+            gate,
         ));
 
         let client = Client::connect_with(ConnectOptions {
@@ -552,28 +603,26 @@ mod tests {
 
     async fn serve(
         listener: TcpListener, replies: Arc<Vec<String>>, sends: Sends, deletes: Deletes,
-        closes: Closes, create_hold: Option<Arc<Notify>>,
+        closes: Closes, gate: Option<Arc<Gate>>,
     ) {
         while let Ok((stream, _)) = listener.accept().await {
             let replies = Arc::clone(&replies);
             let sends = Arc::clone(&sends);
             let deletes = Arc::clone(&deletes);
             let closes = Arc::clone(&closes);
-            let create_hold = create_hold.clone();
+            let gate = gate.clone();
             tokio::spawn(async move {
                 let service = service_fn(move |request: hyper::Request<Incoming>| {
                     let replies = Arc::clone(&replies);
                     let sends = Arc::clone(&sends);
                     let deletes = Arc::clone(&deletes);
                     let closes = Arc::clone(&closes);
-                    let create_hold = create_hold.clone();
+                    let gate = gate.clone();
                     async move {
                         let path = request.uri().path().to_owned();
                         let body = request.into_body().collect().await?.to_bytes();
-                        if path == "/sdk.v1.SdkAgentService/CreateAgent"
-                            && let Some(hold) = &create_hold
-                        {
-                            hold.notified().await;
+                        if let Some(gate) = &gate {
+                            gate.hold(&path).await;
                         }
                         Ok::<_, hyper::Error>(procedure(
                             &path, &body, &replies, &sends, &deletes, &closes,
@@ -814,39 +863,29 @@ mod tests {
         assert_scoped_delete(&deletes);
     }
 
-    #[tokio::test]
-    async fn on_bridge_timeout_leaves_rpc() {
-        let (bridge, _tx) = Bridge::pending();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut rpc = Box::pin(async move {
-            rx.await.expect("sender lives");
-            Ok::<_, anyhow::Error>("agent-late".to_owned())
-        });
-        let waited =
-            super::on_bridge(&bridge, "CreateAgent", Duration::from_millis(30), &mut rpc).await;
-        assert!(
-            matches!(
-                waited,
-                super::BridgeWait::Unanswered {
-                    method: "CreateAgent",
-                    ..
-                }
-            ),
-            "timeout must not consume the RPC"
-        );
-        tx.send(()).expect("rpc lives");
-        assert_eq!(rpc.await.expect("the late id is still available"), "agent-late");
+    /// Wait until the scripted bridge has seen `n` `DeleteAgent` calls.
+    async fn await_deletes(deletes: &Deletes, closes: &Closes, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while deletes.lock().expect("deletes lock").len() < n {
+            assert!(
+                Instant::now() < deadline,
+                "agent was not closed and deleted: closes={:?} deletes={:?}",
+                closes.lock().expect("closes lock"),
+                deletes.lock().expect("deletes lock"),
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]
     async fn create_timeout_reaps_late_agent() {
-        let hold = Arc::new(Notify::new());
+        let gate = Gate::on("CreateAgent");
         let deadlines = Deadlines {
             inactivity: Duration::from_secs(1),
             cap: Duration::from_secs(10),
         };
         let (client, _sends, deletes, closes) =
-            scripted_on(&["unused"], Some(Arc::clone(&hold)), deadlines, 4).await;
+            scripted_on(&["unused"], Some(Arc::clone(&gate)), deadlines, 4).await;
         let check = Check::rejecting(usize::MAX);
         let error =
             client.complete(request(false), check.host()).await.expect_err("CreateAgent timed out");
@@ -860,22 +899,8 @@ mod tests {
         );
         assert!(closes.lock().expect("closes lock").is_empty());
 
-        hold.notify_one();
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let n = deletes.lock().expect("deletes lock").len();
-            if n == 1 {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "late agent was not closed and deleted: closes={:?} deletes={:?}",
-                closes.lock().expect("closes lock"),
-                deletes.lock().expect("deletes lock"),
-            );
-            sleep(Duration::from_millis(20)).await;
-        }
+        gate.open();
+        await_deletes(&deletes, &closes, 1).await;
         assert_eq!(
             closes.lock().expect("closes lock").as_slice(),
             ["agent-1"],
@@ -885,15 +910,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_create_reaps_late_agent() {
+        // One slot: the reap must also give the lease back afterwards.
+        let gate = Gate::on("CreateAgent");
+        let (client, _sends, deletes, closes) =
+            scripted_on(&["alpha"], Some(Arc::clone(&gate)), DEADLINES, 1).await;
+        let check = Check::rejecting(usize::MAX);
+
+        // The guest drops the completion while CreateAgent is in flight.
+        let completion = tokio::spawn(client.complete(request(false), check.host()));
+        gate.arrived().await;
+        completion.abort();
+        completion.await.expect_err("the completion was cancelled");
+        assert!(closes.lock().expect("closes lock").is_empty(), "no id has arrived yet");
+        assert!(deletes.lock().expect("deletes lock").is_empty());
+
+        gate.open();
+        await_deletes(&deletes, &closes, 1).await;
+        assert_eq!(
+            closes.lock().expect("closes lock").as_slice(),
+            ["agent-1"],
+            "the id nobody claimed is closed"
+        );
+        assert_scoped_delete(&deletes);
+
+        // The slot reopened with the reap; a fresh completion runs on it.
+        let next = tokio::spawn(client.complete(request(false), check.host()));
+        tokio::time::timeout(Duration::from_secs(2), gate.arrived())
+            .await
+            .expect("the slot reopens once the reap is done");
+        gate.open();
+        let answer = next.await.expect("joins").expect("completes");
+        assert_eq!(answer.answer, "alpha");
+        assert_eq!(deletes.lock().expect("deletes lock").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_teardown_still_deletes() {
+        let gate = Gate::on("CloseAgent");
+        let (client, sends, deletes, closes) =
+            scripted_on(&["alpha"], Some(Arc::clone(&gate)), DEADLINES, 4).await;
+        let check = Check::rejecting(usize::MAX);
+
+        // The guest drops the completion after the run, mid-teardown.
+        let completion = tokio::spawn(client.complete(request(false), check.host()));
+        gate.arrived().await;
+        assert_eq!(sends.lock().expect("sends lock").len(), 1, "the run finished first");
+        completion.abort();
+        completion.await.expect_err("the completion was cancelled");
+        assert!(deletes.lock().expect("deletes lock").is_empty(), "CloseAgent is still held");
+
+        gate.open();
+        await_deletes(&deletes, &closes, 1).await;
+        assert_eq!(closes.lock().expect("closes lock").as_slice(), ["agent-1"]);
+        assert_scoped_delete(&deletes);
+    }
+
+    #[tokio::test]
     async fn create_never_answered_frees_slot() {
-        // Never notified: the bridge stays alive and never answers.
-        let hold = Arc::new(Notify::new());
+        // Never opened: the bridge stays alive and never answers.
+        let gate = Gate::on("CreateAgent");
         let deadlines = Deadlines {
             inactivity: Duration::from_secs(1),
             cap: Duration::from_secs(10),
         };
         let (client, _sends, deletes, closes) =
-            scripted_on(&["unused"], Some(hold), deadlines, 1).await;
+            scripted_on(&["unused"], Some(gate), deadlines, 1).await;
         let check = Check::rejecting(usize::MAX);
         let started = Instant::now();
 

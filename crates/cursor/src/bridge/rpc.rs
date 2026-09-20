@@ -54,16 +54,6 @@ impl std::fmt::Debug for Rpc {
 }
 
 impl Rpc {
-    /// Bind without a handshake — tests that never issue an RPC.
-    #[cfg(test)]
-    pub(crate) fn unbound() -> Self {
-        Self {
-            hyper: HyperClient::builder(TokioExecutor::new()).build_http(),
-            base: String::new(),
-            bearer: String::new(),
-        }
-    }
-
     /// Bind to `base` and prove the bridge answers `sdk.v1`.
     pub async fn connect(base: String, token: &str) -> Result<Self> {
         // The client is HTTP-only: refuse anything that is not loopback
@@ -416,7 +406,8 @@ fn end_stream_error(method: &str, payload: &[u8]) -> Result<()> {
 }
 
 // Deliberate unit tests: loopback attach URL, envelope framing, and error
-// decoding (CI floor); `tests/live.rs` proves the client against a real bridge.
+// decoding (CI floor); `tests/bridge.rs` proves the client against the fake
+// bridge and `tests/live.rs` against a real one.
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
@@ -457,14 +448,6 @@ mod tests {
             let error = require_loopback_http(url).expect_err(url);
             assert!(error.to_string().contains(needle), "{url}: expected {needle:?} in {error}");
         }
-    }
-
-    #[tokio::test]
-    async fn connect_rejects_non_loopback_before_io() {
-        let error = super::Rpc::connect("http://192.0.2.1:9".into(), "secret")
-            .await
-            .expect_err("a remote host is rejected before any RPC");
-        assert!(error.to_string().contains("loopback"), "{error}");
     }
 
     #[test]

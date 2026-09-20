@@ -272,22 +272,6 @@ impl Bridge {
         }
     }
 
-    /// An owned bridge whose exit the test publishes.
-    #[cfg(test)]
-    pub(crate) fn pending() -> (Self, watch::Sender<Option<Exit>>) {
-        let (exit_tx, exit) = watch::channel(None);
-        let rpc = Arc::new(OnceLock::new());
-        let _ = rpc.set(Rpc::unbound());
-        (
-            Self {
-                rpc,
-                exit,
-                shutdown: Some(Arc::new(Notify::new())),
-            },
-            exit_tx,
-        )
-    }
-
     /// Shut a spawned bridge down and wait for it to exit; an attached
     /// bridge is left running.
     pub async fn close(&self) {

@@ -280,20 +280,25 @@ pub trait History {
     }
 
     /// The most agents created and not yet closed or deleted at once.
+    ///
+    /// Spawned fakes mint `agent-1` independently, so the live set is keyed
+    /// by process as well as id: a workspace-wide scan must not collapse
+    /// concurrent leases, and one process's close must not retire another's.
     fn peak_live(&self) -> usize {
         let mut live = HashSet::new();
         let mut peak = 0;
         for event in self.history() {
-            let Some(agent) = &event.agent else {
+            let Some(agent) = event.agent.as_deref() else {
                 continue;
             };
+            let key = (event.process, agent);
             match event.rpc() {
                 Some(Rpc::CreateAgent) => {
-                    live.insert(agent.clone());
+                    live.insert(key);
                     peak = peak.max(live.len());
                 }
                 Some(Rpc::CloseAgent | Rpc::DeleteAgent) => {
-                    live.remove(agent);
+                    live.remove(&key);
                 }
                 _ => {}
             }
@@ -324,5 +329,51 @@ impl History for Log {
 impl History for Process {
     fn history(&self) -> &[Event] {
         &self.events
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::{Event, History as _, Kind, Log, Rpc};
+
+    fn rpc(process: usize, rpc: Rpc, agent: &str) -> Event {
+        Event {
+            pid: 1,
+            process,
+            ts: 0,
+            kind: Kind::Rpc(rpc),
+            agent: Some(agent.to_owned()),
+            arg: Value::Null,
+        }
+    }
+
+    #[test]
+    fn same_id_across_processes() {
+        // The `lease_waits` shape: three spawned processes each mint `agent-1`.
+        let concurrent = Log::from_events(vec![
+            rpc(1, Rpc::CreateAgent, "agent-1"),
+            rpc(2, Rpc::CreateAgent, "agent-1"),
+            rpc(3, Rpc::CreateAgent, "agent-1"),
+        ]);
+        assert_eq!(concurrent.peak_live(), 3);
+
+        // One process closing `agent-1` must not retire the others.
+        let staggered = Log::from_events(vec![
+            rpc(1, Rpc::CreateAgent, "agent-1"),
+            rpc(2, Rpc::CreateAgent, "agent-1"),
+            rpc(1, Rpc::CloseAgent, "agent-1"),
+            rpc(3, Rpc::CreateAgent, "agent-1"),
+        ]);
+        assert_eq!(staggered.peak_live(), 2);
+
+        // Sequential reuse of the same id in one process is one live agent.
+        let reused = Log::from_events(vec![
+            rpc(1, Rpc::CreateAgent, "agent-1"),
+            rpc(1, Rpc::CloseAgent, "agent-1"),
+            rpc(1, Rpc::CreateAgent, "agent-1"),
+        ]);
+        assert_eq!(reused.peak_live(), 1);
     }
 }

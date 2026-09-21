@@ -73,11 +73,6 @@ impl Pool {
             );
             return Err(error);
         }
-        tracing::info!(
-            pid = started.pid,
-            histogram.cursor_bridge_spawn_ms = elapsed_ms(started.at),
-            "cursor-sdk-bridge spawned"
-        );
         Ok(Arc::new(lease))
     }
 
@@ -124,7 +119,7 @@ impl Drop for Lease {
                 drop(permit);
             });
         }
-        // Without a runtime all three drop here; the bridge's own `Drop`
-        // still asks the watcher for the shutdown.
+        // Without a runtime all three drop here; dropping the bridge still
+        // asks the watcher for the shutdown.
     }
 }

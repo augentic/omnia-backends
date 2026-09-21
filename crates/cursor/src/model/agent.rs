@@ -35,7 +35,7 @@ use tokio::time::{Instant, sleep, sleep_until, timeout};
 use super::observe::{self, Completion, EventLog, Failure};
 use super::options::{Turn, Workspace};
 use crate::Client;
-use crate::bridge::{AgentOptions, Bridge, EXIT_OBSERVE, RunStatus, RunStreamResult};
+use crate::bridge::{AgentOptions, Bridge, EXIT_WAIT, RunStatus, RunStreamResult};
 use crate::endpoint::Attached;
 use crate::pool::Lease;
 
@@ -418,7 +418,7 @@ impl Creating {
 // spends up to `EXIT_GRACE` draining stderr first, so the observe budget
 // is that window plus one of its own.
 async fn exit_or(bridge: &Bridge, error: anyhow::Error) -> anyhow::Error {
-    match timeout(EXIT_OBSERVE, bridge.died()).await {
+    match timeout(EXIT_WAIT, bridge.died()).await {
         Ok(exit) => Failure::BridgeExited(exit).into(),
         Err(_elapsed) => error,
     }

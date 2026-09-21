@@ -3,8 +3,9 @@
 //! `omnia_cursor::Client` against the fake `cursor-sdk-bridge` — `expect_error`
 //! with the needle when the completion fails, `echo_text`/`fanout` when it
 //! succeeds, `fanout_abandon` when the guest must drop a completion — then
-//! asserts the fake's per-agent RPC sequence and the pool whole again
-//! within a stated bound. No row drives `Client::complete` from the test.
+//! asserts the fake's per-agent RPC sequence and every spawned process
+//! gone again within a stated bound (a slot reopens only once its process
+//! is). No row drives `Client::complete` from the test.
 //!
 //! The restart rows (under "Process death" and "Transport") pin the one
 //! retry the client makes: a bridge lost before any candidate reached the
@@ -22,12 +23,11 @@ use omnia::Backend as _;
 use omnia_cursor::{Client, ConnectOptions};
 use serde_json::json;
 use support::fake_bridge::{
-    self, Config, Event, FakeBridge, Fault, History as _, Log, Point, Process, Rpc, Spawnable, Then,
+    self, Config, Event, Fault, History as _, Log, Point, Process, Rpc, Spawnable, Then,
 };
 use support::harness::{
-    AT_ONCE, CALLBACK_PATH, REOPEN, STARTUP, attach_options, attached, await_idle,
-    await_idle_within, callback, connect, expect_error, options, run_guest, sole_agent,
-    spawn_options, spawning,
+    AT_ONCE, CALLBACK_PATH, GONE, STARTUP, await_gone, await_gone_within, await_process_gone,
+    callback, connect, expect_error, options, run_guest, sole_agent, spawning,
 };
 use tokio::task::JoinHandle;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -81,6 +81,19 @@ const KILLED: &str = "cursor-sdk-bridge exited (signal: 9 (SIGKILL)) during the 
 /// The full sequence of a completion that answered.
 const ANSWERED: [Rpc; 4] = [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent];
 
+/// The two workers of a two-way abandon: the one that recorded `rpc`, and
+/// the one that did not.
+fn split_by(log: &Log, rpc: Rpc) -> (Process, Process) {
+    let mut workers = log.workers().into_iter();
+    let (Some(first), Some(second), None) = (workers.next(), workers.next(), workers.next()) else {
+        panic!("two workers: {}", log.summary());
+    };
+    let (with, without) = if first.count(rpc) > 0 { (first, second) } else { (second, first) };
+    assert!(with.count(rpc) > 0, "neither worker saw {rpc:?}: {}", log.summary());
+    assert_eq!(without.count(rpc), 0, "both workers saw {rpc:?}: {}", log.summary());
+    (with, without)
+}
+
 /// The two workers a restarted completion leaves behind, in start order.
 fn restarted(log: &Log) -> (Process, Process) {
     let mut workers = log.workers().into_iter();
@@ -113,7 +126,7 @@ fn restarted_after(first: &Process, second: &Process) {
 async fn connect_rejects_invalid_options() {
     fake_bridge::dummy_key();
     let fake = Spawnable::new(&Config::echo());
-    let good = spawn_options(&fake, options(1));
+    let good = options(1);
     let bad = [
         (
             ConnectOptions {
@@ -135,35 +148,6 @@ async fn connect_rejects_invalid_options() {
                 ..good.clone()
             },
             "timeout_secs must be greater than 0",
-        ),
-        (
-            ConnectOptions {
-                bridge_bin: String::new(),
-                ..good.clone()
-            },
-            "bridge_bin must not be empty",
-        ),
-        (
-            ConnectOptions {
-                bridge_url: Some("http://127.0.0.1:9".to_owned()),
-                ..good.clone()
-            },
-            "bridge_url and bridge_token must be set together",
-        ),
-        (
-            ConnectOptions {
-                bridge_token: Some("token".to_owned()),
-                ..good.clone()
-            },
-            "bridge_url and bridge_token must be set together",
-        ),
-        (
-            ConnectOptions {
-                bridge_url: Some("http://192.0.2.1:9".to_owned()),
-                bridge_token: Some("token".to_owned()),
-                ..good.clone()
-            },
-            "loopback",
         ),
     ];
     for (options, needle) in bad {
@@ -188,7 +172,7 @@ async fn abandon_during_handshake() {
     run_guest(test_programs::MODEL_FANOUT_ABANDON, &["2"], &client).await;
     // Nothing to ask an unbound bridge: it is killed at once, well under
     // the graceful `SHUTDOWN_TIMEOUT`.
-    await_idle_within(&client, 2, AT_ONCE).await;
+    await_gone_within(&fake, AT_ONCE).await;
 
     let log = fake.log();
     let workers = log.workers();
@@ -209,7 +193,7 @@ async fn abandon_before_ready() {
     let fake = Spawnable::new(&Config::echo().fault_on(2, Fault::NeverReady));
     let client = spawning(&fake, 2).await;
     run_guest(test_programs::MODEL_FANOUT_ABANDON, &["2"], &client).await;
-    await_idle_within(&client, 2, AT_ONCE).await;
+    await_gone_within(&fake, AT_ONCE).await;
 
     let log = fake.log();
     let workers = log.workers();
@@ -223,82 +207,80 @@ async fn abandon_before_ready() {
 
 #[tokio::test]
 async fn abandon_during_create() {
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::Park(Point::CreateAgent))).await;
-    let client = attached(&fake, 2).await;
+    let fake = Spawnable::new(&Config::echo().fault(Fault::Park(Point::CreateAgent)));
+    let client = spawning(&fake, 2).await;
 
     let guest = abandon_guest(&client, 2);
     fake.await_parked(Point::CreateAgent, 2).await;
     assert!(fake.release_one(Point::CreateAgent));
     guest.await.expect("the guest task joins");
 
-    // The loser's `CreateAgent` is still held: its task owns the slot until
-    // the id it will get is torn down.
+    // The loser's `CreateAgent` is still held: its task owns the slot — and
+    // so the process — until the id it will get is torn down, while the
+    // winner's process is asked to go.
     assert_eq!(fake.parked(Point::CreateAgent), 1);
-    assert_eq!(client.idle_slots(), 1, "the abandoned create holds its slot");
+    let (winner, loser) = split_by(&fake.log(), Rpc::Send);
+    await_process_gone(&winner).await;
+    assert!(loser.alive(), "the abandoned create holds its slot");
     assert_eq!(fake.log().count(Rpc::DeleteAgent), 1, "only the winner is torn down yet");
 
     fake.release_all();
-    await_rpcs(|| fake.log(), Rpc::DeleteAgent, 2, REOPEN).await;
-    await_idle(&client, 2).await;
+    await_rpcs(|| fake.log(), Rpc::DeleteAgent, 2, GONE).await;
+    await_gone(&fake).await;
     let log = fake.log();
-    let loser = log
-        .agents()
-        .into_iter()
-        .find(|agent| !log.sequence(agent).contains(&Rpc::Send))
-        .expect("the loser never got to `Send`");
-    assert_eq!(log.sequence(&loser), [Rpc::CreateAgent, Rpc::CloseAgent, Rpc::DeleteAgent]);
-    let created =
-        log.saw(Rpc::CreateAgent).into_iter().find(|e| e.agent.as_deref() == Some(&*loser));
-    let deleted =
-        log.saw(Rpc::DeleteAgent).into_iter().find(|e| e.agent.as_deref() == Some(&*loser));
-    let (created, deleted) = (created.expect("create"), deleted.expect("delete"));
+    let loser = log.process(loser.number).expect("the loser's history");
+    let (_, sequence) = sole_agent(&loser);
+    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::CloseAgent, Rpc::DeleteAgent]);
+    let created = loser.saw(Rpc::CreateAgent)[0];
+    let deleted = loser.saw(Rpc::DeleteAgent)[0];
     assert_eq!(
         deleted.text("cwd"),
         created.text("cwd"),
         "the late id is deleted where it was made"
     );
     assert!(!deleted.text("apiKey").is_empty());
+    assert!(loser.ended_with(Rpc::Shutdown));
 
     // Both slots are back: a fresh run gets one and completes.
     let fresh = echo_guest(&client);
     fake.await_parked(Point::CreateAgent, 1).await;
     fake.release_all();
     fresh.await.expect("the fresh guest joins");
-    assert_eq!(client.idle_slots(), 2);
-    assert_eq!(fake.log().count(Rpc::CreateAgent), 3);
-    assert_eq!(fake.log().count(Rpc::DeleteAgent), 3);
+    await_gone(&fake).await;
+    let log = fake.log();
+    assert_eq!(log.workers().len(), 3, "{}", log.summary());
+    assert_eq!(log.count(Rpc::CreateAgent), 3);
+    assert_eq!(log.count(Rpc::DeleteAgent), 3);
 }
 
 #[tokio::test]
 async fn abandon_before_stream() {
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::Park(Point::Send))).await;
-    let client = attached(&fake, 2).await;
+    let fake = Spawnable::new(&Config::echo().fault(Fault::Park(Point::Send)));
+    let client = spawning(&fake, 2).await;
 
     let guest = abandon_guest(&client, 2);
     fake.await_parked(Point::Send, 2).await;
     assert!(fake.release_one(Point::Send));
     guest.await.expect("the guest task joins");
-    await_idle(&client, 2).await;
+    await_gone(&fake).await;
 
     // No stream opened for the loser, so there is no run to cancel; the
     // agent is still closed and deleted.
     let log = fake.log();
-    let agents = log.agents();
-    assert_eq!(agents.len(), 2);
-    for agent in &agents {
-        assert_eq!(
-            log.sequence(agent),
-            [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent],
-            "{agent}"
-        );
+    let workers = log.workers();
+    assert_eq!(workers.len(), 2, "{}", log.summary());
+    for process in &workers {
+        let (_, sequence) = sole_agent(process);
+        assert_eq!(sequence, ANSWERED, "process {}", process.number);
+        assert!(process.ended_with(Rpc::Shutdown), "process {}", process.number);
     }
     assert_eq!(log.count(Rpc::CancelRun), 0);
 }
 
 #[tokio::test]
 async fn abandon_during_teardown() {
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::Park(Point::CloseAgent))).await;
-    let client = attached(&fake, 2).await;
+    let fake = Spawnable::new(&Config::echo().fault(Fault::Park(Point::CloseAgent)));
+    let client = spawning(&fake, 2).await;
 
     let guest = abandon_guest(&client, 2);
     // Both runs are over; both teardowns are held at `CloseAgent`.
@@ -306,21 +288,21 @@ async fn abandon_during_teardown() {
     assert!(fake.release_one(Point::CloseAgent));
     guest.await.expect("the guest task joins");
 
-    // The loser was dropped while waiting on its teardown, which runs on.
+    // The loser was dropped while waiting on its teardown, which runs on
+    // and keeps its process; the winner's is asked to go.
     assert_eq!(fake.parked(Point::CloseAgent), 1);
-    assert_eq!(client.idle_slots(), 1, "the teardown in flight holds its slot");
-    assert_eq!(fake.log().count(Rpc::DeleteAgent), 1);
+    let (winner, loser) = split_by(&fake.log(), Rpc::DeleteAgent);
+    await_process_gone(&winner).await;
+    assert!(loser.alive(), "the teardown in flight holds its slot");
 
     fake.release_all();
-    await_rpcs(|| fake.log(), Rpc::DeleteAgent, 2, REOPEN).await;
-    await_idle(&client, 2).await;
+    await_rpcs(|| fake.log(), Rpc::DeleteAgent, 2, GONE).await;
+    await_gone(&fake).await;
     let log = fake.log();
-    for agent in log.agents() {
-        assert_eq!(
-            log.sequence(&agent),
-            [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent],
-            "{agent}"
-        );
+    for process in log.workers() {
+        let (_, sequence) = sole_agent(&process);
+        assert_eq!(sequence, ANSWERED, "process {}", process.number);
+        assert!(process.ended_with(Rpc::Shutdown), "process {}", process.number);
     }
 }
 
@@ -340,7 +322,7 @@ async fn abandon_while_queued() {
     );
     let client = spawning(&fake, 2).await;
     run_guest(test_programs::MODEL_FANOUT_ABANDON, &["3"], &client).await;
-    await_idle(&client, 2).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let workers = log.workers();
@@ -368,7 +350,7 @@ async fn lease_waits() {
     let fake = Spawnable::new(&Config::echo());
     let client = spawning(&fake, 2).await;
     run_guest(test_programs::MODEL_FANOUT, &["3"], &client).await;
-    await_idle(&client, 2).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let workers = log.workers();
@@ -394,12 +376,15 @@ async fn lease_waits() {
 /// one window; its task holds the slot for one more, then reopens it with
 /// nothing to tear down, and the next completion reaches its own
 /// `CreateAgent`.
-async fn hang_on_create(client: &Client, log: impl Fn() -> Log + Sync) {
-    expect_error("unanswered after 1s", &[], client).await;
-    expect_error("unanswered after 1s", &[], client).await;
-    await_idle(client, 1).await;
+#[tokio::test]
+async fn hang_on_create() {
+    let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::CreateAgent)));
+    let client = connect(with_window(WINDOW, 1)).await;
+    expect_error("unanswered after 1s", &[], &client).await;
+    expect_error("unanswered after 1s", &[], &client).await;
+    await_gone(&fake).await;
 
-    let log = log();
+    let log = fake.log();
     let creates = log.saw(Rpc::CreateAgent);
     assert_eq!(creates.len(), 2, "{}", log.summary());
     let gap = creates[1].at().duration_since(creates[0].at()).unwrap_or_default();
@@ -409,24 +394,9 @@ async fn hang_on_create(client: &Client, log: impl Fn() -> Log + Sync) {
     assert!(gap >= reopen, "the slot reopened after {gap:?}");
     assert_eq!(log.count(Rpc::CloseAgent), 0, "no id arrived to close");
     assert_eq!(log.count(Rpc::DeleteAgent), 0);
-}
-
-#[tokio::test]
-async fn hang_on_create_spawned() {
-    let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::CreateAgent)));
-    let client = connect(spawn_options(&fake, with_window(WINDOW, 1))).await;
-    hang_on_create(&client, || fake.log()).await;
-    for process in fake.log().workers() {
+    for process in log.workers() {
         assert!(process.ended_with(Rpc::Shutdown), "process {}", process.number);
     }
-}
-
-#[tokio::test]
-async fn hang_on_create_attached() {
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::Hang(Point::CreateAgent))).await;
-    let client = connect(attach_options(&fake, with_window(WINDOW, 1))).await;
-    hang_on_create(&client, || fake.log()).await;
-    assert_eq!(fake.log().count(Rpc::Shutdown), 0);
 }
 
 #[tokio::test]
@@ -435,8 +405,8 @@ async fn create_reaps_late_agent() {
     // completion gives up; the id must arrive inside it, and the guest's
     // exit sits between the two under load, so the window is a wide one.
     const HOLD: Duration = Duration::from_secs(5);
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::Park(Point::CreateAgent))).await;
-    let client = connect(attach_options(&fake, with_window(HOLD, 1))).await;
+    let fake = Spawnable::new(&Config::echo().fault(Fault::Park(Point::CreateAgent)));
+    let client = connect(with_window(HOLD, 1)).await;
     expect_error("unanswered after 5s", &[], &client).await;
     assert_eq!(fake.parked(Point::CreateAgent), 1, "the create is still in flight");
     assert_eq!(fake.log().count(Rpc::CloseAgent), 0, "nothing to reap before the id arrives");
@@ -444,8 +414,8 @@ async fn create_reaps_late_agent() {
     // The id nobody is waiting for is closed and deleted by the task that
     // asked for it, against the create-time cwd.
     fake.release_all();
-    await_rpcs(|| fake.log(), Rpc::DeleteAgent, 1, REOPEN).await;
-    await_idle(&client, 1).await;
+    await_rpcs(|| fake.log(), Rpc::DeleteAgent, 1, GONE).await;
+    await_gone(&fake).await;
     let log = fake.log();
     let (agent, sequence) = sole_agent(&log);
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::CloseAgent, Rpc::DeleteAgent], "{agent}");
@@ -461,7 +431,7 @@ async fn create_returns_empty_id() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::EmptyId));
     let client = spawning(&fake, 1).await;
     expect_error("returned an empty agent id", &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     assert_eq!(log.count(Rpc::CreateAgent), 1);
@@ -478,9 +448,9 @@ async fn create_returns_empty_id() {
 #[tokio::test]
 async fn hang_on_send() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Send)));
-    let client = connect(spawn_options(&fake, with_window(WINDOW, 1))).await;
+    let client = connect(with_window(WINDOW, 1)).await;
     expect_error("inactive for 1s", &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     // The stream never opened, so there is no run id to cancel.
     let log = fake.log();
@@ -493,18 +463,15 @@ async fn hang_on_send() {
 async fn cap_hits() {
     // Activity every 200ms keeps the inactivity window rearmed; the 1s cap
     // ends the run anyway, and the run it noted is cancelled.
-    let fake = FakeBridge::serve(Config::paced(200, 1000, Then::Hang)).await;
-    let client = connect(attach_options(
-        &fake,
-        ConnectOptions {
-            timeout_secs: 1,
-            ..options(1)
-        },
-    ))
+    let fake = Spawnable::new(&Config::paced(200, 1000, Then::Hang));
+    let client = connect(ConnectOptions {
+        timeout_secs: 1,
+        ..options(1)
+    })
     .await;
     expect_error("timed out after 1s (absolute cap exceeded while still active)", &[], &client)
         .await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let (_, sequence) = sole_agent(&log);
@@ -520,12 +487,12 @@ async fn cap_hits() {
 async fn slow_stream_rearms() {
     // Five frames 400ms apart outlast the 1s window several times over;
     // each one rearms it.
-    let fake = FakeBridge::serve(Config::paced(400, 5, Then::Finish)).await;
-    let client = connect(attach_options(&fake, with_window(WINDOW, 1))).await;
+    let fake = Spawnable::new(&Config::paced(400, 5, Then::Finish));
+    let client = connect(with_window(WINDOW, 1)).await;
     let started = Instant::now();
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
     assert!(started.elapsed() >= Duration::from_secs(2), "the run streamed for 2s");
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let (_, sequence) = sole_agent(&fake.log());
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
@@ -543,7 +510,7 @@ async fn bridge_killed_on_send_restarts() {
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::KillOnSend(1)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let (first, second) = restarted(&log);
@@ -561,7 +528,7 @@ async fn bridge_exited_on_create_restarts() {
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::ExitOnCreate(1)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let (first, second) = restarted(&log);
@@ -584,7 +551,7 @@ async fn bridge_killed_twice_fails() {
     let client = spawning(&fake, 1).await;
     expect_error(KILLED, &["without:fake-bridge marker"], &client).await;
     // Teardown is skipped on a dead bridge: no `TEARDOWN_TIMEOUT` is paid.
-    await_idle_within(&client, 1, AT_ONCE).await;
+    await_gone_within(&fake, AT_ONCE).await;
 
     let log = fake.log();
     let (first, second) = restarted(&log);
@@ -604,7 +571,7 @@ async fn killed_after_candidate_fails() {
         Spawnable::new(&Config::replies(["alpha", "beta"]).fault_on(1, Fault::KillOnSend(2)));
     let client = spawning(&fake, 1).await;
     expect_error(KILLED, &["check"], &client).await;
-    await_idle_within(&client, 1, AT_ONCE).await;
+    await_gone_within(&fake, AT_ONCE).await;
 
     let log = fake.log();
     let workers = log.workers();
@@ -625,9 +592,9 @@ async fn inactive_run_not_restarted() {
     // A bridge that stays up and silent is not a lost bridge: the run is
     // cancelled at the inactivity bound and the failure stands.
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Stream)));
-    let client = connect(spawn_options(&fake, with_window(WINDOW, 1))).await;
+    let client = connect(with_window(WINDOW, 1)).await;
     expect_error("inactive for 1s", &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let workers = log.workers();
@@ -648,7 +615,7 @@ async fn exit_before_ready() {
         &client,
     )
     .await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let worker = &log.workers()[0];
@@ -662,7 +629,7 @@ async fn ready_then_refused() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::ReadyThenRefused));
     let client = spawning(&fake, 1).await;
     expect_error("did not complete the handshake", &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     // The ready line was read but nothing answered at its URL: the process
     // is not left behind.
@@ -679,7 +646,7 @@ async fn ready_line_not_loopback() {
         Spawnable::new(&Config::echo().fault(Fault::ReadyUrl("http://192.0.2.1:9".to_owned())));
     let client = spawning(&fake, 1).await;
     expect_error("loopback", &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let worker = &log.workers()[0];
@@ -693,11 +660,11 @@ async fn ready_line_not_loopback() {
 
 #[tokio::test]
 async fn hang_on_teardown() {
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::Hang(Point::CloseAgent))).await;
-    let client = attached(&fake, 1).await;
+    let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::CloseAgent)));
+    let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
     let returned = SystemTime::now();
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     // The answer waits on the teardown, and the hung call is bounded, not
     // fatal: `DeleteAgent` still follows it.
@@ -714,18 +681,17 @@ async fn hang_on_shutdown() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Shutdown)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    assert_eq!(client.idle_slots(), 0, "the process is still up");
+    assert!(fake.log().workers()[0].alive(), "the process is still up");
     // `Shutdown` unanswered for one bound, the exit waited for one more,
     // then the kill.
-    await_idle_within(&client, 1, 2 * SHUTDOWN_TIMEOUT + REOPEN).await;
-    let reopened = SystemTime::now();
+    await_gone_within(&fake, 2 * SHUTDOWN_TIMEOUT + GONE).await;
+    let gone = SystemTime::now();
 
     let worker = &fake.log().workers()[0];
     assert_eq!(worker.last_rpc(), Some(Rpc::Shutdown));
     let asked = worker.saw(Rpc::Shutdown)[0].at();
-    let held = reopened.duration_since(asked).unwrap_or_default();
-    assert!(held >= 2 * SHUTDOWN_TIMEOUT, "the slot reopened {held:?} after Shutdown");
-    assert!(!worker.alive());
+    let held = gone.duration_since(asked).unwrap_or_default();
+    assert!(held >= 2 * SHUTDOWN_TIMEOUT, "the process was gone {held:?} after Shutdown");
 }
 
 #[tokio::test]
@@ -740,38 +706,11 @@ async fn handshake_hangs() {
     )
     .await;
     assert!(started.elapsed() >= CONNECT_TIMEOUT);
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let worker = &fake.log().workers()[0];
     assert_eq!(worker.last_rpc(), Some(Rpc::Ping));
     killed(worker);
-}
-
-// ------------------------------------------------------------------------
-// Attach mode
-// ------------------------------------------------------------------------
-
-#[tokio::test]
-async fn attach_mode() {
-    let fake = FakeBridge::serve(Config::echo()).await;
-    let client = attached(&fake, 1).await;
-    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    // A shared bridge is not the lease's to close: the slot is back at once.
-    assert_eq!(client.idle_slots(), 1);
-
-    let log = fake.log();
-    let (_, sequence) = sole_agent(&log);
-    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
-    assert_eq!(log.count(Rpc::Shutdown), 0, "an attached bridge is never shut down");
-}
-
-#[tokio::test]
-async fn attach_rejects_tools() {
-    let fake = FakeBridge::serve(Config::tool("lookup")).await;
-    let client = attached(&fake, 1).await;
-    expect_error("unreachable through an attached bridge", &["tools"], &client).await;
-    assert_eq!(client.idle_slots(), 1);
-    assert_eq!(fake.log().count(Rpc::CreateAgent), 0, "rejected before the slot");
 }
 
 // ------------------------------------------------------------------------
@@ -780,10 +719,10 @@ async fn attach_rejects_tools() {
 
 #[tokio::test]
 async fn close_500() {
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::CloseFails)).await;
-    let client = attached(&fake, 1).await;
+    let fake = Spawnable::new(&Config::echo().fault(Fault::CloseFails));
+    let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     // A failed close is logged, and the delete still follows.
     let (_, sequence) = sole_agent(&fake.log());
@@ -803,7 +742,7 @@ async fn stream_reset_restarts() {
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::ResetStream(1)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let (first, second) = restarted(&log);
@@ -829,7 +768,7 @@ async fn stream_reset_twice_fails() {
         &client,
     )
     .await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let (first, second) = restarted(&log);
@@ -838,24 +777,6 @@ async fn stream_reset_twice_fails() {
         assert_eq!(sequence, RESET, "{}", process.summary());
         assert!(process.ended_with(Rpc::Shutdown), "{}", process.summary());
     }
-}
-
-#[tokio::test]
-async fn attached_stream_reset_restarts() {
-    // An attached bridge is never seen to die, so the restart here rides
-    // on the transport class alone; the fresh lease is a second agent on
-    // the same bridge, which is nobody's to shut down.
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::ResetStream(1))).await;
-    let client = attached(&fake, 1).await;
-    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    await_idle(&client, 1).await;
-
-    let log = fake.log();
-    assert_eq!(log.agents(), ["agent-1", "agent-2"], "{}", log.summary());
-    assert_eq!(log.sequence("agent-1"), RESET);
-    assert_eq!(log.saw(Rpc::CancelRun)[0].text("runId"), "run-1");
-    assert_eq!(log.sequence("agent-2"), ANSWERED);
-    assert_eq!(log.count(Rpc::Shutdown), 0, "an attached bridge is never shut down");
 }
 
 // ------------------------------------------------------------------------
@@ -897,7 +818,7 @@ async fn callback_rejections() {
     assert!(reply["message"].as_str().unwrap_or_default().contains("no live completion"));
 
     guest.await.expect("the guest task joins");
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
     assert_eq!(fake.log().callbacks().len(), 0, "the fake itself never called back");
 }
 
@@ -919,16 +840,24 @@ async fn callback_token_revoked_after_exit() {
     let body = json!({ "toolName": "lookup", "args": {}, "agentId": worker.agents()[0] });
 
     // Asked to go, still up: the finished completion no longer routes.
-    fake_bridge::poll(|| fake.log().workers()[0].count(Rpc::Shutdown) == 1, REOPEN, "Shutdown")
-        .await;
-    assert_eq!(client.idle_slots(), 0);
+    fake_bridge::poll(|| fake.log().workers()[0].count(Rpc::Shutdown) == 1, GONE, "Shutdown").await;
+    assert!(worker.alive(), "the process lingers");
     let (status, reply) = callback(Method::POST, &url, Some(&token), &body).await;
     assert_eq!((status, reply["code"].as_str()), (404, Some("not_found")), "{reply}");
 
-    // Gone, and its token with it.
-    await_idle(&client, 1).await;
-    let (status, reply) = callback(Method::POST, &url, Some(&token), &body).await;
-    assert_eq!((status, reply["code"].as_str()), (401, Some("unauthenticated")), "{reply}");
+    // Gone, and its token with it: the client revokes it once it has seen
+    // the exit, a beat after the process is reaped.
+    await_gone(&fake).await;
+    let deadline = Instant::now() + GONE;
+    loop {
+        let (status, reply) = callback(Method::POST, &url, Some(&token), &body).await;
+        if status == 401 {
+            assert_eq!(reply["code"].as_str(), Some("unauthenticated"), "{reply}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "the token still routes: {status} {reply}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 // ------------------------------------------------------------------------
@@ -968,7 +897,7 @@ async fn ready_line_never_logged() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::InlineToken));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let token = fake.log().workers()[0].bridge_token().expect("the process logged its token");
     assert!(!token.is_empty());

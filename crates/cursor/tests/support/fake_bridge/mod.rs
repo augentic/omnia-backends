@@ -1,13 +1,18 @@
-//! A protocol-faithful fake `cursor-sdk-bridge`, in two mounts.
+//! A protocol-faithful fake `cursor-sdk-bridge`.
 //!
-//! [`FakeBridge::serve`] binds it in-process on loopback for attach mode:
-//! the test holds the server directly and can release requests it has
-//! parked. [`Spawnable`] stands it up as the `fake-cursor-sdk-bridge`
-//! binary (`main.rs`, this same module) for spawn mode: the client starts
-//! one process per lease, each does the ready-line handshake, and all of
-//! them append to one JSONL log the test folds back into per-process
+//! [`Spawnable`] stands it up as the process the client spawns: a home
+//! directory holding the reply script, the shared log, and a symlink named
+//! `cursor-sdk-bridge` to the `fake-cursor-sdk-bridge` binary (`main.rs`,
+//! this same module), put first on the test process's `PATH` so the client
+//! finds the fake the way a deployment finds the real bridge. The client
+//! starts one process per lease, each does the ready-line handshake, and
+//! all of them append to one JSONL log the test folds back into per-process
 //! histories. Faults and the reply script are one [`Config`], written as a
-//! file beside the binary the client is pointed at.
+//! file in the home the binary finds through `FAKE_BRIDGE_HOME`.
+//!
+//! A [`Fault::Park`] holds a request until the test releases it: the
+//! process records the park in the log and waits for the release count the
+//! test writes beside it to pass its ticket.
 //!
 //! The fake answers `sdk.v1` the way the real bridge does — bearer-checked
 //! Connect JSON, `agent-<n>` ids counted per process so two processes hand
@@ -18,6 +23,7 @@ pub mod log;
 mod proto;
 mod server;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 use std::time::Duration;
@@ -25,7 +31,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 
 #[allow(unused_imports, reason = "the suites' side of the module")]
 pub use self::log::{Event, History, Kind, Log, Process, Rpc};
@@ -35,7 +40,11 @@ pub use self::server::{EXIT_ON_CREATE, MARKERS};
 
 const SCRIPT_FILE: &str = "script.json";
 const LOG_FILE: &str = "log.jsonl";
-const BIN_NAME: &str = "fake-cursor-sdk-bridge";
+const RELEASES_FILE: &str = "releases.json";
+/// The name the client spawns the bridge by.
+const BIN_NAME: &str = "cursor-sdk-bridge";
+/// Where a spawned fake finds its home.
+const HOME_VAR: &str = "FAKE_BRIDGE_HOME";
 
 /// Where in an agent's lifecycle a [`Fault::Park`] or [`Fault::Hang`]
 /// holds the request.
@@ -58,7 +67,7 @@ pub enum Point {
 /// One way the fake misbehaves.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Fault {
-    /// Hold requests at `Point` until the test releases them (in-process).
+    /// Hold requests at `Point` until the test releases them.
     Park(Point),
     /// Hold requests at `Point` forever.
     Hang(Point),
@@ -89,13 +98,13 @@ pub enum Fault {
     /// exiting: the lease's slot stays held for that long.
     LingerOnShutdown(u64),
     /// Hold the run's answer until another spawned process has recorded
-    /// this RPC. In-process (no shared log) this is a no-op.
+    /// this RPC.
     WaitForPeer(Rpc),
 }
 
 /// A fault and the spawned process it targets: 1-based in start order
 /// (`Client::connect`'s probe is process 0), or every process but the
-/// probe when unset. In-process, only unselected faults apply.
+/// probe when unset.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Injected {
     pub fault: Fault,
@@ -103,13 +112,8 @@ pub struct Injected {
 }
 
 impl Injected {
-    pub const fn applies(&self, process: Option<usize>) -> bool {
-        match (self.process, process) {
-            (None, None) => true,
-            (None, Some(number)) => number != 0,
-            (Some(selected), Some(number)) => selected == number,
-            (Some(_), None) => false,
-        }
+    pub fn applies(&self, process: usize) -> bool {
+        self.process.map_or(process != 0, |selected| selected == process)
     }
 }
 
@@ -147,8 +151,7 @@ pub enum Script {
     Paced { every_ms: u64, frames: usize, then: Then },
 }
 
-/// The script and faults one fake — one process, or the in-process server
-/// — runs with.
+/// The script and faults one fake process runs with.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub script: Script,
@@ -199,7 +202,7 @@ impl Config {
         self
     }
 
-    /// A fault for every process but the probe (and the in-process server).
+    /// A fault for every process but the probe.
     #[must_use]
     pub fn fault(mut self, fault: Fault) -> Self {
         self.faults.push(Injected { fault, process: None });
@@ -230,40 +233,57 @@ pub fn dummy_key() {
     });
 }
 
-/// The fake served in-process on loopback: the attach-mode bridge, with
-/// the test holding the server's parks and record directly.
-pub struct FakeBridge {
-    server: Arc<Server>,
-    url: String,
-    serving: JoinHandle<()>,
+/// The fake as the process the client spawns: a home directory holding the
+/// script, the shared log, the release counts, and the `cursor-sdk-bridge`
+/// link to `fake-cursor-sdk-bridge`, put on `PATH` for this test process.
+pub struct Spawnable {
+    home: tempfile::TempDir,
 }
 
-impl FakeBridge {
-    /// Bind `127.0.0.1:0` and serve `config`.
-    pub async fn serve(config: Config) -> Self {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind loopback");
-        let url = format!("http://{}", listener.local_addr().expect("local address"));
-        let server = Server::new(config, None, None, log::Recorder::in_memory());
-        let serving = tokio::spawn(Arc::clone(&server).serve(listener));
-        Self { server, url, serving }
+impl Spawnable {
+    /// Lay out `config` for the binary to pick up and put the fake on `PATH`.
+    ///
+    /// `PATH` and `FAKE_BRIDGE_HOME` are process-wide, so one `Spawnable`
+    /// per test process: the suites run under nextest, one test each.
+    #[allow(
+        clippy::option_env_unwrap,
+        reason = "set for the suites; unset in the binary's own build, which never gets here"
+    )]
+    pub fn new(config: &Config) -> Self {
+        let home =
+            tempfile::Builder::new().prefix("fake-bridge-").tempdir().expect("a home directory");
+        std::fs::write(
+            home.path().join(SCRIPT_FILE),
+            serde_json::to_vec_pretty(config).expect("a config serializes"),
+        )
+        .expect("writing the script");
+        let target = option_env!("CARGO_BIN_EXE_fake-cursor-sdk-bridge")
+            .expect("the fake binary is built alongside the suites (feature `fake-bridge`)");
+        std::os::unix::fs::symlink(target, home.path().join(BIN_NAME))
+            .expect("linking the fake binary");
+
+        let mut path = home.path().as_os_str().to_owned();
+        if let Some(rest) = std::env::var_os("PATH") {
+            path.push(":");
+            path.push(rest);
+        }
+        // SAFETY: set before the test spawns any thread of its own, and
+        // read only by the child processes the client spawns from here on.
+        unsafe { std::env::set_var("PATH", path) };
+        // SAFETY: as above.
+        unsafe { std::env::set_var(HOME_VAR, home.path()) };
+        Self { home }
     }
 
-    pub fn url(&self) -> &str {
-        &self.url
-    }
-
-    pub fn token(&self) -> &str {
-        self.server.token()
-    }
-
-    /// Everything recorded so far.
+    /// Everything every process recorded so far.
     pub fn log(&self) -> Log {
-        Log::from_events(self.server.recorder().events())
+        Log::read(&self.home.path().join(LOG_FILE))
     }
 
-    /// Requests held at `point` right now.
+    /// Requests held at `point` right now: parked and not yet released. A
+    /// run that left a `Stream` park through `CancelRun` still counts.
     pub fn parked(&self, point: Point) -> usize {
-        self.server.parks().parked(point)
+        self.log().parked(point).saturating_sub(self.released().count(point))
     }
 
     /// Wait until `count` requests are held at `point`. The bound is
@@ -286,70 +306,73 @@ impl FakeBridge {
         }
     }
 
-    /// Release the earliest request held at `point`.
+    /// Release the earliest request held at `point`; `false` when none is.
     pub fn release_one(&self, point: Point) -> bool {
-        self.server.parks().release_one(point)
+        let mut releases = self.released();
+        if releases.count(point) >= self.log().parked(point) {
+            return false;
+        }
+        releases.release(point, 1);
+        releases.write(&self.releases_path());
+        true
     }
 
     pub fn release_all(&self) {
-        self.server.parks().release_all();
+        let log = self.log();
+        let mut releases = self.released();
+        for point in log.parked_points() {
+            let held = log.parked(point).saturating_sub(releases.count(point));
+            releases.release(point, held);
+        }
+        releases.write(&self.releases_path());
+    }
+
+    fn released(&self) -> Releases {
+        Releases::read(&self.releases_path())
+    }
+
+    fn releases_path(&self) -> PathBuf {
+        self.home.path().join(RELEASES_FILE)
     }
 }
 
-impl Drop for FakeBridge {
-    fn drop(&mut self) {
-        self.serving.abort();
+/// How many parked requests at each point the test has released, in
+/// ticket order; the test writes it, every spawned process polls it.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Releases(BTreeMap<String, usize>);
+
+impl Releases {
+    pub fn read(path: &Path) -> Self {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn count(&self, point: Point) -> usize {
+        self.0.get(&format!("{point:?}")).copied().unwrap_or(0)
+    }
+
+    fn release(&mut self, point: Point, count: usize) {
+        *self.0.entry(format!("{point:?}")).or_insert(0) += count;
+    }
+
+    // Written whole and renamed into place, so a process never reads half.
+    fn write(&self, path: &Path) {
+        let staged = path.with_extension("json.tmp");
+        std::fs::write(&staged, serde_json::to_vec(self).expect("releases serialize"))
+            .expect("writing the releases");
+        std::fs::rename(&staged, path).expect("publishing the releases");
     }
 }
 
-/// The fake as a binary the client spawns: a directory holding the script,
-/// the shared log, and a link to `fake-cursor-sdk-bridge`, which finds
-/// both beside the path it was started through.
-pub struct Spawnable {
-    home: tempfile::TempDir,
-}
-
-impl Spawnable {
-    /// Lay out `config` for the binary to pick up.
-    #[allow(
-        clippy::option_env_unwrap,
-        reason = "set for the suites; unset in the binary's own build, which never gets here"
-    )]
-    pub fn new(config: &Config) -> Self {
-        let home =
-            tempfile::Builder::new().prefix("fake-bridge-").tempdir().expect("a home directory");
-        std::fs::write(
-            home.path().join(SCRIPT_FILE),
-            serde_json::to_vec_pretty(config).expect("a config serializes"),
-        )
-        .expect("writing the script");
-        let target = option_env!("CARGO_BIN_EXE_fake-cursor-sdk-bridge")
-            .expect("the fake binary is built alongside the suites (feature `fake-bridge`)");
-        std::os::unix::fs::symlink(target, home.path().join(BIN_NAME))
-            .expect("linking the fake binary");
-        Self { home }
-    }
-
-    /// What `bridge_bin` is set to.
-    pub fn bin(&self) -> String {
-        self.home.path().join(BIN_NAME).to_string_lossy().into_owned()
-    }
-
-    /// Everything every process recorded so far.
-    pub fn log(&self) -> Log {
-        Log::read(&self.home.path().join(LOG_FILE))
-    }
-}
-
-/// Where the spawned binary finds its script and log: beside the path it
-/// was started through.
+/// Where the spawned binary finds its script, log, and releases.
 pub struct Home(PathBuf);
 
 impl Home {
-    /// From `argv[0]`.
-    pub fn of(program: &str) -> Self {
-        let path = Path::new(program);
-        Self(path.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf))
+    /// From `FAKE_BRIDGE_HOME`, which the test process set before spawning.
+    pub fn from_env() -> Self {
+        Self(PathBuf::from(std::env::var_os(HOME_VAR).expect("FAKE_BRIDGE_HOME is set")))
     }
 
     /// The config, or a plain echo when no script was laid out.
@@ -363,12 +386,16 @@ impl Home {
     pub fn log_path(&self) -> PathBuf {
         self.0.join(LOG_FILE)
     }
+
+    pub fn releases_path(&self) -> PathBuf {
+        self.0.join(RELEASES_FILE)
+    }
 }
 
 /// The spawned binary's whole life: number ourselves through the log,
 /// handshake or fail it as scripted, serve until `Shutdown`.
 pub async fn run_spawned(args: Vec<String>) {
-    let home = Home::of(args.first().map_or(BIN_NAME, String::as_str));
+    let home = Home::from_env();
     let config = home.config();
     let recorder = log::Recorder::to_file(&home.log_path());
     let process = recorder.process();
@@ -390,7 +417,7 @@ pub async fn run_spawned(args: Vec<String>) {
         || json!({}),
         |callback| json!({ "callbackUrl": callback.url, "callbackToken": callback.token }),
     );
-    let server = Server::new(config, Some(process), callback, recorder);
+    let server = Server::new(config, process, callback, recorder, home.releases_path());
     // The fake's own bearer token: what the ready line carries, for a test
     // proving it never reaches a log.
     ready_event["token"] = Value::String(server.token().to_owned());

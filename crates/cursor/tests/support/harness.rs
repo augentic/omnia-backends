@@ -1,6 +1,6 @@
 //! The guest-driven harness the `model` and `bridge` suites share: a client
-//! over one of the fake's mounts, a guest run through `omnia_test::host`,
-//! and the pool probe every row ends on.
+//! over the fake on `PATH`, a guest run through `omnia_test::host`, and the
+//! wait for every spawned process to be gone that every row ends on.
 
 use std::time::Duration;
 
@@ -16,11 +16,11 @@ use omnia_test::host::{Backends, Deployment};
 use omnia_wasi_model::WasiModel;
 use serde_json::Value;
 
-use super::fake_bridge::{self, FakeBridge, History, Rpc, Spawnable};
+use super::fake_bridge::{self, History, Process, Rpc, Spawnable};
 
-/// How long a slot may take to reopen once a guest has returned, when the
-/// row expects no timeout on the way.
-pub const REOPEN: Duration = Duration::from_secs(8);
+/// How long a lease's process may take to be gone once a guest has
+/// returned, when the row expects no timeout on the way.
+pub const GONE: Duration = Duration::from_secs(8);
 /// How long a guest may take to reach its first RPC: its component is
 /// compiled on the way, under whatever load the rest of the suite puts on
 /// the machine.
@@ -35,37 +35,16 @@ pub fn options(max_agents: usize) -> ConnectOptions {
         timeout_secs: 30,
         inactivity_secs: 10,
         max_agents,
-        bridge_bin: "cursor-sdk-bridge".to_owned(),
-        bridge_url: None,
-        bridge_token: None,
     }
 }
 
-/// `options` pointed at the spawnable fake.
-pub fn spawn_options(fake: &Spawnable, options: ConnectOptions) -> ConnectOptions {
-    ConnectOptions {
-        bridge_bin: fake.bin(),
-        ..options
-    }
-}
-
-/// `options` attached to the in-process fake.
-pub fn attach_options(fake: &FakeBridge, options: ConnectOptions) -> ConnectOptions {
-    ConnectOptions {
-        bridge_url: Some(fake.url().to_owned()),
-        bridge_token: Some(fake.token().to_owned()),
-        ..options
-    }
-}
-
-/// A client spawning one fake process per lease.
+/// A client spawning one process of `fake` per lease: the fake is on
+/// `PATH` from the moment it is laid out, so this is `connect` with the
+/// dependency spelled out.
 pub async fn spawning(fake: &Spawnable, max_agents: usize) -> Client {
-    connect(spawn_options(fake, options(max_agents))).await
-}
-
-/// A client attached to the in-process fake.
-pub async fn attached(fake: &FakeBridge, max_agents: usize) -> Client {
-    connect(attach_options(fake, options(max_agents))).await
+    let client = connect(options(max_agents)).await;
+    assert!(fake.log().process(0).is_some(), "the probe spawned the fake");
+    client
 }
 
 /// A client over `options`, with the API key the backend requires.
@@ -94,17 +73,36 @@ pub async fn expect_error(needle: &str, flags: &[&str], client: &Client) {
     run_guest(test_programs::MODEL_EXPECT_ERROR, &args, client).await;
 }
 
-/// Wait for every slot to reopen: a spawned lease's process must be gone
-/// first, so this is also the wait for its `Shutdown`.
-pub async fn await_idle(client: &Client, slots: usize) {
-    await_idle_within(client, slots, REOPEN).await;
+/// Wait for every process the client spawned to be gone — reaped, so the
+/// client has seen each exit. A slot reopens only once its process is, so
+/// this is the pool whole again, and also the wait for each `Shutdown`.
+pub async fn await_gone(fake: &Spawnable) {
+    await_gone_within(fake, GONE).await;
 }
 
-pub async fn await_idle_within(client: &Client, slots: usize, within: Duration) {
+pub async fn await_gone_within(fake: &Spawnable, within: Duration) {
+    let alive = || {
+        fake.log()
+            .workers()
+            .into_iter()
+            .filter(Process::alive)
+            .map(|p| p.number)
+            .collect::<Vec<_>>()
+    };
     fake_bridge::poll(
-        || client.idle_slots() == slots,
+        || alive().is_empty(),
         within,
-        &format!("{slots} idle slot(s), have {}", client.idle_slots()),
+        &format!("every spawned process gone; still up: {:?}", alive()),
+    )
+    .await;
+}
+
+/// Wait for one spawned process to be gone.
+pub async fn await_process_gone(process: &Process) {
+    fake_bridge::poll(
+        || !process.alive(),
+        GONE,
+        &format!("process {} (pid {}) gone", process.number, process.pid),
     )
     .await;
 }

@@ -31,14 +31,9 @@ Pairs with omnia 0.36.x.
   back. `CreateAgent` and the teardown run on tasks of their own, so a
   completion the guest drops mid-create or mid-teardown still closes and
   deletes its agent (an unanswered `CreateAgent` keeps its slot for one
-  more window for the late id).
-  `ConnectOptions::bridge_bin` (`CURSOR_BRIDGE_BIN`) names the
-  executable; `bridge_url` + `bridge_token` (`CURSOR_BRIDGE_URL`,
-  `CURSOR_BRIDGE_TOKEN`) attach to a loopback `http://` bridge another
-  process manages instead of spawning — a non-loopback URL is rejected
-  before any RPC, so the bearer token and API key never leave the host —
-  and a request declaring function tools is rejected there (the callbacks
-  would reach the bridge's owner, not this client).
+  more window for the late id). The executable is `cursor-sdk-bridge` on
+  `PATH`, and a ready line naming a non-loopback URL is rejected before
+  any RPC, so the bearer token and API key never leave the host.
   Spawn time is `cursor_bridge_spawn_ms`, spawn failures are
   `cursor_bridge_spawn_failures`, and a spawn that does not complete its
   handshake fails with the exit status and the step that failed; its
@@ -73,25 +68,24 @@ Pairs with omnia 0.36.x.
   round-trips, fan-out, abandoned fan-out, an expected failure) for
   `wasm32-wasip2`, and each backend runs them through `omnia_test::host`
   against a protocol-faithful fake — `fake-cursor-sdk-bridge` (behind the
-  crate's `fake-bridge` feature; spawned per lease or attached in-process,
+  crate's `fake-bridge` feature; linked onto the test process's `PATH` as
+  `cursor-sdk-bridge` and spawned per lease exactly as the real one is,
   with a fault matrix from a hung handshake to a `SIGKILL` mid-run, and a
   check that the ready line's bearer token never reaches a log) for
   cursor, an `OpenAI`-compatible chat-completions endpoint behind
   `GENAI_ENDPOINT` for genai. The scripted-server unit tests both crates
-  carried are retired in their favour; `Client::idle_slots` on
-  `omnia-cursor` is the suites' hidden probe for a lease fully released.
-  The cursor live tier gains `stress_fanout` (the four-way fan-out twenty
-  times over) and `upstream_tripwire`, red by design until a bridge
-  release lets one process host two agents.
+  carried are retired in their favour. Nothing on `omnia-cursor`'s public
+  surface exists for the tests' sake: a lease fully released is observed
+  as its process gone. The cursor live tier gains `stress_fanout` (the
+  four-way fan-out twenty times over).
 
 ### Changed
 
 - `omnia-cursor` runs one `cursor-sdk-bridge` process per live agent rather
   than one per client, so `Client::connect` spawns and closes a probe bridge
   (still failing fast on a missing or broken binary) and each completion
-  pays a bridge spawn. `ConnectOptions` gains `max_agents`, `bridge_bin`,
-  `bridge_url`, and `bridge_token`; struct literals must name them
-  (`FromEnv` defaults are unchanged in effect).
+  pays a bridge spawn. `ConnectOptions` gains `max_agents`; struct
+  literals must name it (`FromEnv` defaults are unchanged in effect).
 - `omnia-genai`'s `ConnectOptions` gains `endpoint`; struct literals must
   name it (`None` keeps the provider's own endpoint, as before).
 - `omnia-wasm-pkg` is deleted before it ever shipped: registry acquisition

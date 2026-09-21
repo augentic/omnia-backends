@@ -1,8 +1,8 @@
 //! `fake-cursor-sdk-bridge`: the fake as the process `omnia_cursor::Client`
-//! spawns per lease. Everything is in `mod.rs`, shared with the in-process
-//! mount the suites use for attach mode.
+//! spawns per lease, reached through a `cursor-sdk-bridge` link on `PATH`.
+//! Everything is in `mod.rs`, shared with the suites' side.
 
-#![allow(dead_code, reason = "the in-process mount's API is the suites' side of the module")]
+#![allow(dead_code, reason = "the suites' side of the module is unused here")]
 
 #[path = "mod.rs"]
 mod fake_bridge;

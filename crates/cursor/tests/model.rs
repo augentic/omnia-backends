@@ -1,19 +1,17 @@
 //! End-to-end tests for the cursor backend at the `omnia:model` boundary:
 //! every scenario runs a guest component from `crates/test-programs` through
 //! the omnia runtime over an `omnia_cursor::Client`, against the fake
-//! `cursor-sdk-bridge` — spawned per lease, or served in-process and
-//! attached. The guest asserts what it observes and traps on failure; the
-//! test asserts what reached the bridge and that the pool is whole again.
+//! `cursor-sdk-bridge` the client spawns per lease. The guest asserts what
+//! it observes and traps on failure; the test asserts what reached the
+//! bridge and that every process it spawned is gone again.
 
 mod support;
 
 use std::time::SystemTime;
 
 use omnia_cursor::ConnectOptions;
-use support::fake_bridge::{Codec, Config, FakeBridge, Fault, History as _, Point, Rpc, Spawnable};
-use support::harness::{
-    attach_options, attached, await_idle, connect, options, run_guest, sole_agent, spawning,
-};
+use support::fake_bridge::{Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
+use support::harness::{await_gone, connect, options, run_guest, sole_agent, spawning};
 
 // Every guest program in `crates/test-programs` must have a matching test
 // here; a new program without one fails to compile.
@@ -36,7 +34,7 @@ async fn model_echo_text() {
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
     let returned = SystemTime::now();
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let workers = log.workers();
@@ -64,7 +62,7 @@ async fn model_check_accepted() {
     let fake = Spawnable::new(&Config::replies([PASS]));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_CHECK_ACCEPTED, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let (_, sequence) = sole_agent(&log);
@@ -77,7 +75,7 @@ async fn model_check_corrected() {
     let fake = Spawnable::new(&Config::replies([FAIL, PASS]));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_CHECK_CORRECTED, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let (_, sequence) = sole_agent(&log);
@@ -100,7 +98,7 @@ async fn model_check_exhausted() {
     let fake = Spawnable::new(&Config::replies([FAIL]));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_CHECK_EXHAUSTED, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let (_, sequence) = sole_agent(&log);
@@ -118,7 +116,7 @@ async fn tool_roundtrip(codec: Codec) {
     let fake = Spawnable::new(&Config::tool("lookup").codec(codec));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_TOOL_ROUNDTRIP, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let workers = log.workers();
@@ -152,7 +150,7 @@ async fn model_tool_failure() {
     let fake = Spawnable::new(&Config::tool("lookup"));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_TOOL_FAILURE, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     // A repairable failure is a successful callback: the model, not the
     // session, sees it.
@@ -167,7 +165,7 @@ async fn model_undeclared_tool() {
     let fake = Spawnable::new(&Config::tool("lookup"));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_UNDECLARED_TOOL, &[], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     // The endpoint refuses the call and aborts the completion; the run
     // ends and the agent is still torn down.
@@ -187,7 +185,7 @@ async fn model_fanout() {
     let fake = Spawnable::new(&Config::echo());
     let client = spawning(&fake, WIDTH).await;
     run_guest(test_programs::MODEL_FANOUT, &[&WIDTH.to_string()], &client).await;
-    await_idle(&client, WIDTH).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
     let workers = log.workers();
@@ -206,7 +204,7 @@ async fn model_tool_fanout() {
     let fake = Spawnable::new(&Config::tool("lookup"));
     let client = spawning(&fake, WIDTH).await;
     run_guest(test_programs::MODEL_TOOL_FANOUT, &[&WIDTH.to_string()], &client).await;
-    await_idle(&client, WIDTH).await;
+    await_gone(&fake).await;
 
     // Every process chose the same id; the callbacks still reached the
     // right completion, routed by each process's own token.
@@ -229,8 +227,8 @@ async fn model_tool_fanout() {
 #[tokio::test]
 async fn model_fanout_abandon() {
     const WIDTH: usize = 4;
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::Park(Point::Stream))).await;
-    let client = attached(&fake, WIDTH).await;
+    let fake = Spawnable::new(&Config::echo().fault(Fault::Park(Point::Stream)));
+    let client = spawning(&fake, WIDTH).await;
 
     let guest = tokio::spawn({
         let client = client.clone();
@@ -243,14 +241,14 @@ async fn model_fanout_abandon() {
     assert_eq!(fake.log().peak_live(), WIDTH);
     assert!(fake.release_one(Point::Stream));
     guest.await.expect("the guest task joins");
-    await_idle(&client, WIDTH).await;
+    await_gone(&fake).await;
 
     let log = fake.log();
-    let agents = log.agents();
-    assert_eq!(agents.len(), WIDTH);
+    let workers = log.workers();
+    assert_eq!(workers.len(), WIDTH, "{}", log.summary());
     let mut cancelled = 0;
-    for agent in &agents {
-        let sequence = log.sequence(agent);
+    for process in &workers {
+        let (agent, sequence) = sole_agent(process);
         let teardown = &sequence[sequence.len() - 2..];
         assert_eq!(teardown, [Rpc::CloseAgent, Rpc::DeleteAgent], "{agent}: {sequence:?}");
         assert_eq!(sequence.iter().filter(|rpc| **rpc == Rpc::CloseAgent).count(), 1);
@@ -258,26 +256,23 @@ async fn model_fanout_abandon() {
         match sequence.as_slice() {
             [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, ..] => cancelled += 1,
             [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, ..] => {}
-            other => panic!("{agent}: unexpected sequence {other:?}"),
+            other => panic!("process {}: unexpected sequence {other:?}", process.number),
         }
+        assert!(process.ended_with(Rpc::Shutdown), "process {}", process.number);
     }
     assert_eq!(cancelled, WIDTH - 1, "every loser's run was cancelled: {}", log.summary());
-    assert_eq!(log.count(Rpc::Shutdown), 0, "an attached bridge is never shut down");
 }
 
 #[tokio::test]
 async fn model_expect_error() {
-    let fake = FakeBridge::serve(Config::echo().fault(Fault::Hang(Point::Send))).await;
-    let client = connect(attach_options(
-        &fake,
-        ConnectOptions {
-            inactivity_secs: 1,
-            ..options(1)
-        },
-    ))
+    let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Send)));
+    let client = connect(ConnectOptions {
+        inactivity_secs: 1,
+        ..options(1)
+    })
     .await;
     run_guest(test_programs::MODEL_EXPECT_ERROR, &["inactivity limit 1s"], &client).await;
-    await_idle(&client, 1).await;
+    await_gone(&fake).await;
 
     // No run id ever arrived, so nothing is cancelled; the agent is still
     // closed and deleted.

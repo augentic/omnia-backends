@@ -57,13 +57,17 @@ so the policy splits into three tiers:
   [crates/test-programs](crates/test-programs) (compiled for `wasm32-wasip2`
   by that crate's own build script) runs through
   `omnia_test::host::Deployment` over the backend's `Client`, whose service
-  is a fake the test owns: `fake-cursor-sdk-bridge` for cursor (served
-  in-process for attach mode, and built as a binary the client spawns as
-  one process per lease), an `OpenAI`-compatible chat-completions endpoint
-  behind `GENAI_ENDPOINT` for genai. The guest asserts what it observes
-  across the boundary and traps on failure; the test asserts what reached
-  the fake (per-agent RPC sequences, recorded request bodies) and that the
-  backend is whole again afterwards (`Client::idle_slots` on cursor). One
+  is a fake the test owns: `fake-cursor-sdk-bridge` for cursor (a binary
+  linked onto the test process's `PATH` as `cursor-sdk-bridge`, which the
+  client spawns as one process per lease exactly as it spawns the real
+  one), an `OpenAI`-compatible chat-completions endpoint behind
+  `GENAI_ENDPOINT` for genai. The guest asserts what it observes across
+  the boundary and traps on failure; the test asserts what reached the
+  fake (per-agent RPC sequences, recorded request bodies) and that the
+  backend is whole again afterwards (every spawned process gone, on
+  cursor). Nothing public exists for the tests' sake — no `#[doc(hidden)]`
+  probes, no options the fake alone needs; the fake is reached the way the
+  real service is. One
   flat file per boundary in the crate's `tests/`: `tests/model.rs` is the
   `omnia:model` contract, `tests/bridge.rs` / `tests/provider.rs` the
   lifecycle and fault matrix (hung or parked RPCs, process death before and
@@ -109,8 +113,8 @@ so the policy splits into three tiers:
   [crates/cursor/tests/live.rs](crates/cursor/tests/live.rs). Document the run
   recipe (`cargo nextest run --all-features --run-ignored all` plus required
   env) in each crate's README. A live test may be red on purpose when it
-  pins an upstream defect (`upstream_tripwire`): its `#[ignore]` reason
-  names the env it needs and its README entry says what red and green mean.
+  pins an upstream defect: its `#[ignore]` reason names the env it needs
+  and its README entry says what red and green mean.
 - **Delete tautological mapping tests.** A unit test that mirrors the
   implementation's output against a hand-copied literal, or asserts against
   mocked SDK types, earns its keep only if a live test — or an e2e row over

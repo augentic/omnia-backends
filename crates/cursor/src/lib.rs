@@ -26,24 +26,12 @@ pub struct Client {
     pool: Arc<Pool>,
 }
 
-impl Client {
-    /// Agent slots no completion holds right now: `max_agents` when the
-    /// pool is idle. A slot reopens only once its bridge process is gone,
-    /// so this is the test suites' probe for a lease fully released.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn idle_slots(&self) -> usize {
-        self.pool.idle_slots()
-    }
-}
-
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
             .field("deadlines", &self.deadlines)
             .field("model", &self.model)
             .field("max_agents", &self.pool.max_agents())
-            .field("attached", &self.pool.is_attached())
             .finish_non_exhaustive()
     }
 }
@@ -51,23 +39,14 @@ impl std::fmt::Debug for Client {
 impl Backend for Client {
     type ConnectOptions = ConnectOptions;
 
-    // `skip_all`: the options carry the attached bridge's token.
-    #[instrument(
-        skip_all,
-        fields(max_agents = options.max_agents, attached = options.bridge_url.is_some())
-    )]
+    #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
         ensure!(env::var("CURSOR_API_KEY").is_ok(), "CURSOR_API_KEY must be set");
         ensure!(options.timeout_secs > 0, "timeout_secs must be greater than 0");
         ensure!(options.inactivity_secs > 0, "inactivity_secs must be greater than 0");
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");
-        ensure!(!options.bridge_bin.is_empty(), "bridge_bin must not be empty");
-        ensure!(
-            options.bridge_url.is_some() == options.bridge_token.is_some(),
-            "bridge_url and bridge_token must be set together"
-        );
 
-        let pool = Pool::connect(&options).await?;
+        let pool = Pool::connect(options.max_agents).await?;
         Ok(Self {
             deadlines: Deadlines {
                 inactivity: Duration::from_secs(options.inactivity_secs),
@@ -108,20 +87,10 @@ mod config {
         #[env(from = "CURSOR_INACTIVITY_SECS", default = "120")]
         pub inactivity_secs: u64,
         /// Agents live at once; a further completion waits for a slot. Each
-        /// live agent runs in its own bridge process unless attached.
+        /// live agent runs in its own `cursor-sdk-bridge` process, resolved
+        /// on `PATH`.
         #[env(from = "CURSOR_MAX_AGENTS", default = "4")]
         pub max_agents: usize,
-        /// The bridge executable, by name on `PATH` or by path.
-        #[env(from = "CURSOR_BRIDGE_BIN", default = "cursor-sdk-bridge")]
-        pub bridge_bin: String,
-        /// Attach to a running loopback bridge at this Connect base URL
-        /// instead of spawning one per agent. Must be `http://` to
-        /// `127.0.0.1`, `[::1]`, or `localhost`.
-        #[env(from = "CURSOR_BRIDGE_URL")]
-        pub bridge_url: Option<String>,
-        /// Bearer token of the attached bridge (its ready line's token).
-        #[env(from = "CURSOR_BRIDGE_TOKEN")]
-        pub bridge_token: Option<String>,
     }
 }
 pub use config::ConnectOptions;

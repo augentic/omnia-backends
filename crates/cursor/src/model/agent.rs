@@ -8,9 +8,9 @@
 //! that hands an agent over runs on it. `CreateAgent` runs on a task of its
 //! own that holds the lease and owns the id it returns: a completion that
 //! stops waiting — at the inactivity bound, or dropped — leaves an agent
-//! the task closes and deletes itself (an attached bridge would otherwise
-//! keep it), and a bridge silent for one more window gives the slot back
-//! with nothing to tear down. Teardown — the abandoned run cancelled
+//! the task closes and deletes itself, and a bridge silent for one more
+//! window gives the slot back with nothing to tear down. Teardown — the
+//! abandoned run cancelled
 //! best-effort, then close and delete against the create-time cwd, each
 //! call bounded and all of them skipped once the bridge is gone — runs on a
 //! task of its own too, whether the turn ended or the agent was dropped
@@ -416,12 +416,8 @@ impl Creating {
 
 // A socket fails before the watcher publishes the exit: `watch_child`
 // spends up to `EXIT_GRACE` draining stderr first, so the observe budget
-// is that window plus one of its own. An attached bridge is never seen to
-// die, so its error stands.
+// is that window plus one of its own.
 async fn exit_or(bridge: &Bridge, error: anyhow::Error) -> anyhow::Error {
-    if !bridge.is_owned() {
-        return error;
-    }
     match timeout(EXIT_OBSERVE, bridge.died()).await {
         Ok(exit) => Failure::BridgeExited(exit).into(),
         Err(_elapsed) => error,

@@ -8,8 +8,7 @@
 //! and whether a run was in flight and for how long its stream had been
 //! silent. The last lines it wrote to stderr are untrusted subprocess
 //! output: they are logged at DEBUG for operators and never carried into
-//! WARN events or the error messages callers see. [`Bridge::attach`] joins
-//! a bridge some other process manages instead.
+//! WARN events or the error messages callers see.
 
 mod discovery;
 mod messages;
@@ -35,6 +34,8 @@ use tokio::time::timeout;
 
 use crate::endpoint::Registration;
 
+/// The bridge executable, resolved on `PATH`.
+pub const BIN: &str = "cursor-sdk-bridge";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the stderr pipe is given to hand over its last lines after the
 /// process exits. A grandchild that inherited the pipe can hold it open, so
@@ -47,14 +48,14 @@ pub const EXIT_OBSERVE: Duration = EXIT_GRACE.saturating_mul(2);
 const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
 /// One `sdk.v1` bridge: a spawned `cursor-sdk-bridge` process this client
-/// watches, or an attached one it does not own.
+/// watches.
 #[derive(Debug)]
 pub struct Bridge {
     rpc: Arc<OnceLock<Rpc>>,
-    // `None` while the process runs; an attached bridge stays there.
+    // `None` while the process runs.
     exit: watch::Receiver<Option<Exit>>,
-    // Wakes the watcher into a graceful shutdown; `None` for an attached bridge.
-    shutdown: Option<Arc<Notify>>,
+    // Wakes the watcher into a graceful shutdown.
+    shutdown: Arc<Notify>,
     // The run in flight on this bridge, for the watcher's exit report.
     run: Arc<RunWatch>,
 }
@@ -96,7 +97,6 @@ pub struct Started {
 
 /// Stderr scan and RPC connect for a [`Started`] process.
 pub struct PendingHandshake {
-    bin: String,
     lines: Lines<BufReader<ChildStderr>>,
     tail: Arc<Tail>,
     io: Arc<HandshakeIo>,
@@ -129,18 +129,14 @@ impl PendingHandshake {
     pub async fn complete(mut self) -> Result<()> {
         let discovery = match discovery::from_stderr(&mut self.lines, &self.tail).await {
             Ok(discovery) => discovery,
-            Err(error) => {
-                return Err(handshake_failure(&self.bin, error, self.exit, &self.tail).await);
-            }
+            Err(error) => return Err(handshake_failure(error, self.exit, &self.tail).await),
         };
         let drained = drain_stderr(self.lines, Arc::clone(&self.tail));
         *self.io.drained.lock().unwrap_or_else(PoisonError::into_inner) = Some(drained);
 
         let rpc = match discovery.into_rpc().await {
             Ok(rpc) => rpc,
-            Err(error) => {
-                return Err(handshake_failure(&self.bin, error, self.exit, &self.tail).await);
-            }
+            Err(error) => return Err(handshake_failure(error, self.exit, &self.tail).await),
         };
         let _ = self.io.rpc.set(rpc);
         Ok(())
@@ -148,14 +144,14 @@ impl PendingHandshake {
 }
 
 impl Bridge {
-    /// Spawn `bin` registered against `callback` and handshake it.
-    pub async fn spawn(bin: &str, callback: &Registration) -> Result<Self> {
+    /// Spawn a bridge registered against `callback` and handshake it.
+    pub async fn spawn(callback: &Registration) -> Result<Self> {
         let Started {
             bridge,
             handshake,
             pid,
             at,
-        } = Self::start(bin, callback)?;
+        } = Self::start(callback)?;
         match handshake.complete().await {
             Ok(()) => {
                 tracing::info!(
@@ -172,7 +168,7 @@ impl Bridge {
         }
     }
 
-    /// Start `bin` calling back as `callback`, and watch it. The ready-line
+    /// Start [`BIN`] calling back as `callback`, and watch it. The ready-line
     /// handshake is left on the returned [`Started`] so a pool lease can
     /// occupy the slot first.
     ///
@@ -181,9 +177,9 @@ impl Bridge {
     ///
     /// # Errors
     ///
-    /// Returns an error when the state root cannot be created or `bin`
-    /// cannot be spawned.
-    pub fn start(bin: &str, callback: &Registration) -> Result<Started> {
+    /// Returns an error when the state root cannot be created or the
+    /// executable cannot be spawned.
+    pub fn start(callback: &Registration) -> Result<Started> {
         let at = Instant::now();
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-")
@@ -194,7 +190,7 @@ impl Bridge {
         // included, so an operator can turn the bridge's own logging up
         // from outside — bar the git identity, which would point the agent
         // at the host's repository rather than its cwd.
-        let mut command = Command::new(bin);
+        let mut command = Command::new(BIN);
         command
             .kill_on_drop(true)
             .stdin(Stdio::null())
@@ -209,7 +205,7 @@ impl Bridge {
             command.env_remove(var);
         }
 
-        let mut child = command.spawn().with_context(|| format!("issue spawning `{bin}`"))?;
+        let mut child = command.spawn().with_context(|| format!("issue spawning `{BIN}`"))?;
         let pid = child.id();
 
         let stdout = child.stdout.take().expect("stdout");
@@ -245,11 +241,10 @@ impl Bridge {
             bridge: Self {
                 rpc,
                 exit: exit.clone(),
-                shutdown: Some(shutdown),
+                shutdown,
                 run,
             },
             handshake: PendingHandshake {
-                bin: bin.to_owned(),
                 lines,
                 tail,
                 io,
@@ -257,22 +252,6 @@ impl Bridge {
             },
             pid,
             at,
-        })
-    }
-
-    /// Join a loopback bridge already listening at `base`, owned and shut
-    /// down by whoever started it.
-    pub async fn attach(base: String, token: &str) -> Result<Self> {
-        // No watcher publishes for it: the sender is gone, so the bridge is
-        // never seen to die and `died` pends.
-        let (_, exit) = watch::channel(None);
-        let rpc = Arc::new(OnceLock::new());
-        let _ = rpc.set(Rpc::connect(base, token).await?);
-        Ok(Self {
-            rpc,
-            exit,
-            shutdown: None,
-            run: Arc::default(),
         })
     }
 
@@ -287,21 +266,14 @@ impl Bridge {
         self.run.set(activity);
     }
 
-    /// Whether this client spawned the process and shuts it down.
-    pub const fn is_owned(&self) -> bool {
-        self.shutdown.is_some()
-    }
-
-    /// Whether a spawned bridge has exited.
+    /// Whether the bridge has exited.
     pub fn is_dead(&self) -> bool {
         self.exit.borrow().is_some()
     }
 
-    /// Resolves once a spawned bridge exits; an attached bridge is never
-    /// observed to.
+    /// Resolves once the bridge exits.
     pub fn died(&self) -> impl Future<Output = Exit> + Send + 'static {
         let mut exit = self.exit.clone();
-        let owned = self.is_owned();
         async move {
             loop {
                 let state = *exit.borrow_and_update();
@@ -309,33 +281,23 @@ impl Bridge {
                     return exit;
                 }
                 if exit.changed().await.is_err() {
-                    // The watcher is gone. An owned process went with it
-                    // (`kill_on_drop`); an attached one is nobody's to see.
-                    if owned {
-                        return Exit::default();
-                    }
-                    std::future::pending::<()>().await;
+                    // The watcher is gone, and the process with it (`kill_on_drop`).
+                    return Exit::default();
                 }
             }
         }
     }
 
-    /// Shut a spawned bridge down and wait for it to exit; an attached
-    /// bridge is left running.
+    /// Shut the bridge down and wait for it to exit.
     pub async fn close(&self) {
-        let Some(shutdown) = &self.shutdown else {
-            return;
-        };
-        shutdown.notify_one();
+        self.shutdown.notify_one();
         self.died().await;
     }
 }
 
 impl Drop for Bridge {
     fn drop(&mut self) {
-        if let Some(shutdown) = &self.shutdown {
-            shutdown.notify_one();
-        }
+        self.shutdown.notify_one();
     }
 }
 
@@ -414,7 +376,7 @@ async fn watch_child(
 // already published one. What it wrote to stderr goes to DEBUG only, never
 // into the error.
 async fn handshake_failure(
-    bin: &str, error: anyhow::Error, mut exit: watch::Receiver<Option<Exit>>, tail: &Tail,
+    error: anyhow::Error, mut exit: watch::Receiver<Option<Exit>>, tail: &Tail,
 ) -> anyhow::Error {
     let status = timeout(EXIT_OBSERVE, async {
         loop {
@@ -432,8 +394,8 @@ async fn handshake_failure(
     .and_then(|ended| ended.status);
     log_stderr(tail);
     status.map_or_else(
-        || anyhow::anyhow!("`{bin}` did not complete the handshake ({error:#})"),
-        |status| anyhow::anyhow!("`{bin}` exited ({status}) during the handshake ({error:#})"),
+        || anyhow::anyhow!("`{BIN}` did not complete the handshake ({error:#})"),
+        |status| anyhow::anyhow!("`{BIN}` exited ({status}) during the handshake ({error:#})"),
     )
 }
 

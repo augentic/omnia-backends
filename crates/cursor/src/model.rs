@@ -27,9 +27,8 @@ use std::sync::Arc;
 
 pub use agent::Deadlines;
 use agent::{Agent, Unanswered};
-use anyhow::ensure;
 pub use observe::Failure;
-use omnia_wasi_model::{Answer, FutureResult, Request, Tool, ToolHost, WasiModelCtx};
+use omnia_wasi_model::{Answer, FutureResult, Request, ToolHost, WasiModelCtx};
 use options::Turn;
 use tracing::{Instrument, info_span};
 
@@ -56,14 +55,6 @@ impl WasiModelCtx for Client {
 
         Box::pin(
             async move {
-                // An attached bridge calls back whoever started it, never
-                // this client, so a function tool could not be answered.
-                ensure!(
-                    !client.pool.is_attached()
-                        || !request.tools.iter().any(|tool| matches!(tool, Tool::Function(_))),
-                    "function tools are unreachable through an attached bridge (its \
-                     --tool-callback-url is its owner's); spawn one instead"
-                );
                 let failed = match attempt(&client, &request, &tool_host).await {
                     Ok(answer) => return Ok(answer),
                     Err(failed) if failed.restartable() => failed,

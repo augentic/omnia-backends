@@ -109,6 +109,64 @@ and `omnia-filesystem`. The notes below cover everything since 0.27.0.
   these crates; the workspace no longer needs a sibling omnia checkout or a
   git fetch to build.
 
+<!-- Release notes generated using configuration in .github/release.yaml at main -->
+
+## What's Changed
+* Bump to 0.28.0 by @augentic-releases[bot] in https://github.com/augentic/omnia-backends/pull/29
+* Wasi model by @andrewweston in https://github.com/augentic/omnia-backends/pull/30
+* Specify readiness  testing by @andrewweston in https://github.com/augentic/omnia-backends/pull/31
+* MCP server for cursor-agent by @andrewweston in https://github.com/augentic/omnia-backends/pull/32
+* Post-upgrade testing and code review by @andrewweston in https://github.com/augentic/omnia-backends/pull/33
+* Async guest-2-guest linking by @andrewweston in https://github.com/augentic/omnia-backends/pull/34
+* Specify-driven refactoring by @andrewweston in https://github.com/augentic/omnia-backends/pull/35
+* Streamline testing by @andrewweston in https://github.com/augentic/omnia-backends/pull/36
+* Trace cursor thinking by @andrewweston in https://github.com/augentic/omnia-backends/pull/37
+* configurable timeout for cursor by @andrew-goldie in https://github.com/augentic/omnia-backends/pull/38
+* Bump to 0.29.0 by @augentic-releases[bot] in https://github.com/augentic/omnia-backends/pull/39
+* Ci fix by @andrew-goldie in https://github.com/augentic/omnia-backends/pull/40
+* Upgrade to wasmtime 47.0.2 by @andrewweston in https://github.com/augentic/omnia-backends/pull/41
+* Update Rust version by @andrewweston in https://github.com/augentic/omnia-backends/pull/42
+* Simplify telemetry by @andrewweston in https://github.com/augentic/omnia-backends/pull/43
+* Improve model logging by @andrewweston in https://github.com/augentic/omnia-backends/pull/44
+* Cursor usability improvements by @andrewweston in https://github.com/augentic/omnia-backends/pull/45
+* Fix kafka issue by @andrewweston in https://github.com/augentic/omnia-backends/pull/46
+* RFC 78 - Prompt budget by @andrewweston in https://github.com/augentic/omnia-backends/pull/47
+* Repo rename by @andrewweston in https://github.com/augentic/omnia-backends/pull/48
+* Retarget Omnia patches to main by @andrewweston in https://github.com/augentic/omnia-backends/pull/49
+* Remove branch pin by @andrewweston in https://github.com/augentic/omnia-backends/pull/50
+* Omnia feature flags by @andrewweston in https://github.com/augentic/omnia-backends/pull/51
+* Integration tests by @andrewweston in https://github.com/augentic/omnia-backends/pull/52
+* Add filesystem backend for wasi:blobstore by @andrewweston in https://github.com/augentic/omnia-backends/pull/53
+* Cursor fixes by @andrewweston in https://github.com/augentic/omnia-backends/pull/54
+* Cursor fixes by @andrewweston in https://github.com/augentic/omnia-backends/pull/55
+* Cursor fixes v2 by @andrewweston in https://github.com/augentic/omnia-backends/pull/56
+* update deps by @andrewweston in https://github.com/augentic/omnia-backends/pull/57
+* Runtime macro simplification by @andrewweston in https://github.com/augentic/omnia-backends/pull/58
+* KeyValue filesystem backend by @andrewweston in https://github.com/augentic/omnia-backends/pull/59
+* Ensure directory exists for get_container by @andrewweston in https://github.com/augentic/omnia-backends/pull/60
+* Add FILESYSTEM_ROOT default by @andrewweston in https://github.com/augentic/omnia-backends/pull/61
+* Model stream by @andrewweston in https://github.com/augentic/omnia-backends/pull/62
+* Curate model backends by @andrewweston in https://github.com/augentic/omnia-backends/pull/63
+* Wasmtime 48 by @andrewweston in https://github.com/augentic/omnia-backends/pull/64
+* Improve cursor example by @andrewweston in https://github.com/augentic/omnia-backends/pull/65
+* polish readme by @andrewweston in https://github.com/augentic/omnia-backends/pull/66
+* Plugin support by @andrewweston in https://github.com/augentic/omnia-backends/pull/67
+* Add plugin cache backends by @andrewweston in https://github.com/augentic/omnia-backends/pull/68
+* Code review by @andrewweston in https://github.com/augentic/omnia-backends/pull/69
+* Plugin simplification by @andrewweston in https://github.com/augentic/omnia-backends/pull/70
+* Guest callback for model answer verification by @andrewweston in https://github.com/augentic/omnia-backends/pull/71
+* Model answer fixes by @andrewweston in https://github.com/augentic/omnia-backends/pull/72
+* Fix bridge shutdown issue by @andrewweston in https://github.com/augentic/omnia-backends/pull/73
+* Automate PR summary by @andrewweston in https://github.com/augentic/omnia-backends/pull/74
+* Add cursor agent pool by @andrewweston in https://github.com/augentic/omnia-backends/pull/76
+* Add test-programs framework by @andrewweston in https://github.com/augentic/omnia-backends/pull/77
+* Cursor survives a bridge restart by @andrewweston in https://github.com/augentic/omnia-backends/pull/78
+* Omnia 0.36.0 by @andrew-goldie in https://github.com/augentic/omnia-backends/pull/79
+* Bump to 0.30.0 by @andrew-goldie in https://github.com/augentic/omnia-backends/pull/80
+
+
+**Full Changelog**: https://github.com/augentic/omnia-backends/compare/v0.27.0...v0.30.0
+
 ---
 
 Release notes for previous releases can be found on the respective release

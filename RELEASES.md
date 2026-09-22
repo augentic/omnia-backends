@@ -98,6 +98,11 @@ Pairs with omnia 0.36.x.
   (`RegistryAcquire`, path/registry composition, the digest-verify story) was
   absorbed into omnia's `omnia-plugin` crate, re-exported from `omnia`. This
   repository's role in plugin loading is the store impls above.
+- The omnia crates are consumed from crates.io at the published 0.36.0 line
+  (wasmtime 49 underneath) instead of through `[patch.crates-io]` git
+  overrides pinned to a pre-release omnia commit. No API change for users of
+  these crates; the workspace no longer needs a sibling omnia checkout or a
+  git fetch to build.
 
 ---
 

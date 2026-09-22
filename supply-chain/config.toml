@@ -402,8 +402,16 @@ criteria = "safe-to-deploy"
 version = "1.0.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.der]]
+version = "0.8.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.der_derive]]
 version = "0.7.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.der_derive]]
+version = "0.8.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.derive-syn-parse]]
@@ -755,15 +763,15 @@ version = "0.44.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonschema]]
-version = "0.56.0"
+version = "0.57.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonschema-regex]]
-version = "0.56.0"
+version = "0.57.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonschema-value]]
-version = "0.56.0"
+version = "0.57.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonwebtoken]]
@@ -776,10 +784,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.konst_macro_rules]]
 version = "0.2.19"
-criteria = "safe-to-deploy"
-
-[[exemptions.leb128]]
-version = "0.2.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.libredox]]
@@ -943,7 +947,7 @@ version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.object]]
-version = "0.39.1"
+version = "0.40.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.oci-client]]
@@ -960,6 +964,90 @@ criteria = "safe-to-deploy"
 
 [[exemptions.olpc-cjson]]
 version = "0.1.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-cli]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-core]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-guest-macros]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-host-macros]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-link]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-plugin]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-sdk]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-test]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-blobstore]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-config]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-docstore]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-http]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-identity]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-keyvalue]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-messaging]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-model]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-otel]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-sql]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-vault]]
+version = "0.36.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-websocket]]
+version = "0.36.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.once_cell]]
@@ -1167,7 +1255,7 @@ version = "0.9.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand]]
-version = "0.10.2"
+version = "0.10.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand_core]]
@@ -1203,7 +1291,7 @@ version = "0.44.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.referencing]]
-version = "0.56.0"
+version = "0.57.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.regex-lite]]
@@ -1276,10 +1364,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.schemars_derive]]
 version = "1.2.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.sea-query]]
-version = "1.0.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.secrecy]]
@@ -1372,6 +1456,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.spki]]
 version = "0.7.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.spki]]
+version = "0.8.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqlite-wasm-rs]]
@@ -1684,6 +1772,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.x509-cert]]
 version = "0.2.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.x509-cert]]
+version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.xxhash-rust]]

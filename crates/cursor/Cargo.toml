@@ -33,8 +33,6 @@ http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1", "server"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
 libc = { workspace = true, optional = true }
-# Pinned to the local omnia 0.36.0 line via the workspace `[patch.crates-io]`
-# override (the `omnia-wasi-model` host crate is unreleased on crates.io).
 omnia.workspace = true
 omnia-wasi-model.workspace = true
 prost.workspace = true

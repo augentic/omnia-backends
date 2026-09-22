@@ -10,8 +10,8 @@ implements the corresponding `omnia` `WasiXxxCtx` trait against a real service.
 `omnia_plugin::ContentStore` and `omnia_plugin::ReleaseStore` (the
 store bound behind the `RegistryClient` acquirer);
 registry acquisition itself lives in `omnia-plugin`. The `omnia` runtime is consumed
-via `[patch.crates-io]` entries pointing at the omnia git repository (or a
-sibling `../omnia/crates/*` checkout by switching the commented path patches).
+as published crates.io dependencies (currently 0.36.0), declared once under
+`[workspace.dependencies]` in the root `Cargo.toml`.
 
 ## Key commands
 
@@ -91,9 +91,9 @@ so the policy splits into three tiers:
     per-host setters** (`Backends::defaults().await.keyvalue(client)`,
     `.blobstore(..)`, `.sql(..)`, …): a redis/postgres/nats suite runs the
     same shape over the real client behind a service-up env gate, since no
-    honest in-process fake of those services exists. Not built yet; the
-    setters land in omnia alongside this tier and arrive here through the
-    git patch.
+    honest in-process fake of those services exists. The setters shipped in
+    `omnia-test` 0.36.0; the redis/postgres/nats suites themselves are not
+    built yet.
 - **Unit tests for deterministic, service-free logic, wherever it lives**:
   OData filter building (`azure-table/store/filter.rs`), Postgres type
   mapping, the Kafka partitioner, cursor's ready-line and Connect-frame
@@ -135,7 +135,13 @@ so the policy splits into three tiers:
   log the test folds back into per-process histories; faults can target one
   spawned process by ordinal, so one guest run can see a healthy process and
   a faulted one side by side.
-- The omnia crates come through `[patch.crates-io]` git entries pinned in
-  `Cargo.lock`, and every `omnia-*` must sit on the same revision — a newly
-  added one (`omnia-test`, say) locks to whatever is current and leaves the
-  rest behind. `cargo update -p omnia` moves them together.
+- The omnia crates come from crates.io, pinned by the single
+  `[workspace.dependencies]` declarations (`omnia = "0.36.0"` and friends);
+  every `omnia-*` must stay on the same line, so bump them all together and
+  never add a `[patch.crates-io]` git or path override to chase an
+  unreleased change. `.cargo/config.toml` sets
+  `registry.global-min-publish-age = "7 days"`; stable cargo ignores it
+  (it is enforced only under nightly `-Zmin-publish-age`), but where it is
+  enforced, re-locking onto a freshly published omnia line needs an explicit
+  bypass (`CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE="0 days" cargo fetch`).
+  Locked versions are exempt, so `--locked` builds are unaffected.

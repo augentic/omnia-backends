@@ -35,7 +35,7 @@ use tokio::time::{Instant, sleep, sleep_until, timeout};
 use super::observe::{self, Completion, EventLog, Failure};
 use super::options::{Turn, Workspace};
 use crate::Client;
-use crate::bridge::{AgentOptions, Bridge, EXIT_WAIT, RunStatus, RunStreamResult};
+use crate::bridge::{AgentOptions, Bridge, EXIT_WAIT, Exit, RunStatus, RunStream, RunStreamResult};
 use crate::endpoint::Attached;
 use crate::pool::Lease;
 
@@ -45,6 +45,10 @@ const MAX_ROUNDS: usize = 2;
 // Teardown is best-effort: a bridge that will not answer it does not keep
 // its slot for longer than this per call.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+// A completion dropped mid-stream may not have polled since the init frame
+// was flushed, and `CancelRun` needs the id that frame carries. A bridge
+// that never sends one does not hold the slot past this.
+const RUN_ID_WAIT: Duration = Duration::from_secs(2);
 
 pub struct Agent {
     lease: Arc<Lease>,
@@ -178,7 +182,7 @@ impl Agent {
         let died = self.lease.bridge().died();
         tokio::pin!(died);
 
-        let mut stream = tokio::select! {
+        let stream = tokio::select! {
             stream = self.lease.bridge().rpc().send(self.id.clone(), text.to_owned()) => {
                 match stream {
                     Ok(stream) => stream,
@@ -189,67 +193,17 @@ impl Agent {
             exit = &mut died => return Err(Failure::BridgeExited(exit).into()),
         };
 
-        let mut log = EventLog::default();
-        let mut outcome: Option<RunStreamResult> = None;
-
-        loop {
-            tokio::select! {
-                message = stream.next() => {
-                    let message = match message {
-                        Ok(Some(message)) => message,
-                        Ok(None) => break,
-                        Err(error) => return Err(exit_or(self.lease.bridge(), error).await),
-                    };
-                    activity_tx.send_replace(Instant::now());
-                    if let Some(event) = &message.sdk_message {
-                        log.observe(event);
-                        self.note_run(log.run_id());
-                    }
-                    if let Some(result) = message.result {
-                        self.note_run(Some(&result.run_id));
-                        outcome = Some(result);
-                    }
-                    if message.done.is_some() {
-                        break;
-                    }
-                }
-                error = &mut deadline => {
-                    self.cancel_live_run();
-                    return Err(error.into());
-                }
-                reason = self.abort_rx.recv() => {
-                    self.cancel_live_run();
-                    return Err(Failure::Aborted(
-                        reason.unwrap_or_else(|| "session closed".to_owned()),
-                    )
-                    .into());
-                }
-                exit = &mut died => {
-                    // the run died with its process; nothing is left to cancel
-                    self.live_run = None;
-                    return Err(Failure::BridgeExited(exit).into());
-                }
-            }
-        }
-
-        // the run reached a terminal state; nothing is left to cancel.
-        self.live_run = None;
-        let outcome = outcome.context("the run stream ended without a result")?;
-        if outcome.status != RunStatus::Finished {
-            let detail = outcome
-                .error_code
-                .filter(|code| !code.is_empty())
-                .or_else(|| log.status_message().map(ToOwned::to_owned))
-                .unwrap_or_else(|| "<no detail>".to_owned());
-            bail!("cursor run {}: {detail}", outcome.status);
-        }
-        let result = outcome.result.unwrap_or_default();
-
-        Ok(Response {
-            result: result.result,
-            transcript: log.finish(),
-            usage: result.usage.map(Usage::from),
-        })
+        // `drive` disarms the guard when the send finishes. Dropping it
+        // still armed — the completion future was dropped at this await —
+        // is the guest abandoning a run whose id it may not have polled yet.
+        let mut open = OpenSend {
+            agent: self,
+            stream: Some(stream),
+            armed: true,
+        };
+        let outcome = open.drive(&activity_tx, &mut deadline, &mut died).await;
+        open.armed = false;
+        outcome
     }
 
     fn note_run(&mut self, run_id: Option<&str>) {
@@ -466,6 +420,144 @@ impl Release {
         }
         drop(self.workspace);
     }
+}
+
+/// The open `Send` stream. `drive` disarms it when the turn finishes;
+/// dropping it still armed means the guest abandoned the completion at
+/// this await, so the run id — possibly flushed and not yet polled — is
+/// read before the agent is torn down.
+struct OpenSend<'a> {
+    agent: &'a mut Agent,
+    stream: Option<RunStream>,
+    armed: bool,
+}
+
+impl OpenSend<'_> {
+    async fn drive<D, X>(
+        &mut self, activity_tx: &watch::Sender<Instant>, deadline: &mut D, died: &mut X,
+    ) -> Result<Response>
+    where
+        D: Future<Output = Failure> + Unpin,
+        X: Future<Output = Exit> + Unpin,
+    {
+        let OpenSend { agent, stream, .. } = self;
+        let stream = stream.as_mut().expect("the send stream is open");
+        let mut log = EventLog::default();
+        let mut outcome: Option<RunStreamResult> = None;
+
+        loop {
+            tokio::select! {
+                message = stream.next() => {
+                    let message = match message {
+                        Ok(Some(message)) => message,
+                        Ok(None) => break,
+                        Err(error) => return Err(exit_or(agent.lease.bridge(), error).await),
+                    };
+                    activity_tx.send_replace(Instant::now());
+                    if let Some(event) = &message.sdk_message {
+                        log.observe(event);
+                        agent.note_run(log.run_id());
+                    }
+                    if let Some(result) = message.result {
+                        agent.note_run(Some(&result.run_id));
+                        outcome = Some(result);
+                    }
+                    if message.done.is_some() {
+                        break;
+                    }
+                }
+                error = &mut *deadline => {
+                    agent.cancel_live_run();
+                    return Err(error.into());
+                }
+                reason = agent.abort_rx.recv() => {
+                    agent.cancel_live_run();
+                    return Err(Failure::Aborted(
+                        reason.unwrap_or_else(|| "session closed".to_owned()),
+                    )
+                    .into());
+                }
+                exit = &mut *died => {
+                    // the run died with its process; nothing is left to cancel
+                    agent.live_run = None;
+                    return Err(Failure::BridgeExited(exit).into());
+                }
+            }
+        }
+
+        // the run reached a terminal state; nothing is left to cancel.
+        agent.live_run = None;
+        let outcome = outcome.context("the run stream ended without a result")?;
+        if outcome.status != RunStatus::Finished {
+            let detail = outcome
+                .error_code
+                .filter(|code| !code.is_empty())
+                .or_else(|| log.status_message().map(ToOwned::to_owned))
+                .unwrap_or_else(|| "<no detail>".to_owned());
+            bail!("cursor run {}: {detail}", outcome.status);
+        }
+        let result = outcome.result.unwrap_or_default();
+
+        Ok(Response {
+            result: result.result,
+            transcript: log.finish(),
+            usage: result.usage.map(Usage::from),
+        })
+    }
+}
+
+impl Drop for OpenSend<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let stream = self.stream.take();
+        let Some(mut release) = self.agent.take_release() else {
+            return;
+        };
+        let Ok(handle) = Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            // Already noted: the stream has nothing more to add. Not yet:
+            // the init frame may be buffered or still in flight, and
+            // dropping the stream first would lose the id `CancelRun` needs.
+            let stream = if release.run_id.is_none() {
+                stream
+            } else {
+                drop(stream);
+                None
+            };
+            if let Some(stream) = stream {
+                release.run_id = observe_run_id(stream).await;
+            }
+            release.run().await;
+        });
+    }
+}
+
+/// The first run id on `stream`, or `None` when the stream ends without one
+/// or stays silent for [`RUN_ID_WAIT`].
+async fn observe_run_id(mut stream: RunStream) -> Option<String> {
+    let read = async {
+        let mut log = EventLog::default();
+        while let Ok(Some(message)) = stream.next().await {
+            if let Some(event) = &message.sdk_message {
+                log.observe(event);
+                if let Some(id) = log.run_id() {
+                    return Some(id.to_owned());
+                }
+            }
+            if let Some(result) = message.result.filter(|result| !result.run_id.is_empty()) {
+                return Some(result.run_id);
+            }
+            if message.done.is_some() {
+                break;
+            }
+        }
+        None
+    };
+    timeout(RUN_ID_WAIT, read).await.ok().flatten()
 }
 
 impl Drop for Agent {

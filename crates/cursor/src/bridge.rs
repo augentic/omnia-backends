@@ -24,7 +24,7 @@ pub use messages::{
     AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
     RunStatus, RunStreamResult, SdkMessage, ToolList,
 };
-pub use rpc::{Rpc, TransportError};
+pub use rpc::{Rpc, RunStream, TransportError};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};

@@ -24,10 +24,10 @@ chrono.workspace = true
 fromenv.workspace = true
 futures.workspace = true
 http.workspace = true
-jsonschema = { version = "0.56.0", default-features = false }
+jsonschema.workspace = true
 omnia.workspace = true
 omnia-wasi-messaging.workspace = true
-rand = "0.10.2"
+rand = "0.10.3"
 rdkafka = { version = "0.39.0", features = ["cmake-build", "curl", "ssl-vendored", "tokio"] }
 schema-registry-client = "0.4.2"
 serde_json.workspace = true

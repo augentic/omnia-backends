@@ -763,15 +763,15 @@ version = "0.44.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonschema]]
-version = "0.56.0"
+version = "0.57.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonschema-regex]]
-version = "0.56.0"
+version = "0.57.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonschema-value]]
-version = "0.56.0"
+version = "0.57.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.jsonwebtoken]]
@@ -1255,7 +1255,7 @@ version = "0.9.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand]]
-version = "0.10.2"
+version = "0.10.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand_core]]
@@ -1291,7 +1291,7 @@ version = "0.44.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.referencing]]
-version = "0.56.0"
+version = "0.57.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.regex-lite]]

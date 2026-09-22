@@ -224,10 +224,6 @@ async fn model_tool_fanout() {
     assert_eq!(tokens.len(), WIDTH, "each process called back under its own token");
 }
 
-// Under CI load the losers are sometimes closed without a `CancelRun` first
-// (`cancelled` comes back 0 of 3); passes reliably locally. Parked for the
-// 0.30.0 release; un-ignore once the race is understood.
-#[ignore = "flaky under CI load: losers occasionally close without CancelRun"]
 #[tokio::test]
 async fn model_fanout_abandon() {
     const WIDTH: usize = 4;

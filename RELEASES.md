@@ -1,8 +1,13 @@
-## 0.29.0
+## 0.30.0
 
 Unreleased
 
 Pairs with omnia 0.36.x.
+
+0.28.0 and 0.29.0 were never published to crates.io (the `v0.29.0` tag was
+cut by hand and points at no published artefact), so 0.30.0 is the first
+line after 0.27.0 and the first release of `omnia-cursor`, `omnia-genai`,
+and `omnia-filesystem`. The notes below cover everything since 0.27.0.
 
 ### Added
 
@@ -110,7 +115,7 @@ Release notes for previous releases can be found on the respective release
 branches of the repository.
 
 <!-- ARCHIVE_START -->
-* [0.29.x](https://github.com/augentic/omnia-backends/blob/release-0.29.0/RELEASES.md)
+* [0.30.x](https://github.com/augentic/omnia-backends/blob/release-0.30.0/RELEASES.md)
 * [0.28.x](https://github.com/augentic/omnia-backends/blob/release-0.28.0/RELEASES.md)
 * [0.27.x](https://github.com/augentic/omnia-backends/blob/release-0.27.0/RELEASES.md)
 * [0.26.x](https://github.com/augentic/omnia-backends/blob/release-0.26.0/RELEASES.md)

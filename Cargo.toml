@@ -11,7 +11,7 @@ keywords = ["wasi", "wasm", "backend", "runtime", "omnia"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/augentic/omnia-backends"
 rust-version = "1.97"
-version = "0.29.0"
+version = "0.30.0"
 
 [workspace.lints.rust]
 missing_docs = "warn"
@@ -72,7 +72,7 @@ http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.11.1", default-features = false }
 hyper-util = { version = "0.1.20", default-features = false }
-jsonschema = { version = "0.56.0", default-features = false }
+jsonschema = { version = "0.57.0", default-features = false }
 libc = "0.2"
 prost = "0.14.4"
 prost-types = "0.14.4"
@@ -104,36 +104,6 @@ omnia-wasi-otel = "0.36.0"
 omnia-wasi-sql = { version = "0.36.0", default-features = false }
 omnia-wasi-vault = "0.36.0"
 
-[patch.crates-io]
-omnia = { git = "https://github.com/augentic/omnia.git" }
-omnia-core = { git = "https://github.com/augentic/omnia.git" }
-omnia-plugin = { git = "https://github.com/augentic/omnia.git" }
-omnia-sdk = { git = "https://github.com/augentic/omnia.git" }
-omnia-test = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-docstore = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-identity = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-messaging = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-model = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-otel = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-sql = { git = "https://github.com/augentic/omnia.git" }
-omnia-wasi-vault = { git = "https://github.com/augentic/omnia.git" }
-# omnia = { path = "../omnia/crates/omnia" }
-# omnia-core = { path = "../omnia/crates/omnia-core" }
-# omnia-plugin = { path = "../omnia/crates/omnia-plugin" }
-# omnia-sdk = { path = "../omnia/crates/omnia-sdk" }
-# omnia-test = { path = "../omnia/crates/omnia-test" }
-# omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
-# omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
-# omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }
-# omnia-wasi-keyvalue = { path = "../omnia/crates/wasi-keyvalue" }
-# omnia-wasi-messaging = { path = "../omnia/crates/wasi-messaging" }
-# omnia-wasi-model = { path = "../omnia/crates/wasi-model" }
-# omnia-wasi-otel = { path = "../omnia/crates/wasi-otel" }
-# omnia-wasi-sql = { path = "../omnia/crates/wasi-sql" }
-# omnia-wasi-vault = { path = "../omnia/crates/wasi-vault" }
-
 [profile.release]
 lto = true
 opt-level = "s"
@@ -150,7 +120,8 @@ opt-level = 3
 opt-level = 3
 
 # Wasm-to-CLIF translation and trampoline generation. Crate name is
-# version-coupled: wasmtime 48 renamed `wasmtime-cranelift` to this; cargo
-# silently ignores the entry if a future bump renames it again.
+# version-coupled: it has been named this since wasmtime 48 (previously
+# `wasmtime-cranelift`); cargo silently ignores the entry if a future bump
+# renames it again.
 [profile.dev.package.wasmtime-internal-cranelift]
 opt-level = 3

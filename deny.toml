@@ -2,7 +2,11 @@
 
 [graph]
 all-features = true
-targets = ["aarch64-apple-darwin"]
+# The guest programs in `crates/test-programs` are compiled for wasm32-wasip2,
+# and their dependencies live behind `[target.'cfg(target_arch = "wasm32")']`.
+# Without that target in the graph those edges are pruned and the workspace
+# dependencies only they use (`omnia-sdk`) are reported as unused.
+targets = ["aarch64-apple-darwin", "wasm32-wasip2"]
 
 [output]
 feature-depth = 1

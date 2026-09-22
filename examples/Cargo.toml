@@ -44,6 +44,5 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures.workspace = true
-omnia-sdk = { workspace = true, features = ["http", "orm"] }
 wasip3 = { version = "0.9.0", features = ["http-compat"] }
 wit-bindgen = { version = "0.62.0", features = ["async-spawn"] }

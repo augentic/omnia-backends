@@ -89,20 +89,36 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 urlencoding = "2.1.3"
 
-omnia = "0.36.0"
-omnia-core = { version = "0.36.0", default-features = false }
-omnia-plugin = "0.36.0"
-omnia-sdk = { version = "0.36.0", default-features = false }
-omnia-test = { version = "0.36.0", default-features = false }
-omnia-wasi-blobstore = "0.36.0"
-omnia-wasi-docstore = "0.36.0"
-omnia-wasi-identity = { version = "0.36.0", default-features = false }
-omnia-wasi-keyvalue = "0.36.0"
-omnia-wasi-messaging = "0.36.0"
-omnia-wasi-model = "0.36.0"
-omnia-wasi-otel = "0.36.0"
-omnia-wasi-sql = { version = "0.36.0", default-features = false }
-omnia-wasi-vault = "0.36.0"
+omnia = "0.37.0"
+omnia-core = { version = "0.37.0", default-features = false }
+omnia-plugin = "0.37.0"
+omnia-sdk = { version = "0.37.0", default-features = false }
+omnia-test = { version = "0.37.0", default-features = false }
+omnia-wasi-blobstore = "0.37.0"
+omnia-wasi-docstore = "0.37.0"
+omnia-wasi-identity = { version = "0.37.0", default-features = false }
+omnia-wasi-keyvalue = "0.37.0"
+omnia-wasi-messaging = "0.37.0"
+omnia-wasi-model = "0.37.0"
+omnia-wasi-otel = "0.37.0"
+omnia-wasi-sql = { version = "0.37.0", default-features = false }
+omnia-wasi-vault = "0.37.0"
+
+[patch.crates-io]
+omnia = { git = "https://github.com/augentic/omnia" }
+omnia-core = { git = "https://github.com/augentic/omnia" }
+omnia-plugin = { git = "https://github.com/augentic/omnia" }
+omnia-sdk = { git = "https://github.com/augentic/omnia" }
+omnia-test = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-docstore = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-identity = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-messaging = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-model = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-otel = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-sql = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-vault = { git = "https://github.com/augentic/omnia" }
 
 [profile.release]
 lto = true

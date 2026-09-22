@@ -19,8 +19,8 @@ workspace = true
 all-features = true
 
 [features]
-# The protocol-faithful fake `cursor-sdk-bridge` the e2e suites spawn and
-# attach to (`fake-cursor-sdk-bridge`), and the suites themselves.
+# The protocol-faithful fake `cursor-sdk-bridge` the e2e suites spawn
+# (`fake-cursor-sdk-bridge`), and the suites themselves.
 fake-bridge = ["dep:libc", "http-body-util/channel", "tokio/rt-multi-thread"]
 
 [dependencies]
@@ -52,8 +52,8 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "
 tracing-subscriber.workspace = true
 
 # The fake bridge is a binary of this package so the suites find it through
-# `CARGO_BIN_EXE_fake-cursor-sdk-bridge`; it shares its source with the
-# in-process mount under `tests/support/fake_bridge`.
+# `CARGO_BIN_EXE_fake-cursor-sdk-bridge` and link it onto `PATH` as
+# `cursor-sdk-bridge`; its source is `tests/support/fake_bridge`.
 [[bin]]
 name = "fake-cursor-sdk-bridge"
 path = "tests/support/fake_bridge/main.rs"

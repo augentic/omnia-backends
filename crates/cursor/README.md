@@ -39,7 +39,7 @@ MSRV: Rust 1.97
 ## Requirements
 
 The [`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge) executable
-must be on `PATH` (or named by `CURSOR_BRIDGE_BIN`), and `CURSOR_API_KEY`
+must be on `PATH`, and `CURSOR_API_KEY`
 must be set — the bridge protocol authenticates every agent with an explicit
 key, so a prior `cursor-agent login` no longer suffices. The key is read from
 the environment per completion; it is never stored on `Client` /
@@ -127,21 +127,11 @@ Concurrency is bounded by `CURSOR_MAX_AGENTS` (default 4): that many agents
 live at once, each in its own bridge process, and a further completion
 waits its turn (first come, first served; the wait is recorded as
 `cursor_lease_wait_ms`, apart from the completion's own duration, which
-starts once the slot is held). The bridge executable is
-`CURSOR_BRIDGE_BIN` (default `cursor-sdk-bridge`, resolved on `PATH`; a
-path works too). Alternatively, attach to a bridge some other process
-manages by setting both `CURSOR_BRIDGE_URL` (its Connect base URL — must
-be `http://` to `127.0.0.1`, `[::1]`, or `localhost`) and
-`CURSOR_BRIDGE_TOKEN` (the token from its ready line): nothing is spawned,
-every agent — still at most `CURSOR_MAX_AGENTS` at once — shares that one
-bridge, and its lifetime and exit are its owner's concern. Function-tool
-callbacks reach whatever `--tool-callback-url` the external bridge was
-started with, not this client, so a request that declares function tools is
-rejected before any RPC in attach mode; it needs spawn mode.
+starts once the slot is held). The bridge executable is `cursor-sdk-bridge`,
+resolved on `PATH`.
 
 `Client::connect()` / `FromEnv` reads the optional `CURSOR_TIMEOUT_SECS`,
-`CURSOR_INACTIVITY_SECS`, `CURSOR_MODEL`, `CURSOR_MAX_AGENTS`,
-`CURSOR_BRIDGE_BIN`, `CURSOR_BRIDGE_URL`, and `CURSOR_BRIDGE_TOKEN`; callers
+`CURSOR_INACTIVITY_SECS`, `CURSOR_MODEL`, and `CURSOR_MAX_AGENTS`; callers
 that need different bounds, a default model, or another pool shape pass
 `ConnectOptions` to `connect_with`. A spawned bridge inherits the host's
 environment (bar the `GIT_*` identity variables, which would point the
@@ -182,21 +172,18 @@ use omnia::Backend;
 use omnia_cursor::{Client, ConnectOptions};
 
 // CURSOR_TIMEOUT_SECS / CURSOR_INACTIVITY_SECS / CURSOR_MODEL /
-// CURSOR_MAX_AGENTS / CURSOR_BRIDGE_BIN when set; else a 600s cap, a 120s
-// inactivity window, a Cursor-chosen model, and up to four agents, each in
-// its own `cursor-sdk-bridge` process.
+// CURSOR_MAX_AGENTS when set; else a 600s cap, a 120s inactivity window, a
+// Cursor-chosen model, and up to four agents, each in its own
+// `cursor-sdk-bridge` process.
 let client = Client::connect().await?;
 
 // Explicit bounds, default model, and pool shape for long-running judgment
-// legs; `bridge_url` + `bridge_token` instead attach to a running bridge.
+// legs.
 let client = Client::connect_with(ConnectOptions {
     timeout_secs: 1800,
     inactivity_secs: 120,
     model: "composer-2".into(),
     max_agents: 2,
-    bridge_bin: "cursor-sdk-bridge".into(),
-    bridge_url: None,
-    bridge_token: None,
 }).await?;
 ```
 
@@ -214,23 +201,26 @@ bridge, by hand.
 is a protocol-faithful `cursor-sdk-bridge`: bearer-checked `sdk.v1` Connect
 RPCs, `agent-<n>` ids counted per process (so two processes hand out the
 same id, as the real one does), `Send` as an enveloped run stream, and
-`CallCustomTool` posted back to this crate's own callback endpoint. It has
-two mounts — served in-process for attach mode, where a test can park a
-request at any point of an agent's life and release it, and built as the
-`fake-cursor-sdk-bridge` binary (feature `fake-bridge`) for spawn mode,
-where the client starts one process per lease and every process appends to
-one JSONL log the test folds back into per-process histories. A scripted
-`Config` decides the reply (`Echo`, `Replies`, `Tool`, `Paced`) and the
-faults (hang or park at a point, exit or `SIGKILL` on the nth call, a
-missing, refused, or non-loopback ready line, a reset stream, an empty id,
-a failing close), each fault aimed at one spawned process or all of them.
+`CallCustomTool` posted back to this crate's own callback endpoint. It is
+built as the `fake-cursor-sdk-bridge` binary (feature `fake-bridge`) and
+linked onto the test process's `PATH` as `cursor-sdk-bridge`, so the
+client finds it exactly as a deployment finds the real one — nothing on
+`Client` or `ConnectOptions` exists for the tests' sake. The client starts
+one process per lease and every process appends to one JSONL log the test
+folds back into per-process histories; a test can park a request at any
+point of an agent's life and release it, the parks and releases going
+through files in the fake's home. A scripted `Config` decides the reply
+(`Echo`, `Replies`, `Tool`, `Paced`) and the faults (hang or park at a
+point, exit or `SIGKILL` on the nth call, a missing, refused, or
+non-loopback ready line, a reset stream, an empty id, a failing close),
+each fault aimed at one spawned process or all of them.
 
 **Tier 2 — guests through the runtime.** Every scenario is a guest
 component from [`crates/test-programs`](../test-programs) run through
 `omnia_test::host::Deployment` over an `omnia_cursor::Client`, so what is
 asserted is the guest-visible contract; the test then asserts the fake's
-per-agent RPC sequence and that the pool's slots are all back
-(`Client::idle_slots`, a hidden probe). [`tests/model.rs`](tests/model.rs)
+per-agent RPC sequence and that every process the client spawned is gone
+again (a slot reopens only once its process is). [`tests/model.rs`](tests/model.rs)
 is one row per guest program (`foreach_model!` fails to compile when a
 program has no row): echo, the three `check` outcomes, tool round-trips in
 every callback codec, a repairable and an undeclared tool, fan-out over
@@ -245,23 +235,25 @@ the opening `Send` or exited on `CreateAgent` restarts once on a fresh
 process that answers; killed twice fails with the typed exit; killed after
 the guest's `check` has seen a candidate is not restarted; a run that stalls
 mid-stream is cancelled, not restarted; a stream reset restarts on a fresh
-process — spawned, once the reset one has been asked to go, and attached,
-as a second agent on the same bridge — and reset twice fails with the typed
-transport error), a bridge that hangs on `Ping`, `CloseAgent`, or
-`Shutdown`, attach mode, the callback endpoint's rejections and token
-revocation, and a check that the ready line and its token never reach a
-log. Guests are compiled by the `test-programs` build script; there is no
-separate `--target` build to run.
+process once the reset one has been asked to go, and reset twice fails with
+the typed transport error), a bridge that hangs on `Ping`, `CloseAgent`, or
+`Shutdown`, the callback endpoint's rejections and token revocation, and a
+check that the ready line and its token never reach a log. Guests are
+compiled by the `test-programs` build script; there is no separate
+`--target` build to run.
 
 **Tier 3 — the real bridge.** [`tests/live.rs`](tests/live.rs) drives real
 completions through the `wasi-model` boundary: the plain acceptance run, a
 function-tool round-trip with a lent workspace, a no-workspace function-tool
 run, an in-process MCP grant, the guest `check` loop, a four-way fan-out
-that holds four bridge processes at once and then sees every slot reopen,
-`stress_fanout`, that fan-out twenty times over (a bridge that exits
+that holds four bridge processes at once and then sees every one of them
+gone, `stress_fanout`, that fan-out twenty times over (a bridge that exits
 under load fails its completion with `cursor-sdk-bridge exited`), and
 `bridge_killed_mid_run_recovers`, which `kill -9`s a real bridge under its
-opening run and sees the completion answer from the restart. All are
+opening run and sees the completion answer from the restart. The rows that
+watch the spawned processes read their pids from the client's own
+`cursor-sdk-bridge spawned` events through the process's tracing
+subscriber, so they run one per process, as nextest does. All are
 `#[ignore]`d so they never spawn a process in CI; run them with
 `cursor-sdk-bridge` installed:
 
@@ -272,17 +264,6 @@ CURSOR_API_KEY=... \
 
 Add `CURSOR_SDK_BRIDGE_LOG=1` when a live failure needs the bridge's
 per-RPC stderr; the client logs the tail of it at DEBUG.
-
-`upstream_tripwire` is the one live test that is red on purpose. It
-attaches to a bridge you start by hand (`CURSOR_BRIDGE_URL` and
-`CURSOR_BRIDGE_TOKEN` from its ready line) with `max_agents = 2` and runs
-two completions at once — two agents on one process, which the pool never
-does. Today the upstream bridge dies of a double-close (`EXC_GUARD`, wait
-status 9) with two live agents; an attached bridge is never seen to die,
-so both completions fail as transport errors and the crash report is the
-evidence. Red means one process still cannot host two agents and the
-one-process-per-agent pool stays as it is. Green means a bridge release has
-fixed it, and an `agents_per_bridge` knob is worth adding.
 
 ## License
 

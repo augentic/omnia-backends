@@ -6,6 +6,16 @@ Unreleased
 
 ### Changed
 
+- `omnia-cursor` no longer attaches to a bridge another process manages.
+  `ConnectOptions` drops `bridge_bin`, `bridge_url`, and `bridge_token`;
+  the executable is `cursor-sdk-bridge` on `PATH`, and a ready line naming
+  a non-loopback URL is rejected before any RPC, so the bearer token and
+  API key never leave the host. Struct literals name `max_agents` only.
+- The cursor end-to-end fake is linked onto the test process's `PATH` as
+  `cursor-sdk-bridge` and spawned per lease. A lease fully released is
+  observed as its process gone; `Client::idle_slots` and `upstream_tripwire`
+  are gone.
+
 ---
 
 Release notes for previous releases can be found on the respective release

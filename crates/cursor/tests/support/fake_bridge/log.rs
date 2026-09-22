@@ -1,23 +1,23 @@
-//! What the fake records — one event per handshake step, RPC, and tool
-//! callback — and the test-side views that fold the record back into
+//! What the fake records — one event per handshake step, RPC, park, and
+//! tool callback — and the test-side views that fold the record back into
 //! per-process histories.
 //!
-//! In-process the record is a `Vec` behind a mutex. A spawned fake appends
-//! JSONL lines to the file `FAKE_BRIDGE_LOG` names under `flock`, so several
-//! processes share one log and number themselves through it: the probe
-//! `Client::connect` spawns is process 0, each lease's process counts up
-//! from 1.
+//! Every spawned fake appends JSONL lines to the one log in its home under
+//! `flock`, so several processes share it and number themselves through it:
+//! the probe `Client::connect` spawns is process 0, each lease's process
+//! counts up from 1.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use super::Point;
 
 /// One `sdk.v1` procedure the fake answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -42,6 +42,8 @@ pub enum Kind {
     Ready,
     /// One RPC arrived (recorded on arrival, before any hang or park).
     Rpc(Rpc),
+    /// A request is held at this point until the test releases it.
+    Parked(Point),
     /// The fake posted `CallCustomTool`; `arg` carries the status and the
     /// bearer token it used.
     Callback,
@@ -86,36 +88,21 @@ pub fn now_micros() -> u64 {
 pub struct Recorder {
     pid: u32,
     process: usize,
-    memory: Mutex<Vec<Event>>,
-    file: Option<PathBuf>,
+    file: PathBuf,
 }
 
 impl Recorder {
-    /// An in-process record, as process 0.
-    pub fn in_memory() -> Self {
-        Self {
-            pid: std::process::id(),
-            process: 0,
-            memory: Mutex::new(Vec::new()),
-            file: None,
-        }
-    }
-
-    /// A file-backed record for a spawned process, which claims the next
-    /// process number under the log's lock and announces itself.
+    /// The record for a spawned process, which claims the next process
+    /// number under the log's lock and announces itself.
     pub fn to_file(path: &Path) -> Self {
-        let pid = std::process::id();
         let file = lock(path);
         let started = Log::read(path).events.iter().filter(|e| e.kind == Kind::Started).count();
         let recorder = Self {
-            pid,
+            pid: std::process::id(),
             process: started,
-            memory: Mutex::new(Vec::new()),
-            file: Some(path.to_path_buf()),
+            file: path.to_path_buf(),
         };
-        let event = recorder.event(Kind::Started, None, Value::Null);
-        append(&file, &event);
-        recorder.memory.lock().unwrap_or_else(PoisonError::into_inner).push(event);
+        append(&file, &recorder.event(Kind::Started, None, Value::Null));
         drop(file);
         recorder
     }
@@ -124,21 +111,22 @@ impl Recorder {
         self.process
     }
 
-    /// The shared JSONL log a spawned process appends to.
-    pub fn log_path(&self) -> Option<&Path> {
-        self.file.as_deref()
+    /// The shared JSONL log every spawned process appends to.
+    pub fn log_path(&self) -> &Path {
+        &self.file
     }
 
     pub fn record(&self, kind: Kind, agent: Option<&str>, arg: Value) {
-        let event = self.event(kind, agent, arg);
-        if let Some(path) = &self.file {
-            append(&lock(path), &event);
-        }
-        self.memory.lock().unwrap_or_else(PoisonError::into_inner).push(event);
+        append(&lock(&self.file), &self.event(kind, agent, arg));
     }
 
-    pub fn events(&self) -> Vec<Event> {
-        self.memory.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    /// Record a park at `point` and take its ticket: how many requests
+    /// parked there before it, across every process.
+    pub fn park(&self, point: Point) -> usize {
+        let file = lock(&self.file);
+        let ticket = Log::read(&self.file).parked(point);
+        append(&file, &self.event(Kind::Parked(point), None, Value::Null));
+        ticket
     }
 
     fn event(&self, kind: Kind, agent: Option<&str>, arg: Value) -> Event {
@@ -173,7 +161,7 @@ fn append(mut file: &File, event: &Event) {
     file.flush().expect("flushing the fake bridge log");
 }
 
-/// Every event recorded, from memory or from the shared log file.
+/// Every event recorded in the shared log file.
 #[derive(Clone, Debug, Default)]
 pub struct Log {
     pub events: Vec<Event>,
@@ -190,6 +178,24 @@ impl Log {
 
     pub const fn from_events(events: Vec<Event>) -> Self {
         Self { events }
+    }
+
+    /// Requests ever parked at `point`, released or not.
+    pub fn parked(&self, point: Point) -> usize {
+        self.events.iter().filter(|e| e.kind == Kind::Parked(point)).count()
+    }
+
+    /// Every point a request was parked at.
+    pub fn parked_points(&self) -> Vec<Point> {
+        let mut points = Vec::new();
+        for event in &self.events {
+            if let Kind::Parked(point) = event.kind
+                && !points.contains(&point)
+            {
+                points.push(point);
+            }
+        }
+        points
     }
 
     /// The processes that wrote to the log, by number.
@@ -213,7 +219,7 @@ impl Log {
     }
 }
 
-/// One spawned process's history (the whole record in-process).
+/// One spawned process's history.
 #[derive(Clone, Debug)]
 pub struct Process {
     pub number: usize,

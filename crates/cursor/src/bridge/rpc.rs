@@ -483,7 +483,7 @@ fn end_stream_error(method: &str, payload: &[u8]) -> Result<()> {
     bail!("bridge RPC `{method}` stream failed ({code}): {message}")
 }
 
-// Deliberate unit tests: loopback attach URL, envelope framing, and error
+// Deliberate unit tests: the loopback ready-line URL, envelope framing, and error
 // decoding (CI floor); `tests/bridge.rs` proves the client against the fake
 // bridge and `tests/live.rs` against a real one.
 #[cfg(test)]

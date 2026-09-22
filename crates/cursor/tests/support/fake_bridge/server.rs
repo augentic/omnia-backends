@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -30,7 +31,7 @@ use super::log::{Kind, Log, Recorder, Rpc};
 use super::proto::{
     CallCustomToolRequest, CallCustomToolResponse, struct_to_value, value_to_struct,
 };
-use super::{Codec, Config, Fault, Point, Script, Then};
+use super::{Codec, Config, Fault, Point, Releases, Script, Then};
 
 /// Lines the fake writes to stderr before it dies on purpose; a client that
 /// leaks the stderr tail into an error message leaks these.
@@ -56,13 +57,14 @@ pub struct Callback {
 
 pub struct Server {
     config: Config,
-    /// `None` in-process; the claimed number when spawned (the probe is 0).
-    process: Option<usize>,
+    /// The process number claimed through the log (the probe is 0).
+    process: usize,
     token: String,
     callback: Option<Callback>,
     recorder: Recorder,
+    /// The release counts the test publishes, which a park waits on.
+    releases: PathBuf,
     state: Mutex<State>,
-    parks: Parks,
     shutdown: Notify,
     http: HyperClient<HttpConnector, Body>,
 }
@@ -99,7 +101,8 @@ enum Outcome {
 
 impl Server {
     pub fn new(
-        config: Config, process: Option<usize>, callback: Option<Callback>, recorder: Recorder,
+        config: Config, process: usize, callback: Option<Callback>, recorder: Recorder,
+        releases: PathBuf,
     ) -> Arc<Self> {
         Arc::new(Self {
             config,
@@ -107,8 +110,8 @@ impl Server {
             token: gen_token(),
             callback,
             recorder,
+            releases,
             state: Mutex::new(State::default()),
-            parks: Parks::default(),
             shutdown: Notify::new(),
             http: HyperClient::builder(TokioExecutor::new()).build_http(),
         })
@@ -120,10 +123,6 @@ impl Server {
 
     pub const fn recorder(&self) -> &Recorder {
         &self.recorder
-    }
-
-    pub const fn parks(&self) -> &Parks {
-        &self.parks
     }
 
     /// Resolves once a `Shutdown` RPC has been answered.
@@ -148,16 +147,12 @@ impl Server {
     // that extra beat so the client notes the run id while we still hold
     // the winner.
     async fn await_peer(&self, rpc: Rpc) {
-        let Some(path) = self.recorder.log_path() else {
-            return;
-        };
-        let me = self.process.unwrap_or(0);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         loop {
-            if Log::read(path)
+            if Log::read(self.recorder.log_path())
                 .events
                 .iter()
-                .any(|event| event.process != me && event.rpc() == Some(rpc))
+                .any(|event| event.process != self.process && event.rpc() == Some(rpc))
             {
                 sleep(Duration::from_millis(100)).await;
                 return;
@@ -240,7 +235,17 @@ impl Server {
             std::future::pending::<()>().await;
         }
         if self.has(&Fault::Park(point)) {
-            self.parks.park(point).await;
+            self.park(point).await;
+        }
+    }
+
+    // Take a ticket for `point` and wait until the test has released that
+    // many requests there. Cancel-safe: dropping this leaves the ticket
+    // taken, which the test's `parked` count documents.
+    async fn park(&self, point: Point) {
+        let ticket = self.recorder.park(point);
+        while Releases::read(&self.releases).count(point) <= ticket {
+            sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -427,7 +432,7 @@ impl Server {
         }
         if self.has(&Fault::Park(Point::Stream)) {
             tokio::select! {
-                () = self.parks.park(Point::Stream) => {}
+                () = self.park(Point::Stream) => {}
                 _ = &mut cancel => return Outcome::Cancelled,
             }
         }
@@ -578,47 +583,6 @@ impl Server {
         self.checkpoint(Point::DeleteAgent).await;
         self.state().agents.remove(&agent);
         empty()
-    }
-}
-
-/// Requests parked at the scripted points, released by the test.
-#[derive(Default)]
-pub struct Parks {
-    waiters: Mutex<Vec<(Point, oneshot::Sender<()>)>>,
-}
-
-impl Parks {
-    async fn park(&self, point: Point) {
-        let (tx, rx) = oneshot::channel();
-        self.lock().push((point, tx));
-        let _ = rx.await;
-    }
-
-    /// Requests currently held at `point`.
-    pub fn parked(&self, point: Point) -> usize {
-        self.lock().iter().filter(|(at, tx)| *at == point && !tx.is_closed()).count()
-    }
-
-    /// Release the earliest request held at `point`; `false` when none is.
-    pub fn release_one(&self, point: Point) -> bool {
-        let mut waiters = self.lock();
-        let Some(index) = waiters.iter().position(|(at, tx)| *at == point && !tx.is_closed())
-        else {
-            return false;
-        };
-        let (_, tx) = waiters.remove(index);
-        drop(waiters);
-        tx.send(()).is_ok()
-    }
-
-    pub fn release_all(&self) {
-        for (_, tx) in self.lock().drain(..) {
-            let _ = tx.send(());
-        }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Vec<(Point, oneshot::Sender<()>)>> {
-        self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

@@ -8,14 +8,15 @@
 //! a slot never reopens while its process is still around.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context as _, Result};
 use omnia_wasi_model::ToolHost;
 use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::time::Instant;
 
-use crate::bridge::{Bridge, elapsed_ms};
+use crate::bridge::{Bridge, Rpc};
+use crate::elapsed_ms;
 use crate::endpoint::{Attached, Endpoint, Registration};
 
 #[derive(Debug)]
@@ -48,32 +49,25 @@ impl Pool {
         tracing::info!(histogram.cursor_lease_wait_ms = elapsed_ms(queued), "agent slot acquired");
 
         let registration = Arc::new(self.endpoint.register()?);
-        let started = match Bridge::start(&registration) {
-            Ok(started) => started,
-            Err(error) => {
-                tracing::warn!(
-                    monotonic_counter.cursor_bridge_spawn_failures = 1_u64,
-                    "cursor-sdk-bridge failed to spawn"
-                );
-                return Err(error);
-            }
+        let spawned = async {
+            let (bridge, handshake) = Bridge::start(&registration)?;
+            // Hold the slot before the handshake: cancelling or failing that
+            // wait drops it, which closes the process and only then reopens
+            // the permit.
+            let slot = Slot {
+                permit: Some(permit),
+                bridge: Arc::new(bridge),
+                registration: Arc::clone(&registration),
+            };
+            let rpc = handshake.complete().await?;
+            Ok(Arc::new(Lease { slot, rpc }))
         };
-        // Store the permit before the handshake: cancelling or failing that
-        // wait drops this lease, which closes the process and only then
-        // reopens the slot.
-        let lease = Lease {
-            permit: Some(permit),
-            bridge: Arc::new(started.bridge),
-            registration,
-        };
-        if let Err(error) = started.handshake.complete().await {
+        spawned.await.inspect_err(|_error| {
             tracing::warn!(
                 monotonic_counter.cursor_bridge_spawn_failures = 1_u64,
                 "cursor-sdk-bridge failed to spawn"
             );
-            return Err(error);
-        }
-        Ok(Arc::new(lease))
+        })
     }
 
     pub const fn max_agents(&self) -> usize {
@@ -81,18 +75,27 @@ impl Pool {
     }
 }
 
-/// One agent slot and the bridge it runs on.
+/// One agent slot with its bridge handshaken: the `sdk.v1` client is bound
+/// for as long as the lease lives.
 #[derive(Debug)]
 pub struct Lease {
-    permit: Option<OwnedSemaphorePermit>,
-    bridge: Arc<Bridge>,
-    // The spawned process's own callback identity.
-    registration: Arc<Registration>,
+    slot: Slot,
+    rpc: Rpc,
 }
 
 impl Lease {
     pub fn bridge(&self) -> &Bridge {
-        &self.bridge
+        &self.slot.bridge
+    }
+
+    /// The bound `sdk.v1` client.
+    pub const fn rpc(&self) -> &Rpc {
+        &self.rpc
+    }
+
+    /// The bound `sdk.v1` client, while its bridge is still running.
+    pub fn live_rpc(&self) -> Option<&Rpc> {
+        self.slot.bridge.is_running().then_some(&self.rpc)
     }
 
     /// Route the bridge's callbacks for `agent_id` into `tool_host` until
@@ -100,11 +103,21 @@ impl Lease {
     pub fn attach(
         &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
     ) -> Attached {
-        self.registration.attach(agent_id, tool_host, abort)
+        self.slot.registration.attach(agent_id, tool_host, abort)
     }
 }
 
-impl Drop for Lease {
+// The permit, the process, and the process's own callback identity; held
+// from before the handshake so a spawn that fails or is abandoned still
+// closes the process before the permit returns.
+#[derive(Debug)]
+struct Slot {
+    permit: Option<OwnedSemaphorePermit>,
+    bridge: Arc<Bridge>,
+    registration: Arc<Registration>,
+}
+
+impl Drop for Slot {
     fn drop(&mut self) {
         let permit = self.permit.take();
         let bridge = Arc::clone(&self.bridge);

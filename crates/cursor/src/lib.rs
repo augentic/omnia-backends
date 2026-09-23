@@ -6,13 +6,14 @@ mod model;
 mod pool;
 
 use std::env;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 pub use bridge::{Exit, TransportError};
 pub use model::Failure;
 use omnia::Backend;
+use tokio::time::Instant;
 use tracing::instrument;
 
 use crate::model::Deadlines;
@@ -23,6 +24,8 @@ use crate::pool::Pool;
 pub struct Client {
     deadlines: Deadlines,
     model: String,
+    // read once at connect; every `CreateAgent` and `DeleteAgent` carries it
+    api_key: String,
     pool: Arc<Pool>,
 }
 
@@ -41,7 +44,8 @@ impl Backend for Client {
 
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        ensure!(env::var("CURSOR_API_KEY").is_ok(), "CURSOR_API_KEY must be set");
+        let api_key =
+            env::var("CURSOR_API_KEY").map_err(|_unset| anyhow!("CURSOR_API_KEY must be set"))?;
         ensure!(options.timeout_secs > 0, "timeout_secs must be greater than 0");
         ensure!(options.inactivity_secs > 0, "inactivity_secs must be greater than 0");
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");
@@ -53,9 +57,21 @@ impl Backend for Client {
                 cap: Duration::from_secs(options.timeout_secs),
             },
             model: options.model,
+            api_key,
             pool: Arc::new(pool),
         })
     }
+}
+
+// Every mutex in this crate guards data no panic can leave half-written, so
+// a poisoned lock is still worth reading.
+ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Milliseconds since `since`, saturating.
+ fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 // A named module solely to scope the allow: the `FromEnv` derive expands to

@@ -10,18 +10,16 @@
 //! stops waiting — at the inactivity bound, or dropped — leaves an agent
 //! the task closes and deletes itself, and a bridge silent for one more
 //! window gives the slot back with nothing to tear down. Teardown — the
-//! abandoned run cancelled
-//! best-effort, then close and delete against the create-time cwd, each
-//! call bounded and all of them skipped once the bridge is gone — runs on a
-//! task of its own too, whether the turn ended or the agent was dropped
-//! mid-way; `complete` waits for it, and the lease rides on it, so the
-//! bridge closes only after.
+//! abandoned run cancelled best-effort, then close and delete against the
+//! create-time cwd, each call bounded and all of them skipped once the
+//! bridge is gone — runs on a task of its own too, whether the turn ended
+//! or the agent was dropped mid-way; `complete` waits for it, and the lease
+//! rides on it, so the bridge closes only after.
 //!
 //! A failed agent reports itself as [`Unanswered`]: the error, and whether
 //! it struck before any candidate had been offered to the guest, which is
 //! what lets the caller run the prompt again on a fresh agent.
 
-use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,13 +33,15 @@ use tokio::time::{Instant, sleep, sleep_until, timeout};
 use super::observe::{self, Completion, EventLog, Failure};
 use super::options::{Turn, Workspace};
 use crate::Client;
-use crate::bridge::{AgentOptions, Bridge, EXIT_WAIT, Exit, RunStatus, RunStream, RunStreamResult};
+use crate::bridge::{
+    AgentOperationOptions, AgentOptions, Bridge, Exit, RunStatus, RunStream, RunStreamResult,
+};
 use crate::endpoint::Attached;
 use crate::pool::Lease;
 
 // Candidates offered to the guest's check before the round budget ends the
 // completion: the opening prompt plus one correction on the same agent.
-const MAX_ROUNDS: usize = 2;
+const MAX_ROUNDS: u32 = 2;
 // Teardown is best-effort: a bridge that will not answer it does not keep
 // its slot for longer than this per call.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -54,6 +54,7 @@ pub struct Agent {
     lease: Arc<Lease>,
     id: String,
     cwd: String,
+    api_key: String,
     deadlines: Deadlines,
     prompt: String,
     format: Format,
@@ -61,8 +62,10 @@ pub struct Agent {
     tool_host: Arc<dyn ToolHost>,
     live_run: Option<String>,
     abort_rx: mpsc::UnboundedReceiver<String>,
-    completion: Option<Completion>,
+    completion: Completion,
     _attached: Attached,
+    // Owned until the teardown takes it: `None` once the agent is released,
+    // by `complete` or by `Drop`, whichever comes first.
     workspace: Option<Workspace>,
 }
 
@@ -70,7 +73,6 @@ impl Agent {
     pub async fn create(
         client: &Client, lease: Arc<Lease>, turn: Turn, tool_host: Arc<dyn ToolHost>,
     ) -> Result<Self> {
-        let completion = Completion::start(&turn);
         let Turn {
             options,
             workspace,
@@ -78,11 +80,12 @@ impl Agent {
             format,
             check,
         } = turn;
-        let cwd = options.local.cwd.first().cloned().unwrap_or_default();
+        let mut completion =
+            Completion::start(&options.model.id, &format, &prompt, options.mcp_servers.len());
 
         let window = client.deadlines.inactivity;
-        let creating = Creating::spawn(Arc::clone(&lease), options, workspace, cwd.clone(), window);
-        let Created { id, workspace } = match creating.claim(lease.bridge(), window).await {
+        let creating = Creating::spawn(Arc::clone(&lease), options, workspace, window);
+        let Created { id, cwd, workspace } = match creating.claim(lease.bridge(), window).await {
             Ok(created) => created,
             Err(error) => {
                 completion.finish(observe::outcome_of(&error));
@@ -97,6 +100,7 @@ impl Agent {
             lease,
             id,
             cwd,
+            api_key: client.api_key.clone(),
             deadlines: client.deadlines,
             prompt,
             format,
@@ -104,7 +108,7 @@ impl Agent {
             tool_host,
             live_run: None,
             abort_rx,
-            completion: Some(completion),
+            completion,
             _attached: attached,
             workspace: Some(workspace),
         })
@@ -112,15 +116,12 @@ impl Agent {
 
     pub async fn complete(mut self) -> Result<Answer, Unanswered> {
         let result = self.run().await;
-        let attempts = self.completion.as_ref().map_or(0, Completion::attempts);
         let outcome = match &result {
-            Ok(_) if attempts > 1 => "corrected",
+            Ok(_) if self.completion.attempts() > 1 => "corrected",
             Ok(_) => "ok",
-            Err(unanswered) => observe::outcome_of(&unanswered.error),
+            Err(unanswered) => observe::outcome_of(unanswered.error()),
         };
-        if let Some(completion) = self.completion.take() {
-            completion.finish(outcome);
-        }
+        self.completion.finish(outcome);
         // The answer waits on the teardown; a completion dropped here leaves
         // it running, `Drop` having nothing left to release.
         if let Some(teardown) = self.take_release().and_then(Release::spawn) {
@@ -131,10 +132,9 @@ impl Agent {
 
     async fn run(&mut self) -> Result<Answer, Unanswered> {
         let mut prompt = std::mem::take(&mut self.prompt);
-        for round in 1..=MAX_ROUNDS {
-            if let Some(completion) = &mut self.completion {
-                completion.new_attempt();
-            }
+        let mut round = 1;
+        loop {
+            self.completion.new_attempt();
             // A candidate is only offered after a `Send` succeeds, so the
             // opening round's failure is one the guest has seen nothing of.
             let response = match self.send(&prompt).await {
@@ -142,10 +142,8 @@ impl Agent {
                 Err(error) if round == 1 => return Err(Unanswered::before_candidate(error)),
                 Err(error) => return Err(Unanswered::settled(error)),
             };
-            if let Some(completion) = &mut self.completion {
-                let tools = response.transcript.as_ref().map_or(0, |t| t.turns.len());
-                completion.record(response.result.len(), tools, response.usage.as_ref());
-            }
+            let tools = response.transcript.as_ref().map_or(0, |t| t.turns.len());
+            self.completion.record(response.result.len(), tools, response.usage.as_ref());
 
             let candidate = self.format.candidate(&response.result);
             if !self.check {
@@ -155,18 +153,19 @@ impl Agent {
             match self.tool_host.check(candidate.clone()).await.map_err(Unanswered::settled)? {
                 Ok(()) => return Ok(response.answer(candidate)),
                 // The agent keeps its session, so the correction alone is
-                // the next prompt; on the last round it is the typed
-                // failure the guest sees.
-                Err(correction) if round == MAX_ROUNDS => {
-                    return Err(Unanswered::settled(Error::BudgetExhausted(correction).into()));
-                }
-                Err(correction) => {
+                // the next prompt.
+                Err(correction) if round < MAX_ROUNDS => {
                     tracing::debug!(%correction, "check rejected the candidate");
                     prompt = correction;
+                    round += 1;
+                }
+                // Out of rounds: the last correction is the typed failure
+                // the guest sees.
+                Err(correction) => {
+                    return Err(Unanswered::settled(Error::BudgetExhausted(correction).into()));
                 }
             }
         }
-        unreachable!("every round returns")
     }
 
     async fn send(&mut self, text: &str) -> Result<Response> {
@@ -183,7 +182,7 @@ impl Agent {
         tokio::pin!(died);
 
         let stream = tokio::select! {
-            stream = self.lease.bridge().rpc().send(self.id.clone(), text.to_owned()) => {
+            stream = self.lease.rpc().send(self.id.clone(), text.to_owned()) => {
                 match stream {
                     Ok(stream) => stream,
                     Err(error) => return Err(exit_or(self.lease.bridge(), error).await),
@@ -216,12 +215,9 @@ impl Agent {
         let Some(run_id) = self.live_run.take() else {
             return;
         };
-        let bridge = self.lease.bridge();
-        if bridge.is_dead() {
+        let Some(rpc) = self.lease.live_rpc().cloned() else {
             return;
-        }
-
-        let rpc = bridge.rpc().clone();
+        };
         let agent_id = self.id.clone();
         if let Ok(handle) = Handle::try_current() {
             handle.spawn(async move {
@@ -230,17 +226,16 @@ impl Agent {
         }
     }
 
+    // The teardown, the first time; `None` once it has been handed out.
     fn take_release(&mut self) -> Option<Release> {
-        let id = std::mem::take(&mut self.id);
-        if id.is_empty() {
-            return None;
-        }
+        let workspace = self.workspace.take()?;
         Some(Release {
             lease: Arc::clone(&self.lease),
-            id,
-            cwd: std::mem::take(&mut self.cwd),
+            id: self.id.clone(),
+            cwd: self.cwd.clone(),
+            api_key: self.api_key.clone(),
             run_id: self.live_run.take(),
-            workspace: self.workspace.take(),
+            workspace,
         })
     }
 }
@@ -257,7 +252,7 @@ impl Drop for Agent {
 /// before any candidate had been offered to the guest — in `CreateAgent` or
 /// the opening `Send`.
 pub struct Unanswered {
-    pub error: anyhow::Error,
+    error: anyhow::Error,
     before_candidate: bool,
 }
 
@@ -279,6 +274,14 @@ impl Unanswered {
         }
     }
 
+    pub const fn error(&self) -> &anyhow::Error {
+        &self.error
+    }
+
+    pub fn into_error(self) -> anyhow::Error {
+        self.error
+    }
+
     /// Whether a fresh agent may be given the prompt once more: the bridge
     /// or its socket was lost before any candidate reached the guest, so
     /// nothing has been said about the prompt and no candidate would be
@@ -290,7 +293,7 @@ impl Unanswered {
     /// The process that died under the completion, when that is the failure.
     pub fn pid(&self) -> Option<u32> {
         match self.error.downcast_ref::<Failure>() {
-            Some(Failure::BridgeExited(exit)) => exit.pid,
+            Some(Failure::BridgeExited(exit)) => Some(exit.pid),
             _ => None,
         }
     }
@@ -307,7 +310,7 @@ pub struct Deadlines {
 
 impl Deadlines {
     /// Resolve when a run breaches its inactivity or absolute bound.
-    pub async fn watch(self, mut activity: watch::Receiver<Instant>) -> Failure {
+    async fn watch(self, mut activity: watch::Receiver<Instant>) -> Failure {
         let cap = sleep_until(Instant::now() + self.cap);
         tokio::pin!(cap);
         let mut activity_closed = false;
@@ -349,12 +352,14 @@ impl Creating {
     // the completion waits, then one more for a late id — or a bridge that
     // stays alive and silent would hold the slot for good.
     fn spawn(
-        lease: Arc<Lease>, options: AgentOptions, workspace: Workspace, cwd: String,
-        window: Duration,
+        lease: Arc<Lease>, options: AgentOptions, workspace: Workspace, window: Duration,
     ) -> Self {
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
-            let rpc = lease.bridge().rpc().clone();
+            // what teardown needs of the options, before the RPC consumes them
+            let cwd = options.local.cwd.first().cloned().unwrap_or_default();
+            let api_key = options.api_key.clone();
+            let rpc = lease.rpc().clone();
             let limit = window.saturating_mul(2);
             let outcome = match timeout(limit, rpc.create_agent(options)).await {
                 Ok(Ok(created)) if created.agent_id.is_empty() => {
@@ -362,6 +367,7 @@ impl Creating {
                 }
                 Ok(Ok(created)) => Ok(Created {
                     id: created.agent_id,
+                    cwd,
                     workspace,
                 }),
                 Ok(Err(error)) => Err(error),
@@ -381,9 +387,10 @@ impl Creating {
                     Release {
                         lease,
                         id: unclaimed.id,
-                        cwd,
+                        cwd: unclaimed.cwd,
+                        api_key,
                         run_id: None,
-                        workspace: Some(unclaimed.workspace),
+                        workspace: unclaimed.workspace,
                     }
                     .run()
                     .await;
@@ -413,9 +420,11 @@ impl Creating {
     }
 }
 
-/// A created agent and the workspace its cwd points into.
+/// A created agent, the cwd it was created against, and the workspace that
+/// cwd points into.
 struct Created {
     id: String,
+    cwd: String,
     workspace: Workspace,
 }
 
@@ -438,7 +447,8 @@ impl OpenSend<'_> {
         X: Future<Output = Exit> + Unpin,
     {
         let OpenSend { agent, stream, .. } = self;
-        let stream = stream.as_mut().expect("the send stream is open");
+        // `None` only once `Drop` has handed the stream to the teardown
+        let stream = stream.as_mut().context("the send stream is no longer this turn's")?;
         let mut log = EventLog::default();
         let mut outcome: Option<RunStreamResult> = None;
 
@@ -558,8 +568,9 @@ struct Release {
     lease: Arc<Lease>,
     id: String,
     cwd: String,
+    api_key: String,
     run_id: Option<String>,
-    workspace: Option<Workspace>,
+    workspace: Workspace,
 }
 
 impl Release {
@@ -570,30 +581,27 @@ impl Release {
     }
 
     async fn run(self) {
-        let bridge = self.lease.bridge();
-        if bridge.is_dead() {
-            tracing::debug!(agent = %self.id, "bridge exited; skipping agent teardown");
-        } else {
-            let rpc = bridge.rpc();
+        if let Some(rpc) = self.lease.live_rpc() {
             if let Some(run_id) = self.run_id {
                 teardown("CancelRun", rpc.cancel_run(run_id, self.id.clone())).await;
             }
             teardown("CloseAgent", rpc.close_agent(self.id.clone())).await;
-            let api_key = env::var("CURSOR_API_KEY").unwrap_or_default();
-            teardown("DeleteAgent", rpc.delete_agent(self.id, self.cwd, api_key)).await;
+            let options = AgentOperationOptions {
+                cwd: self.cwd,
+                api_key: self.api_key,
+            };
+            teardown("DeleteAgent", rpc.delete_agent(self.id, options)).await;
+        } else {
+            tracing::debug!(agent = %self.id, "bridge exited; skipping agent teardown");
         }
         drop(self.workspace);
     }
 }
 
-// A socket fails before the watcher publishes the exit: `watch_child`
-// spends up to `EXIT_GRACE` draining stderr first, so the observe budget
-// is that window plus one of its own.
+// A socket fails before the supervisor publishes the exit, so the bridge is
+// given a moment to report one before the transport error stands.
 async fn exit_or(bridge: &Bridge, error: anyhow::Error) -> anyhow::Error {
-    match timeout(EXIT_WAIT, bridge.died()).await {
-        Ok(exit) => Failure::BridgeExited(exit).into(),
-        Err(_elapsed) => error,
-    }
+    bridge.recent_exit().await.map_or(error, |exit| Failure::BridgeExited(exit).into())
 }
 
 // One best-effort teardown call: a failure is logged, a silence is bounded.

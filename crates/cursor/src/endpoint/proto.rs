@@ -3,9 +3,11 @@
 //! one place the binary protobuf codec must be accepted alongside JSON.
 //! Field tags mirror `sdk_custom_tool_callback_service.proto` verbatim.
 
+use prost_types::NullValue;
 use prost_types::value::Kind;
 use serde_json::{Map, Value};
 
+// Tag 3 (`tool_call_id`) is left undeclared; prost skips it.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct CallCustomToolRequest {
     #[prost(string, tag = "1")]
@@ -13,8 +15,6 @@ pub struct CallCustomToolRequest {
     /// Tool arguments as a JSON object.
     #[prost(message, optional, tag = "2")]
     pub args: Option<prost_types::Struct>,
-    #[prost(string, optional, tag = "3")]
-    pub tool_call_id: Option<String>,
     #[prost(string, tag = "4")]
     pub agent_id: String,
 }
@@ -57,10 +57,9 @@ pub fn value_to_struct(object: &Map<String, Value>) -> prost_types::Struct {
 
 // `Struct` numbers are f64 by definition, so integers beyond 2^53 round —
 // the same loss every protobuf JSON mapping accepts.
-#[allow(clippy::cast_precision_loss)]
 fn value_to_kind(value: &Value) -> prost_types::Value {
     let kind = match value {
-        Value::Null => Kind::NullValue(0),
+        Value::Null => Kind::NullValue(i32::from(NullValue::NullValue)),
         Value::Bool(flag) => Kind::BoolValue(*flag),
         Value::Number(number) => Kind::NumberValue(number.as_f64().unwrap_or_default()),
         Value::String(text) => Kind::StringValue(text.clone()),

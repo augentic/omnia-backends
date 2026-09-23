@@ -7,9 +7,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use omnia_wasi_model::Usage;
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+// no `Debug`: carries the API key
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentOptions {
@@ -22,8 +24,8 @@ pub struct AgentOptions {
     pub tools: Option<ToolList>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelSelection {
     pub id: String,
 }
@@ -49,7 +51,7 @@ pub struct CustomToolDefinition {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpServerConfig {
-    pub http: HttpMcpServerConfig,
+    http: HttpMcpServerConfig,
 }
 
 impl McpServerConfig {
@@ -65,10 +67,10 @@ impl McpServerConfig {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct HttpMcpServerConfig {
+struct HttpMcpServerConfig {
     #[serde(rename = "type")]
-    pub transport: &'static str,
-    pub url: String,
+    transport: &'static str,
+    url: String,
 }
 
 #[derive(Serialize)]
@@ -84,7 +86,6 @@ pub struct Empty {}
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GetVersionResponse {
-    pub bridge_version: String,
     pub protocol_version: String,
     pub capabilities: Vec<String>,
 }
@@ -105,7 +106,6 @@ pub struct CreateAgentRequest {
 #[serde(rename_all = "camelCase", default)]
 pub struct CreateAgentResponse {
     pub agent_id: String,
-    pub model: Option<ModelSelection>,
 }
 
 #[derive(Serialize)]
@@ -161,7 +161,9 @@ pub struct UserMessage {
 pub struct RunStreamMessage {
     pub sdk_message: Option<SdkMessage>,
     pub result: Option<RunStreamResult>,
-    pub done: Option<Value>,
+    /// Present on the closing frame; its payload carries nothing this
+    /// backend reads.
+    pub done: Option<IgnoredAny>,
     offset: Option<String>,
 }
 
@@ -188,22 +190,46 @@ pub struct SdkMessage {
 #[serde(rename_all = "camelCase", default)]
 pub struct RunStreamResult {
     pub run_id: String,
+    #[serde(deserialize_with = "run_status")]
     pub status: RunStatus,
     pub error_code: Option<String>,
     pub result: Option<RunResult>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// `RunLifecycleStatus`, by its proto3 JSON name; a name this backend does
+/// not know is `Unknown`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 pub enum RunStatus {
     #[default]
+    #[serde(rename = "RUN_LIFECYCLE_STATUS_UNSPECIFIED")]
     Unspecified,
+    #[serde(rename = "RUN_LIFECYCLE_STATUS_CREATING")]
     Creating,
+    #[serde(rename = "RUN_LIFECYCLE_STATUS_RUNNING")]
     Running,
+    #[serde(rename = "RUN_LIFECYCLE_STATUS_FINISHED")]
     Finished,
+    #[serde(rename = "RUN_LIFECYCLE_STATUS_ERROR")]
     Error,
+    #[serde(rename = "RUN_LIFECYCLE_STATUS_CANCELLED")]
     Cancelled,
+    #[serde(rename = "RUN_LIFECYCLE_STATUS_EXPIRED")]
     Expired,
+    #[serde(other)]
     Unknown,
+}
+
+impl RunStatus {
+    // in proto declaration order, so the index is the wire number
+    const BY_NUMBER: [Self; 7] = [
+        Self::Unspecified,
+        Self::Creating,
+        Self::Running,
+        Self::Finished,
+        Self::Error,
+        Self::Cancelled,
+        Self::Expired,
+    ];
 }
 
 impl fmt::Display for RunStatus {
@@ -221,33 +247,23 @@ impl fmt::Display for RunStatus {
     }
 }
 
-impl<'de> Deserialize<'de> for RunStatus {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(deserializer)?;
-        Ok(match value {
-            Value::String(name) => match name.as_str() {
-                "RUN_LIFECYCLE_STATUS_UNSPECIFIED" => Self::Unspecified,
-                "RUN_LIFECYCLE_STATUS_CREATING" => Self::Creating,
-                "RUN_LIFECYCLE_STATUS_RUNNING" => Self::Running,
-                "RUN_LIFECYCLE_STATUS_FINISHED" => Self::Finished,
-                "RUN_LIFECYCLE_STATUS_ERROR" => Self::Error,
-                "RUN_LIFECYCLE_STATUS_CANCELLED" => Self::Cancelled,
-                "RUN_LIFECYCLE_STATUS_EXPIRED" => Self::Expired,
-                _ => Self::Unknown,
-            },
-            Value::Number(number) => match number.as_i64() {
-                Some(0) => Self::Unspecified,
-                Some(1) => Self::Creating,
-                Some(2) => Self::Running,
-                Some(3) => Self::Finished,
-                Some(4) => Self::Error,
-                Some(5) => Self::Cancelled,
-                Some(6) => Self::Expired,
-                _ => Self::Unknown,
-            },
-            _ => Self::Unknown,
-        })
+// proto3 JSON writes an enum by name, but a bridge may write the number; any
+// other shape is `Unknown`
+fn run_status<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RunStatus, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Name(RunStatus),
+        Number(usize),
+        Other(IgnoredAny),
     }
+    Ok(match Wire::deserialize(deserializer)? {
+        Wire::Name(status) => status,
+        Wire::Number(number) => {
+            RunStatus::BY_NUMBER.get(number).copied().unwrap_or(RunStatus::Unknown)
+        }
+        Wire::Other(_) => RunStatus::Unknown,
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -286,7 +302,7 @@ impl From<TokenUsage> for Usage {
 
 /// Wire counts are `i64`; negatives become 0, values above `u32::MAX` saturate.
 fn clamp_u32(count: i64) -> u32 {
-    u32::try_from(count.clamp(0, i64::from(u32::MAX))).unwrap_or(u32::MAX)
+    if count.is_negative() { 0 } else { u32::try_from(count).unwrap_or(u32::MAX) }
 }
 
 fn flexible_i64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
@@ -305,8 +321,9 @@ fn flexible_i64_opt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option
 #[cfg(test)]
 mod tests {
     use omnia_wasi_model::Usage;
+    use serde_json::json;
 
-    use super::TokenUsage;
+    use super::{RunStatus, RunStreamResult, TokenUsage};
 
     fn usage(input: i64, output: i64, reasoning: Option<i64>) -> Usage {
         Usage::from(TokenUsage {
@@ -338,5 +355,24 @@ mod tests {
                 reasoning_tokens: None,
             }
         );
+    }
+
+    #[test]
+    fn run_status_spellings() {
+        let status = |value| {
+            serde_json::from_value::<RunStreamResult>(json!({ "status": value }))
+                .expect("a result with only a status parses")
+                .status
+        };
+        assert_eq!(status(json!("RUN_LIFECYCLE_STATUS_FINISHED")), RunStatus::Finished);
+        assert_eq!(status(json!(3)), RunStatus::Finished);
+        assert_eq!(status(json!("RUN_LIFECYCLE_STATUS_PAUSED")), RunStatus::Unknown);
+        assert_eq!(status(json!(42)), RunStatus::Unknown);
+        assert_eq!(status(json!(-1)), RunStatus::Unknown);
+        assert_eq!(status(json!(null)), RunStatus::Unknown);
+        assert_eq!(status(json!({ "nested": true })), RunStatus::Unknown);
+
+        let absent: RunStreamResult = serde_json::from_value(json!({})).expect("all defaulted");
+        assert_eq!(absent.status, RunStatus::Unspecified);
     }
 }

@@ -14,7 +14,7 @@ mod proto;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -32,6 +32,8 @@ use proto::{CallCustomToolRequest, CallCustomToolResponse, struct_to_value, valu
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+
+use crate::lock;
 
 const PATH: &str = "/sdk.v1.SdkCustomToolCallbackService/CallCustomTool";
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -60,38 +62,7 @@ impl Endpoint {
         let addr = listener.local_addr().context("reading the tool-callback address")?;
 
         let handler = Arc::new(Handler::default());
-
-        let server = {
-            let handler = Arc::clone(&handler);
-            tokio::spawn(async move {
-                loop {
-                    let (stream, _) = match listener.accept().await {
-                        Ok(conn) => conn,
-                        Err(error) => {
-                            tracing::warn!(%error, "tool-callback accept error");
-                            // don't spin on persistent failure (e.g. fd exhaustion)
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            continue;
-                        }
-                    };
-                    let handler = Arc::clone(&handler);
-                    tokio::spawn(async move {
-                        if let Err(error) = http1::Builder::new()
-                            .serve_connection(
-                                TokioIo::new(stream),
-                                service_fn(move |request| {
-                                    let handler = Arc::clone(&handler);
-                                    async move { Ok::<_, Infallible>(handler.handle(request).await) }
-                                }),
-                            )
-                            .await
-                        {
-                            tracing::warn!(%error, "tool-callback connection error");
-                        }
-                    });
-                }
-            })
-        };
+        let server = tokio::spawn(serve(listener, Arc::clone(&handler)));
 
         Ok(Self {
             url: format!("http://{addr}"),
@@ -110,13 +81,40 @@ impl Endpoint {
     pub fn register(&self) -> Result<Registration> {
         let token = gen_token()?;
         let sessions = Arc::new(Sessions::default());
-        self.handler.bridges().insert(token.clone(), Arc::clone(&sessions));
+        lock(&self.handler.bridges).insert(token.clone(), Arc::clone(&sessions));
         Ok(Registration {
             handler: Arc::clone(&self.handler),
             url: self.url.clone(),
             token,
             sessions,
         })
+    }
+}
+
+// accept until the `Endpoint` drops; one connection task per bridge socket
+async fn serve(listener: TcpListener, handler: Arc<Handler>) {
+    loop {
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(error) => {
+                tracing::warn!(%error, "tool-callback accept error");
+                // don't spin on persistent failure (e.g. fd exhaustion)
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let handler = Arc::clone(&handler);
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let handler = Arc::clone(&handler);
+                async move { Ok::<_, Infallible>(handler.handle(request).await) }
+            });
+            if let Err(error) =
+                http1::Builder::new().serve_connection(TokioIo::new(stream), service).await
+            {
+                tracing::warn!(%error, "tool-callback connection error");
+            }
+        });
     }
 }
 
@@ -171,7 +169,7 @@ impl std::fmt::Debug for Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.handler.bridges().remove(&self.token);
+        lock(&self.handler.bridges).remove(&self.token);
     }
 }
 
@@ -195,14 +193,10 @@ struct Handler {
 }
 
 impl Handler {
-    fn bridges(&self) -> MutexGuard<'_, HashMap<String, Arc<Sessions>>> {
-        self.bridges.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// The agent table of the bridge whose bearer token the request carries.
     fn authorize(&self, headers: &HeaderMap) -> Option<Arc<Sessions>> {
         let token = headers.get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?;
-        self.bridges().get(token).cloned()
+        lock(&self.bridges).get(token).cloned()
     }
 
     async fn handle(&self, request: http::Request<Incoming>) -> Reply {
@@ -253,7 +247,7 @@ impl Handler {
 
 impl std::fmt::Debug for Handler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Handler").field("bridges", &self.bridges().len()).finish()
+        f.debug_struct("Handler").field("bridges", &lock(&self.bridges).len()).finish()
     }
 }
 
@@ -265,19 +259,15 @@ struct Sessions {
 
 impl Sessions {
     fn insert(&self, agent_id: String, session: Session) {
-        self.lock().insert(agent_id, session);
+        lock(&self.entries).insert(agent_id, session);
     }
 
     fn remove(&self, agent_id: &str) {
-        self.lock().remove(agent_id);
+        lock(&self.entries).remove(agent_id);
     }
 
     fn lookup(&self, agent_id: &str) -> Option<Session> {
-        self.lock().get(agent_id).cloned()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, Session>> {
-        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.entries).get(agent_id).cloned()
     }
 }
 
@@ -374,7 +364,7 @@ async fn call_tool(sessions: &Sessions, headers: &HeaderMap, body: Bytes) -> Rep
     tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
 
     match session.tool_host.call_tool(call.tool_name.clone(), arguments).await {
-        Ok(Ok(output)) => respond(codec, &to_json(&output)),
+        Ok(Ok(output)) => respond(codec, &wrap_output(&output)),
         Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
         Err(error) => {
             let message = format!("tool `{}` failed: {error:#}", call.tool_name);
@@ -409,7 +399,9 @@ fn gen_token() -> Result<String> {
     }))
 }
 
-fn to_json(output: &str) -> Value {
+// The SDK wants a JSON object for a tool result; anything else the tool
+// returned rides under `value`.
+fn wrap_output(output: &str) -> Value {
     match serde_json::from_str::<Value>(output) {
         Ok(value @ Value::Object(_)) => value,
         Ok(value) => json!({ "value": value }),
@@ -423,9 +415,8 @@ fn respond(codec: Codec, result: &Value) -> Reply {
             reply(StatusCode::OK, "application/json", json!({ "result": result }).to_string())
         }
         Codec::Proto => {
-            let object = result.as_object().cloned().unwrap_or_default();
             let response = CallCustomToolResponse {
-                result: Some(value_to_struct(&object)),
+                result: Some(result.as_object().map(value_to_struct).unwrap_or_default()),
             };
             reply(StatusCode::OK, "application/proto", response.encode_to_vec())
         }
@@ -450,13 +441,13 @@ fn reply(status: StatusCode, content_type: &'static str, body: impl Into<Bytes>)
 mod tests {
     use serde_json::json;
 
-    use super::to_json;
+    use super::wrap_output;
 
     #[test]
-    fn to_json_policy() {
-        assert_eq!(to_json(r#"{"answer":42}"#), json!({ "answer": 42 }));
-        assert_eq!(to_json("[1,2]"), json!({ "value": [1, 2] }));
-        assert_eq!(to_json(r#""text""#), json!({ "value": "text" }));
-        assert_eq!(to_json("not json"), json!({ "value": "not json" }));
+    fn output_wrapping() {
+        assert_eq!(wrap_output(r#"{"answer":42}"#), json!({ "answer": 42 }));
+        assert_eq!(wrap_output("[1,2]"), json!({ "value": [1, 2] }));
+        assert_eq!(wrap_output(r#""text""#), json!({ "value": "text" }));
+        assert_eq!(wrap_output("not json"), json!({ "value": "not json" }));
     }
 }

@@ -7,13 +7,13 @@
 //! lines and tracing-opentelemetry metric fields.
 
 use std::collections::HashMap;
-use std::time::Instant;
 
-use omnia_wasi_model::{ToolTurn, Transcript, Usage};
+use omnia_wasi_model::{Format, ToolTurn, Transcript, Usage};
 use serde_json::Value;
+use tokio::time::Instant;
 
-use crate::bridge::{Exit, SdkMessage, TransportError, status_text};
-use crate::model::options::Turn;
+use crate::bridge::{Exit, SdkMessage, TransportError};
+use crate::elapsed_ms;
 
 /// How a completion this backend ran came to fail, by variant rather than
 /// by message.
@@ -48,7 +48,6 @@ pub enum Failure {
 impl Failure {
     /// The `outcome` label the `cursor_completions` counter carries for
     /// this failure.
-    #[must_use]
     pub const fn outcome(&self) -> &'static str {
         match self {
             Self::Timeout { .. } => "timeout",
@@ -77,7 +76,7 @@ impl std::fmt::Display for Failure {
             ),
             Self::Aborted(reason) => write!(f, "completion aborted: {reason}"),
             Self::BridgeExited(exit) => {
-                write!(f, "cursor-sdk-bridge exited ({}) during the run", status_text(exit.status))
+                write!(f, "cursor-sdk-bridge exited ({exit}) during the run")
             }
         }
     }
@@ -103,20 +102,14 @@ pub struct Completion {
 
 impl Completion {
     // INFO that a completion is in flight (no metric prefixes — live tail).
-    pub fn start(turn: &Turn) -> Self {
-        let format = turn.format.to_string();
-        let prompt_bytes = u64::try_from(turn.prompt.len()).unwrap_or(u64::MAX);
+    pub fn start(model: &str, format: &Format, prompt: &str, mcp_servers: usize) -> Self {
+        let format = format.to_string();
+        let prompt_bytes = len_u64(prompt.len());
 
-        tracing::info!(
-            model = %turn.options.model.id,
-            format = %format,
-            prompt_bytes,
-            mcp = turn.options.mcp_servers.len(),
-            "completion started"
-        );
+        tracing::info!(model, format, prompt_bytes, mcp = mcp_servers, "completion started");
 
         Self {
-            model: turn.options.model.id.clone(),
+            model: model.to_owned(),
             format,
             prompt_bytes,
             started: Instant::now(),
@@ -137,8 +130,8 @@ impl Completion {
 
     /// Snapshot the last successful send (result size, tools, tokens).
     pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
-        self.result_bytes = u64::try_from(result_len).unwrap_or(u64::MAX);
-        self.tool_turns = u64::try_from(tool_turns).unwrap_or(u64::MAX);
+        self.result_bytes = len_u64(result_len);
+        self.tool_turns = len_u64(tool_turns);
 
         if let Some(usage) = usage {
             self.input_tokens = u64::from(usage.input_tokens);
@@ -151,18 +144,14 @@ impl Completion {
         self.attempts
     }
 
-    // INFO + OTEL metric fields for this completion. Consumes self so Drop
-    // does not emit a second time.
-    pub fn finish(mut self, outcome: &'static str) {
-        self.emit(outcome);
-    }
-
-    fn emit(&mut self, outcome: &'static str) {
+    // INFO + OTEL metric fields for this completion; emitted once, so a
+    // later `Drop` says nothing.
+    pub fn finish(&mut self, outcome: &'static str) {
         if self.emitted {
             return;
         }
         self.emitted = true;
-        let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let duration_ms = elapsed_ms(self.started);
         tracing::info!(
             model = %self.model,
             format = %self.format,
@@ -184,9 +173,7 @@ impl Completion {
 
 impl Drop for Completion {
     fn drop(&mut self) {
-        if !self.emitted {
-            self.emit("abort");
-        }
+        self.finish("abort");
     }
 }
 
@@ -209,7 +196,7 @@ impl EventLog {
         match event.kind.as_str() {
             "tool_call" => self.tool_call(payload),
             "system" | "status" => {
-                if let Some(message) = first_match(payload, &["message"]) {
+                if let Some(message) = payload.get("message").and_then(Value::as_str) {
                     self.status_message = Some(message.to_owned());
                 }
             }
@@ -327,12 +314,18 @@ fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
 }
 
+// a byte or item count as a metric value; `usize` never exceeds `u64` on a
+// supported target, so this is a lossless widening
+fn len_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
 
-    use super::EventLog;
-    use crate::bridge::{SdkMessage, TransportError};
+    use super::{EventLog, Failure};
+    use crate::bridge::{Exit, SdkMessage, TransportError};
 
     fn observe_all(events: &[Value]) -> EventLog {
         let mut log = EventLog::default();
@@ -403,11 +396,11 @@ mod tests {
         assert!(log.finish().is_none(), "nothing usable, nothing recorded");
     }
 
+    // an exit whose status the wait never reported
+    const EXITED: Exit = Exit { status: None, pid: 1 };
+
     #[test]
     fn classify_crate_errors() {
-        use super::Failure;
-        use crate::bridge::Exit;
-
         let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
         assert_eq!(super::outcome_of(&timeout), "timeout");
 
@@ -422,7 +415,7 @@ mod tests {
         let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
         assert_eq!(super::outcome_of(&aborted), "abort");
 
-        let exited: anyhow::Error = Failure::BridgeExited(Exit::default()).into();
+        let exited: anyhow::Error = Failure::BridgeExited(EXITED).into();
         assert_eq!(super::outcome_of(&exited), "bridge_exit");
         assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown) during the run");
 
@@ -438,10 +431,7 @@ mod tests {
 
     #[test]
     fn lost_bridge_classes() {
-        use super::Failure;
-        use crate::bridge::Exit;
-
-        let exited: anyhow::Error = Failure::BridgeExited(Exit::default()).into();
+        let exited: anyhow::Error = Failure::BridgeExited(EXITED).into();
         assert!(super::lost_bridge(&exited));
         let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
         let socket: anyhow::Error =

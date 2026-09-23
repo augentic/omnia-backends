@@ -58,17 +58,17 @@ impl WasiModelCtx for Client {
                 let failed = match attempt(&client, &request, &tool_host).await {
                     Ok(answer) => return Ok(answer),
                     Err(failed) if failed.restartable() => failed,
-                    Err(failed) => return Err(failed.error),
+                    Err(failed) => return Err(failed.into_error()),
                 };
-                let error = format!("{:#}", failed.error);
+                let error = format!("{:#}", failed.error());
                 tracing::warn!(
                     monotonic_counter.cursor_bridge_restarts = 1_u64,
-                    outcome = observe::outcome_of(&failed.error),
+                    outcome = observe::outcome_of(failed.error()),
                     pid = failed.pid(),
                     %error,
                     "bridge lost before any candidate; completion restarting on a fresh bridge"
                 );
-                attempt(&client, &request, &tool_host).await.map_err(|failed| failed.error)
+                attempt(&client, &request, &tool_host).await.map_err(Unanswered::into_error)
             }
             .instrument(info_span!("complete")),
         )
@@ -84,7 +84,7 @@ async fn attempt(
     // A request that cannot be shaped fails before it queues for a slot;
     // the deadlines start inside `create`, after the wait. Neither failure
     // is a lost bridge — the probe proved the binary — so both stand.
-    let turn = Turn::prepare(request, tool_host.local_path(), &client.model)
+    let turn = Turn::prepare(request, tool_host.local_path(), &client.model, &client.api_key)
         .map_err(Unanswered::settled)?;
     let lease = client.pool.lease().await.map_err(Unanswered::settled)?;
     let agent = Agent::create(client, lease, turn, Arc::clone(tool_host))

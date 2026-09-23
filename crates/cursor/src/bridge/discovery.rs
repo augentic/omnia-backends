@@ -5,8 +5,9 @@
 //! never logged (older bridges inline `authToken`).
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::net::IpAddr;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -15,11 +16,12 @@ use serde_repr::Deserialize_repr;
 use tokio::io::{AsyncBufRead, Lines};
 
 use super::rpc::Rpc;
+use crate::lock;
 
 // The ready line is always spelled with the upstream name, whatever the
 // executable is called locally.
 const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
-const TIMEOUT: Duration = Duration::from_secs(30);
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const TAIL_LINES: usize = 20;
 
 #[derive(Default, Deserialize)]
@@ -39,7 +41,7 @@ impl Discovery {
     pub async fn into_rpc(self) -> Result<Rpc> {
         let base_url = self.base_url()?;
         let token = self.token().await?;
-        Rpc::connect(base_url, &token).await
+        Rpc::connect(&base_url, &token).await
     }
 
     /// Prefer `url`; fall back to `host` + `port` (bracketing `IPv6` hosts).
@@ -84,23 +86,23 @@ pub struct Tail(Mutex<VecDeque<String>>);
 
 impl Tail {
     pub fn push(&self, line: String) {
-        let mut lines = self.lock();
+        let mut lines = lock(&self.0);
         if lines.len() == TAIL_LINES {
             lines.pop_front();
         }
         lines.push_back(line);
     }
-
-    fn lock(&self) -> MutexGuard<'_, VecDeque<String>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
 }
 
-impl std::fmt::Display for Tail {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let text =
-            self.lock().iter().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
-        f.write_str(&text)
+impl fmt::Display for Tail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, line) in lock(&self.0).iter().enumerate() {
+            if index > 0 {
+                f.write_str("\n")?;
+            }
+            write!(f, "  {line}")?;
+        }
+        Ok(())
     }
 }
 
@@ -130,9 +132,8 @@ enum Protocol {
 pub async fn from_stderr(
     lines: &mut Lines<impl AsyncBufRead + Unpin>, tail: &Tail,
 ) -> Result<Discovery> {
-    tokio::time::timeout(TIMEOUT, async {
+    tokio::time::timeout(READY_TIMEOUT, async {
         while let Some(line) = lines.next_line().await.context("reading stderr")? {
-            // look for "ready" line
             let Some(json) = line.strip_prefix(READY_PREFIX) else {
                 tracing::debug!(line = %line, "stderr");
                 tail.push(line);
@@ -147,7 +148,7 @@ pub async fn from_stderr(
         bail!("no ready line found")
     })
     .await
-    .map_err(|_elapsed| anyhow!("no ready line within {}s", TIMEOUT.as_secs()))?
+    .map_err(|_elapsed| anyhow!("no ready line within {}s", READY_TIMEOUT.as_secs()))?
 }
 
 // Deliberate unit tests: pure discovery-line parsing (CI floor);

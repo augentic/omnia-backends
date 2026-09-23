@@ -43,100 +43,6 @@ pub struct Bridge {
     shutdown: watch::Sender<()>,
 }
 
-#[derive(Debug)]
-struct Process {
-    pid: Option<u32>,
-    started: Instant,
-    rpc: OnceLock<Rpc>,
-    clock: Activity,
-    tail: Tail,
-}
-
-// activity clock of the in-flight run; the sender lives as long as the run
-#[derive(Debug, Default)]
-struct Activity(Mutex<Option<watch::Receiver<TokioInstant>>>);
-
-impl Activity {
-    fn set(&self, clock: watch::Receiver<TokioInstant>) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(clock);
-    }
-
-    // whether a run is in flight, and how long its stream has been silent
-    fn snapshot(&self) -> (bool, Option<u64>) {
-        let guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        match guard.as_ref() {
-            // a closed channel is a `Send` that has returned
-            Some(clock) if clock.has_changed().is_ok() => {
-                (true, Some(millis(clock.borrow().elapsed())))
-            }
-            _ => (false, None),
-        }
-    }
-}
-
-/// A spawned process whose ready-line handshake has not finished.
-///
-/// The [`Bridge`] is already watched, so the caller can occupy the agent
-/// slot before [`Handshake::complete`] returns.
-pub struct Started {
-    pub bridge: Bridge,
-    pub handshake: Handshake,
-}
-
-/// Ready-line scan and RPC connect for a [`Started`] process.
-pub struct Handshake {
-    discovery: oneshot::Receiver<Result<Discovery>>,
-    process: Arc<Process>,
-    exit: watch::Receiver<Option<Exit>>,
-}
-
-/// How a spawned bridge ended.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Exit {
-    /// The exit status, when the wait reported one.
-    pub status: Option<ExitStatus>,
-    /// The process id, when the spawn reported one.
-    pub pid: Option<u32>,
-}
-
-impl Handshake {
-    /// Finish the ready-line scan and bind `sdk.v1`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the ready line never arrives or the RPC handshake fails.
-    pub async fn complete(mut self) -> Result<()> {
-        let scanned = (&mut self.discovery)
-            .await
-            .unwrap_or_else(|_gone| Err(anyhow!("the stderr reader ended without a ready line")));
-        let discovery = self.or_exit(scanned).await?;
-        let connected = discovery.into_rpc().await;
-        let rpc = self.or_exit(connected).await?;
-        let _ = self.process.rpc.set(rpc);
-        tracing::info!(
-            pid = self.process.pid,
-            histogram.cursor_bridge_spawn_ms = elapsed_ms(self.process.started),
-            "cursor-sdk-bridge spawned"
-        );
-        Ok(())
-    }
-
-    // attach the published exit status; stderr stays at DEBUG, never in the error
-    async fn or_exit<T>(&mut self, step: Result<T>) -> Result<T> {
-        let error = match step {
-            Ok(value) => return Ok(value),
-            Err(error) => error,
-        };
-        let status =
-            timeout(EXIT_WAIT, wait_exit(&mut self.exit)).await.ok().and_then(|exit| exit.status);
-        log_stderr(&self.process.tail);
-        Err(status.map_or_else(
-            || anyhow!("`{BIN}` did not complete the handshake ({error:#})"),
-            |status| anyhow!("`{BIN}` exited ({status}) during the handshake ({error:#})"),
-        ))
-    }
-}
-
 impl Bridge {
     /// Spawn a bridge registered against `callback` and handshake it.
     pub async fn spawn(callback: &Registration) -> Result<Self> {
@@ -258,6 +164,102 @@ impl Bridge {
     }
 }
 
+/// A spawned process whose ready-line handshake has not finished.
+///
+/// The [`Bridge`] is already watched, so the caller can occupy the agent
+/// slot before [`Handshake::complete`] returns.
+pub struct Started {
+    pub bridge: Bridge,
+    pub handshake: Handshake,
+}
+
+/// Ready-line scan and RPC connect for a [`Started`] process.
+pub struct Handshake {
+    discovery: oneshot::Receiver<Result<Discovery>>,
+    process: Arc<Process>,
+    exit: watch::Receiver<Option<Exit>>,
+}
+
+impl Handshake {
+    /// Finish the ready-line scan and bind `sdk.v1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ready line never arrives or the RPC handshake fails.
+    pub async fn complete(mut self) -> Result<()> {
+        let scanned = (&mut self.discovery)
+            .await
+            .unwrap_or_else(|_gone| Err(anyhow!("the stderr reader ended without a ready line")));
+        let discovery = self.or_exit(scanned).await?;
+        let connected = discovery.into_rpc().await;
+        let rpc = self.or_exit(connected).await?;
+        let _ = self.process.rpc.set(rpc);
+
+        tracing::info!(
+            pid = self.process.pid,
+            histogram.cursor_bridge_spawn_ms = elapsed_ms(self.process.started),
+            "cursor-sdk-bridge spawned"
+        );
+        
+        Ok(())
+    }
+
+    // attach the published exit status; stderr stays at DEBUG, never in the error
+    async fn or_exit<T>(&mut self, step: Result<T>) -> Result<T> {
+        let error = match step {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let status =
+            timeout(EXIT_WAIT, wait_exit(&mut self.exit)).await.ok().and_then(|exit| exit.status);
+        log_stderr(&self.process.tail);
+        Err(status.map_or_else(
+            || anyhow!("`{BIN}` did not complete the handshake ({error:#})"),
+            |status| anyhow!("`{BIN}` exited ({status}) during the handshake ({error:#})"),
+        ))
+    }
+}
+
+/// How a spawned bridge ended.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Exit {
+    /// The exit status, when the wait reported one.
+    pub status: Option<ExitStatus>,
+    /// The process id, when the spawn reported one.
+    pub pid: Option<u32>,
+}
+
+#[derive(Debug)]
+struct Process {
+    pid: Option<u32>,
+    started: Instant,
+    rpc: OnceLock<Rpc>,
+    clock: Activity,
+    tail: Tail,
+}
+
+// activity clock of the in-flight run; the sender lives as long as the run
+#[derive(Debug, Default)]
+struct Activity(Mutex<Option<watch::Receiver<TokioInstant>>>);
+
+impl Activity {
+    fn set(&self, clock: watch::Receiver<TokioInstant>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(clock);
+    }
+
+    // whether a run is in flight, and how long its stream has been silent
+    fn snapshot(&self) -> (bool, Option<u64>) {
+        let guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        match guard.as_ref() {
+            // a closed channel is a `Send` that has returned
+            Some(clock) if clock.has_changed().is_ok() => {
+                (true, Some(millis(clock.borrow().elapsed())))
+            }
+            _ => (false, None),
+        }
+    }
+}
+
 struct Supervisor {
     child: Child,
     state_root: TempDir,
@@ -317,6 +319,15 @@ async fn shutdown(supervisor: &mut Supervisor) -> Option<ExitStatus> {
     }
 }
 
+/// An exit status for a log line: `status unknown` when the wait itself failed.
+pub fn status_text(status: Option<ExitStatus>) -> String {
+    status.map_or_else(|| "status unknown".to_owned(), |status| status.to_string())
+}
+
+pub fn elapsed_ms(since: Instant) -> u64 {
+    millis(since.elapsed())
+}
+
 // a closed channel is the watcher gone, and the process with it (`kill_on_drop`)
 async fn wait_exit(exit: &mut watch::Receiver<Option<Exit>>) -> Exit {
     exit.wait_for(Option::is_some).await.ok().and_then(|published| *published).unwrap_or_default()
@@ -356,15 +367,6 @@ fn log_stderr(tail: &Tail) {
     if !stderr.is_empty() {
         tracing::debug!(%stderr, "cursor-sdk-bridge stderr tail");
     }
-}
-
-/// An exit status for a log line: `status unknown` when the wait itself failed.
-pub fn status_text(status: Option<ExitStatus>) -> String {
-    status.map_or_else(|| "status unknown".to_owned(), |status| status.to_string())
-}
-
-pub fn elapsed_ms(since: Instant) -> u64 {
-    millis(since.elapsed())
 }
 
 fn millis(duration: Duration) -> u64 {

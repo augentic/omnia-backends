@@ -15,6 +15,76 @@ use serde_json::Value;
 use crate::bridge::{Exit, SdkMessage, TransportError, status_text};
 use crate::model::options::Turn;
 
+/// How a completion this backend ran came to fail, by variant rather than
+/// by message.
+///
+/// `complete`'s error downcasts to one of these — or to a
+/// [`TransportError`], or to the typed `budget-exhausted` a rejected check
+/// ends on.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Failure {
+    /// Absolute wall-clock cap exceeded while the stream was still active.
+    Timeout {
+        /// The cap in seconds, from connect options.
+        cap_secs: u64,
+    },
+    /// No stream events within the inactivity window.
+    Inactive {
+        /// Observed idle span in seconds.
+        idle_secs: u64,
+        /// Configured inactivity limit in seconds.
+        inactivity_secs: u64,
+        /// Configured absolute cap in seconds.
+        cap_secs: u64,
+    },
+    /// Hard tool-host failure (or a closed abort channel).
+    Aborted(String),
+    /// The spawned bridge process exited while the completion was running
+    /// on it.
+    BridgeExited(Exit),
+}
+
+impl Failure {
+    /// The `outcome` label the `cursor_completions` counter carries for
+    /// this failure.
+    #[must_use]
+    pub const fn outcome(&self) -> &'static str {
+        match self {
+            Self::Timeout { .. } => "timeout",
+            Self::Inactive { .. } => "inactive",
+            Self::Aborted(_) => "abort",
+            Self::BridgeExited(_) => "bridge_exit",
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout { cap_secs } => write!(
+                f,
+                "cursor run timed out after {cap_secs}s (absolute cap exceeded while still active)"
+            ),
+            Self::Inactive {
+                idle_secs,
+                inactivity_secs,
+                cap_secs,
+            } => write!(
+                f,
+                "cursor run inactive for {idle_secs}s (no stream events; inactivity limit \
+                 {inactivity_secs}s, absolute cap {cap_secs}s)"
+            ),
+            Self::Aborted(reason) => write!(f, "completion aborted: {reason}"),
+            Self::BridgeExited(exit) => {
+                write!(f, "cursor-sdk-bridge exited ({}) during the run", status_text(exit.status))
+            }
+        }
+    }
+}
+
+impl std::error::Error for Failure {}
+
 /// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
 /// records `outcome=abort` (a cancelled future).
 pub struct Completion {
@@ -120,102 +190,6 @@ impl Drop for Completion {
     }
 }
 
-/// How a completion this backend ran came to fail, by variant rather than
-/// by message.
-///
-/// `complete`'s error downcasts to one of these — or to a
-/// [`TransportError`], or to the typed `budget-exhausted` a rejected check
-/// ends on.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum Failure {
-    /// Absolute wall-clock cap exceeded while the stream was still active.
-    Timeout {
-        /// The cap in seconds, from connect options.
-        cap_secs: u64,
-    },
-    /// No stream events within the inactivity window.
-    Inactive {
-        /// Observed idle span in seconds.
-        idle_secs: u64,
-        /// Configured inactivity limit in seconds.
-        inactivity_secs: u64,
-        /// Configured absolute cap in seconds.
-        cap_secs: u64,
-    },
-    /// Hard tool-host failure (or a closed abort channel).
-    Aborted(String),
-    /// The spawned bridge process exited while the completion was running
-    /// on it.
-    BridgeExited(Exit),
-}
-
-impl Failure {
-    /// The `outcome` label the `cursor_completions` counter carries for
-    /// this failure.
-    #[must_use]
-    pub const fn outcome(&self) -> &'static str {
-        match self {
-            Self::Timeout { .. } => "timeout",
-            Self::Inactive { .. } => "inactive",
-            Self::Aborted(_) => "abort",
-            Self::BridgeExited(_) => "bridge_exit",
-        }
-    }
-}
-
-impl std::fmt::Display for Failure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout { cap_secs } => write!(
-                f,
-                "cursor run timed out after {cap_secs}s (absolute cap exceeded while still active)"
-            ),
-            Self::Inactive {
-                idle_secs,
-                inactivity_secs,
-                cap_secs,
-            } => write!(
-                f,
-                "cursor run inactive for {idle_secs}s (no stream events; inactivity limit \
-                 {inactivity_secs}s, absolute cap {cap_secs}s)"
-            ),
-            Self::Aborted(reason) => write!(f, "completion aborted: {reason}"),
-            Self::BridgeExited(exit) => {
-                write!(f, "cursor-sdk-bridge exited ({}) during the run", status_text(exit.status))
-            }
-        }
-    }
-}
-
-impl std::error::Error for Failure {}
-
-/// Classify a failed `complete`: a [`Failure`] by variant, a
-/// [`TransportError`] as `transport`, the typed `budget-exhausted` a
-/// rejected check ends on, anything else `error`.
-pub fn outcome_of(error: &anyhow::Error) -> &'static str {
-    if let Some(failure) = error.downcast_ref::<Failure>() {
-        return failure.outcome();
-    }
-    if error.downcast_ref::<TransportError>().is_some() {
-        return "transport";
-    }
-    match error.downcast_ref::<omnia_wasi_model::Error>() {
-        Some(omnia_wasi_model::Error::BudgetExhausted(_)) => "exhausted",
-        _ => "error",
-    }
-}
-
-/// Whether the bridge, or the socket to it, was lost under the completion:
-/// the process exited, or an RPC failed below Connect. Neither says anything
-/// about the prompt, so a fresh bridge may be given it again; a Connect
-/// error, an end-stream error, or a run that ended in a failing status is
-/// the bridge answering, and is not.
-pub fn lost_bridge(error: &anyhow::Error) -> bool {
-    matches!(error.downcast_ref::<Failure>(), Some(Failure::BridgeExited(_)))
-        || error.downcast_ref::<TransportError>().is_some()
-}
-
 /// Reconstructs the tool transcript and run metadata from the SDK stream.
 #[derive(Default)]
 pub struct EventLog {
@@ -302,12 +276,6 @@ impl EventLog {
     }
 }
 
-// The first string found under any of `keys`, tolerating both `snake_case`
-// and `camelCase` spellings across bridge versions.
-fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
-}
-
 /// A started tool call awaiting its completion event.
 struct PendingCall {
     tool: String,
@@ -325,6 +293,38 @@ impl PendingCall {
             })
         })
     }
+}
+
+/// Classify a failed `complete`: a [`Failure`] by variant, a
+/// [`TransportError`] as `transport`, the typed `budget-exhausted` a
+/// rejected check ends on, anything else `error`.
+pub fn outcome_of(error: &anyhow::Error) -> &'static str {
+    if let Some(failure) = error.downcast_ref::<Failure>() {
+        return failure.outcome();
+    }
+    if error.downcast_ref::<TransportError>().is_some() {
+        return "transport";
+    }
+    match error.downcast_ref::<omnia_wasi_model::Error>() {
+        Some(omnia_wasi_model::Error::BudgetExhausted(_)) => "exhausted",
+        _ => "error",
+    }
+}
+
+/// Whether the bridge, or the socket to it, was lost under the completion:
+/// the process exited, or an RPC failed below Connect. Neither says anything
+/// about the prompt, so a fresh bridge may be given it again; a Connect
+/// error, an end-stream error, or a run that ended in a failing status is
+/// the bridge answering, and is not.
+pub fn lost_bridge(error: &anyhow::Error) -> bool {
+    matches!(error.downcast_ref::<Failure>(), Some(Failure::BridgeExited(_)))
+        || error.downcast_ref::<TransportError>().is_some()
+}
+
+// The first string found under any of `keys`, tolerating both `snake_case`
+// and `camelCase` spellings across bridge versions.
+fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
 }
 
 #[cfg(test)]

@@ -22,58 +22,6 @@ const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 const TIMEOUT: Duration = Duration::from_secs(30);
 const TAIL_LINES: usize = 20;
 
-// Scan stderr for the ready line and parse its JSON payload; the lines
-// skipped on the way are kept in `tail` for a failure report.
-pub async fn from_stderr(
-    lines: &mut Lines<impl AsyncBufRead + Unpin>, tail: &Tail,
-) -> Result<Discovery> {
-    tokio::time::timeout(TIMEOUT, async {
-        while let Some(line) = lines.next_line().await.context("reading stderr")? {
-            // look for "ready" line
-            let Some(json) = line.strip_prefix(READY_PREFIX) else {
-                tracing::debug!(line = %line, "stderr");
-                tail.push(line);
-                continue;
-            };
-
-            let discovery: Discovery =
-                serde_json::from_str(json).context("parsing discovery payload")?;
-            return Ok(discovery);
-        }
-
-        bail!("no ready line found")
-    })
-    .await
-    .map_err(|_elapsed| anyhow!("no ready line within {}s", TIMEOUT.as_secs()))?
-}
-
-/// The last few lines the bridge wrote to stderr (the ready line aside),
-/// shared between the reader and whoever reports how the process ended.
-#[derive(Debug, Default)]
-pub struct Tail(Mutex<VecDeque<String>>);
-
-impl Tail {
-    pub fn push(&self, line: String) {
-        let mut lines = self.lock();
-        if lines.len() == TAIL_LINES {
-            lines.pop_front();
-        }
-        lines.push_back(line);
-    }
-
-    fn lock(&self) -> MutexGuard<'_, VecDeque<String>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-impl std::fmt::Display for Tail {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let text =
-            self.lock().iter().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
-        f.write_str(&text)
-    }
-}
-
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Discovery {
@@ -85,27 +33,6 @@ pub struct Discovery {
     auth_token_file: Option<String>,
     transport: Transport,
     protocol: Protocol,
-}
-
-#[derive(Default, Deserialize_repr)]
-#[repr(u32)]
-enum Version {
-    #[default]
-    V1 = 1,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Transport {
-    #[default]
-    Tcp,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Protocol {
-    #[default]
-    Connect,
 }
 
 impl Discovery {
@@ -148,6 +75,79 @@ impl Discovery {
             .with_context(|| format!("reading token file {path}"))?;
         Ok(token.trim().to_owned())
     }
+}
+
+/// The last few lines the bridge wrote to stderr (the ready line aside),
+/// shared between the reader and whoever reports how the process ended.
+#[derive(Debug, Default)]
+pub struct Tail(Mutex<VecDeque<String>>);
+
+impl Tail {
+    pub fn push(&self, line: String) {
+        let mut lines = self.lock();
+        if lines.len() == TAIL_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, VecDeque<String>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl std::fmt::Display for Tail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text =
+            self.lock().iter().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
+        f.write_str(&text)
+    }
+}
+
+#[derive(Default, Deserialize_repr)]
+#[repr(u32)]
+enum Version {
+    #[default]
+    V1 = 1,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Transport {
+    #[default]
+    Tcp,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Protocol {
+    #[default]
+    Connect,
+}
+
+// Scan stderr for the ready line and parse its JSON payload; the lines
+// skipped on the way are kept in `tail` for a failure report.
+pub async fn from_stderr(
+    lines: &mut Lines<impl AsyncBufRead + Unpin>, tail: &Tail,
+) -> Result<Discovery> {
+    tokio::time::timeout(TIMEOUT, async {
+        while let Some(line) = lines.next_line().await.context("reading stderr")? {
+            // look for "ready" line
+            let Some(json) = line.strip_prefix(READY_PREFIX) else {
+                tracing::debug!(line = %line, "stderr");
+                tail.push(line);
+                continue;
+            };
+
+            let discovery: Discovery =
+                serde_json::from_str(json).context("parsing discovery payload")?;
+            return Ok(discovery);
+        }
+
+        bail!("no ready line found")
+    })
+    .await
+    .map_err(|_elapsed| anyhow!("no ready line within {}s", TIMEOUT.as_secs()))?
 }
 
 // Deliberate unit tests: pure discovery-line parsing (CI floor);

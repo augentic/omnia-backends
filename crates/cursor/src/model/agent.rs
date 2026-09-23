@@ -245,6 +245,14 @@ impl Agent {
     }
 }
 
+impl Drop for Agent {
+    fn drop(&mut self) {
+        if let Some(release) = self.take_release() {
+            release.spawn();
+        }
+    }
+}
+
 /// A completion that produced no answer: the failure, and whether it struck
 /// before any candidate had been offered to the guest — in `CreateAgent` or
 /// the opening `Send`.
@@ -288,16 +296,53 @@ impl Unanswered {
     }
 }
 
+/// Inactivity and absolute bounds on one run, from the connect options.
+#[derive(Clone, Copy, Debug)]
+pub struct Deadlines {
+    /// Kill a run after this long with no stream events.
+    pub inactivity: Duration,
+    /// Kill a run after this long, streaming or not.
+    pub cap: Duration,
+}
+
+impl Deadlines {
+    /// Resolve when a run breaches its inactivity or absolute bound.
+    pub async fn watch(self, mut activity: watch::Receiver<Instant>) -> Failure {
+        let cap = sleep_until(Instant::now() + self.cap);
+        tokio::pin!(cap);
+        let mut activity_closed = false;
+
+        loop {
+            let last_activity = *activity.borrow_and_update();
+            let inactive = sleep_until(last_activity + self.inactivity);
+            tokio::pin!(inactive);
+
+            tokio::select! {
+                () = &mut cap => {
+                    return Failure::Timeout {
+                        cap_secs: self.cap.as_secs(),
+                    };
+                }
+                () = &mut inactive => {
+                    let idle = Instant::now().saturating_duration_since(last_activity).as_secs();
+                    return Failure::Inactive {
+                        idle_secs: idle,
+                        inactivity_secs: self.inactivity.as_secs(),
+                        cap_secs: self.cap.as_secs(),
+                    };
+                }
+                changed = activity.changed(), if !activity_closed => {
+                    activity_closed = changed.is_err();
+                }
+            }
+        }
+    }
+}
+
 /// `CreateAgent` on a task of its own, which holds the lease and owns the
 /// id it returns: a completion that stops waiting — at the inactivity
 /// bound, or dropped — leaves an agent the task closes and deletes itself.
 struct Creating(oneshot::Receiver<Result<Created>>);
-
-/// A created agent and the workspace its cwd points into.
-struct Created {
-    id: String,
-    workspace: Workspace,
-}
 
 impl Creating {
     // The lease is the slot, so the task's wait is bounded too: the window
@@ -368,58 +413,10 @@ impl Creating {
     }
 }
 
-// A socket fails before the watcher publishes the exit: `watch_child`
-// spends up to `EXIT_GRACE` draining stderr first, so the observe budget
-// is that window plus one of its own.
-async fn exit_or(bridge: &Bridge, error: anyhow::Error) -> anyhow::Error {
-    match timeout(EXIT_WAIT, bridge.died()).await {
-        Ok(exit) => Failure::BridgeExited(exit).into(),
-        Err(_elapsed) => error,
-    }
-}
-
-// One best-effort teardown call: a failure is logged, a silence is bounded.
-async fn teardown(method: &'static str, rpc: impl Future<Output = Result<()>>) {
-    match timeout(TEARDOWN_TIMEOUT, rpc).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::debug!(%error, method, "agent teardown call failed"),
-        Err(_elapsed) => tracing::warn!(method, "agent teardown call unanswered"),
-    }
-}
-
-/// Close then delete, holding the create-time cwd until both RPCs finish so
-/// a private workspace is still visible to the local store. Holds the lease
-/// so the bridge outlives the teardown.
-struct Release {
-    lease: Arc<Lease>,
+/// A created agent and the workspace its cwd points into.
+struct Created {
     id: String,
-    cwd: String,
-    run_id: Option<String>,
-    workspace: Option<Workspace>,
-}
-
-impl Release {
-    /// Run on a task of its own, so the caller's fate does not cut the
-    /// teardown short; `None` without a runtime.
-    fn spawn(self) -> Option<JoinHandle<()>> {
-        Handle::try_current().ok().map(|handle| handle.spawn(self.run()))
-    }
-
-    async fn run(self) {
-        let bridge = self.lease.bridge();
-        if bridge.is_dead() {
-            tracing::debug!(agent = %self.id, "bridge exited; skipping agent teardown");
-        } else {
-            let rpc = bridge.rpc();
-            if let Some(run_id) = self.run_id {
-                teardown("CancelRun", rpc.cancel_run(run_id, self.id.clone())).await;
-            }
-            teardown("CloseAgent", rpc.close_agent(self.id.clone())).await;
-            let api_key = env::var("CURSOR_API_KEY").unwrap_or_default();
-            teardown("DeleteAgent", rpc.delete_agent(self.id, self.cwd, api_key)).await;
-        }
-        drop(self.workspace);
-    }
+    workspace: Workspace,
 }
 
 /// The open `Send` stream. `drive` disarms it when the turn finishes;
@@ -536,6 +533,78 @@ impl Drop for OpenSend<'_> {
     }
 }
 
+// One completed turn: the final text plus the observed transcript and usage.
+#[derive(Debug)]
+struct Response {
+    result: String,
+    transcript: Option<Transcript>,
+    usage: Option<Usage>,
+}
+
+impl Response {
+    fn answer(self, candidate: String) -> Answer {
+        Answer {
+            answer: candidate,
+            usage: self.usage,
+            transcript: self.transcript,
+        }
+    }
+}
+
+/// Close then delete, holding the create-time cwd until both RPCs finish so
+/// a private workspace is still visible to the local store. Holds the lease
+/// so the bridge outlives the teardown.
+struct Release {
+    lease: Arc<Lease>,
+    id: String,
+    cwd: String,
+    run_id: Option<String>,
+    workspace: Option<Workspace>,
+}
+
+impl Release {
+    /// Run on a task of its own, so the caller's fate does not cut the
+    /// teardown short; `None` without a runtime.
+    fn spawn(self) -> Option<JoinHandle<()>> {
+        Handle::try_current().ok().map(|handle| handle.spawn(self.run()))
+    }
+
+    async fn run(self) {
+        let bridge = self.lease.bridge();
+        if bridge.is_dead() {
+            tracing::debug!(agent = %self.id, "bridge exited; skipping agent teardown");
+        } else {
+            let rpc = bridge.rpc();
+            if let Some(run_id) = self.run_id {
+                teardown("CancelRun", rpc.cancel_run(run_id, self.id.clone())).await;
+            }
+            teardown("CloseAgent", rpc.close_agent(self.id.clone())).await;
+            let api_key = env::var("CURSOR_API_KEY").unwrap_or_default();
+            teardown("DeleteAgent", rpc.delete_agent(self.id, self.cwd, api_key)).await;
+        }
+        drop(self.workspace);
+    }
+}
+
+// A socket fails before the watcher publishes the exit: `watch_child`
+// spends up to `EXIT_GRACE` draining stderr first, so the observe budget
+// is that window plus one of its own.
+async fn exit_or(bridge: &Bridge, error: anyhow::Error) -> anyhow::Error {
+    match timeout(EXIT_WAIT, bridge.died()).await {
+        Ok(exit) => Failure::BridgeExited(exit).into(),
+        Err(_elapsed) => error,
+    }
+}
+
+// One best-effort teardown call: a failure is logged, a silence is bounded.
+async fn teardown(method: &'static str, rpc: impl Future<Output = Result<()>>) {
+    match timeout(TEARDOWN_TIMEOUT, rpc).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::debug!(%error, method, "agent teardown call failed"),
+        Err(_elapsed) => tracing::warn!(method, "agent teardown call unanswered"),
+    }
+}
+
 /// The first run id on `stream`, or `None` when the stream ends without one
 /// or stays silent for [`RUN_ID_WAIT`].
 async fn observe_run_id(mut stream: RunStream) -> Option<String> {
@@ -558,73 +627,4 @@ async fn observe_run_id(mut stream: RunStream) -> Option<String> {
         None
     };
     timeout(RUN_ID_WAIT, read).await.ok().flatten()
-}
-
-impl Drop for Agent {
-    fn drop(&mut self) {
-        if let Some(release) = self.take_release() {
-            release.spawn();
-        }
-    }
-}
-
-// One completed turn: the final text plus the observed transcript and usage.
-#[derive(Debug)]
-struct Response {
-    result: String,
-    transcript: Option<Transcript>,
-    usage: Option<Usage>,
-}
-
-impl Response {
-    fn answer(self, candidate: String) -> Answer {
-        Answer {
-            answer: candidate,
-            usage: self.usage,
-            transcript: self.transcript,
-        }
-    }
-}
-
-/// Inactivity and absolute bounds on one run, from the connect options.
-#[derive(Clone, Copy, Debug)]
-pub struct Deadlines {
-    /// Kill a run after this long with no stream events.
-    pub inactivity: Duration,
-    /// Kill a run after this long, streaming or not.
-    pub cap: Duration,
-}
-
-impl Deadlines {
-    /// Resolve when a run breaches its inactivity or absolute bound.
-    pub async fn watch(self, mut activity: watch::Receiver<Instant>) -> Failure {
-        let cap = sleep_until(Instant::now() + self.cap);
-        tokio::pin!(cap);
-        let mut activity_closed = false;
-
-        loop {
-            let last_activity = *activity.borrow_and_update();
-            let inactive = sleep_until(last_activity + self.inactivity);
-            tokio::pin!(inactive);
-
-            tokio::select! {
-                () = &mut cap => {
-                    return Failure::Timeout {
-                        cap_secs: self.cap.as_secs(),
-                    };
-                }
-                () = &mut inactive => {
-                    let idle = Instant::now().saturating_duration_since(last_activity).as_secs();
-                    return Failure::Inactive {
-                        idle_secs: idle,
-                        inactivity_secs: self.inactivity.as_secs(),
-                        cap_secs: self.cap.as_secs(),
-                    };
-                }
-                changed = activity.changed(), if !activity_closed => {
-                    activity_closed = changed.is_err();
-                }
-            }
-        }
-    }
 }

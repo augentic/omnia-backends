@@ -45,91 +45,12 @@ const COMPRESSED: u8 = 0x01;
 /// answers; a spawned bridge is already past its ready line by then.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A failure below the Connect protocol on one bridge RPC.
-///
-/// The request could not be sent, the response or run stream could not be
-/// read, or the stream ended inside a frame: the bridge never answered the
-/// call, unlike a Connect error (`failed (status, code)`) or an end-stream
-/// error, both of which are the bridge answering.
-#[derive(Debug)]
-pub struct TransportError {
-    method: String,
-    cause: Cause,
-}
-
-#[derive(Debug)]
-enum Cause {
-    /// The HTTP client or the socket failed while `doing`.
-    Io { doing: &'static str, source: Box<dyn std::error::Error + Send + Sync + 'static> },
-    /// The body ended with a partial envelope still buffered.
-    Truncated { buffered: usize },
-}
-
-impl TransportError {
-    pub(crate) fn io(
-        method: &str, doing: &'static str, source: impl std::error::Error + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            method: method.to_owned(),
-            cause: Cause::Io {
-                doing,
-                source: Box::new(source),
-            },
-        }
-    }
-
-    pub(crate) fn truncated(method: &str, buffered: usize) -> Self {
-        Self {
-            method: method.to_owned(),
-            cause: Cause::Truncated { buffered },
-        }
-    }
-
-    /// The `Service/Method` the failure struck.
-    #[must_use]
-    pub fn method(&self) -> &str {
-        &self.method
-    }
-}
-
-// The source is left to `Error::source`, so an `{error:#}` chain names it
-// once.
-impl std::fmt::Display for TransportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.cause {
-            Cause::Io { doing, .. } => {
-                write!(f, "bridge RPC `{}` transport failed {doing}", self.method)
-            }
-            Cause::Truncated { buffered } => write!(
-                f,
-                "bridge RPC `{}` stream ended mid-frame ({buffered} bytes buffered)",
-                self.method
-            ),
-        }
-    }
-}
-
-impl std::error::Error for TransportError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.cause {
-            Cause::Io { source, .. } => Some(source.as_ref()),
-            Cause::Truncated { .. } => None,
-        }
-    }
-}
-
 /// A cloneable `sdk.v1` client bound to one bridge endpoint and bearer token.
 #[derive(Clone)]
 pub struct Rpc {
     hyper: HyperClient<HttpConnector, Full<Bytes>>,
     base: String,
     bearer: String,
-}
-
-impl std::fmt::Debug for Rpc {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Rpc").field("base", &self.base).finish_non_exhaustive()
-    }
 }
 
 impl Rpc {
@@ -292,6 +213,172 @@ impl Rpc {
     }
 }
 
+impl std::fmt::Debug for Rpc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Rpc").field("base", &self.base).finish_non_exhaustive()
+    }
+}
+
+/// The typed message stream of one `Send` call: envelope framing, end-stream
+/// errors, keepalives, and unparsable frames are all absorbed here, so a
+/// yielded message is always real progress.
+pub struct RunStream(FrameStream);
+
+impl RunStream {
+    /// The next run message, or `None` once the run stream ends.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on transport failures or when the stream ends with a
+    /// Connect error.
+    pub async fn next(&mut self) -> Result<Option<RunStreamMessage>> {
+        while let Some(frame) = self.0.next().await? {
+            if frame.is_end_stream() {
+                self.0.end_stream_error(&frame.payload)?;
+                return Ok(None);
+            }
+            let message: RunStreamMessage = match serde_json::from_slice(&frame.payload) {
+                Ok(message) => message,
+                Err(error) => {
+                    tracing::debug!(%error, "skipping unparsable stream frame");
+                    continue;
+                }
+            };
+            // Keepalives (and unknown envelope cases) are dropped here so the
+            // caller's inactivity deadline only rearms on real progress.
+            if message.is_keepalive() {
+                continue;
+            }
+            return Ok(Some(message));
+        }
+        Ok(None)
+    }
+}
+
+/// A failure below the Connect protocol on one bridge RPC.
+///
+/// The request could not be sent, the response or run stream could not be
+/// read, or the stream ended inside a frame: the bridge never answered the
+/// call, unlike a Connect error (`failed (status, code)`) or an end-stream
+/// error, both of which are the bridge answering.
+#[derive(Debug)]
+pub struct TransportError {
+    method: String,
+    cause: Cause,
+}
+
+impl TransportError {
+    pub(crate) fn io(
+        method: &str, doing: &'static str, source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            method: method.to_owned(),
+            cause: Cause::Io {
+                doing,
+                source: Box::new(source),
+            },
+        }
+    }
+
+    pub(crate) fn truncated(method: &str, buffered: usize) -> Self {
+        Self {
+            method: method.to_owned(),
+            cause: Cause::Truncated { buffered },
+        }
+    }
+
+    /// The `Service/Method` the failure struck.
+    #[must_use]
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+}
+
+// The source is left to `Error::source`, so an `{error:#}` chain names it
+// once.
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.cause {
+            Cause::Io { doing, .. } => {
+                write!(f, "bridge RPC `{}` transport failed {doing}", self.method)
+            }
+            Cause::Truncated { buffered } => write!(
+                f,
+                "bridge RPC `{}` stream ended mid-frame ({buffered} bytes buffered)",
+                self.method
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.cause {
+            Cause::Io { source, .. } => Some(source.as_ref()),
+            Cause::Truncated { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Cause {
+    /// The HTTP client or the socket failed while `doing`.
+    Io { doing: &'static str, source: Box<dyn std::error::Error + Send + Sync + 'static> },
+    /// The body ended with a partial envelope still buffered.
+    Truncated { buffered: usize },
+}
+
+/// Incrementally decodes Connect envelopes from a streaming response body.
+struct FrameStream {
+    method: String,
+    body: Incoming,
+    buffer: BytesMut,
+}
+
+impl FrameStream {
+    /// The next envelope, or `None` when the body ends cleanly at a frame
+    /// boundary. Fails with a [`TransportError`] on a socket failure or a
+    /// truncated frame, and plainly on a compressed frame (compression is
+    /// never negotiated).
+    async fn next(&mut self) -> Result<Option<Frame>> {
+        loop {
+            if let Some(frame) = decode_frame(&mut self.buffer)? {
+                return Ok(Some(frame));
+            }
+            let Some(chunk) = self.body.frame().await else {
+                if !self.buffer.is_empty() {
+                    return Err(TransportError::truncated(&self.method, self.buffer.len()).into());
+                }
+                return Ok(None);
+            };
+            let chunk = chunk
+                .map_err(|error| TransportError::io(&self.method, "reading the stream", error))?;
+            if let Ok(data) = chunk.into_data() {
+                self.buffer.extend_from_slice(&data);
+            }
+        }
+    }
+
+    /// Interpret an end-of-stream frame observed on this stream: `Ok` on a
+    /// clean end, `Err` when the `EndStreamResponse` carries a Connect error.
+    fn end_stream_error(&self, payload: &[u8]) -> Result<()> {
+        end_stream_error(&self.method, payload)
+    }
+}
+
+/// A decoded response envelope: the flag byte and the message payload.
+#[derive(Debug)]
+struct Frame {
+    flags: u8,
+    payload: Bytes,
+}
+
+impl Frame {
+    const fn is_end_stream(&self) -> bool {
+        self.flags & END_STREAM != 0
+    }
+}
+
 /// `http://` to a loopback host: IP literal in `127.0.0.0/8` or `::1`, or
 /// the name `localhost`. Anything else would send credentials in the clear.
 fn require_loopback_http(base: &str) -> Result<()> {
@@ -325,6 +412,22 @@ fn envelope(payload: &[u8]) -> Vec<u8> {
     body.extend_from_slice(&length.to_be_bytes());
     body.extend_from_slice(payload);
     body
+}
+
+/// Split one complete envelope off the front of `buffer`, if present.
+fn decode_frame(buffer: &mut BytesMut) -> Result<Option<Frame>> {
+    if buffer.len() < 5 {
+        return Ok(None);
+    }
+    let flags = buffer[0];
+    ensure!(flags & COMPRESSED == 0, "bridge sent a compressed frame without negotiation");
+    let length = u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as usize;
+    if buffer.len() < 5 + length {
+        return Ok(None);
+    }
+    let mut frame = buffer.split_to(5 + length);
+    let payload = frame.split_off(5).freeze();
+    Ok(Some(Frame { flags, payload }))
 }
 
 /// Close/delete of a missing agent is the desired end state. Cursor still
@@ -367,109 +470,6 @@ fn connect_error(method: &str, status: http::StatusCode, body: &[u8]) -> anyhow:
         tracing::debug!(method, %details, "bridge error details");
     }
     anyhow::anyhow!("bridge RPC `{method}` failed ({status}, {code}): {}", message.trim())
-}
-
-/// The typed message stream of one `Send` call: envelope framing, end-stream
-/// errors, keepalives, and unparsable frames are all absorbed here, so a
-/// yielded message is always real progress.
-pub struct RunStream(FrameStream);
-
-impl RunStream {
-    /// The next run message, or `None` once the run stream ends.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error on transport failures or when the stream ends with a
-    /// Connect error.
-    pub async fn next(&mut self) -> Result<Option<RunStreamMessage>> {
-        while let Some(frame) = self.0.next().await? {
-            if frame.is_end_stream() {
-                self.0.end_stream_error(&frame.payload)?;
-                return Ok(None);
-            }
-            let message: RunStreamMessage = match serde_json::from_slice(&frame.payload) {
-                Ok(message) => message,
-                Err(error) => {
-                    tracing::debug!(%error, "skipping unparsable stream frame");
-                    continue;
-                }
-            };
-            // Keepalives (and unknown envelope cases) are dropped here so the
-            // caller's inactivity deadline only rearms on real progress.
-            if message.is_keepalive() {
-                continue;
-            }
-            return Ok(Some(message));
-        }
-        Ok(None)
-    }
-}
-
-/// A decoded response envelope: the flag byte and the message payload.
-#[derive(Debug)]
-struct Frame {
-    flags: u8,
-    payload: Bytes,
-}
-
-impl Frame {
-    const fn is_end_stream(&self) -> bool {
-        self.flags & END_STREAM != 0
-    }
-}
-
-/// Incrementally decodes Connect envelopes from a streaming response body.
-struct FrameStream {
-    method: String,
-    body: Incoming,
-    buffer: BytesMut,
-}
-
-impl FrameStream {
-    /// The next envelope, or `None` when the body ends cleanly at a frame
-    /// boundary. Fails with a [`TransportError`] on a socket failure or a
-    /// truncated frame, and plainly on a compressed frame (compression is
-    /// never negotiated).
-    async fn next(&mut self) -> Result<Option<Frame>> {
-        loop {
-            if let Some(frame) = decode_frame(&mut self.buffer)? {
-                return Ok(Some(frame));
-            }
-            let Some(chunk) = self.body.frame().await else {
-                if !self.buffer.is_empty() {
-                    return Err(TransportError::truncated(&self.method, self.buffer.len()).into());
-                }
-                return Ok(None);
-            };
-            let chunk = chunk
-                .map_err(|error| TransportError::io(&self.method, "reading the stream", error))?;
-            if let Ok(data) = chunk.into_data() {
-                self.buffer.extend_from_slice(&data);
-            }
-        }
-    }
-
-    /// Interpret an end-of-stream frame observed on this stream: `Ok` on a
-    /// clean end, `Err` when the `EndStreamResponse` carries a Connect error.
-    fn end_stream_error(&self, payload: &[u8]) -> Result<()> {
-        end_stream_error(&self.method, payload)
-    }
-}
-
-/// Split one complete envelope off the front of `buffer`, if present.
-fn decode_frame(buffer: &mut BytesMut) -> Result<Option<Frame>> {
-    if buffer.len() < 5 {
-        return Ok(None);
-    }
-    let flags = buffer[0];
-    ensure!(flags & COMPRESSED == 0, "bridge sent a compressed frame without negotiation");
-    let length = u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as usize;
-    if buffer.len() < 5 + length {
-        return Ok(None);
-    }
-    let mut frame = buffer.split_to(5 + length);
-    let payload = frame.split_off(5).freeze();
-    Ok(Some(Frame { flags, payload }))
 }
 
 /// `Ok` on a clean end frame, `Err` when it carries a Connect error.

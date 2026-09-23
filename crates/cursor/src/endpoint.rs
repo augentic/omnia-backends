@@ -175,39 +175,6 @@ impl Drop for Registration {
     }
 }
 
-/// One bridge's live completions by `agent_id`.
-#[derive(Debug, Default)]
-struct Sessions {
-    entries: Mutex<HashMap<String, Session>>,
-}
-
-impl Sessions {
-    fn insert(&self, agent_id: String, session: Session) {
-        self.lock().insert(agent_id, session);
-    }
-
-    fn remove(&self, agent_id: &str) {
-        self.lock().remove(agent_id);
-    }
-
-    fn lookup(&self, agent_id: &str) -> Option<Session> {
-        self.lock().get(agent_id).cloned()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, Session>> {
-        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-/// One live completion's callback route: the session's tool host plus the
-/// abort signal that ends the completion on a hard (non-repairable) tool
-/// failure.
-#[derive(Clone, Debug)]
-struct Session {
-    tool_host: Arc<dyn ToolHost>,
-    abort: mpsc::UnboundedSender<String>,
-}
-
 /// Detaches its agent on drop.
 #[must_use]
 pub struct Attached {
@@ -225,12 +192,6 @@ impl Drop for Attached {
 struct Handler {
     /// Registered bridge processes' agent tables, by bearer token.
     bridges: Mutex<HashMap<String, Arc<Sessions>>>,
-}
-
-impl std::fmt::Debug for Handler {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Handler").field("bridges", &self.bridges().len()).finish()
-    }
 }
 
 impl Handler {
@@ -287,6 +248,89 @@ impl Handler {
         };
 
         call_tool(&sessions, &parts.headers, body).await
+    }
+}
+
+impl std::fmt::Debug for Handler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handler").field("bridges", &self.bridges().len()).finish()
+    }
+}
+
+/// One bridge's live completions by `agent_id`.
+#[derive(Debug, Default)]
+struct Sessions {
+    entries: Mutex<HashMap<String, Session>>,
+}
+
+impl Sessions {
+    fn insert(&self, agent_id: String, session: Session) {
+        self.lock().insert(agent_id, session);
+    }
+
+    fn remove(&self, agent_id: &str) {
+        self.lock().remove(agent_id);
+    }
+
+    fn lookup(&self, agent_id: &str) -> Option<Session> {
+        self.lock().get(agent_id).cloned()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, Session>> {
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// One live completion's callback route: the session's tool host plus the
+/// abort signal that ends the completion on a hard (non-repairable) tool
+/// failure.
+#[derive(Clone, Debug)]
+struct Session {
+    tool_host: Arc<dyn ToolHost>,
+    abort: mpsc::UnboundedSender<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Codec {
+    Json,
+    Proto,
+}
+
+struct ToolCall {
+    tool_name: String,
+    args: Value,
+    agent_id: String,
+}
+
+impl ToolCall {
+    fn decode(codec: Codec, body: &[u8]) -> Result<Self> {
+        match codec {
+            Codec::Json => {
+                #[derive(Default, serde::Deserialize)]
+                #[serde(rename_all = "camelCase", default)]
+                struct JsonCall {
+                    tool_name: String,
+                    args: Value,
+                    agent_id: String,
+                }
+                let call: JsonCall =
+                    serde_json::from_slice(body).context("decoding the JSON callback body")?;
+                Ok(Self {
+                    tool_name: call.tool_name,
+                    args: if call.args.is_null() { json!({}) } else { call.args },
+                    agent_id: call.agent_id,
+                })
+            }
+            Codec::Proto => {
+                let call = CallCustomToolRequest::decode(body)
+                    .context("decoding the protobuf callback body")?;
+                Ok(Self {
+                    tool_name: call.tool_name,
+                    args: call.args.as_ref().map_or_else(|| json!({}), struct_to_value),
+                    agent_id: call.agent_id,
+                })
+            }
+        }
     }
 }
 
@@ -363,50 +407,6 @@ fn gen_token() -> Result<String> {
         let _ = write!(hex, "{byte:02x}");
         hex
     }))
-}
-
-#[derive(Clone, Copy)]
-enum Codec {
-    Json,
-    Proto,
-}
-
-struct ToolCall {
-    tool_name: String,
-    args: Value,
-    agent_id: String,
-}
-
-impl ToolCall {
-    fn decode(codec: Codec, body: &[u8]) -> Result<Self> {
-        match codec {
-            Codec::Json => {
-                #[derive(Default, serde::Deserialize)]
-                #[serde(rename_all = "camelCase", default)]
-                struct JsonCall {
-                    tool_name: String,
-                    args: Value,
-                    agent_id: String,
-                }
-                let call: JsonCall =
-                    serde_json::from_slice(body).context("decoding the JSON callback body")?;
-                Ok(Self {
-                    tool_name: call.tool_name,
-                    args: if call.args.is_null() { json!({}) } else { call.args },
-                    agent_id: call.agent_id,
-                })
-            }
-            Codec::Proto => {
-                let call = CallCustomToolRequest::decode(body)
-                    .context("decoding the protobuf callback body")?;
-                Ok(Self {
-                    tool_name: call.tool_name,
-                    args: call.args.as_ref().map_or_else(|| json!({}), struct_to_value),
-                    agent_id: call.agent_id,
-                })
-            }
-        }
-    }
 }
 
 fn to_json(output: &str) -> Value {

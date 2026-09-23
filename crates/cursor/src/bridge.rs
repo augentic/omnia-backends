@@ -15,8 +15,7 @@ pub use messages::{
     AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
     ModelSelection, RunStatus, RunStreamResult, SdkMessage, ToolList,
 };
-pub use rpc::TransportError;
-pub use rpc::{Rpc, RunStream};
+pub use rpc::{Rpc, RunStream, TransportError};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
@@ -28,12 +27,8 @@ use crate::endpoint::Registration;
 use crate::{elapsed_ms, lock};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-// the stderr drain after the process is gone
 const EXIT_GRACE: Duration = Duration::from_millis(250);
-// how long a socket failure waits for the exit it usually precedes: one
-// stderr drain plus as much again for the publish to land
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
-const GIT_IDENTITY: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
 // `None` until the supervisor publishes the exit
 type ExitWatch = watch::Receiver<Option<Exit>>;
@@ -47,19 +42,7 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    /// Spawn a bridge registered against `callback` and handshake it.
-    pub async fn spawn(callback: &Registration) -> Result<Self> {
-        let (bridge, handshake) = Self::start(callback)?;
-        match handshake.complete().await {
-            Ok(_rpc) => Ok(bridge),
-            Err(error) => {
-                bridge.close().await;
-                Err(error)
-            }
-        }
-    }
-
-    /// Start `cursor-sdk-bridge` calling back as `callback`, and watch it.
+    /// Spawn `cursor-sdk-bridge` calling back as `callback`, and watch it.
     /// The ready-line handshake is left on the returned [`Handshake`] so a
     /// pool lease can occupy the slot first.
     ///
@@ -67,7 +50,7 @@ impl Bridge {
     ///
     /// Returns an error when the state root cannot be created or the
     /// executable cannot be spawned.
-    pub fn start(callback: &Registration) -> Result<(Self, Handshake)> {
+    pub fn spawn(callback: &Registration) -> Result<(Self, Handshake)> {
         let started_at = Instant::now();
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-")
@@ -86,23 +69,24 @@ impl Bridge {
             .args(["--tool-callback-url", callback.url()])
             .args(["--tool-callback-auth-token", callback.token()]);
 
-        // drop git identity, which would point the agent at the host repository
-        for var in GIT_IDENTITY {
+        // drop git identity, so agent does not point at the host repository
+        for var in &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"] {
             command.env_remove(var);
         }
 
         let mut child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
-        // `kill_on_drop`: an early return past this point still ends the process
         let pid = child.id().context("the spawned bridge reported no pid")?;
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
             bail!("the spawned bridge has no piped stdout and stderr");
         };
+
         let state = Arc::new(State {
             pid,
             started_at,
             clock: Activity::default(),
             tail: Tail::default(),
         });
+
         drain_stdout(stdout);
         let (discovery, stderr) = read_stderr(stderr, Arc::clone(&state));
 
@@ -168,7 +152,7 @@ impl Bridge {
     }
 }
 
-/// Ready-line scan and RPC connect for a process [`Bridge::start`] spawned.
+/// Ready-line scan and RPC connect for a process [`Bridge::spawn`] spawned.
 ///
 /// The [`Bridge`] is already watched, so the caller can occupy the agent
 /// slot before [`Handshake::complete`] returns.
@@ -192,12 +176,14 @@ impl Handshake {
             mut exit,
             rpc: rpc_tx,
         } = self;
+
         let scanned = discovery
             .await
             .unwrap_or_else(|_gone| Err(anyhow!("the stderr reader ended without a ready line")));
         let discovery = or_exit(&mut exit, &state, scanned).await?;
         let connected = discovery.into_rpc().await;
         let rpc = or_exit(&mut exit, &state, connected).await?;
+
         // a supervisor already gone has no process left to shut down gracefully
         let _ = rpc_tx.send(rpc.clone());
 

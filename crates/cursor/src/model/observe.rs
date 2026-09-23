@@ -48,6 +48,7 @@ pub enum Failure {
 impl Failure {
     /// The `outcome` label the `cursor_completions` counter carries for
     /// this failure.
+    #[must_use]
     pub const fn outcome(&self) -> &'static str {
         match self {
             Self::Timeout { .. } => "timeout",

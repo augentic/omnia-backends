@@ -27,18 +27,21 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// Bind the callback endpoint and prove the bridge is spawnable — a
-    /// probe spawn, closed again — so a missing or broken binary fails here
+    /// Bind the callback endpoint and prove the bridge is spawnable — one
+    /// probe lease, closed again — so a missing or broken binary fails here
     /// rather than at the first completion.
     pub async fn connect(max_agents: usize) -> Result<Self> {
-        let endpoint = Endpoint::bind().await?;
-        let probe = endpoint.register()?;
-        Bridge::spawn(&probe).await?.close().await;
-        Ok(Self {
+        let pool = Self {
             permits: Arc::new(Semaphore::new(max_agents.min(Semaphore::MAX_PERMITS))),
-            endpoint,
+            endpoint: Endpoint::bind().await?,
             max_agents,
-        })
+        };
+        
+        // closed here rather than on the lease's drop task, so the probe is
+        // gone before the first completion queues for its slot
+        pool.lease().await?.bridge().close().await;
+
+        Ok(pool)
     }
 
     /// Wait for a slot, in arrival order, then for the bridge to run on.
@@ -50,18 +53,17 @@ impl Pool {
 
         let registration = Arc::new(self.endpoint.register()?);
         let spawned = async {
-            let (bridge, handshake) = Bridge::start(&registration)?;
-            // Hold the slot before the handshake: cancelling or failing that
-            // wait drops it, which closes the process and only then reopens
-            // the permit.
+            let (bridge, handshake) = Bridge::spawn(&registration)?;
             let slot = Slot {
                 permit: Some(permit),
                 bridge: Arc::new(bridge),
                 registration: Arc::clone(&registration),
             };
             let rpc = handshake.complete().await?;
+
             Ok(Arc::new(Lease { slot, rpc }))
         };
+
         spawned.await.inspect_err(|_error| {
             tracing::warn!(
                 monotonic_counter.cursor_bridge_spawn_failures = 1_u64,

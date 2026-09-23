@@ -334,6 +334,7 @@ pub struct TransportError {
 }
 
 impl TransportError {
+    /// A socket failure while `doing`.
     pub fn io(
         method: &str, doing: &'static str, source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
@@ -346,6 +347,8 @@ impl TransportError {
         }
     }
 
+    /// The body ended with a partial envelope still buffered.
+    #[must_use]
     pub fn truncated(method: &str, buffered: usize) -> Self {
         Self {
             method: method.to_owned(),

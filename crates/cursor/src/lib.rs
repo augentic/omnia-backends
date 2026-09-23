@@ -65,12 +65,12 @@ impl Backend for Client {
 
 // Every mutex in this crate guards data no panic can leave half-written, so
 // a poisoned lock is still worth reading.
- fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Milliseconds since `since`, saturating.
- fn elapsed_ms(since: Instant) -> u64 {
+fn elapsed_ms(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 

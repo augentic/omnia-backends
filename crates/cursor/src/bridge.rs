@@ -148,11 +148,24 @@ impl Bridge {
         async move { wait_exit(&mut exit, pid).await }
     }
 
-    /// `error`, unless the bridge reports the exit it usually runs ahead of.
-    pub async fn exit_or(&self, error: anyhow::Error) -> anyhow::Error {
-        match timeout(EXIT_WAIT, self.exited()).await {
-            Ok(exit) => Failure::BridgeExited(exit).into(),
-            Err(_elapsed) => error,
+    /// `future`, failing as the bridge's exit when it exits under it.
+    pub async fn fail_on_exit<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
+        let exited = self.exited();
+        tokio::pin!(exited);
+
+        let error = tokio::select! {
+            outcome = future => match outcome {
+                Ok(value) => return Ok(value),
+                Err(error) => error,
+            },
+            exit = &mut exited => return Err(Failure::BridgeExited(exit).into()),
+        };
+
+        // the socket fails ahead of the exit the supervisor publishes, so
+        // the failure waits a moment for the exit that explains it
+        match timeout(EXIT_WAIT, exited).await {
+            Ok(exit) => Err(Failure::BridgeExited(exit).into()),
+            Err(_elapsed) => Err(error),
         }
     }
 
@@ -162,15 +175,12 @@ impl Bridge {
         self.exited().await;
     }
 
-    // a failed handshake step; stderr stays at DEBUG, never in the error
-    async fn step<T>(&self, step: Result<T>) -> Result<T> {
-        match step {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                self.state.trace_err();
-                Err(self.exit_or(error).await.context("cursor sdk handshake failed"))
-            }
-        }
+    // one handshake step; stderr stays at DEBUG, never in the error
+    async fn step<T>(&self, step: impl Future<Output = Result<T>>) -> Result<T> {
+        self.fail_on_exit(step)
+            .await
+            .inspect_err(|_error| self.state.trace_err())
+            .context("cursor sdk handshake failed")
     }
 }
 
@@ -188,12 +198,13 @@ impl Handshake {
     ///
     /// Returns an error when the ready line never arrives or the RPC handshake fails.
     pub async fn complete(self, bridge: &Bridge) -> Result<Rpc> {
-        let scanned = self
-            .0
-            .await
-            .unwrap_or_else(|_gone| Err(anyhow!("the stderr reader ended without a ready line")));
+        let scanned = async {
+            self.0.await.unwrap_or_else(|_gone| {
+                Err(anyhow!("the stderr reader ended without a ready line"))
+            })
+        };
         let discovery = bridge.step(scanned).await?;
-        let rpc = bridge.step(discovery.into_rpc().await).await?;
+        let rpc = bridge.step(discovery.into_rpc()).await?;
 
         // from here a close is asked over the client; until now it is a kill
         let _ = bridge.state.rpc.set(rpc.clone());
@@ -317,7 +328,7 @@ impl Supervisor {
             );
             self.state.trace_err();
         }
-        
+
         let _ = self.exit.send(Some(exit));
         drop(self.state_root);
     }

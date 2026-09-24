@@ -28,12 +28,12 @@ use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep, sleep_until, timeout};
+use tokio::time::{Instant, sleep_until, timeout};
 
 use super::observe::{self, Completion, EventLog};
 use super::options::{Turn, Workspace};
 use crate::bridge::{
-    AgentOperationOptions, AgentOptions, Bridge, Exit, RunStatus, RunStream, RunStreamResult,
+    AgentOperationOptions, AgentOptions, Bridge, RunStatus, RunStream, RunStreamResult,
 };
 use crate::endpoint::Attached;
 use crate::pool::Lease;
@@ -174,19 +174,11 @@ impl Agent {
         self.lease.bridge().watch(activity_rx.clone());
         let deadline = self.deadlines.watch(activity_rx);
         tokio::pin!(deadline);
-        // Owns its watch, so it does not borrow `self` across the loop.
-        let exited = self.lease.bridge().exited();
-        tokio::pin!(exited);
 
+        let send = self.lease.rpc().send(self.id.clone(), text.to_owned());
         let stream = tokio::select! {
-            stream = self.lease.rpc().send(self.id.clone(), text.to_owned()) => {
-                match stream {
-                    Ok(stream) => stream,
-                    Err(error) => return Err(self.lease.bridge().exit_or(error).await),
-                }
-            }
+            stream = self.lease.bridge().fail_on_exit(send) => stream?,
             error = &mut deadline => return Err(error.into()),
-            exit = &mut exited => return Err(Failure::BridgeExited(exit).into()),
         };
 
         // `drive` disarms the guard when the send finishes. Dropping it
@@ -197,7 +189,7 @@ impl Agent {
             stream: Some(stream),
             armed: true,
         };
-        let outcome = open.drive(&activity_tx, &mut deadline, &mut exited).await;
+        let outcome = open.drive(&activity_tx, &mut deadline).await;
         open.armed = false;
         outcome
     }
@@ -384,20 +376,14 @@ impl Creating {
 
     /// The agent, within `window`; past it the agent is the task's.
     async fn claim(self, bridge: &Bridge, window: Duration) -> Result<Release> {
-        let exited = bridge.exited();
-        tokio::pin!(exited);
-        tokio::select! {
-            outcome = self.0 => match outcome {
-                Ok(Ok(release)) => Ok(release),
-                Ok(Err(error)) => Err(bridge.exit_or(error).await),
-                Err(_closed) => Err(anyhow!("bridge RPC `CreateAgent` ended without an outcome")),
-            },
-            exit = &mut exited => Err(Failure::BridgeExited(exit).into()),
-            () = sleep(window) => Err(anyhow!(
-                "bridge RPC `CreateAgent` unanswered after {}s",
-                window.as_secs()
-            )),
-        }
+        let created = async {
+            self.0.await.unwrap_or_else(|_closed| {
+                Err(anyhow!("bridge RPC `CreateAgent` ended without an outcome"))
+            })
+        };
+        timeout(window, bridge.fail_on_exit(created)).await.unwrap_or_else(|_elapsed| {
+            Err(anyhow!("bridge RPC `CreateAgent` unanswered after {}s", window.as_secs()))
+        })
     }
 }
 
@@ -412,12 +398,11 @@ struct OpenSend<'a> {
 }
 
 impl OpenSend<'_> {
-    async fn drive<D, X>(
-        &mut self, activity_tx: &watch::Sender<Instant>, deadline: &mut D, exited: &mut X,
+    async fn drive<D>(
+        &mut self, activity_tx: &watch::Sender<Instant>, deadline: &mut D,
     ) -> Result<Response>
     where
         D: Future<Output = Failure> + Unpin,
-        X: Future<Output = Exit> + Unpin,
     {
         let OpenSend { agent, stream, .. } = self;
         // `None` only once `Drop` has handed the stream to the teardown
@@ -427,12 +412,8 @@ impl OpenSend<'_> {
 
         loop {
             tokio::select! {
-                message = stream.next() => {
-                    let message = match message {
-                        Ok(Some(message)) => message,
-                        Ok(None) => break,
-                        Err(error) => return Err(agent.lease.bridge().exit_or(error).await),
-                    };
+                message = agent.lease.bridge().fail_on_exit(stream.next()) => {
+                    let Some(message) = message? else { break };
                     activity_tx.send_replace(Instant::now());
                     log.observe_message(&message);
                     agent.note_run(log.run_id());
@@ -453,11 +434,6 @@ impl OpenSend<'_> {
                         reason.unwrap_or_else(|| "session closed".to_owned()),
                     )
                     .into());
-                }
-                exit = &mut *exited => {
-                    // the run exited with its process; nothing is left to cancel
-                    agent.live_run = None;
-                    return Err(Failure::BridgeExited(exit).into());
                 }
             }
         }

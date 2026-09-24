@@ -2,6 +2,7 @@
 
 mod bridge;
 mod endpoint;
+mod failure;
 mod model;
 mod pool;
 
@@ -11,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, ensure};
 pub use bridge::{Exit, TransportError};
-pub use model::Failure;
+pub use failure::Failure;
 use omnia::Backend;
 use tokio::time::Instant;
 use tracing::instrument;

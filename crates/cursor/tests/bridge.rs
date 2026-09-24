@@ -78,7 +78,7 @@ fn killed(process: &Process) {
 }
 
 /// The `Failure::BridgeExited` detail a `SIGKILL`ed bridge fails with.
-const KILLED: &str = "cursor-sdk-bridge exited (signal: 9 (SIGKILL)) during the run";
+const KILLED: &str = "cursor-sdk-bridge exited (signal: 9 (SIGKILL))";
 /// The full sequence of a completion that answered.
 const ANSWERED: [Rpc; 4] = [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent];
 
@@ -637,7 +637,7 @@ async fn exit_before_ready() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::ExitBeforeReady(3)));
     let client = spawning(&fake, 1).await;
     expect_error(
-        "exited (exit status: 3) during the handshake",
+        "handshake failed: cursor-sdk-bridge exited (exit status: 3)",
         &["without:fake-bridge marker"],
         &client,
     )
@@ -655,7 +655,7 @@ async fn exit_before_ready() {
 async fn ready_then_refused() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::ReadyThenRefused));
     let client = spawning(&fake, 1).await;
-    expect_error("did not complete the handshake", &[], &client).await;
+    expect_error("handshake failed", &[], &client).await;
     await_gone(&fake).await;
 
     // The ready line was read but nothing answered at its URL: the process

@@ -52,7 +52,7 @@ group, which reaches the agent processes the bridge forks; whatever a bridge
 left in its group when it exited on its own is swept as the exit is seen,
 so nothing of a slot's process outlives it. A bridge that
 crashes fails the completion running on it with the typed
-`cursor-sdk-bridge exited (…) during the run` (metric outcome `bridge_exit`)
+`cursor-sdk-bridge exited (…)` (metric outcome `bridge_exit`)
 rather than as the next completion's stall. The exit is logged at WARN with
 the process's `pid`, its `uptime_ms`, the `status` (`signal: 9 (SIGKILL)`,
 `exit status: 7`), whether a `run_in_flight` was on it, and how

@@ -4,7 +4,8 @@
 //! transcript and capture the run id and last status text. Payload shapes
 //! mirror the public SDK — every field access is nullable and a malformed
 //! event is skipped, never fatal. [`Completion`] emits the start/finish INFO
-//! lines and tracing-opentelemetry metric fields.
+//! lines and tracing-opentelemetry metric fields; [`outcome_of`] and
+//! [`lost_bridge`] classify a failed completion's error.
 
 use std::collections::HashMap;
 
@@ -12,78 +13,8 @@ use omnia_wasi_model::{Format, ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::Instant;
 
-use crate::bridge::{Exit, SdkMessage, TransportError};
-use crate::elapsed_ms;
-
-/// How a completion this backend ran came to fail, by variant rather than
-/// by message.
-///
-/// `complete`'s error downcasts to one of these — or to a
-/// [`TransportError`], or to the typed `budget-exhausted` a rejected check
-/// ends on.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum Failure {
-    /// Absolute wall-clock cap exceeded while the stream was still active.
-    Timeout {
-        /// The cap in seconds, from connect options.
-        cap_secs: u64,
-    },
-    /// No stream events within the inactivity window.
-    Inactive {
-        /// Observed idle span in seconds.
-        idle_secs: u64,
-        /// Configured inactivity limit in seconds.
-        inactivity_secs: u64,
-        /// Configured absolute cap in seconds.
-        cap_secs: u64,
-    },
-    /// Hard tool-host failure (or a closed abort channel).
-    Aborted(String),
-    /// The spawned bridge process exited while the completion was running
-    /// on it.
-    BridgeExited(Exit),
-}
-
-impl Failure {
-    /// The `outcome` label the `cursor_completions` counter carries for
-    /// this failure.
-    #[must_use]
-    pub const fn outcome(&self) -> &'static str {
-        match self {
-            Self::Timeout { .. } => "timeout",
-            Self::Inactive { .. } => "inactive",
-            Self::Aborted(_) => "abort",
-            Self::BridgeExited(_) => "bridge_exit",
-        }
-    }
-}
-
-impl std::fmt::Display for Failure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout { cap_secs } => write!(
-                f,
-                "cursor run timed out after {cap_secs}s (absolute cap exceeded while still active)"
-            ),
-            Self::Inactive {
-                idle_secs,
-                inactivity_secs,
-                cap_secs,
-            } => write!(
-                f,
-                "cursor run inactive for {idle_secs}s (no stream events; inactivity limit \
-                 {inactivity_secs}s, absolute cap {cap_secs}s)"
-            ),
-            Self::Aborted(reason) => write!(f, "completion aborted: {reason}"),
-            Self::BridgeExited(exit) => {
-                write!(f, "cursor-sdk-bridge exited ({exit}) during the run")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Failure {}
+use crate::bridge::{RunStreamMessage, SdkMessage, TransportError};
+use crate::{Failure, elapsed_ms};
 
 /// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
 /// records `outcome=abort` (a cancelled future).
@@ -188,7 +119,20 @@ pub struct EventLog {
 }
 
 impl EventLog {
-    pub fn observe(&mut self, event: &SdkMessage) {
+    /// Absorb one stream message: its event, and the run id its result names.
+    pub fn observe_message(&mut self, message: &RunStreamMessage) {
+        if let Some(event) = &message.sdk_message {
+            self.observe(event);
+        }
+        if self.run_id.is_none()
+            && let Some(result) = &message.result
+            && !result.run_id.is_empty()
+        {
+            self.run_id = Some(result.run_id.clone());
+        }
+    }
+
+    fn observe(&mut self, event: &SdkMessage) {
         let payload = &event.message;
         if self.run_id.is_none() {
             self.run_id = first_match(payload, &["run_id", "runId"]).map(ToOwned::to_owned);
@@ -325,7 +269,8 @@ fn len_u64(len: usize) -> u64 {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{EventLog, Failure};
+    use super::EventLog;
+    use crate::Failure;
     use crate::bridge::{Exit, SdkMessage, TransportError};
 
     fn observe_all(events: &[Value]) -> EventLog {
@@ -418,7 +363,7 @@ mod tests {
 
         let exited: anyhow::Error = Failure::BridgeExited(EXITED).into();
         assert_eq!(super::outcome_of(&exited), "bridge_exit");
-        assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown) during the run");
+        assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown)");
 
         let transport: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
         assert_eq!(super::outcome_of(&transport), "transport");

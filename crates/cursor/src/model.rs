@@ -27,7 +27,6 @@ use std::sync::Arc;
 
 pub use agent::Deadlines;
 use agent::{Agent, Unanswered};
-pub use observe::Failure;
 use omnia_wasi_model::{Answer, FutureResult, Request, ToolHost, WasiModelCtx};
 use options::Turn;
 use tracing::{Instrument, info_span};
@@ -41,15 +40,15 @@ impl WasiModelCtx for Client {
     ///
     /// # Errors
     ///
-    /// The error downcasts to one of: [`Failure`] — `Timeout`, `Inactive`,
-    /// `Aborted`, or `BridgeExited` (the spawned process died and the
-    /// restart, if any, failed too); [`crate::TransportError`] — the socket
-    /// to the bridge failed below Connect; or
-    /// [`omnia_wasi_model::Error::BudgetExhausted`] — the guest's `check`
-    /// rejected every candidate. Anything else is a plain error the bridge
-    /// or the provider answered with: a Connect error, an end-stream error,
-    /// a run that ended in a failing status, a lease that could not be
-    /// taken, or a request that could not be shaped.
+    /// The error downcasts to one of: [`crate::Failure`] — `Timeout`, `Inactive`,
+    /// `Aborted`, or `BridgeExited` (the spawned process exited under its
+    /// handshake, or under the completion with the restart, if any, failing
+    /// too); [`crate::TransportError`] — the socket to the bridge failed
+    /// below Connect; or [`omnia_wasi_model::Error::BudgetExhausted`] — the
+    /// guest's `check` rejected every candidate. Anything else is a plain
+    /// error the bridge or the provider answered with: a Connect error, an
+    /// end-stream error, a run that ended in a failing status, a handshake
+    /// the process outlived, or a request that could not be shaped.
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let client = self.clone();
 

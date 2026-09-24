@@ -56,14 +56,15 @@ impl Pool {
             let (bridge, handshake) = Bridge::spawn(&registration)?;
             // The slot reopens, and the token is revoked, only once the
             // process is gone — however the lease ends, handshake included.
-            let died = bridge.died();
+            let exited = bridge.exited();
             let token = Arc::clone(&registration);
+
             tokio::spawn(async move {
-                died.await;
+                exited.await;
                 drop(permit);
                 drop(token);
             });
-            let rpc = handshake.complete().await?;
+            let rpc = handshake.complete(&bridge).await?;
 
             Ok(Arc::new(Lease {
                 bridge,

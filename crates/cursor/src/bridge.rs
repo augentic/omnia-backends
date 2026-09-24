@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use discovery::{Discovery, Tail};
 pub use messages::{
     AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
-    ModelSelection, RunStatus, RunStreamResult, SdkMessage, ToolList,
+    ModelSelection, RunStatus, RunStreamMessage, RunStreamResult, SdkMessage, ToolList,
 };
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
 pub use rpc::{Rpc, RunStream, TransportError};
@@ -30,10 +30,11 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
 use crate::endpoint::Registration;
-use crate::{elapsed_ms, lock};
+use crate::{Failure, elapsed_ms, lock};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_millis(250);
+// how long a failure is given for the exit it usually runs ahead of
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
 
 // `None` until the supervisor publishes the exit
@@ -81,13 +82,12 @@ impl Bridge {
 
         let mut command = CommandWrap::from(command);
         command.wrap(KillOnDrop);
-        // leader of its own group, so a kill reaches the processes it forks
         command.wrap(ProcessGroup::leader());
 
         let mut child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
-        let pid = child.id().context("the spawned bridge reported no pid")?;
+        let pid = child.id().context("no pid for spawned bridge")?;
         let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
-            bail!("the spawned bridge has no piped stdout and stderr");
+            bail!("no piped stdout and stderr for spawned bridge");
         };
 
         let state = Arc::new(State {
@@ -101,6 +101,7 @@ impl Bridge {
         drain_stdout(stdout);
         let (discovery, stderr) = read_stderr(stderr, Arc::clone(&state));
 
+        // wait for whichever comes first: the process exiting, or a stop request
         let (shutdown, stop) = watch::channel(());
         let (exit_tx, exit) = watch::channel(None);
         tokio::spawn(
@@ -115,17 +116,14 @@ impl Bridge {
             .run(),
         );
 
-        let bridge = Self {
-            state: Arc::clone(&state),
-            exit: exit.clone(),
-            shutdown,
-        };
-        let handshake = Handshake {
-            discovery,
-            state,
-            exit,
-        };
-        Ok((bridge, handshake))
+        Ok((
+            Self {
+                state,
+                exit,
+                shutdown,
+            },
+            Handshake(discovery),
+        ))
     }
 
     /// Whether the bridge has yet to exit.
@@ -136,27 +134,40 @@ impl Bridge {
     /// Record the run's activity clock for an uninvited exit.
     ///
     /// The sender lives as long as the run.
-    pub fn watch_run(&self, clock: watch::Receiver<Instant>) {
+    pub fn watch(&self, clock: watch::Receiver<Instant>) {
         self.state.clock.set(clock);
     }
 
     /// Resolves once the bridge exits.
-    pub fn died(&self) -> impl Future<Output = Exit> + Send + 'static {
+    pub fn exited(&self) -> impl Future<Output = Exit> + Send + 'static {
         let mut exit = self.exit.clone();
         let pid = self.state.pid;
         async move { wait_exit(&mut exit, pid).await }
     }
 
-    /// The exit a socket failure usually runs ahead of, waited for briefly;
-    /// `None` when the process is still running past that window.
-    pub async fn recent_exit(&self) -> Option<Exit> {
-        timeout(EXIT_WAIT, self.died()).await.ok()
+    /// `error`, unless the bridge reports the exit it usually runs ahead of.
+    pub async fn exit_or(&self, error: anyhow::Error) -> anyhow::Error {
+        match timeout(EXIT_WAIT, self.exited()).await {
+            Ok(exit) => Failure::BridgeExited(exit).into(),
+            Err(_elapsed) => error,
+        }
     }
 
     /// Shut the bridge down and wait for it to exit.
     pub async fn close(&self) {
         let _ = self.shutdown.send(());
-        self.died().await;
+        self.exited().await;
+    }
+
+    // a failed handshake step; stderr stays at DEBUG, never in the error
+    async fn step<T>(&self, step: Result<T>) -> Result<T> {
+        match step {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                log_stderr(&self.state.tail);
+                Err(self.exit_or(error).await.context("cursor sdk handshake failed"))
+            }
+        }
     }
 }
 
@@ -164,58 +175,34 @@ impl Bridge {
 ///
 /// The [`Bridge`] is already watched, so the caller can occupy the agent
 /// slot before [`Handshake::complete`] returns.
-pub struct Handshake {
-    discovery: oneshot::Receiver<Result<Discovery>>,
-    state: Arc<State>,
-    exit: ExitWatch,
-}
+pub struct Handshake(oneshot::Receiver<Result<Discovery>>);
 
 impl Handshake {
-    /// Finish the ready-line scan and bind `sdk.v1`, returning the client.
+    /// Finish the ready-line scan and bind `sdk.v1` on `bridge`, returning
+    /// the client.
     ///
     /// # Errors
     ///
     /// Returns an error when the ready line never arrives or the RPC handshake fails.
-    pub async fn complete(self) -> Result<Rpc> {
-        let Self {
-            discovery,
-            state,
-            mut exit,
-        } = self;
-
-        let scanned = discovery
+    pub async fn complete(self, bridge: &Bridge) -> Result<Rpc> {
+        let scanned = self
+            .0
             .await
             .unwrap_or_else(|_gone| Err(anyhow!("the stderr reader ended without a ready line")));
-        let discovery = or_exit(&mut exit, &state, scanned).await?;
-        let connected = discovery.into_rpc().await;
-        let rpc = or_exit(&mut exit, &state, connected).await?;
+        let discovery = bridge.step(scanned).await?;
+        let rpc = bridge.step(discovery.into_rpc().await).await?;
 
         // from here a close is asked over the client; until now it is a kill
-        let _ = state.rpc.set(rpc.clone());
+        let _ = bridge.state.rpc.set(rpc.clone());
 
         tracing::info!(
-            pid = state.pid,
-            histogram.cursor_bridge_spawn_ms = elapsed_ms(state.started_at),
+            pid = bridge.state.pid,
+            histogram.cursor_bridge_spawn_ms = elapsed_ms(bridge.state.started_at),
             "cursor-sdk-bridge spawned"
         );
 
         Ok(rpc)
     }
-}
-
-// attach the published exit status; stderr stays at DEBUG, never in the error
-async fn or_exit<T>(exit: &mut ExitWatch, state: &State, step: Result<T>) -> Result<T> {
-    let error = match step {
-        Ok(value) => return Ok(value),
-        Err(error) => error,
-    };
-    let status =
-        timeout(EXIT_WAIT, wait_exit(exit, state.pid)).await.ok().and_then(|exit| exit.status);
-    log_stderr(&state.tail);
-    Err(status.map_or_else(
-        || anyhow!("cursor sdk did not complete the handshake ({error:#})"),
-        |status| anyhow!("cursor sdk exited ({status}) during the handshake ({error:#})"),
-    ))
 }
 
 /// How a spawned bridge ended.

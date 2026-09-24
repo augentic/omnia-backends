@@ -32,7 +32,9 @@ use tokio::time::{Instant, timeout};
 use crate::endpoint::Registration;
 use crate::{Failure, elapsed_ms, lock};
 
+// for the exit a `Shutdown` RPC asks for
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+// for the stderr pipe once the group is gone
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 // how long a failure is given for the exit it usually runs ahead of
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
@@ -80,6 +82,7 @@ impl Bridge {
             command.env_remove(var);
         }
 
+        // its own process group: one kill reaches whatever it forks
         let mut command = CommandWrap::from(command);
         command.wrap(KillOnDrop);
         command.wrap(ProcessGroup::leader());
@@ -101,7 +104,7 @@ impl Bridge {
         drain_stdout(stdout);
         let (discovery, stderr) = read_stderr(stderr, Arc::clone(&state));
 
-        // wait for whichever comes first: the process exiting, or a stop request
+        // the supervisor owns the child from here to its exit
         let (shutdown, stop) = watch::channel(());
         let (exit_tx, exit) = watch::channel(None);
         tokio::spawn(
@@ -164,7 +167,7 @@ impl Bridge {
         match step {
             Ok(value) => Ok(value),
             Err(error) => {
-                log_stderr(&self.state.tail);
+                self.state.trace_err();
                 Err(self.exit_or(error).await.context("cursor sdk handshake failed"))
             }
         }
@@ -234,6 +237,16 @@ struct State {
     rpc: OnceLock<Rpc>,
 }
 
+impl State {
+    // untrusted (paths, provider context, session fragments): DEBUG only
+    fn trace_err(&self) {
+        let tail = self.tail.to_string();
+        if !tail.is_empty() {
+            tracing::debug!(%tail, "cursor-sdk-bridge tail");
+        }
+    }
+}
+
 // activity clock of the in-flight run; the sender lives as long as the run
 #[derive(Debug, Default)]
 struct Activity(Mutex<Option<watch::Receiver<Instant>>>);
@@ -275,10 +288,7 @@ impl Supervisor {
                 false
             }
         };
-        // The one kill, of the group: the leader if it is still up — asked
-        // and not gone, or never bound to be asked — and whatever it forked
-        // and left behind, so nothing of the slot outlives it. A leader
-        // already reaped answers the wait at once with the status it kept.
+        // the one kill, of the group: nothing of the slot outlives it
         let _ = self.child.start_kill();
         let status = self.child.wait().await.ok();
         // before the drain: `Send` is still pending, so this is the run at exit
@@ -294,6 +304,7 @@ impl Supervisor {
             status,
             pid: self.state.pid,
         };
+        // an exit nobody asked for is a crash: WARN, with the stderr behind it
         if self_exited {
             tracing::warn!(
                 pid = exit.pid,
@@ -304,8 +315,9 @@ impl Supervisor {
                 monotonic_counter.cursor_bridge_exits = 1_u64,
                 "cursor-sdk-bridge exited"
             );
-            log_stderr(&self.state.tail);
+            self.state.trace_err();
         }
+        
         let _ = self.exit.send(Some(exit));
         drop(self.state_root);
     }
@@ -361,14 +373,6 @@ fn drain_stdout(stdout: ChildStdout) {
             tracing::debug!(%line, stream = "stdout", "bridge output");
         }
     });
-}
-
-// untrusted (paths, provider context, session fragments): DEBUG only
-fn log_stderr(tail: &Tail) {
-    let stderr = tail.to_string();
-    if !stderr.is_empty() {
-        tracing::debug!(%stderr, "cursor-sdk-bridge stderr tail");
-    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! Filesystem plugin-store contract tests.
 
-use omnia_core::sha256_digest as digest_of;
+use omnia_core::Digest;
 use omnia_filesystem::Client;
 use omnia_plugin::{ContentStore, ReleaseStore};
 use omnia_wasi_blobstore::{Bytes, WasiBlobstoreCtx};
@@ -9,6 +9,11 @@ use tempfile::TempDir;
 
 fn client(root: &TempDir) -> Client {
     Client::open(root.path()).expect("open")
+}
+
+// The store keys content by the digest's spelling.
+fn digest_of(bytes: &[u8]) -> String {
+    Digest::of(bytes).to_string()
 }
 
 #[tokio::test]

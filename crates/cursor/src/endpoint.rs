@@ -32,7 +32,7 @@ use prost::Message as _;
 use proto::{CallCustomToolRequest, CallCustomToolResponse, struct_to_value, value_to_struct};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use crate::lock;
 
@@ -145,11 +145,18 @@ impl Registration {
     }
 
     /// Route this bridge's callbacks for `agent_id` into `tool_host` until
-    /// the returned guard drops.
+    /// the returned guard drops; the first hard tool failure is sent on
+    /// `abort`.
     pub fn attach(
-        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
+        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: oneshot::Sender<String>,
     ) -> Attached {
-        self.sessions.insert(agent_id.clone(), Session { tool_host, abort });
+        self.sessions.insert(
+            agent_id.clone(),
+            Session {
+                tool_host,
+                abort: Some(abort),
+            },
+        );
         Attached {
             sessions: Arc::clone(&self.sessions),
             agent_id,
@@ -265,18 +272,28 @@ impl Sessions {
         lock(&self.entries).remove(agent_id);
     }
 
-    fn lookup(&self, agent_id: &str) -> Option<Session> {
-        lock(&self.entries).get(agent_id).cloned()
+    fn tool_host(&self, agent_id: &str) -> Option<Arc<dyn ToolHost>> {
+        lock(&self.entries).get(agent_id).map(|session| Arc::clone(&session.tool_host))
+    }
+
+    // End the completion live under `agent_id`, unless it is gone or an
+    // earlier failure already has.
+    fn abort(&self, agent_id: &str, reason: String) {
+        let abort = lock(&self.entries).get_mut(agent_id).and_then(|session| session.abort.take());
+        if let Some(abort) = abort {
+            // nobody listening: the completion ended on its own
+            let _ = abort.send(reason);
+        }
     }
 }
 
 /// One live completion's callback route: the session's tool host plus the
-/// abort signal that ends the completion on a hard (non-repairable) tool
-/// failure.
-#[derive(Clone, Debug)]
+/// abort that ends the completion on a hard (non-repairable) tool failure,
+/// taken by the first such failure.
+#[derive(Debug)]
 struct Session {
     tool_host: Arc<dyn ToolHost>,
-    abort: mpsc::UnboundedSender<String>,
+    abort: Option<oneshot::Sender<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -345,7 +362,7 @@ async fn call_tool(sessions: &Sessions, headers: &HeaderMap, body: Bytes) -> Res
         }
     };
 
-    let Some(session) = sessions.lookup(&call.agent_id) else {
+    let Some(tool_host) = sessions.tool_host(&call.agent_id) else {
         return connect_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -356,12 +373,12 @@ async fn call_tool(sessions: &Sessions, headers: &HeaderMap, body: Bytes) -> Res
     let arguments = call.args.to_string();
     tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
 
-    match session.tool_host.call_tool(call.tool_name.clone(), arguments).await {
+    match tool_host.call_tool(call.tool_name.clone(), arguments).await {
         Ok(Ok(output)) => respond(codec, &wrap_output(&output)),
         Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
         Err(error) => {
             let message = format!("tool `{}` failed: {error:#}", call.tool_name);
-            let _ = session.abort.send(message.clone());
+            sessions.abort(&call.agent_id, message.clone());
             connect_error(StatusCode::CONFLICT, "aborted", &message)
         }
     }

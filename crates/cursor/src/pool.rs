@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use omnia_wasi_model::ToolHost;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, oneshot};
 use tokio::time::Instant;
 
 use crate::bridge::Bridge;
@@ -87,9 +87,10 @@ impl Lease {
     }
 
     /// Route the bridge's callbacks for `agent_id` into `tool_host` until
-    /// the returned guard drops.
+    /// the returned guard drops; the first hard tool failure is sent on
+    /// `abort`.
     pub fn attach(
-        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
+        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: oneshot::Sender<String>,
     ) -> Attached {
         self.registration.attach(agent_id, tool_host, abort)
     }

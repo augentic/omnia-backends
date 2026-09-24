@@ -18,7 +18,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout};
 
@@ -44,7 +44,7 @@ pub struct Agent {
     format: Format,
     check: bool,
     tool_host: Arc<dyn ToolHost>,
-    abort: mpsc::UnboundedReceiver<String>,
+    abort: oneshot::Receiver<String>,
     completion: Completion,
     // the turn in flight: its stream while `follow` runs, and the run the
     // stream named until that run ends
@@ -76,7 +76,7 @@ impl Agent {
             .await
             .inspect_err(|error| completion.finish(Outcome::of(error)))?;
 
-        let (abort_tx, abort) = mpsc::unbounded_channel();
+        let (abort_tx, abort) = oneshot::channel();
         let attached = lease.attach(created.id.clone(), Arc::clone(&tool_host), abort_tx);
 
         Ok(Self {
@@ -227,9 +227,9 @@ impl Agent {
                     }
                 }
                 failure = &mut deadline => return Err(failure.into()),
-                // `_attached` holds the sender, so the channel never closes
-                // under this
-                Some(reason) = abort.recv() => return Err(Failure::Aborted(reason).into()),
+                // the sender lives in the session `_attached` keeps
+                // registered, so it never drops unsent under this
+                Ok(reason) = &mut *abort => return Err(Failure::Aborted(reason).into()),
             }
         }
 

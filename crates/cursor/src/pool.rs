@@ -49,32 +49,23 @@ impl Pool {
         let queued = Instant::now();
         let permit =
             Arc::clone(&self.permits).acquire_owned().await.context("the agent pool is closed")?;
-        tracing::info!(histogram.cursor_lease_wait_ms = elapsed_ms(queued), "agent slot acquired");
+        tracing::debug!(wait_ms = elapsed_ms(queued), "agent slot acquired");
 
         let registration = Arc::new(self.endpoint.register()?);
-        let spawning = async {
-            let spawned = Bridge::spawn(&registration)?;
-            // The slot reopens, and the token is revoked, only once the
-            // process is gone — however the lease ends, handshake included.
-            let exited = spawned.exited();
-            let token = Arc::clone(&registration);
+        let spawned = Bridge::spawn(&registration)?;
+        // The slot reopens, and the token is revoked, only once the
+        // process is gone — however the lease ends, handshake included.
+        let exited = spawned.exited();
+        let token = Arc::clone(&registration);
 
-            tokio::spawn(async move {
-                exited.await;
-                drop(permit);
-                drop(token);
-            });
+        tokio::spawn(async move {
+            exited.await;
+            drop(permit);
+            drop(token);
+        });
 
-            let bridge = spawned.handshake().await?;
-            Ok(Arc::new(Lease { bridge, registration }))
-        };
-
-        spawning.await.inspect_err(|_error| {
-            tracing::warn!(
-                monotonic_counter.cursor_bridge_spawn_failures = 1_u64,
-                "cursor-sdk-bridge failed to spawn"
-            );
-        })
+        let bridge = spawned.handshake().await?;
+        Ok(Arc::new(Lease { bridge, registration }))
     }
 
     pub const fn max_agents(&self) -> usize {

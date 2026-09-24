@@ -14,8 +14,7 @@ mod proto;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::fmt::Write as _;
-use std::fmt::{self, Formatter};
+use std::fmt::{self, Formatter, Write as _};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -355,7 +354,6 @@ async fn call_tool(sessions: &Sessions, headers: &HeaderMap, body: Bytes) -> Res
     };
 
     let arguments = call.args.to_string();
-    tracing::info!(monotonic_counter.cursor_custom_tool_calls = 1_u64, "custom tool callback");
     tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
 
     match session.tool_host.call_tool(call.tool_name.clone(), arguments).await {

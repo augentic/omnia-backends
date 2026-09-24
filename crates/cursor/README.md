@@ -52,11 +52,11 @@ group, which reaches the agent processes the bridge forks; whatever a bridge
 left in its group when it exited on its own is swept as the exit is seen,
 so nothing of a slot's process outlives it. A bridge that
 crashes fails the completion running on it with the typed
-`cursor-sdk-bridge exited (…)` (metric outcome `bridge_exit`)
+`cursor-sdk-bridge exited (…)` (outcome `bridge_exit`)
 rather than as the next completion's stall. The exit is logged at WARN with
 the process's `pid`, its `uptime_ms`, and the `status` (`signal: 9 (SIGKILL)`,
-`exit status: 7`), and counted as `cursor_bridge_exits`; the completion that
-lost its run to it logs `run lost with its process` at INFO under the same
+`exit status: 7`); the completion that
+lost its run to it logs `run lost with its process` at DEBUG under the same
 `pid`, with how long that run's stream had been `silent_ms`. The last lines
 the process wrote to stderr are logged at DEBUG only — they are untrusted
 subprocess output and never reach WARN or the error a guest sees.
@@ -70,15 +70,15 @@ reached the guest, the dead lease is released, a fresh one is taken (with
 one slot that means waiting for the dead process to be reaped), and the
 original prompt is sent again with fresh deadlines. The restart is logged at
 WARN (`completion restarting on a fresh bridge`, with the first attempt's
-`outcome`, `error`, and `pid` when the process is known) and counted as
-`cursor_bridge_restarts`; the second attempt's result is final, whatever it
+`error` and `pid` when the process is known); the second attempt's result
+is final, whatever it
 is. Nothing else restarts: a failure after the guest's `check` has seen a
 candidate (the guest would be offered a candidate twice), an inactivity or
 cap deadline, a guest abort, `budget-exhausted`, a Connect or end-stream
 error (the bridge answered), a lease that could not be taken, or a request
 that could not be shaped all stand as they are. Each attempt is its own
-agent on its own bridge, so the `completion started` / `completion` INFO
-lines and the `cursor_completions` counter are per attempt: a restarted
+agent on its own bridge, so the `completion started` (DEBUG) / `completion`
+(INFO) lines are per attempt: a restarted
 call produces two pairs inside one `complete` span, the first ending
 `bridge_exit` or `transport`, with the restart WARN between them, and
 `attempts` on those lines still counts the sends on that one agent. A
@@ -129,8 +129,9 @@ a fresh cap on the second send. The two errors are distinct
 
 Concurrency is bounded by `CURSOR_MAX_AGENTS` (default 4): that many agents
 live at once, each in its own bridge process, and a further completion
-waits its turn (first come, first served; the wait is recorded as
-`cursor_lease_wait_ms`, apart from the completion's own duration, which
+waits its turn (first come, first served; the wait is logged at DEBUG as
+`agent slot acquired` with `wait_ms`, apart from the completion's own
+`duration_ms`, which
 starts once the slot is held). The bridge executable is `cursor-sdk-bridge`,
 resolved on `PATH`.
 
@@ -261,7 +262,7 @@ under load fails its completion with `cursor-sdk-bridge exited`), and
 `bridge_killed_mid_run_recovers`, which `kill -9`s a real bridge under its
 opening run and sees the completion answer from the restart. The rows that
 watch the spawned processes read their pids from the client's own
-`cursor-sdk-bridge spawned` events through the process's tracing
+`cursor-sdk-bridge spawned` DEBUG events through the process's tracing
 subscriber, so they run one per process, as nextest does; "gone" is the
 whole process group each bridge led, so a `cursor-agent` left behind by a
 bridge is a failure here, not just the bridge itself. All are

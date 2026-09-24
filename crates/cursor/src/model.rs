@@ -19,7 +19,6 @@ use options::Turn;
 use tracing::{Instrument, info_span};
 
 use crate::Client;
-use crate::failure::Outcome;
 
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
@@ -34,8 +33,6 @@ impl WasiModelCtx for Client {
                 };
 
                 tracing::warn!(
-                    monotonic_counter.cursor_bridge_restarts = 1_u64,
-                    outcome = Outcome::of(failed.error()).as_str(),
                     pid = failed.pid(),
                     error = format!("{:#}", failed.error()),
                     "bridge lost before any candidate; completion restarting on a fresh bridge"

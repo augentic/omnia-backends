@@ -4,8 +4,8 @@
 //! transcript and capture the run id and last status text. Payload shapes
 //! mirror the public SDK — every field access is nullable and a malformed
 //! event is skipped, never fatal. The result's token counts become the
-//! guest's [`Usage`] here too. [`Completion`] emits the start/finish INFO
-//! lines and tracing-opentelemetry metric fields.
+//! guest's [`Usage`] here too. [`Completion`] emits the start (DEBUG) and
+//! finish (INFO) events.
 
 use std::collections::HashMap;
 
@@ -17,7 +17,7 @@ use crate::bridge::{RunStreamMessage, SdkMessage, TokenUsage};
 use crate::elapsed_ms;
 use crate::failure::Outcome;
 
-/// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
+/// One completion's start/finish events. Drop without [`Self::finish`]
 /// records [`Outcome::Abort`] (a cancelled future).
 pub struct Completion {
     model: String,
@@ -34,13 +34,11 @@ pub struct Completion {
 }
 
 impl Completion {
-    // Log at INFO that a completion is in flight. The line carries no metric
-    // prefixes: it is for the live tail.
     pub fn start(model: &str, format: &Format, prompt: &str, mcp_servers: usize) -> Self {
         let format = format.to_string();
         let prompt_bytes = len_u64(prompt.len());
 
-        tracing::info!(model, format, prompt_bytes, mcp = mcp_servers, "completion started");
+        tracing::debug!(model, format, prompt_bytes, mcp = mcp_servers, "completion started");
 
         Self {
             model: model.to_owned(),
@@ -78,28 +76,25 @@ impl Completion {
         self.attempts
     }
 
-    // Log the completion at INFO with its OTEL metric fields. It is emitted
-    // once, so a later `Drop` says nothing.
+    // The one INFO line per completion. It is emitted once, so a later
+    // `Drop` says nothing.
     pub fn finish(&mut self, outcome: Outcome) {
         if self.emitted {
             return;
         }
         self.emitted = true;
-        let duration_ms = elapsed_ms(self.started);
         tracing::info!(
             model = %self.model,
             format = %self.format,
             outcome = outcome.as_str(),
             attempts = self.attempts,
-            histogram.cursor_completion_duration_ms = duration_ms,
-            histogram.cursor_prompt_bytes = self.prompt_bytes,
-            histogram.cursor_result_bytes = self.result_bytes,
-            histogram.cursor_tool_turns = self.tool_turns,
-            histogram.cursor_input_tokens = self.input_tokens,
-            histogram.cursor_output_tokens = self.output_tokens,
-            histogram.cursor_reasoning_tokens = self.reasoning_tokens,
-            monotonic_counter.cursor_completions = 1_u64,
-            monotonic_counter.cursor_corrections = u64::from(outcome == Outcome::Corrected),
+            duration_ms = elapsed_ms(self.started),
+            prompt_bytes = self.prompt_bytes,
+            result_bytes = self.result_bytes,
+            tool_turns = self.tool_turns,
+            input_tokens = self.input_tokens,
+            output_tokens = self.output_tokens,
+            reasoning_tokens = self.reasoning_tokens,
             "completion"
         );
     }
@@ -250,7 +245,7 @@ fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
 }
 
-// Widen a byte or item count to a metric value. `usize` never exceeds
+// Widen a byte or item count to an event field. `usize` never exceeds
 // `u64` on a supported target, so nothing is lost.
 fn len_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)

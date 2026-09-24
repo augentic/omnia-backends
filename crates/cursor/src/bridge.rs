@@ -218,13 +218,7 @@ impl Supervisor {
 
         // an exit nobody asked for is a crash
         if self_exited {
-            tracing::warn!(
-                pid = exit.pid,
-                uptime_ms,
-                status = %exit,
-                monotonic_counter.cursor_bridge_exits = 1_u64,
-                "cursor-sdk-bridge exited"
-            );
+            tracing::warn!(pid = exit.pid, uptime_ms, status = %exit, "cursor-sdk-bridge exited");
             self.state.trace_err();
         }
 
@@ -278,9 +272,9 @@ impl Spawned {
         };
         let rpc = watched.step("no answer to the sdk.v1 handshake", CONNECT_TIMEOUT, bound).await?;
 
-        tracing::info!(
+        tracing::debug!(
             pid = watched.state.pid,
-            histogram.cursor_bridge_spawn_ms = elapsed_ms(watched.state.started_at),
+            spawn_ms = elapsed_ms(watched.state.started_at),
             "cursor-sdk-bridge spawned"
         );
 

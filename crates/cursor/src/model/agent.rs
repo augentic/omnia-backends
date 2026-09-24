@@ -189,7 +189,7 @@ impl Agent {
         if let Err(error) = &outcome
             && let Some(Failure::BridgeExited(exit)) = error.downcast_ref::<Failure>()
         {
-            tracing::info!(
+            tracing::debug!(
                 pid = exit.pid,
                 silent_ms = elapsed_ms(*activity.borrow()),
                 "run lost with its process"

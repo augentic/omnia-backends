@@ -47,16 +47,15 @@ pub enum Failure {
 }
 
 impl Failure {
-    /// The `outcome` label the `cursor_completions` counter carries for
-    /// this failure.
+    /// The `outcome` field the `completion` event carries for this failure.
     #[must_use]
     pub const fn outcome(&self) -> &'static str {
         Outcome::of_failure(self).as_str()
     }
 }
 
-/// How one completion came out: the closed set of `outcome` labels the
-/// `cursor_completions` counter carries.
+/// How one completion came out: the closed set of `outcome` values the
+/// `completion` event carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// Answered on the opening prompt.
@@ -114,7 +113,7 @@ impl Outcome {
         matches!(self, Self::BridgeExit | Self::Transport)
     }
 
-    /// The metric label.
+    /// The `outcome` field value.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",
@@ -154,7 +153,7 @@ mod tests {
         .into()
     }
 
-    // The labels are what dashboards key on.
+    // The values are what log queries key on.
     #[test]
     fn labels() {
         let labels = [

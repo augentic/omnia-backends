@@ -1,7 +1,7 @@
 //! Completion telemetry and failure classification.
 //!
-//! [`Completion`] records lifecycle events and metrics. [`Failure`] lets
-//! [`outcome_of`] classify backend errors by type instead of message text.
+//! [`Completion`] emits the start (DEBUG) and finish (INFO) events. [`Failure`]
+//! lets [`outcome_of`] classify backend errors by type instead of message text.
 
 use std::time::Instant;
 
@@ -9,7 +9,7 @@ use omnia_wasi_model::Usage;
 
 use crate::model::options::Turn;
 
-// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
+// One completion's start/finish events. Drop without [`Self::finish`]
 // records `outcome=abort` (a cancelled future).
 pub struct Completion {
     model: String,
@@ -26,11 +26,10 @@ pub struct Completion {
 }
 
 impl Completion {
-    // INFO that a completion is in flight (no metric prefixes — live tail).
     pub fn start(turn: &Turn) -> Self {
         let format = turn.format.to_string();
 
-        tracing::info!(
+        tracing::debug!(
             model = %turn.model,
             format = %format,
             prompt_bytes = turn.prompt_bytes,
@@ -74,8 +73,8 @@ impl Completion {
         self.attempts
     }
 
-    // INFO + OTEL metric fields for this completion. Consumes self so Drop
-    // does not emit a second time.
+    // The one INFO line per completion. Consumes self so Drop does not emit
+    // a second time.
     pub fn finish(mut self, outcome: &'static str) {
         self.emit(outcome);
     }
@@ -91,15 +90,13 @@ impl Completion {
             format = %self.format,
             outcome,
             attempts = self.attempts,
-            histogram.genai_completion_duration_ms = duration_ms,
-            histogram.genai_prompt_bytes = self.prompt_bytes,
-            histogram.genai_result_bytes = self.result_bytes,
-            histogram.genai_tool_turns = self.tool_turns,
-            histogram.genai_input_tokens = self.input_tokens,
-            histogram.genai_output_tokens = self.output_tokens,
-            histogram.genai_reasoning_tokens = self.reasoning_tokens,
-            monotonic_counter.genai_completions = 1_u64,
-            monotonic_counter.genai_corrections = u64::from(outcome == "corrected"),
+            duration_ms,
+            prompt_bytes = self.prompt_bytes,
+            result_bytes = self.result_bytes,
+            tool_turns = self.tool_turns,
+            input_tokens = self.input_tokens,
+            output_tokens = self.output_tokens,
+            reasoning_tokens = self.reasoning_tokens,
             "completion"
         );
     }
@@ -114,7 +111,7 @@ impl Drop for Completion {
 }
 
 /// A completion failure this crate constructs. [`outcome_of`] downcasts this
-/// so metric labels do not depend on message wording.
+/// so the `outcome` field does not depend on message wording.
 #[derive(Debug, thiserror::Error)]
 pub enum Failure {
     // Round budget spent without the model producing a final text answer.

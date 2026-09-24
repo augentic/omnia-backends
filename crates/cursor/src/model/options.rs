@@ -16,17 +16,22 @@ use crate::protocol::{
     ModelSelection, ToolList,
 };
 
-/// Everything one completion derives from the request: the `CreateAgent`
-/// options, the pin every later call on the agent repeats, the workspace
-/// they point into, the opening prompt, the format steering candidate
-/// extraction, and whether the guest checks answers.
+/// Everything one completion derives from the request: the agent to create,
+/// the opening prompt, the format steering candidate extraction, and whether
+/// the guest checks answers.
 pub struct Turn {
-    pub options: AgentOptions,
-    pub operation: AgentOperationOptions,
-    pub workspace: Workspace,
+    pub agent: AgentSpec,
     pub prompt: String,
     pub format: Format,
     pub check: bool,
+}
+
+/// The agent one completion creates: the `CreateAgent` options, the pin
+/// every later call on the agent repeats, and the workspace they point into.
+pub struct AgentSpec {
+    pub options: AgentOptions,
+    pub operation: AgentOperationOptions,
+    pub workspace: Workspace,
 }
 
 impl Turn {
@@ -52,9 +57,11 @@ impl Turn {
         };
         let prompt = with_mcp_hint(&request.mcp_servers(), request.to_string());
         Ok(Self {
-            options,
-            operation,
-            workspace,
+            agent: AgentSpec {
+                options,
+                operation,
+                workspace,
+            },
             prompt,
             format: request.format.clone(),
             check: request.check,

@@ -9,66 +9,61 @@
 
 use std::collections::HashMap;
 
-use omnia_wasi_model::{Format, ToolTurn, Transcript, Usage};
+use omnia_wasi_model::{ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::Instant;
 
+use super::options::Turn;
 use crate::elapsed_ms;
 use crate::failure::Outcome;
 use crate::protocol::{RunStreamMessage, SdkMessage, TokenUsage};
 
-/// One completion's start/finish events. Drop without [`Self::finish`]
-/// records [`Outcome::Abort`] (a cancelled future).
+/// One completion's start/finish events: the outcome and what it cost, on
+/// the `complete` span that names the model and format. Drop without
+/// [`Self::finish`] records [`Outcome::Abort`] (a cancelled future).
 pub struct Completion {
-    model: String,
-    format: String,
-    prompt_bytes: u64,
     started: Instant,
     attempts: u32,
-    result_bytes: u64,
-    tool_turns: u64,
     input_tokens: u64,
     output_tokens: u64,
     reasoning_tokens: u64,
     emitted: bool,
 }
 
-impl Completion {
-    pub fn start(model: &str, format: &Format, prompt: &str, mcp_servers: usize) -> Self {
-        let format = format.to_string();
-        let prompt_bytes = len_u64(prompt.len());
-
-        tracing::debug!(model, format, prompt_bytes, mcp = mcp_servers, "completion started");
+impl From<&Turn> for Completion {
+    // The start event: the clock runs from here.
+    fn from(turn: &Turn) -> Self {
+        tracing::debug!(
+            prompt_bytes = turn.prompt.len(),
+            mcp = turn.agent.options.mcp_servers.len(),
+            "completion started"
+        );
 
         Self {
-            model: model.to_owned(),
-            format,
-            prompt_bytes,
             started: Instant::now(),
             attempts: 0,
-            result_bytes: 0,
-            tool_turns: 0,
             input_tokens: 0,
             output_tokens: 0,
             reasoning_tokens: 0,
             emitted: false,
         }
     }
+}
 
+impl Completion {
     // Count an attempt as started, including ones that later time out.
-    pub const fn new_attempt(&mut self) {
+    pub const fn attempt(&mut self) {
         self.attempts = self.attempts.saturating_add(1);
     }
 
-    /// Snapshot the last successful send (result size, tools, tokens).
+    /// Note one answered send and add its tokens to the completion's bill.
     pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
-        self.result_bytes = len_u64(result_len);
-        self.tool_turns = len_u64(tool_turns);
+        tracing::debug!(result_bytes = result_len, tool_turns, ?usage, "send answered");
 
         if let Some(usage) = usage {
-            self.input_tokens = u64::from(usage.input_tokens);
-            self.output_tokens = u64::from(usage.output_tokens);
-            self.reasoning_tokens = u64::from(usage.reasoning_tokens.unwrap_or(0));
+            self.input_tokens += u64::from(usage.input_tokens);
+            self.output_tokens += u64::from(usage.output_tokens);
+            self.reasoning_tokens += u64::from(usage.reasoning_tokens.unwrap_or(0));
         }
     }
 
@@ -83,15 +78,11 @@ impl Completion {
             return;
         }
         self.emitted = true;
+
         tracing::info!(
-            model = %self.model,
-            format = %self.format,
             outcome = outcome.as_str(),
             attempts = self.attempts,
             duration_ms = elapsed_ms(self.started),
-            prompt_bytes = self.prompt_bytes,
-            result_bytes = self.result_bytes,
-            tool_turns = self.tool_turns,
             input_tokens = self.input_tokens,
             output_tokens = self.output_tokens,
             reasoning_tokens = self.reasoning_tokens,
@@ -244,13 +235,6 @@ fn clamp_u32(count: i64) -> u32 {
 fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
 }
-
-// Widen a byte or item count to an event field. `usize` never exceeds
-// `u64` on a supported target, so nothing is lost.
-fn len_u64(len: usize) -> u64 {
-    u64::try_from(len).unwrap_or(u64::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use omnia_wasi_model::Usage;

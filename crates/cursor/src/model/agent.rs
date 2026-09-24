@@ -23,20 +23,33 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout};
 
 use super::observe::{Completion, EventLog};
-use super::options::{Turn, Workspace};
+use super::options::{AgentSpec, Turn, Workspace};
 use crate::endpoint::Attached;
 use crate::failure::Outcome;
 use crate::pool::Lease;
-use crate::protocol::{AgentOperationOptions, AgentOptions, RunStatus, RunStream, RunStreamResult};
+use crate::protocol::{AgentOperationOptions, RunStatus, RunStream, RunStreamResult};
 use crate::{Failure, elapsed_ms};
 
 const MAX_ROUNDS: u32 = 2;
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const RUN_ID_WAIT: Duration = Duration::from_secs(2);
 
+/// Run `turn` as an agent on `lease`, with its callbacks routed into
+/// `tool_host`: `CreateAgent`, the prompt to an answer, then the teardown.
+///
+/// # Errors
+///
+/// Returns the failure, marked as before any candidate when it struck in
+/// `CreateAgent` or the opening `Send`.
+pub async fn complete(
+    lease: Arc<Lease>, turn: Turn, tool_host: Arc<dyn ToolHost>, deadlines: Deadlines,
+) -> Result<Answer, Unanswered> {
+    Agent::new(lease, turn, tool_host, deadlines).await?.run().await
+}
+
 /// One completion's agent on a leased worker, from `CreateAgent` to its
 /// teardown.
-pub struct Agent {
+struct Agent {
     lease: Arc<Lease>,
     id: String,
     deadlines: Deadlines,
@@ -46,35 +59,22 @@ pub struct Agent {
     tool_host: Arc<dyn ToolHost>,
     abort: oneshot::Receiver<String>,
     completion: Completion,
-    // the turn in flight: its stream while `follow` runs, and the run the
-    // stream named until that run ends
     stream: Option<RunStream>,
     run_id: Option<String>,
-    // handed to the teardown once, by `complete` or by `Drop`
     created: Option<Created>,
     _attached: Attached,
 }
 
 impl Agent {
-    /// Create the agent for `turn` on `lease`, with its callbacks routed
-    /// into `tool_host`.
-    pub async fn create(
+    // `CreateAgent`: a failure here is one the guest has seen nothing of.
+    async fn new(
         lease: Arc<Lease>, turn: Turn, tool_host: Arc<dyn ToolHost>, deadlines: Deadlines,
-    ) -> Result<Self> {
-        let Turn {
-            options,
-            operation,
-            workspace,
-            prompt,
-            format,
-            check,
-        } = turn;
-        let mut completion =
-            Completion::start(&options.model.id, &format, &prompt, options.mcp_servers.len());
-
-        let created = Created::create(&lease, options, operation, workspace, deadlines.inactivity)
+    ) -> Result<Self, Unanswered> {
+        let mut completion = Completion::from(&turn);
+        let created = Created::create(&lease, turn.agent, deadlines.inactivity)
             .await
-            .inspect_err(|error| completion.finish(Outcome::of(error)))?;
+            .inspect_err(|error| completion.finish(Outcome::of(error)))
+            .map_err(Unanswered::before_candidate)?;
 
         let (abort_tx, abort) = oneshot::channel();
         let attached = lease.attach(created.id.clone(), Arc::clone(&tool_host), abort_tx);
@@ -83,9 +83,9 @@ impl Agent {
             lease,
             id: created.id.clone(),
             deadlines,
-            prompt,
-            format,
-            check,
+            prompt: turn.prompt,
+            format: turn.format,
+            check: turn.check,
             tool_host,
             abort,
             completion,
@@ -96,9 +96,9 @@ impl Agent {
         })
     }
 
-    /// Drive the prompt to an answer, then tear the agent down. The answer
-    /// waits on the teardown, so the lease — and the worker — go only after.
-    pub async fn complete(mut self) -> Result<Answer, Unanswered> {
+    // Drive the prompt to an answer, then tear the agent down. The answer
+    // waits on the teardown, so the lease — and the worker — go only after.
+    async fn run(mut self) -> Result<Answer, Unanswered> {
         let prompt = mem::take(&mut self.prompt);
         let result = self.rounds(prompt).await;
         let outcome = match &result {
@@ -120,7 +120,8 @@ impl Agent {
     async fn rounds(&mut self, mut prompt: String) -> Result<Answer, Unanswered> {
         let mut round = 1;
         loop {
-            self.completion.new_attempt();
+            self.completion.attempt();
+
             // a candidate is only offered once a `Send` succeeds, so the
             // opening round's failure is one the guest has seen nothing of
             let response = match self.send(&prompt).await {
@@ -136,21 +137,20 @@ impl Agent {
                 return Ok(response.answer(candidate));
             }
 
+            // check for error and rounds left
             match self.tool_host.check(candidate.clone()).await.map_err(Unanswered::settled)? {
                 Ok(()) => return Ok(response.answer(candidate)),
-                // the agent keeps its session, so the correction alone is
-                // the next prompt
                 Err(correction) if round < MAX_ROUNDS => {
                     tracing::debug!(%correction, "check rejected the candidate");
+                    // agents keep their session, so the correction is the prompt
                     prompt = correction;
-                    round += 1;
                 }
-                // out of rounds: the last correction is the typed failure
-                // the guest sees
                 Err(correction) => {
                     return Err(Unanswered::settled(Error::BudgetExhausted(correction).into()));
                 }
             }
+
+            round += 1;
         }
     }
 
@@ -286,10 +286,13 @@ impl Created {
     /// waiting — at `window`, or dropped — leaves an agent the task tears
     /// down itself; a worker silent for one more window gives the slot back
     /// with nothing to tear down.
-    async fn create(
-        lease: &Arc<Lease>, options: AgentOptions, operation: AgentOperationOptions,
-        workspace: Workspace, window: Duration,
-    ) -> Result<Self> {
+    async fn create(lease: &Arc<Lease>, spec: AgentSpec, window: Duration) -> Result<Self> {
+        let AgentSpec {
+            options,
+            operation,
+            workspace,
+        } = spec;
+
         let (tx, rx) = oneshot::channel();
         tokio::spawn({
             let lease = Arc::clone(lease);
@@ -303,6 +306,7 @@ impl Created {
                     );
                     return;
                 };
+
                 let created = match answered {
                     Ok(created) if created.agent_id.is_empty() => {
                         Err(anyhow!("sdk.v1 RPC `CreateAgent` returned an empty agent id"))
@@ -315,6 +319,7 @@ impl Created {
                     }),
                     Err(error) => Err(error),
                 };
+
                 match tx.send(created) {
                     Ok(()) => {}
                     // nobody waiting: the caller timed out or was dropped,
@@ -330,6 +335,7 @@ impl Created {
                 Err(anyhow!("sdk.v1 RPC `CreateAgent` ended without an outcome"))
             })
         };
+
         timeout(window, lease.worker().fail_on_exit(claimed)).await.unwrap_or_else(|_elapsed| {
             Err(anyhow!("sdk.v1 RPC `CreateAgent` unanswered after {}s", window.as_secs()))
         })
@@ -429,9 +435,9 @@ pub struct Unanswered {
 }
 
 impl Unanswered {
-    /// A failure in `CreateAgent` or the opening `Send`: the guest has seen
-    /// nothing of this agent.
-    pub const fn before_candidate(error: anyhow::Error) -> Self {
+    // A failure in `CreateAgent` or the opening `Send`: the guest has seen
+    // nothing of this agent.
+    const fn before_candidate(error: anyhow::Error) -> Self {
         Self {
             error,
             before_candidate: true,

@@ -13,7 +13,7 @@ mod options;
 use std::sync::Arc;
 
 pub use agent::Deadlines;
-use agent::{Agent, Unanswered};
+use agent::Unanswered;
 use omnia_wasi_model::{Answer, FutureResult, Request, ToolHost, WasiModelCtx};
 use options::Turn;
 use tracing::{Instrument, info_span};
@@ -23,6 +23,8 @@ use crate::Client;
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let client = self.clone();
+        let model = request.model.as_deref().unwrap_or(&self.model);
+        let span = info_span!("complete", model, format = %request.format);
 
         Box::pin(
             async move {
@@ -40,7 +42,7 @@ impl WasiModelCtx for Client {
 
                 client.attempt(&request, &tool_host).await.map_err(Unanswered::into_error)
             }
-            .instrument(info_span!("complete")),
+            .instrument(span),
         )
     }
 }
@@ -49,18 +51,10 @@ impl Client {
     async fn attempt(
         &self, request: &Request, tool_host: &Arc<dyn ToolHost>,
     ) -> Result<Answer, Unanswered> {
-        // prepare the turn
         let turn = Turn::prepare(request, tool_host.local_path(), &self.model, &self.api_key)
             .await
             .map_err(Unanswered::settled)?;
-
-        // lease a worker from the pool
         let lease = self.pool.lease().await.map_err(Unanswered::settled)?;
-
-        // create the agent
-        let agent = Agent::create(lease, turn, Arc::clone(tool_host), self.deadlines)
-            .await
-            .map_err(Unanswered::before_candidate)?;
-        agent.complete().await
+        agent::complete(lease, turn, Arc::clone(tool_host), self.deadlines).await
     }
 }

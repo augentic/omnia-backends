@@ -1,5 +1,5 @@
 //! Key/PATH-gated live integration tests for the cursor backend — wasi-model
-//! "run 3" (the bridge-managed agent acceptance gate).
+//! "run 3" (the `cursor-sdk-bridge` agent acceptance gate).
 //!
 //! Mirrors the genai backend's `live.rs`: each test spawns a real
 //! `cursor-sdk-bridge`, drives a completion through the
@@ -61,11 +61,11 @@ fn temp_workspace(label: &str) -> Result<std::path::PathBuf> {
     Ok(workspace)
 }
 
-// Connect and drop the client alone, which spawns one bridge, completes its
+// Connect and drop the client alone, which spawns one worker, completes its
 // handshake, and closes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn live_bridge_handshake() -> Result<()> {
+async fn live_worker_handshake() -> Result<()> {
     let client = connect().await?;
     drop(client);
     Ok(())
@@ -149,7 +149,7 @@ async fn fanout(client: &Client, agents: usize, pids: &SpawnedPids) -> Result<()
 }
 
 /// Four completions pending together, the way `emery_sdk::extract` puts its
-/// seams up: one bridge process per agent on the pooled client, none held
+/// seams up: one worker per agent on the pooled client, none held
 /// two, every answer arrives, and every process is gone once they have.
 /// `connect()` leaves `max_agents` at four, so nothing here queues.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -160,7 +160,7 @@ async fn live_fanout() -> Result<()> {
     fanout(&client, 4, &pids).await
 }
 
-/// `live_fanout` twenty times over on one client: a bridge that exits
+/// `live_fanout` twenty times over on one client: a worker that exits
 /// under the fan-out fails its completion with `cursor-sdk-bridge exited`,
 /// and a lease that does not release leaves its process up, and a slot
 /// closed, for the next round.
@@ -204,16 +204,16 @@ impl SpawnedPids {
             }
             anyhow::ensure!(
                 tokio::time::Instant::now() < deadline,
-                "bridge process groups {up:?} still up after {GONE:?}: a lease did not release, \
-                 or a bridge left an agent process behind"
+                "worker process groups {up:?} still up after {GONE:?}: a lease did not release, \
+                 or a worker left an agent process behind"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
 
-/// Whether anything is left of the process group a bridge led (`kill -0`
-/// on the group): the bridge itself, or an agent process it forked.
+/// Whether anything is left of the process group a worker led (`kill -0`
+/// on the group): the worker itself, or an agent process it forked.
 fn group_alive(pgid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", "--", &format!("-{pgid}")])
@@ -255,12 +255,12 @@ impl tracing::field::Visit for Spawn {
     }
 }
 
-/// A real bridge `kill -9`ed under its opening run: the completion restarts
+/// A real worker `kill -9`ed under its opening run: the completion restarts
 /// on a fresh process and still answers. The probe is the first spawn, the
 /// completion's own process the second, the restart the third.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn bridge_killed_mid_run_recovers() -> Result<()> {
+async fn worker_killed_mid_run_recovers() -> Result<()> {
     let pids = SpawnedPids::install();
 
     // One slot, so the restart also proves the dead lease is reaped first.
@@ -278,7 +278,7 @@ async fn bridge_killed_mid_run_recovers() -> Result<()> {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while pids.pids().len() < 2 {
-        anyhow::ensure!(tokio::time::Instant::now() < deadline, "no second bridge spawned");
+        anyhow::ensure!(tokio::time::Instant::now() < deadline, "no second worker spawned");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let victim = pids.pids()[1];

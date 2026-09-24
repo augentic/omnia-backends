@@ -1,13 +1,12 @@
-//! Spawn and manage a `cursor-sdk-bridge` process.
+//! Spawn and supervise one `cursor-sdk-bridge` process — a worker — with
+//! `sdk.v1` bound over it.
 //!
-//! The bridge leads a process group of its own: a kill reaches the agent
-//! processes it forks, and whatever a bridge left in its group when it
+//! The worker leads a process group of its own: a kill reaches the agent
+//! processes it forks, and whatever a worker left in its group when it
 //! exited is swept as the exit is seen, so nothing of a slot's process
 //! outlives it.
 
 mod discovery;
-mod messages;
-mod rpc;
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -17,12 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use discovery::Discovery;
-pub use messages::{
-    AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
-    ModelSelection, RunStatus, RunStreamMessage, RunStreamResult, SdkMessage, TokenUsage, ToolList,
-};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
-pub use rpc::{Rpc, RpcError, RunStream};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{ChildStderr, ChildStdout, Command};
@@ -31,13 +25,14 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
 use crate::endpoint::Registration;
+use crate::sdk::Rpc;
 use crate::{Failure, elapsed_ms, lock};
 
 // The handshake's two bounds: the ready line on stderr, then `sdk.v1`
 // bound over it (token read, `Ping`, `GetVersion`).
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-// The grace `Shutdown` asks the bridge for, and the bound on the whole ask —
+// The grace `Shutdown` asks the worker for, and the bound on the whole ask —
 // grace, reply and exit — before the kill; the grace must sit well inside.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -47,15 +42,15 @@ const TAIL_LINES: usize = 20;
 const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 
 /// A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`
-/// bound on it. Dropping it asks the bridge to go; [`Bridge::close`] also
+/// bound on it. Dropping it asks the worker to go; [`Worker::close`] also
 /// waits for it to.
 #[derive(Debug)]
-pub struct Bridge {
+pub struct Worker {
     watched: Watched,
     rpc: Rpc,
 }
 
-impl Bridge {
+impl Worker {
     /// Spawn `cursor-sdk-bridge` calling back as `callback`, and watch it.
     /// The ready-line handshake is left to [`Spawned::handshake`] so a pool
     /// lease can occupy the slot first.
@@ -91,7 +86,7 @@ impl Bridge {
         command.wrap(KillOnDrop);
         command.wrap(ProcessGroup::leader());
 
-        // spawn the bridge
+        // spawn the worker
         let child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
         Supervisor::spawn(child, state_root)
     }
@@ -101,17 +96,17 @@ impl Bridge {
         &self.rpc
     }
 
-    /// The bound `sdk.v1` client, while the bridge is still running.
+    /// The bound `sdk.v1` client, while the worker is still running.
     pub fn live_rpc(&self) -> Option<&Rpc> {
         self.watched.is_running().then_some(&self.rpc)
     }
 
-    /// `future`, failing as the bridge's exit when it exits under it.
+    /// `future`, failing as the worker's exit when it exits under it.
     pub async fn fail_on_exit<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
         self.watched.fail_on_exit(future).await
     }
 
-    /// Ask the bridge to go, and wait for it to exit.
+    /// Ask the worker to go, and wait for it to exit.
     pub async fn close(&self) {
         self.ask();
         self.watched.exited().await;
@@ -124,7 +119,7 @@ impl Bridge {
     }
 }
 
-impl Drop for Bridge {
+impl Drop for Worker {
     fn drop(&mut self) {
         self.ask();
     }
@@ -146,9 +141,9 @@ impl Supervisor {
     fn spawn(mut child: Box<dyn ChildWrapper>, state_root: TempDir) -> Result<Spawned> {
         let started_at = Instant::now();
 
-        let pid = child.id().context("no pid for spawned bridge")?;
+        let pid = child.id().context("no pid for spawned worker")?;
         let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
-            bail!("no piped stdout and stderr for spawned bridge");
+            bail!("no piped stdout and stderr for spawned worker");
         };
 
         let state = Arc::new(State {
@@ -189,9 +184,9 @@ impl Supervisor {
             // an exit in the same tick as a close is still an exit
             biased;
             _ = self.child.wait() => true,
-            // `close`, or the `Bridge` or `Spawned` dropped
+            // `close`, or the `Worker` or `Spawned` dropped
             _ = self.stop.changed() => {
-                // a `Bridge` hands its client over to be asked; a `Spawned`
+                // a `Worker` hands its client over to be asked; a `Spawned`
                 // has none to hand over, and is killed outright
                 let rpc = self.stop.borrow().clone();
                 if let Some(rpc) = rpc {
@@ -236,7 +231,7 @@ impl Supervisor {
     }
 }
 
-/// A process [`Bridge::spawn`] spawned, watched and killable, with its
+/// A process [`Worker::spawn`] spawned, watched and killable, with its
 /// ready-line handshake still to run. Dropped, it is killed: nothing is
 /// bound to ask over.
 pub struct Spawned {
@@ -256,7 +251,7 @@ impl Spawned {
     ///
     /// Returns an error when the ready line never arrives or the RPC
     /// handshake fails; the process is killed with it.
-    pub async fn handshake(self) -> Result<Bridge> {
+    pub async fn handshake(self) -> Result<Worker> {
         let Self { watched, discovery } = self;
         let scanned = async {
             discovery.await.unwrap_or_else(|_gone| {
@@ -278,7 +273,7 @@ impl Spawned {
             "cursor-sdk-bridge spawned"
         );
 
-        Ok(Bridge { watched, rpc })
+        Ok(Worker { watched, rpc })
     }
 }
 
@@ -316,12 +311,12 @@ impl Watched {
                 Err(error) => error,
             },
             // branch 2: the process exited before the future completed
-            exit = &mut exited => return Err(Failure::BridgeExited(exit).into()),
+            exit = &mut exited => return Err(Failure::WorkerExited(exit).into()),
         };
 
         // wait for the exit that explains the failure
         match timeout(EXIT_WAIT, exited).await {
-            Ok(exit) => Err(Failure::BridgeExited(exit).into()),
+            Ok(exit) => Err(Failure::WorkerExited(exit).into()),
             Err(_elapsed) => Err(error),
         }
     }
@@ -344,7 +339,7 @@ impl Watched {
     }
 }
 
-// what the bridge, its handshake and its supervisor all see of one process
+// what the worker, its handshake and its supervisor all see of one process
 #[derive(Debug)]
 struct State {
     pid: u32,
@@ -363,7 +358,7 @@ impl State {
     }
 }
 
-// The last few lines the bridge wrote to stderr (the ready line aside),
+// The last few lines the worker wrote to stderr (the ready line aside),
 // shared between the reader and whoever reports how the process ended.
 #[derive(Debug, Default)]
 struct Tail(Mutex<VecDeque<String>>);
@@ -390,7 +385,7 @@ impl fmt::Display for Tail {
     }
 }
 
-/// How a spawned bridge ended.
+/// How a spawned worker ended.
 #[derive(Clone, Copy, Debug)]
 pub struct Exit {
     /// The exit status, when the wait reported one.
@@ -438,7 +433,7 @@ fn read_stderr(
                     let _ = tx.send(payload.parse());
                 }
             } else {
-                tracing::debug!(%line, stream = "stderr", "bridge output");
+                tracing::debug!(%line, stream = "stderr", "cursor-sdk-bridge output");
                 state.tail.push(line);
             }
         }
@@ -451,7 +446,7 @@ fn drain_stdout(stdout: ChildStdout) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(%line, stream = "stdout", "bridge output");
+            tracing::debug!(%line, stream = "stdout", "cursor-sdk-bridge output");
         }
     });
 }
@@ -463,7 +458,7 @@ mod tests {
 
     use super::{Exit, TAIL_LINES, Tail};
 
-    // The crash WARN and `Failure::BridgeExited` both read this text.
+    // The crash WARN and `Failure::WorkerExited` both read this text.
     #[test]
     fn exit_display() {
         let exit = |status| Exit { status, pid: 1 }.to_string();

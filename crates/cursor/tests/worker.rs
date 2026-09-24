@@ -8,7 +8,7 @@
 //! is). No row drives `Client::complete` from the test.
 //!
 //! The restart rows (under "Process death" and "Transport") pin the one
-//! retry the client makes: a bridge lost before any candidate reached the
+//! retry the client makes: a worker lost before any candidate reached the
 //! guest is given up, and the prompt goes once more to a fresh lease; a
 //! second loss, a loss after a candidate, or a run that merely stalls is
 //! the failure as it stands.
@@ -36,10 +36,10 @@ use tracing_subscriber::layer::SubscriberExt as _;
 const WINDOW: Duration = Duration::from_secs(1);
 /// `agent.rs`'s bound on one teardown call.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// `bridge.rs`'s bound on a graceful exit: the `Shutdown` RPC and the exit
+/// `worker.rs`'s bound on a graceful exit: the `Shutdown` RPC and the exit
 /// it asks for, together.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// `bridge.rs`'s bound on binding `sdk.v1` over the ready line (token read,
+/// `worker.rs`'s bound on binding `sdk.v1` over the ready line (token read,
 /// `Ping`, `GetVersion`).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -74,7 +74,7 @@ fn killed(process: &Process) {
     assert_eq!(process.count(Rpc::Shutdown), 0, "process {} was killed, not asked", process.number);
 }
 
-/// The `Failure::BridgeExited` detail a `SIGKILL`ed bridge fails with.
+/// The `Failure::WorkerExited` detail a `SIGKILL`ed worker fails with.
 const KILLED: &str = "cursor-sdk-bridge exited (signal: 9 (SIGKILL))";
 /// The full sequence of a completion that answered.
 const ANSWERED: [Rpc; 4] = [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent];
@@ -173,7 +173,7 @@ async fn abandon_during_handshake() {
     let fake = Spawnable::new(&Config::echo().fault_on(2, Fault::Hang(Point::Ping)));
     let client = spawning(&fake, 2).await;
     run_guest(test_programs::MODEL_FANOUT_ABANDON, &["2"], &client).await;
-    // Nothing to ask an unbound bridge: it is killed at once, well under
+    // Nothing to ask an unbound worker: it is killed at once, well under
     // the graceful `SHUTDOWN_TIMEOUT`.
     await_gone_within(&fake, AT_ONCE).await;
 
@@ -501,7 +501,7 @@ async fn slow_stream_rearms() {
 // ------------------------------------------------------------------------
 
 #[tokio::test]
-async fn bridge_killed_on_send_restarts() {
+async fn worker_killed_on_send_restarts() {
     // Process 1 dies as the opening `Send` begins: no candidate has been
     // offered, so the prompt goes once more, on process 2, and the guest
     // gets its answer.
@@ -522,7 +522,7 @@ async fn bridge_killed_on_send_restarts() {
 }
 
 #[tokio::test]
-async fn bridge_exited_on_create_restarts() {
+async fn worker_exited_on_create_restarts() {
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::ExitOnCreate(1)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
@@ -561,7 +561,7 @@ async fn grandchildren_swept() {
 }
 
 #[tokio::test]
-async fn bridge_killed_twice_fails() {
+async fn worker_killed_twice_fails() {
     // Every process dies on its opening `Send`: one restart, then the
     // second exit stands. The socket resets as each process dies; the typed
     // exit wins over the transport error, and what the processes wrote to
@@ -569,7 +569,7 @@ async fn bridge_killed_twice_fails() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::KillOnSend(1)));
     let client = spawning(&fake, 1).await;
     expect_error(KILLED, &["without:fake-bridge marker"], &client).await;
-    // Teardown is skipped on a dead bridge: no `TEARDOWN_TIMEOUT` is paid.
+    // Teardown is skipped on a dead worker: no `TEARDOWN_TIMEOUT` is paid.
     await_gone_within(&fake, AT_ONCE).await;
 
     let log = fake.log();
@@ -608,7 +608,7 @@ async fn killed_after_candidate_fails() {
 
 #[tokio::test]
 async fn inactive_run_not_restarted() {
-    // A bridge that stays up and silent is not a lost bridge: the run is
+    // A worker that stays up and silent is not a lost worker: the run is
     // cancelled at the inactivity bound and the failure stands.
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Stream)));
     let client = connect(with_window(WINDOW, 1)).await;
@@ -756,7 +756,7 @@ async fn close_500() {
 #[tokio::test]
 async fn stream_reset_restarts() {
     // Process 1 resets its opening run's stream after its first frame and
-    // stays up: the socket failure alone is the lost bridge. The run id that
+    // stays up: the socket failure alone is the lost worker. The run id that
     // frame carried is cancelled, the agent torn down and the process asked
     // to go before the restart takes the slot.
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::ResetStream(1)));
@@ -783,7 +783,7 @@ async fn stream_reset_twice_fails() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::ResetStream(1)));
     let client = spawning(&fake, 1).await;
     expect_error(
-        "bridge RPC `SdkAgentService/Send` transport failed reading the stream",
+        "sdk.v1 RPC `SdkAgentService/Send` transport failed reading the stream",
         &[],
         &client,
     )
@@ -806,7 +806,7 @@ async fn stream_reset_twice_fails() {
 #[tokio::test]
 async fn callback_rejections() {
     // A run that streams for a few seconds keeps its agent live while the
-    // test knocks on the endpoint the way a misbehaving bridge would.
+    // test knocks on the endpoint the way a misbehaving worker would.
     let fake = Spawnable::new(&Config::paced(200, 20, Then::Finish));
     let client = spawning(&fake, 1).await;
     let guest = echo_guest(&client);
@@ -919,7 +919,7 @@ async fn ready_line_never_logged() {
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
     await_gone(&fake).await;
 
-    let token = fake.log().workers()[0].bridge_token().expect("the process logged its token");
+    let token = fake.log().workers()[0].token().expect("the process logged its token");
     assert!(!token.is_empty());
     let events = captured.0.lock().expect("captured lock").clone();
     assert!(

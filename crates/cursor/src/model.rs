@@ -1,9 +1,9 @@
-//! `wasi-model` backend over the Cursor SDK bridge.
+//! `wasi-model` backend over `cursor-sdk-bridge`.
 //!
-//! Each completion leases a bridge, creates an agent from the [`Request`], and
+//! Each completion leases a worker, creates an agent from the [`Request`], and
 //! streams the answer. Guest tools run through [`ToolHost::call_tool`]; an
 //! optional [`ToolHost::check`] can reject and correct on the same session. If
-//! the bridge is lost before any candidate reaches the guest, the completion
+//! the worker is lost before any candidate reaches the guest, the completion
 //! retries once on a fresh lease.
 
 mod agent;
@@ -35,7 +35,7 @@ impl WasiModelCtx for Client {
                 tracing::warn!(
                     pid = failed.pid(),
                     error = format!("{:#}", failed.error()),
-                    "bridge lost before any candidate; completion restarting on a fresh bridge"
+                    "worker lost before any candidate; completion restarting on a fresh worker"
                 );
 
                 client.attempt(&request, &tool_host).await.map_err(Unanswered::into_error)
@@ -54,7 +54,7 @@ impl Client {
             .await
             .map_err(Unanswered::settled)?;
 
-        // lease a bridge from the pool
+        // lease a worker from the pool
         let lease = self.pool.lease().await.map_err(Unanswered::settled)?;
 
         // create the agent

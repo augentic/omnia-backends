@@ -1,7 +1,8 @@
 //! The payload of the ready line `cursor-sdk-bridge` writes to stderr.
 //!
 //! Unknown fields are forward-compatible additions and ignored; the whole
-//! line is never logged (older bridges inline `authToken`).
+//! line is never logged (older `cursor-sdk-bridge` releases inline
+//! `authToken`).
 
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -10,7 +11,7 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use serde_repr::Deserialize_repr;
 
-/// The ready line's payload: where the bridge listens, and how to
+/// The ready line's payload: where the worker listens, and how to
 /// authenticate to it.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -90,8 +91,9 @@ enum Protocol {
     Connect,
 }
 
-// Deliberate unit tests: pure payload parsing (CI floor); `tests/bridge.rs`
-// proves the line reaches the handshake, `tests/live.rs` the real bridge.
+// Deliberate unit tests: pure payload parsing (CI floor); `tests/worker.rs`
+// proves the line reaches the handshake, `tests/live.rs` the real
+// `cursor-sdk-bridge`.
 #[cfg(test)]
 mod tests {
     use super::Discovery;

@@ -259,7 +259,7 @@ impl Process {
     }
 
     /// The process's own bearer token, as its ready line carried it.
-    pub fn bridge_token(&self) -> Option<String> {
+    pub fn token(&self) -> Option<String> {
         let ready = self.events.iter().find(|e| e.kind == Kind::Ready)?;
         Some(ready.text("token").to_owned())
     }

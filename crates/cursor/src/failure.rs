@@ -1,4 +1,5 @@
-use crate::bridge::{Exit, RpcError, RunStatus};
+use crate::sdk::{RpcError, RunStatus};
+use crate::worker::Exit;
 
 /// How a completion this backend ran came to fail, by variant rather than
 /// by message.
@@ -8,7 +9,7 @@ use crate::bridge::{Exit, RpcError, RunStatus};
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Failure {
-    /// The run reached a terminal status other than `finished`: the bridge
+    /// The run reached a terminal status other than `finished`: the worker
     /// or the provider answered with an error.
     #[error("cursor run {status}: {}", .detail.as_deref().unwrap_or("<no detail>"))]
     Run {
@@ -40,10 +41,10 @@ pub enum Failure {
     /// Hard tool-host failure (or a closed abort channel).
     #[error("completion aborted: {0}")]
     Aborted(String),
-    /// The spawned bridge process exited under the completion — during its
+    /// The spawned worker exited under the completion — during its
     /// handshake, or with a run on it.
     #[error("cursor-sdk-bridge exited ({0})")]
-    BridgeExited(Exit),
+    WorkerExited(Exit),
 }
 
 impl Failure {
@@ -66,13 +67,13 @@ pub enum Outcome {
     Inactive,
     /// [`Failure::Aborted`], or a completion dropped before it finished.
     Abort,
-    BridgeExit,
-    /// An [`RpcError::Transport`]: the socket to the bridge failed below
+    WorkerExit,
+    /// An [`RpcError::Transport`]: the socket to the worker failed below
     /// Connect.
     Transport,
     /// The guest's check rejected every candidate.
     Exhausted,
-    /// The bridge or the provider answered with an error: a
+    /// The worker or the provider answered with an error: a
     /// [`Failure::Run`], an [`RpcError::Connect`], or anything else.
     Error,
 }
@@ -100,17 +101,17 @@ impl Outcome {
             Failure::Timeout { .. } => Self::Timeout,
             Failure::Inactive { .. } => Self::Inactive,
             Failure::Aborted(_) => Self::Abort,
-            Failure::BridgeExited(_) => Self::BridgeExit,
+            Failure::WorkerExited(_) => Self::WorkerExit,
         }
     }
 
-    /// Whether the bridge, or the socket to it, was lost under the
+    /// Whether the worker, or the socket to it, was lost under the
     /// completion. Neither says anything about the prompt, so a fresh
-    /// bridge may be given it again; every other outcome is the bridge
+    /// worker may be given it again; every other outcome is the worker
     /// answering — a Connect error, an end-stream error, a run that ended
     /// in a failing status — and is not.
-    pub const fn lost_bridge(self) -> bool {
-        matches!(self, Self::BridgeExit | Self::Transport)
+    pub const fn lost_worker(self) -> bool {
+        matches!(self, Self::WorkerExit | Self::Transport)
     }
 
     /// The `outcome` field value.
@@ -121,7 +122,7 @@ impl Outcome {
             Self::Timeout => "timeout",
             Self::Inactive => "inactive",
             Self::Abort => "abort",
-            Self::BridgeExit => "bridge_exit",
+            Self::WorkerExit => "worker_exit",
             Self::Transport => "transport",
             Self::Exhausted => "exhausted",
             Self::Error => "error",
@@ -162,7 +163,7 @@ mod tests {
             Outcome::Timeout,
             Outcome::Inactive,
             Outcome::Abort,
-            Outcome::BridgeExit,
+            Outcome::WorkerExit,
             Outcome::Transport,
             Outcome::Exhausted,
             Outcome::Error,
@@ -176,7 +177,7 @@ mod tests {
                 "timeout",
                 "inactive",
                 "abort",
-                "bridge_exit",
+                "worker_exit",
                 "transport",
                 "exhausted",
                 "error"
@@ -194,8 +195,8 @@ mod tests {
         let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
         assert_eq!(Outcome::of(&aborted), Outcome::Abort);
 
-        let exited: anyhow::Error = Failure::BridgeExited(EXITED).into();
-        assert_eq!(Outcome::of(&exited), Outcome::BridgeExit);
+        let exited: anyhow::Error = Failure::WorkerExited(EXITED).into();
+        assert_eq!(Outcome::of(&exited), Outcome::WorkerExit);
         assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown)");
 
         let transport: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
@@ -210,33 +211,33 @@ mod tests {
         assert_eq!(failed.to_string(), "cursor run error: model overloaded");
         assert_eq!(run_error(None).to_string(), "cursor run error: <no detail>");
 
-        assert_eq!(Outcome::of(&anyhow::anyhow!("bridge RPC failed")), Outcome::Error);
+        assert_eq!(Outcome::of(&anyhow::anyhow!("sdk.v1 RPC failed")), Outcome::Error);
     }
 
     #[test]
-    fn lost_bridge() {
-        let exited: anyhow::Error = Failure::BridgeExited(EXITED).into();
-        assert!(Outcome::of(&exited).lost_bridge());
+    fn lost_worker() {
+        let exited: anyhow::Error = Failure::WorkerExited(EXITED).into();
+        assert!(Outcome::of(&exited).lost_worker());
         let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
         let socket: anyhow::Error =
             RpcError::io("SdkAgentService/Send", "reading the stream", reset).into();
-        assert!(Outcome::of(&socket).lost_bridge());
+        assert!(Outcome::of(&socket).lost_worker());
         let torn: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
-        assert!(Outcome::of(&torn).lost_bridge());
+        assert!(Outcome::of(&torn).lost_worker());
 
-        // The bridge answered, in one way or another.
-        assert!(!Outcome::of(&inactive()).lost_bridge());
+        // The worker answered, in one way or another.
+        assert!(!Outcome::of(&inactive()).lost_worker());
         let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
-        assert!(!Outcome::of(&timeout).lost_bridge());
+        assert!(!Outcome::of(&timeout).lost_worker());
         let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
-        assert!(!Outcome::of(&aborted).lost_bridge());
+        assert!(!Outcome::of(&aborted).lost_worker());
         let rejected: anyhow::Error =
             omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
-        assert!(!Outcome::of(&rejected).lost_bridge());
+        assert!(!Outcome::of(&rejected).lost_worker());
         assert!(!Outcome::of(&anyhow::anyhow!(
-            "bridge RPC `SdkAgentService/Send` failed (500 Internal Server Error, internal): boom"
+            "sdk.v1 RPC `SdkAgentService/Send` failed (500 Internal Server Error, internal): boom"
         ))
-        .lost_bridge());
-        assert!(!Outcome::of(&run_error(Some("model overloaded"))).lost_bridge());
+        .lost_worker());
+        assert!(!Outcome::of(&run_error(Some("model overloaded"))).lost_worker());
     }
 }

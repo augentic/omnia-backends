@@ -1,8 +1,8 @@
-//! Connect-over-HTTP/1.1 client for the bridge's loopback endpoint, exposing
-//! one typed method per `sdk.v1` procedure. Response shapes deserialize
-//! tolerantly (unknown fields ignored, missing fields defaulted), so a
-//! mispaired path and response type would fail silently — the pairing lives
-//! only here.
+//! Connect-over-HTTP/1.1 client for a `cursor-sdk-bridge`'s loopback
+//! endpoint, exposing one typed method per `sdk.v1` procedure. Response
+//! shapes deserialize tolerantly (unknown fields ignored, missing fields
+//! defaulted), so a mispaired path and response type would fail silently —
+//! the pairing lives only here.
 //!
 //! Every RPC is `POST {base}/sdk.v1.{Service}/{Method}` in the Connect JSON
 //! codec with bearer auth. Unary calls are plain JSON bodies; server streams
@@ -10,10 +10,11 @@
 //! per message, with flag `0x02` marking the JSON `EndStreamResponse`.
 //!
 //! A failed call is an [`RpcError`] in one of two classes a caller can tell
-//! apart: [`RpcError::Connect`] — the bridge answered, with a status and code
-//! on a unary call or an error frame closing a run stream — and
+//! apart: [`RpcError::Connect`] — the process answered, with a status and
+//! code on a unary call or an error frame closing a run stream — and
 //! [`RpcError::Transport`] — the socket, the HTTP layer, or the framing gave
-//! out below Connect, so the bridge is not known to have seen the call at all.
+//! out below Connect, so the process is not known to have seen the call at
+//! all.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -42,7 +43,8 @@ const END_STREAM: u8 = 0x02;
 /// Envelope flag bit marking a compressed frame (never negotiated here).
 const COMPRESSED: u8 = 0x01;
 
-/// A cloneable `sdk.v1` client bound to one bridge endpoint and bearer token.
+/// A cloneable `sdk.v1` client bound to one process's loopback endpoint and
+/// bearer token.
 #[derive(Clone)]
 pub struct Rpc {
     hyper: HyperClient<HttpConnector, Full<Bytes>>,
@@ -51,7 +53,7 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    /// Bind to `base` and prove the bridge answers `sdk.v1` (`Ping`, then
+    /// Bind to `base` and prove the process answers `sdk.v1` (`Ping`, then
     /// `GetVersion`). Unbounded: the caller holds the handshake's bound.
     pub async fn connect(base: &str, token: &str) -> Result<Self> {
         // The client is HTTP-only: refuse anything that is not loopback
@@ -74,12 +76,12 @@ impl Rpc {
         self.unary_empty("SdkBridgeControlService/Ping", &Empty {}).await
     }
 
-    /// `GetVersion`: the bridge's protocol and capabilities.
+    /// `GetVersion`: the process's protocol and capabilities.
     pub async fn get_version(&self) -> Result<GetVersionResponse> {
         self.unary("SdkBridgeControlService/GetVersion", &Empty {}).await
     }
 
-    /// `Shutdown`: ask the bridge to exit, giving its agents `grace` to
+    /// `Shutdown`: ask the process to exit, giving its agents `grace` to
     /// finish (whole seconds, saturating).
     pub async fn shutdown(&self, grace: Duration) -> Result<()> {
         let request = ShutdownRequest {
@@ -232,12 +234,12 @@ impl RunStream {
     }
 }
 
-/// One bridge RPC failed: the bridge answered with an error, or the call
+/// One `sdk.v1` RPC failed: the process answered with an error, or the call
 /// never got an answer at all.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RpcError {
-    /// The bridge answered: a non-success status on a unary call, or an
+    /// The process answered: a non-success status on a unary call, or an
     /// `EndStreamResponse` carrying an error on a stream.
     #[error(fmt = connect_fmt)]
     Connect {
@@ -252,8 +254,8 @@ pub enum RpcError {
     },
     /// Below Connect: the request could not be sent, or the response or run
     /// stream could not be read (a socket failure, or a body that ended
-    /// inside a frame). The bridge is not known to have seen the call.
-    #[error("bridge RPC `{method}` transport failed {doing}")]
+    /// inside a frame). The process is not known to have seen the call.
+    #[error("sdk.v1 RPC `{method}` transport failed {doing}")]
     Transport {
         /// The `Service/Method` the call named.
         method: String,
@@ -288,7 +290,7 @@ impl RpcError {
         Some(Self::answered(method, None, end.error?))
     }
 
-    // Details are the bridge's own diagnostics: logged, never carried.
+    // Details are the process's own diagnostics: logged, never carried.
     fn answered(method: &str, status: Option<StatusCode>, answer: ConnectStatus) -> Self {
         let ConnectStatus {
             code,
@@ -296,7 +298,7 @@ impl RpcError {
             details,
         } = answer;
         if let Some(details) = details {
-            tracing::debug!(method, %details, "bridge error details");
+            tracing::debug!(method, %details, "sdk.v1 error details");
         }
         Self::Connect {
             method: method.to_owned(),
@@ -348,8 +350,8 @@ fn connect_fmt(
     f: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
     match status {
-        Some(status) => write!(f, "bridge RPC `{method}` failed ({status}, {code}): {message}"),
-        None => write!(f, "bridge RPC `{method}` stream failed ({code}): {message}"),
+        Some(status) => write!(f, "sdk.v1 RPC `{method}` failed ({status}, {code}): {message}"),
+        None => write!(f, "sdk.v1 RPC `{method}` stream failed ({code}): {message}"),
     }
 }
 
@@ -401,16 +403,16 @@ impl Frame {
 /// `http://` to a loopback host: IP literal in `127.0.0.0/8` or `::1`, or
 /// the name `localhost`. Anything else would send credentials in the clear.
 fn require_loopback_http(base: &str) -> Result<()> {
-    let uri: Uri = base.parse().context("parsing bridge URL")?;
+    let uri: Uri = base.parse().context("parsing sdk.v1 URL")?;
     ensure!(
         uri.scheme() == Some(&http::uri::Scheme::HTTP),
-        "bridge URL must use the http scheme (the client has no TLS)"
+        "sdk.v1 URL must use the http scheme (the client has no TLS)"
     );
     if let Some(authority) = uri.authority() {
-        ensure!(!authority.as_str().contains('@'), "bridge URL must not include userinfo");
+        ensure!(!authority.as_str().contains('@'), "sdk.v1 URL must not include userinfo");
     }
-    let host = uri.host().context("bridge URL must include a host")?;
-    ensure!(is_loopback_host(host), "bridge URL must target a loopback host");
+    let host = uri.host().context("sdk.v1 URL must include a host")?;
+    ensure!(is_loopback_host(host), "sdk.v1 URL must target a loopback host");
     Ok(())
 }
 
@@ -445,7 +447,10 @@ fn decode_frame(buffer: &mut BytesMut) -> Result<Option<Frame>> {
         return Ok(None);
     }
     let flags = buffer[0];
-    ensure!(flags & COMPRESSED == 0, "bridge sent a compressed frame without negotiation");
+    ensure!(
+        flags & COMPRESSED == 0,
+        "cursor-sdk-bridge sent a compressed frame without negotiation"
+    );
     let length = u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]) as usize;
     if buffer.len() < 5 + length {
         return Ok(None);
@@ -473,8 +478,8 @@ fn gone_ok(result: Result<()>) -> Result<()> {
 }
 
 // Deliberate unit tests: the loopback ready-line URL, envelope framing, and
-// error decoding (CI floor); `tests/bridge.rs` proves the client against the
-// fake bridge and `tests/live.rs` against a real one.
+// error decoding (CI floor); `tests/worker.rs` proves the client against the
+// fake `cursor-sdk-bridge` and `tests/live.rs` against a real one.
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
@@ -578,7 +583,7 @@ mod tests {
             .expect("an end-stream error fails the stream");
         assert_eq!(
             error.to_string(),
-            "bridge RPC `SdkAgentService/Send` stream failed (unauthenticated): Unauthorized"
+            "sdk.v1 RPC `SdkAgentService/Send` stream failed (unauthenticated): Unauthorized"
         );
     }
 
@@ -591,7 +596,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "bridge RPC `SdkAgentService/CreateAgent` failed (404 Not Found, not_found): unknown \
+            "sdk.v1 RPC `SdkAgentService/CreateAgent` failed (404 Not Found, not_found): unknown \
              agent"
         );
 
@@ -608,7 +613,7 @@ mod tests {
         let error: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
         assert_eq!(
             format!("{error:#}"),
-            "bridge RPC `SdkAgentService/Send` transport failed reading the stream: stream ended \
+            "sdk.v1 RPC `SdkAgentService/Send` transport failed reading the stream: stream ended \
              mid-frame (3 bytes buffered)"
         );
     }

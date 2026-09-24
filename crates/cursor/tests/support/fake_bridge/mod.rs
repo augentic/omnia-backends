@@ -4,7 +4,7 @@
 //! directory holding the reply script, the shared log, and a symlink named
 //! `cursor-sdk-bridge` to the `fake-cursor-sdk-bridge` binary (`main.rs`,
 //! this same module), put first on the test process's `PATH` so the client
-//! finds the fake the way a deployment finds the real bridge. The client
+//! finds the fake the way a deployment finds the real one. The client
 //! starts one process per lease, each does the ready-line handshake, and
 //! all of them append to one JSONL log the test folds back into per-process
 //! histories. Faults and the reply script are one [`Config`], written as a
@@ -18,7 +18,7 @@
 //! the binary is built against the crate's `[dependencies]` alone, and the
 //! probe's `libc` is a dev-dependency.
 //!
-//! The fake answers `sdk.v1` the way the real bridge does — bearer-checked
+//! The fake answers `sdk.v1` the way the real one does — bearer-checked
 //! Connect JSON, `agent-<n>` ids counted per process so two processes hand
 //! out the same id, `Send` as an enveloped run stream, `CallCustomTool`
 //! posted back to the client's own endpoint — and nothing else.
@@ -51,7 +51,7 @@ pub use self::server::{EXIT_ON_CREATE, MARKERS};
 const SCRIPT_FILE: &str = "script.json";
 const LOG_FILE: &str = "log.jsonl";
 const RELEASES_FILE: &str = "releases.json";
-/// The name the client spawns the bridge by.
+/// The name the client spawns a worker by.
 const BIN_NAME: &str = "cursor-sdk-bridge";
 /// Where a spawned fake finds its home.
 const HOME_VAR: &str = "FAKE_BRIDGE_HOME";
@@ -435,8 +435,9 @@ pub async fn run_spawned(args: Vec<String>) {
     // proving it never reaches a log.
     ready_event["token"] = Value::String(server.token().to_owned());
 
-    // As the real bridge forks an agent process: a child in our group,
-    // holding the stderr pipe the client reads, that nothing of ours reaps.
+    // As the real `cursor-sdk-bridge` forks an agent process: a child in our
+    // group, holding the stderr pipe the client reads, that nothing of ours
+    // reaps.
     #[allow(clippy::zombie_processes, reason = "the fault is a child nobody waits for")]
     if server.has(&Fault::Grandchild) {
         let child = std::process::Command::new("sleep")

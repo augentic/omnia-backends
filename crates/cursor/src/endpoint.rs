@@ -1,11 +1,11 @@
-//! Loopback `CallCustomTool` server: the bridge calls back here to execute a
+//! Loopback `CallCustomTool` server: the worker calls back here to execute a
 //! guest-declared function tool, and the call routes into the completion's
 //! session through [`ToolHost::call_tool`].
 //!
 //! The server binds `127.0.0.1:0` and accepts both Connect unary codecs (the
-//! bridge picks the content type). Each bridge process is registered under
+//! worker picks the content type). Each worker is registered under
 //! its own bearer token, and that token selects the process's own agent
-//! table: agent ids are the bridge's to choose, so two live processes may
+//! table: agent ids are the worker's to choose, so two live processes may
 //! pick the same one, and a callback routes by the token it carries as well
 //! as the id it names. Budgets, per-call timeouts, oversize checks, and id
 //! correlation are enforced host-side inside `call_tool`.
@@ -70,7 +70,7 @@ impl Endpoint {
         })
     }
 
-    /// Register one bridge process: a fresh bearer token for it to call
+    /// Register one worker: a fresh bearer token for it to call
     /// back with, and its own agent table behind that token. Dropping the
     /// registration revokes the token.
     ///
@@ -80,7 +80,7 @@ impl Endpoint {
     pub fn register(&self) -> Result<Registration> {
         let token = gen_token()?;
         let sessions = Arc::new(Sessions::default());
-        lock(&self.handler.bridges).insert(token.clone(), Arc::clone(&sessions));
+        lock(&self.handler.workers).insert(token.clone(), Arc::clone(&sessions));
         Ok(Registration {
             handler: Arc::clone(&self.handler),
             url: self.url.clone(),
@@ -90,7 +90,7 @@ impl Endpoint {
     }
 }
 
-// Accept until the `Endpoint` drops, one connection task per bridge socket.
+// Accept until the `Endpoint` drops, one connection task per worker socket.
 async fn serve(listener: TcpListener, handler: Arc<Handler>) {
     loop {
         let stream = match listener.accept().await {
@@ -123,7 +123,7 @@ impl Drop for Endpoint {
     }
 }
 
-/// One bridge process's callback identity: the URL and bearer token it is
+/// One worker's callback identity: the URL and bearer token it is
 /// started with, and the agents routed under that token.
 #[must_use]
 pub struct Registration {
@@ -134,17 +134,17 @@ pub struct Registration {
 }
 
 impl Registration {
-    /// The full callback URL handed to the bridge (`--tool-callback-url`).
+    /// The full callback URL handed to the worker (`--tool-callback-url`).
     pub fn url(&self) -> &str {
         &self.url
     }
 
-    /// The bearer token handed to the bridge (`--tool-callback-auth-token`).
+    /// The bearer token handed to the worker (`--tool-callback-auth-token`).
     pub fn token(&self) -> &str {
         &self.token
     }
 
-    /// Route this bridge's callbacks for `agent_id` into `tool_host` until
+    /// Route this worker's callbacks for `agent_id` into `tool_host` until
     /// the returned guard drops; the first hard tool failure is sent on
     /// `abort`.
     pub fn attach(
@@ -175,7 +175,7 @@ impl std::fmt::Debug for Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        lock(&self.handler.bridges).remove(&self.token);
+        lock(&self.handler.workers).remove(&self.token);
     }
 }
 
@@ -194,15 +194,15 @@ impl Drop for Attached {
 
 #[derive(Default)]
 struct Handler {
-    /// Registered bridge processes' agent tables, by bearer token.
-    bridges: Mutex<HashMap<String, Arc<Sessions>>>,
+    /// Registered workers' agent tables, by bearer token.
+    workers: Mutex<HashMap<String, Arc<Sessions>>>,
 }
 
 impl Handler {
-    /// The agent table of the bridge whose bearer token the request carries.
+    /// The agent table of the worker whose bearer token the request carries.
     fn authorize(&self, headers: &HeaderMap) -> Option<Arc<Sessions>> {
         let token = headers.get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?;
-        lock(&self.bridges).get(token).cloned()
+        lock(&self.workers).get(token).cloned()
     }
 
     async fn handle(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
@@ -253,11 +253,11 @@ impl Handler {
 
 impl fmt::Debug for Handler {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Handler").field("bridges", &lock(&self.bridges).len()).finish()
+        f.debug_struct("Handler").field("workers", &lock(&self.workers).len()).finish()
     }
 }
 
-/// One bridge's live completions by `agent_id`.
+/// One worker's live completions by `agent_id`.
 #[derive(Debug, Default)]
 struct Sessions {
     entries: Mutex<HashMap<String, Session>>,
@@ -335,7 +335,7 @@ impl ToolCall {
     }
 }
 
-// Execute one decoded callback against the calling bridge's agent table.
+// Execute one decoded callback against the calling worker's agent table.
 async fn call_tool(sessions: &Sessions, headers: &HeaderMap, body: Bytes) -> Response<Full<Bytes>> {
     let content_type =
         headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
@@ -448,8 +448,8 @@ fn reply(
 }
 
 // The output-wrapping policy and the `Struct` codec — pure translation —
-// are unit-tested here; the server itself is exercised by a bridge calling
-// back in `tests/model.rs` and `tests/bridge.rs`.
+// are unit-tested here; the server itself is exercised by a worker calling
+// back in `tests/model.rs` and `tests/worker.rs`.
 #[cfg(test)]
 mod tests {
     use serde_json::{Map, Value, json};

@@ -63,11 +63,11 @@ so the policy splits into three tiers:
   probes, no options the fake alone needs; the fake is reached the way the
   real service is. One
   flat file per boundary in the crate's `tests/`: `tests/model.rs` is the
-  `omnia:model` contract, `tests/bridge.rs` / `tests/provider.rs` the
+  `omnia:model` contract, `tests/worker.rs` / `tests/provider.rs` the
   lifecycle and fault matrix (hung or parked RPCs, process death before and
   after the ready line, a completion dropped at every point it can be
   waiting, a `429`/`503`/truncated body). Exemplars:
-  [crates/cursor/tests/bridge.rs](crates/cursor/tests/bridge.rs) and
+  [crates/cursor/tests/worker.rs](crates/cursor/tests/worker.rs) and
   [crates/genai/tests/model.rs](crates/genai/tests/model.rs).
   - **Every guest program pairs with a row in every model backend's
     `tests/model.rs`.** Each suite invokes `test_programs::foreach_model!()`,
@@ -95,7 +95,7 @@ so the policy splits into three tiers:
 - **Unit tests for deterministic, service-free logic, wherever it lives**:
   OData filter building (`azure-table/store/filter.rs`), Postgres type
   mapping, the Kafka partitioner, cursor's ready-line and Connect-frame
-  parsing (`cursor/src/bridge/discovery.rs`, `bridge/rpc.rs`), genai's
+  parsing (`cursor/src/worker/discovery.rs`, `sdk/rpc.rs`), genai's
   request translation (`genai/src/model/options.rs`). A behaviour a guest
   boundary reaches is an e2e row, not a unit test: the scripted-server unit
   tests the model backends once carried inside `src/` were retired for

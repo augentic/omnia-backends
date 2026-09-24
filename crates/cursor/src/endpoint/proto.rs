@@ -1,10 +1,11 @@
 //! Hand-written prost messages for `sdk.v1.SdkCustomToolCallbackService` —
-//! the one service the bridge calls *into* this backend, and therefore the
+//! the one service the worker calls *into* this backend, and therefore the
 //! one place the binary protobuf codec must be accepted alongside JSON.
 //! Field tags mirror `sdk_custom_tool_callback_service.proto` verbatim.
 //!
-//! The fake bridge under `tests/support` includes this file by path: it
-//! POSTs the same messages, and one codec on both sides keeps them honest.
+//! The fake `cursor-sdk-bridge` under `tests/support` includes this file by
+//! path: it POSTs the same messages, and one codec on both sides keeps them
+//! honest.
 
 use prost_types::NullValue;
 use prost_types::value::Kind;
@@ -55,7 +56,7 @@ fn kind_to_value(value: &prost_types::Value) -> Value {
 
 // A `Struct` number is always a double; proto3's JSON mapping prints an
 // integral one without a fraction, so `42` must read back as `42`, not
-// `42.0`, whichever codec the bridge picked.
+// `42.0`, whichever codec the worker picked.
 fn number_to_value(number: f64) -> Value {
     match number {
         #[allow(clippy::cast_possible_truncation, reason = "integral and within 2^53: exact")]

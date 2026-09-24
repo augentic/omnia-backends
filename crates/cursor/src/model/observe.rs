@@ -13,9 +13,9 @@ use omnia_wasi_model::{Format, ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::Instant;
 
-use crate::bridge::{RunStreamMessage, SdkMessage, TokenUsage};
 use crate::elapsed_ms;
 use crate::failure::Outcome;
+use crate::sdk::{RunStreamMessage, SdkMessage, TokenUsage};
 
 /// One completion's start/finish events. Drop without [`Self::finish`]
 /// records [`Outcome::Abort`] (a cancelled future).
@@ -240,7 +240,7 @@ fn clamp_u32(count: i64) -> u32 {
 }
 
 // Find the first string under any of `keys`, tolerating both `snake_case`
-// and `camelCase` spellings across bridge versions.
+// and `camelCase` spellings across `cursor-sdk-bridge` versions.
 fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
 }
@@ -257,7 +257,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::EventLog;
-    use crate::bridge::{SdkMessage, TokenUsage};
+    use crate::sdk::{SdkMessage, TokenUsage};
 
     fn usage(input: i64, output: i64, reasoning: Option<i64>) -> Usage {
         Usage::from(TokenUsage {

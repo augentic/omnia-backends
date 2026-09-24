@@ -1,21 +1,23 @@
 #![doc = include_str!("../README.md")]
 
-mod bridge;
 mod endpoint;
 mod failure;
 mod model;
 mod pool;
+mod sdk;
+mod worker;
 
 use std::env;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, ensure};
-pub use bridge::{Exit, RpcError, RunStatus};
 pub use failure::Failure;
 use omnia::Backend;
+pub use sdk::{RpcError, RunStatus};
 use tokio::time::Instant;
 use tracing::instrument;
+pub use worker::Exit;
 
 use crate::model::Deadlines;
 use crate::pool::Pool;

@@ -1,13 +1,13 @@
-//! A bridge-managed agent: one completion's `CreateAgent`, the `Send` of
+//! An agent on a leased worker: one completion's `CreateAgent`, the `Send` of
 //! its prompt and of each correction the guest's check returns, and the
 //! teardown that gives the slot back.
 //!
-//! No wait on the bridge is unbounded — the inactivity window that stream
-//! progress rearms, the absolute cap, the callback's abort and the bridge's
-//! own exit each end one — so a bridge alive but silent unblocks the guest.
+//! No wait on the worker is unbounded — the inactivity window that stream
+//! progress rearms, the absolute cap, the callback's abort and the worker's
+//! own exit each end one — so a worker alive but silent unblocks the guest.
 //! The completion future is the guest's to drop at any `.await`, so
 //! `CreateAgent` and the teardown each run on a task of their own with the
-//! lease riding on it: the bridge closes only once nothing of the agent is
+//! lease riding on it: the worker closes only once nothing of the agent is
 //! left on it.
 
 use std::mem;
@@ -24,17 +24,17 @@ use tokio::time::{Instant, sleep_until, timeout};
 
 use super::observe::{Completion, EventLog};
 use super::options::{Turn, Workspace};
-use crate::bridge::{AgentOperationOptions, AgentOptions, RunStatus, RunStream, RunStreamResult};
 use crate::endpoint::Attached;
 use crate::failure::Outcome;
 use crate::pool::Lease;
+use crate::sdk::{AgentOperationOptions, AgentOptions, RunStatus, RunStream, RunStreamResult};
 use crate::{Failure, elapsed_ms};
 
 const MAX_ROUNDS: u32 = 2;
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const RUN_ID_WAIT: Duration = Duration::from_secs(2);
 
-/// One completion's agent on a leased bridge, from `CreateAgent` to its
+/// One completion's agent on a leased worker, from `CreateAgent` to its
 /// teardown.
 pub struct Agent {
     lease: Arc<Lease>,
@@ -97,7 +97,7 @@ impl Agent {
     }
 
     /// Drive the prompt to an answer, then tear the agent down. The answer
-    /// waits on the teardown, so the lease — and the bridge — go only after.
+    /// waits on the teardown, so the lease — and the worker — go only after.
     pub async fn complete(mut self) -> Result<Answer, Unanswered> {
         let prompt = mem::take(&mut self.prompt);
         let result = self.rounds(prompt).await;
@@ -155,16 +155,16 @@ impl Agent {
     }
 
     async fn send(&mut self, text: &str) -> Result<Response> {
-        // both bounds run from the `Send` call itself, so a bridge that takes
+        // both bounds run from the `Send` call itself, so a worker that takes
         // the request and never opens the stream is an inactivity failure
         let activity = watch::Sender::new(Instant::now());
         let deadline = self.deadlines.watch(&activity);
         tokio::pin!(deadline);
 
-        let bridge = self.lease.bridge();
-        let send = bridge.rpc().send(self.id.clone(), text.to_owned());
+        let worker = self.lease.worker();
+        let send = worker.rpc().send(self.id.clone(), text.to_owned());
         let opened = tokio::select! {
-            stream = bridge.fail_on_exit(send) => stream,
+            stream = worker.fail_on_exit(send) => stream,
             failure = &mut deadline => Err(failure.into()),
         };
         let outcome = match opened {
@@ -182,7 +182,7 @@ impl Agent {
         // The run went with its process: how long its stream had been silent
         // tells a hang the kill ended from a crash mid-stream.
         if let Err(error) = &outcome
-            && let Some(Failure::BridgeExited(exit)) = error.downcast_ref::<Failure>()
+            && let Some(Failure::WorkerExited(exit)) = error.downcast_ref::<Failure>()
         {
             tracing::debug!(
                 pid = exit.pid,
@@ -212,7 +212,7 @@ impl Agent {
 
         loop {
             tokio::select! {
-                message = lease.bridge().fail_on_exit(stream.next()) => {
+                message = lease.worker().fail_on_exit(stream.next()) => {
                     let Some(message) = message? else { break };
                     activity.send_replace(Instant::now());
                     log.observe_message(&message);
@@ -271,7 +271,7 @@ impl Drop for Agent {
 }
 
 /// The agent `CreateAgent` made, with what tearing it down needs: the lease,
-/// so the bridge outlives the teardown, and the workspace, so a private one
+/// so the worker outlives the teardown, and the workspace, so a private one
 /// is still there for the local store to delete from.
 struct Created {
     lease: Arc<Lease>,
@@ -284,7 +284,7 @@ impl Created {
     /// `CreateAgent` on a task of its own, which holds the lease and owns
     /// the agent it makes until the caller claims it. A caller that stops
     /// waiting — at `window`, or dropped — leaves an agent the task tears
-    /// down itself; a bridge silent for one more window gives the slot back
+    /// down itself; a worker silent for one more window gives the slot back
     /// with nothing to tear down.
     async fn create(
         lease: &Arc<Lease>, options: AgentOptions, operation: AgentOperationOptions,
@@ -294,7 +294,7 @@ impl Created {
         tokio::spawn({
             let lease = Arc::clone(lease);
             async move {
-                let rpc = lease.bridge().rpc().clone();
+                let rpc = lease.worker().rpc().clone();
                 let limit = window.saturating_mul(2);
                 let Ok(answered) = timeout(limit, rpc.create_agent(options)).await else {
                     tracing::warn!(
@@ -305,7 +305,7 @@ impl Created {
                 };
                 let created = match answered {
                     Ok(created) if created.agent_id.is_empty() => {
-                        Err(anyhow!("bridge RPC `CreateAgent` returned an empty agent id"))
+                        Err(anyhow!("sdk.v1 RPC `CreateAgent` returned an empty agent id"))
                     }
                     Ok(created) => Ok(Self {
                         lease,
@@ -327,16 +327,16 @@ impl Created {
 
         let claimed = async {
             rx.await.unwrap_or_else(|_closed| {
-                Err(anyhow!("bridge RPC `CreateAgent` ended without an outcome"))
+                Err(anyhow!("sdk.v1 RPC `CreateAgent` ended without an outcome"))
             })
         };
-        timeout(window, lease.bridge().fail_on_exit(claimed)).await.unwrap_or_else(|_elapsed| {
-            Err(anyhow!("bridge RPC `CreateAgent` unanswered after {}s", window.as_secs()))
+        timeout(window, lease.worker().fail_on_exit(claimed)).await.unwrap_or_else(|_elapsed| {
+            Err(anyhow!("sdk.v1 RPC `CreateAgent` unanswered after {}s", window.as_secs()))
         })
     }
 
     /// Cancel the run, close, then delete — each call bounded, all of them
-    /// skipped once the bridge is gone — then let the workspace go.
+    /// skipped once the worker is gone — then let the workspace go.
     async fn teardown(self, run_id: Option<String>, stream: Option<RunStream>) {
         let run_id = match (run_id, stream) {
             // an abandoned turn's stream may still carry the run id — the
@@ -348,14 +348,14 @@ impl Created {
                 run_id
             }
         };
-        if let Some(rpc) = self.lease.bridge().live_rpc() {
+        if let Some(rpc) = self.lease.worker().live_rpc() {
             if let Some(run_id) = run_id {
                 call("CancelRun", rpc.cancel_run(run_id, self.id.clone())).await;
             }
             call("CloseAgent", rpc.close_agent(self.id.clone())).await;
             call("DeleteAgent", rpc.delete_agent(self.id, self.operation)).await;
         } else {
-            tracing::debug!(agent = %self.id, "bridge exited; skipping agent teardown");
+            tracing::debug!(agent = %self.id, "worker exited; skipping agent teardown");
         }
         drop(self.workspace);
     }
@@ -454,18 +454,18 @@ impl Unanswered {
         self.error
     }
 
-    /// Whether a fresh agent may be given the prompt once more: the bridge
+    /// Whether a fresh agent may be given the prompt once more: the worker
     /// or its socket was lost before any candidate reached the guest, so
     /// nothing has been said about the prompt and no candidate would be
     /// offered twice.
     pub fn restartable(&self) -> bool {
-        self.before_candidate && Outcome::of(&self.error).lost_bridge()
+        self.before_candidate && Outcome::of(&self.error).lost_worker()
     }
 
     /// The process that exited under the completion, when that is the failure.
     pub fn pid(&self) -> Option<u32> {
         match self.error.downcast_ref::<Failure>() {
-            Some(Failure::BridgeExited(exit)) => Some(exit.pid),
+            Some(Failure::WorkerExited(exit)) => Some(exit.pid),
             _ => None,
         }
     }
@@ -512,7 +512,8 @@ mod tests {
 
     use super::{Deadlines, Unanswered};
     use crate::Failure;
-    use crate::bridge::{Exit, RpcError};
+    use crate::sdk::RpcError;
+    use crate::worker::Exit;
 
     const DEADLINES: Deadlines = Deadlines {
         inactivity: Duration::from_secs(1),
@@ -579,7 +580,7 @@ mod tests {
 
     #[test]
     fn restartable() {
-        let exited = || Failure::BridgeExited(EXITED).into();
+        let exited = || Failure::WorkerExited(EXITED).into();
         let reset = || RpcError::truncated("SdkAgentService/Send", 3).into();
         let stalled = || {
             Failure::Inactive {
@@ -594,7 +595,7 @@ mod tests {
         assert!(Unanswered::before_candidate(reset()).restartable());
         // the guest has seen a candidate: nothing is offered twice
         assert!(!Unanswered::settled(exited()).restartable());
-        // the bridge is up and answering, in its way
+        // the worker is up and answering, in its way
         assert!(!Unanswered::before_candidate(stalled()).restartable());
 
         assert_eq!(Unanswered::before_candidate(exited()).pid(), Some(7));

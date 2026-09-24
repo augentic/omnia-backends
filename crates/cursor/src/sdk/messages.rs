@@ -114,7 +114,8 @@ pub struct CloseAgentRequest {
 }
 
 /// Local delete/get/archive are cwd-scoped; the key is the same pin
-/// `CreateAgent` sent so a later call does not depend on bridge env fallback.
+/// `CreateAgent` sent so a later call does not depend on the process's env
+/// fallback.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentOperationOptions {
@@ -283,8 +284,8 @@ impl fmt::Display for RunStatus {
     }
 }
 
-// The proto3 JSON mapping writes an enum by name, but a bridge may write
-// the number; any other shape is `Unknown`.
+// The proto3 JSON mapping writes an enum by name, but a `cursor-sdk-bridge`
+// release may write the number; any other shape is `Unknown`.
 fn run_status<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RunStatus, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]

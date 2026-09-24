@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result};
 use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::Value;
 
-use crate::bridge::{
+use crate::sdk::{
     AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
     ModelSelection, ToolList,
 };
@@ -102,7 +102,7 @@ impl Workspace {
     }
 
     // The wire carries the path as a string, so one that is not UTF-8 cannot
-    // name the workspace to the bridge.
+    // name the workspace to the worker.
     fn cwd(&self) -> Result<String> {
         let path = self.path();
         path.to_str()

@@ -3,7 +3,7 @@
 //! the omnia runtime over an `omnia_cursor::Client`, against the fake
 //! `cursor-sdk-bridge` the client spawns per lease. The guest asserts what
 //! it observes and traps on failure; the test asserts what reached the
-//! bridge and that every process it spawned is gone again.
+//! fake and that every process the client spawned is gone again.
 
 mod support;
 

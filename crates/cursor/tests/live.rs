@@ -61,7 +61,8 @@ fn temp_workspace(label: &str) -> Result<std::path::PathBuf> {
     Ok(workspace)
 }
 
-// Spawn-and-handshake only
+// Connect and drop the client alone, which spawns one bridge, completes its
+// handshake, and closes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
 async fn live_bridge_handshake() -> Result<()> {

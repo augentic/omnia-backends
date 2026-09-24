@@ -6,8 +6,8 @@ use crate::bridge::{Exit, TransportError};
 /// by message.
 ///
 /// `complete`'s error downcasts to one of these — or to a
-/// [`TransportError`](crate::TransportError), or to the typed
-/// `budget-exhausted` a rejected check ends on.
+/// [`TransportError`], or to the typed `budget-exhausted` a rejected check
+/// ends on.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Failure {
@@ -151,7 +151,7 @@ mod tests {
         .into()
     }
 
-    // the labels are what dashboards key on
+    // The labels are what dashboards key on.
     #[test]
     fn labels() {
         let labels = [

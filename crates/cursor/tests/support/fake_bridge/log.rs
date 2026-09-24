@@ -286,7 +286,8 @@ fn zombie(pid: u32) -> bool {
         == Some('Z')
 }
 
-// elsewhere, what is reparented to pid 1 is reaped as it exits
+// Off Linux, what is reparented to pid 1 is reaped as it exits, so there
+// is no zombie to tell apart.
 #[cfg(all(test, not(target_os = "linux")))]
 const fn zombie(_pid: u32) -> bool {
     false

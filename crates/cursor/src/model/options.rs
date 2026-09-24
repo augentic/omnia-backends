@@ -70,8 +70,8 @@ pub enum Workspace {
 }
 
 impl Workspace {
-    // the lent tree, created and canonicalized — or a private empty
-    // temporary directory when no workspace is lent
+    // Create and canonicalize the lent tree; when none is lent, create a
+    // private empty temporary directory instead.
     async fn new(lent: Option<&Path>) -> Result<Self> {
         match lent {
             Some(path) => {
@@ -101,7 +101,8 @@ impl Workspace {
         }
     }
 
-    // the path as the wire carries it
+    // The wire carries the path as a string, so one that is not UTF-8 cannot
+    // name the workspace to the bridge.
     fn cwd(&self) -> Result<String> {
         let path = self.path();
         path.to_str()
@@ -114,7 +115,8 @@ impl Workspace {
     }
 }
 
-// The `CreateAgent` options for `request`, run in `workspace`.
+// Translate `request` into the `CreateAgent` options for an agent run in
+// `workspace`.
 fn agent_options(
     request: &Request, workspace: &Workspace, default_model: &str, api_key: &str,
 ) -> Result<AgentOptions> {

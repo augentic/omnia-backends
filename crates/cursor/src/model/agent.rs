@@ -217,7 +217,8 @@ impl Agent {
         });
     }
 
-    // The teardown, the first time; `None` once it has been handed out.
+    // Take the teardown, with the live run it is to cancel. It is handed out
+    // once; afterwards this is `None`.
     fn take_release(&mut self) -> Option<Release> {
         let mut release = self.release.take()?;
         release.run_id = self.live_run.take();
@@ -405,8 +406,8 @@ impl<'a> OpenSend<'a> {
         }
     }
 
-    // the turn's outcome, however it ends; only a drop mid-`follow` is an
-    // abandonment
+    // Follow the turn to its outcome, then disarm: only a drop while `follow`
+    // is still running is an abandonment.
     async fn drive<D>(
         mut self, activity: &watch::Sender<Instant>, deadline: &mut D,
     ) -> Result<Response>
@@ -550,13 +551,14 @@ impl Release {
     }
 }
 
-// On a task of its own, so the caller's fate does not cut it short; `None`
-// without a runtime.
+// Spawn `task` so the caller's fate does not cut it short. Without a
+// runtime to spawn on, this is `None`.
 fn detach(task: impl Future<Output = ()> + Send + 'static) -> Option<JoinHandle<()>> {
     Handle::try_current().ok().map(|handle| handle.spawn(task))
 }
 
-// One best-effort teardown call: a failure is logged, a silence is bounded.
+// Make one best-effort teardown call: a failure is logged and a silence
+// is bounded.
 async fn teardown(method: &'static str, rpc: impl Future<Output = Result<()>>) {
     match timeout(TEARDOWN_TIMEOUT, rpc).await {
         Ok(Ok(())) => {}

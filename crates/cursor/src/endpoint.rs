@@ -92,7 +92,7 @@ impl Endpoint {
     }
 }
 
-// accept until the `Endpoint` drops; one connection task per bridge socket
+// Accept until the `Endpoint` drops, one connection task per bridge socket.
 async fn serve(listener: TcpListener, handler: Arc<Handler>) {
     loop {
         let stream = match listener.accept().await {
@@ -384,7 +384,7 @@ async fn drain(mut body: Incoming, limit: usize) {
     }
 }
 
-// 256 bits of entropy as lowercase hex
+// Draw 256 bits of entropy and spell them as lowercase hex.
 fn gen_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|error| anyhow::anyhow!("gathering entropy: {error}"))?;

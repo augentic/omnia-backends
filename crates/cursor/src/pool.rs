@@ -64,8 +64,9 @@ impl Pool {
                 drop(permit);
                 drop(token);
             });
-            let rpc = handshake.complete(&bridge).await?;
 
+            let rpc = handshake.complete(&bridge).await?;
+            
             Ok(Arc::new(Lease {
                 bridge,
                 registration,

@@ -247,8 +247,8 @@ impl fmt::Display for RunStatus {
     }
 }
 
-// proto3 JSON writes an enum by name, but a bridge may write the number; any
-// other shape is `Unknown`
+// The proto3 JSON mapping writes an enum by name, but a bridge may write
+// the number; any other shape is `Unknown`.
 fn run_status<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RunStatus, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]

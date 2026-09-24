@@ -32,11 +32,8 @@ use tokio::time::{Instant, timeout};
 use crate::endpoint::Registration;
 use crate::{Failure, elapsed_ms};
 
-// for the exit a `Shutdown` RPC asks for
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-// for the stderr pipe once the group is gone
 const EXIT_GRACE: Duration = Duration::from_millis(250);
-// how long a failure is given for the exit it usually runs ahead of
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
 
 /// A spawned `cursor-sdk-bridge` process this client watches.
@@ -79,11 +76,12 @@ impl Bridge {
             command.env_remove(var);
         }
 
-        // its own process group: one kill reaches whatever it forks
+        // create process group
         let mut command = CommandWrap::from(command);
         command.wrap(KillOnDrop);
         command.wrap(ProcessGroup::leader());
 
+        // spawn the bridge
         let mut child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
         let pid = child.id().context("no pid for spawned bridge")?;
         let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
@@ -100,7 +98,7 @@ impl Bridge {
         drain_stdout(stdout);
         let (discovery, stderr) = read_stderr(stderr, Arc::clone(&state));
 
-        // the supervisor owns the child from here to its exit
+        // spawn the supervisor
         let (shutdown, stop) = watch::channel(());
         let (exit_tx, exit) = watch::channel(None);
         tokio::spawn(
@@ -142,16 +140,18 @@ impl Bridge {
         let exited = self.exited();
         tokio::pin!(exited);
 
+        // wait for the future or the bridge to exit
         let error = tokio::select! {
+            // branch 1: the future completed
             outcome = future => match outcome {
                 Ok(value) => return Ok(value),
                 Err(error) => error,
             },
+            // branch 2: the bridge exited before the future completed
             exit = &mut exited => return Err(Failure::BridgeExited(exit).into()),
         };
 
-        // the socket fails ahead of the exit the supervisor publishes, so
-        // the failure waits a moment for the exit that explains it
+        // wait for the exit that explains the failure
         match timeout(EXIT_WAIT, exited).await {
             Ok(exit) => Err(Failure::BridgeExited(exit).into()),
             Err(_elapsed) => Err(error),
@@ -164,7 +164,8 @@ impl Bridge {
         self.exited().await;
     }
 
-    // one handshake step; stderr stays at DEBUG, never in the error
+    // Run one handshake step under the bridge's exit. The stderr tail behind
+    // a failure is logged at DEBUG; it never reaches the error.
     async fn step<T>(&self, step: impl Future<Output = Result<T>>) -> Result<T> {
         self.fail_on_exit(step)
             .await
@@ -236,7 +237,8 @@ struct State {
 }
 
 impl State {
-    // untrusted (paths, provider context, session fragments): DEBUG only
+    // The tail is untrusted subprocess output (paths, provider context,
+    // session fragments), so it is logged at DEBUG only.
     fn trace_err(&self) {
         let tail = self.tail.to_string();
         if !tail.is_empty() {
@@ -267,14 +269,13 @@ impl Supervisor {
                 false
             }
         };
-        
-        // the one kill, of the group: nothing of the slot outlives it
+
+        // the one kill of the group: nothing of the slot outlives it
         let _ = self.child.start_kill();
         let status = self.child.wait().await.ok();
         let uptime_ms = elapsed_ms(self.state.started_at);
 
-        // the group is gone, so a pipe still open is held by a process that
-        // left it: not worth waiting for
+        // kill the stderr if it's not done yet
         if timeout(EXIT_GRACE, &mut self.stderr).await.is_err() {
             self.stderr.abort();
         }
@@ -284,7 +285,7 @@ impl Supervisor {
             pid: self.state.pid,
         };
 
-        // an exit nobody asked for is a crash: WARN, with the stderr behind it
+        // an exit nobody asked for is a crash
         if self_exited {
             tracing::warn!(
                 pid = exit.pid,
@@ -300,8 +301,8 @@ impl Supervisor {
         drop(self.state_root);
     }
 
-    // Ask over the bound client and wait for the exit it brings, under one
-    // bound together; unbound, there is nothing to ask
+    // Ask over the bound client and wait for the exit it brings, both under
+    // one bound. With no client bound yet, there is nothing to ask.
     async fn ask(&mut self) {
         let Some(rpc) = self.state.rpc.get() else {
             return;
@@ -325,7 +326,8 @@ async fn wait_exit(exit: &mut watch::Receiver<Option<Exit>>, pid: u32) -> Exit {
         .unwrap_or(Exit { status: None, pid })
 }
 
-// hold the pipe to EOF so an abandoned handshake never closes it under a live writer
+// Scan stderr for the ready line, then hold the pipe to EOF so an abandoned
+// handshake never closes it under a live writer.
 fn read_stderr(
     stderr: ChildStderr, state: Arc<State>,
 ) -> (oneshot::Receiver<Result<Discovery>>, JoinHandle<()>) {
@@ -343,7 +345,7 @@ fn read_stderr(
     (discovery_rx, reader)
 }
 
-// drain stdout so a full pipe never blocks the process
+// Drain stdout so a full pipe never blocks the process.
 fn drain_stdout(stdout: ChildStdout) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -360,7 +362,7 @@ mod tests {
 
     use super::Exit;
 
-    // the crash WARN and `Failure::BridgeExited` both read this text
+    // The crash WARN and `Failure::BridgeExited` both read this text.
     #[test]
     fn exit_display() {
         let exit = |status| Exit { status, pid: 1 }.to_string();

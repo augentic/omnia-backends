@@ -164,7 +164,8 @@ impl Server {
         }
     }
 
-    // Whether the nth call of some RPC is the one a counted fault targets.
+    // The nth call of some RPC is the one a counted fault targets when a
+    // scripted fault, read through `pick`, names that ordinal.
     fn targets(&self, ordinal: usize, pick: impl Fn(&Fault) -> Option<usize>) -> bool {
         self.faults().any(|f| pick(f) == Some(ordinal))
     }
@@ -366,8 +367,8 @@ impl Server {
         reply(StatusCode::OK, "application/connect+json", stream.boxed())
     }
 
-    // The run stream: the run id first, then whatever the script says, then
-    // the terminal result and the end-of-stream frame.
+    // Produce the run stream: the run id first, then whatever the script
+    // says, then the terminal result and the end-of-stream frame.
     async fn produce(self: Arc<Self>, run: Run, mut tx: Sender<Bytes, BoxError>) {
         let init = json!({
             "sdkMessage": { "type": "system", "message": { "subtype": "init", "run_id": run.id } }
@@ -595,9 +596,9 @@ pub fn echo_of(prompt: &str) -> String {
     }
 }
 
-// The answer text for a `CallCustomTool` result: a repairable `error` is
-// the model's `tool failed:` line; the endpoint's `{ "value": v }` wrapping
-// of a non-object output is unwrapped back to the output.
+// Spell a `CallCustomTool` result as the answer text: a repairable `error`
+// becomes the model's `tool failed:` line, and the endpoint's `{ "value": v }`
+// wrapping of a non-object output is unwrapped back to the output.
 fn answer_from(result: &Value) -> String {
     if let Some(error) = result.get("error").and_then(Value::as_str) {
         return format!("tool failed: {error}");
@@ -652,8 +653,8 @@ fn full(bytes: impl Into<Bytes>) -> Body {
     Full::new(bytes.into()).map_err(|never: Infallible| match never {}).boxed()
 }
 
-// The same bytes as a chunked body, split ten bytes at a time, the way a
-// streaming callback client may frame it.
+// Frame the same bytes as a chunked body, split ten bytes at a time, the way
+// a streaming callback client may.
 fn chunked(payload: String) -> Body {
     let payload = payload.into_bytes();
     let (mut tx, body) = Channel::<Bytes, BoxError>::new(payload.len() / 10 + 2);

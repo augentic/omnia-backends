@@ -369,7 +369,8 @@ impl Releases {
         *self.0.entry(format!("{point:?}")).or_insert(0) += count;
     }
 
-    // Written whole and renamed into place, so a process never reads half.
+    // Write the file whole and rename it into place, so a process never
+    // reads half.
     fn write(&self, path: &Path) {
         let staged = path.with_extension("json.tmp");
         std::fs::write(&staged, serde_json::to_vec(self).expect("releases serialize"))

@@ -33,7 +33,8 @@ pub struct Completion {
 }
 
 impl Completion {
-    // INFO that a completion is in flight (no metric prefixes — live tail).
+    // Log at INFO that a completion is in flight. The line carries no metric
+    // prefixes: it is for the live tail.
     pub fn start(model: &str, format: &Format, prompt: &str, mcp_servers: usize) -> Self {
         let format = format.to_string();
         let prompt_bytes = len_u64(prompt.len());
@@ -76,8 +77,8 @@ impl Completion {
         self.attempts
     }
 
-    // INFO + OTEL metric fields for this completion; emitted once, so a
-    // later `Drop` says nothing.
+    // Log the completion at INFO with its OTEL metric fields. It is emitted
+    // once, so a later `Drop` says nothing.
     pub fn finish(&mut self, outcome: Outcome) {
         if self.emitted {
             return;
@@ -227,14 +228,14 @@ impl PendingCall {
     }
 }
 
-// The first string found under any of `keys`, tolerating both `snake_case`
+// Find the first string under any of `keys`, tolerating both `snake_case`
 // and `camelCase` spellings across bridge versions.
 fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
 }
 
-// a byte or item count as a metric value; `usize` never exceeds `u64` on a
-// supported target, so this is a lossless widening
+// Widen a byte or item count to a metric value. `usize` never exceeds
+// `u64` on a supported target, so nothing is lost.
 fn len_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }

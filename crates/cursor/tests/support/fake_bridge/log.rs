@@ -47,6 +47,8 @@ pub enum Kind {
     /// The fake posted `CallCustomTool`; `arg` carries the status and the
     /// bearer token it used.
     Callback,
+    /// The process forked a child of its own; `arg` carries its pid.
+    Forked,
 }
 
 /// One recorded moment, timestamped in epoch microseconds so events from
@@ -239,11 +241,17 @@ impl Process {
 
     /// Whether a process with this pid still exists.
     pub fn alive(&self) -> bool {
-        let Ok(pid) = i32::try_from(self.pid) else {
-            return false;
-        };
-        // SAFETY: signal 0 probes for existence and delivers nothing.
-        unsafe { libc::kill(pid, 0) == 0 }
+        alive(self.pid)
+    }
+
+    /// The pids of the children the process forked, in order.
+    pub fn forked(&self) -> Vec<u32> {
+        self.events
+            .iter()
+            .filter(|e| e.kind == Kind::Forked)
+            .filter_map(|e| e.arg.get("pid").and_then(Value::as_u64))
+            .filter_map(|pid| u32::try_from(pid).ok())
+            .collect()
     }
 
     /// The callback URL and bearer token the process was started with.
@@ -257,6 +265,40 @@ impl Process {
         let ready = self.events.iter().find(|e| e.kind == Kind::Ready)?;
         Some(ready.text("token").to_owned())
     }
+}
+
+/// Whether a process with `pid` is still running: a pid that answers a
+/// probe, and is not a zombie waiting on a parent that may never reap it
+/// (a forked child, reparented to a pid 1 that does not).
+pub fn alive(pid: u32) -> bool {
+    let Ok(signed) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 probes for existence and delivers nothing.
+    if unsafe { libc::kill(signed, 0) } != 0 {
+        return false;
+    }
+    !zombie(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|stat| proc_state(&stat))
+        == Some('Z')
+}
+
+// elsewhere, what is reparented to pid 1 is reaped as it exits
+#[cfg(not(target_os = "linux"))]
+const fn zombie(_pid: u32) -> bool {
+    false
+}
+
+// The state field of `/proc/<pid>/stat` follows the parenthesised command
+// name, which may itself hold spaces and parentheses: split from the right.
+#[cfg(any(target_os = "linux", test))]
+fn proc_state(stat: &str) -> Option<char> {
+    let (_, after_name) = stat.rsplit_once(") ")?;
+    after_name.chars().next()
 }
 
 /// Queries shared by the whole log and one process's slice of it.
@@ -342,7 +384,14 @@ impl History for Process {
 mod tests {
     use serde_json::Value;
 
-    use super::{Event, History as _, Kind, Log, Rpc};
+    use super::{Event, History as _, Kind, Log, Rpc, proc_state};
+
+    #[test]
+    fn command_name_holding_the_separator() {
+        assert_eq!(proc_state("42 (sleep) S 1 42 42 0 -1"), Some('S'));
+        assert_eq!(proc_state("42 (a) b) Z 1 42 42 0 -1"), Some('Z'));
+        assert_eq!(proc_state("42 (no state"), None);
+    }
 
     fn rpc(process: usize, rpc: Rpc, agent: &str) -> Event {
         Event {

@@ -1,4 +1,9 @@
 //! Spawn and manage a `cursor-sdk-bridge` process.
+//!
+//! The bridge leads a process group of its own: a kill reaches the agent
+//! processes it forks, and whatever a bridge left in its group when it
+//! exited is swept as the exit is seen, so nothing of a slot's process
+//! outlives it.
 
 mod discovery;
 mod messages;
@@ -6,7 +11,7 @@ mod rpc;
 
 use std::fmt;
 use std::process::{ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -15,10 +20,11 @@ pub use messages::{
     AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
     ModelSelection, RunStatus, RunStreamResult, SdkMessage, ToolList,
 };
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
 pub use rpc::{Rpc, RunStream, TransportError};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
@@ -59,7 +65,6 @@ impl Bridge {
 
         let mut command = Command::new("cursor-sdk-bridge");
         command
-            .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -74,9 +79,14 @@ impl Bridge {
             command.env_remove(var);
         }
 
+        let mut command = CommandWrap::from(command);
+        command.wrap(KillOnDrop);
+        // leader of its own group, so a kill reaches the processes it forks
+        command.wrap(ProcessGroup::leader());
+
         let mut child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
         let pid = child.id().context("the spawned bridge reported no pid")?;
-        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
             bail!("the spawned bridge has no piped stdout and stderr");
         };
 
@@ -85,6 +95,7 @@ impl Bridge {
             started_at,
             clock: Activity::default(),
             tail: Tail::default(),
+            rpc: OnceLock::new(),
         });
 
         drain_stdout(stdout);
@@ -92,7 +103,6 @@ impl Bridge {
 
         let (shutdown, stop) = watch::channel(());
         let (exit_tx, exit) = watch::channel(None);
-        let (rpc_tx, rpc_rx) = oneshot::channel();
         tokio::spawn(
             Supervisor {
                 child,
@@ -101,7 +111,6 @@ impl Bridge {
                 state: Arc::clone(&state),
                 stop,
                 exit: exit_tx,
-                rpc: rpc_rx,
             }
             .run(),
         );
@@ -115,7 +124,6 @@ impl Bridge {
             discovery,
             state,
             exit,
-            rpc: rpc_tx,
         };
         Ok((bridge, handshake))
     }
@@ -160,7 +168,6 @@ pub struct Handshake {
     discovery: oneshot::Receiver<Result<Discovery>>,
     state: Arc<State>,
     exit: ExitWatch,
-    rpc: oneshot::Sender<Rpc>,
 }
 
 impl Handshake {
@@ -174,7 +181,6 @@ impl Handshake {
             discovery,
             state,
             mut exit,
-            rpc: rpc_tx,
         } = self;
 
         let scanned = discovery
@@ -184,8 +190,8 @@ impl Handshake {
         let connected = discovery.into_rpc().await;
         let rpc = or_exit(&mut exit, &state, connected).await?;
 
-        // a supervisor already gone has no process left to shut down gracefully
-        let _ = rpc_tx.send(rpc.clone());
+        // from here a close is asked over the client; until now it is a kill
+        let _ = state.rpc.set(rpc.clone());
 
         tracing::info!(
             pid = state.pid,
@@ -237,6 +243,8 @@ struct State {
     started_at: Instant,
     clock: Activity,
     tail: Tail,
+    // the bound client, once the handshake has one
+    rpc: OnceLock<Rpc>,
 }
 
 // activity clock of the in-flight run; the sender lives as long as the run
@@ -260,31 +268,38 @@ impl Activity {
 
 // waits on the process, tears it down on request, and publishes its exit
 struct Supervisor {
-    child: Child,
+    child: Box<dyn ChildWrapper>,
     state_root: TempDir,
     stderr: JoinHandle<()>,
     state: Arc<State>,
     stop: watch::Receiver<()>,
     exit: watch::Sender<Option<Exit>>,
-    // the bound client, once the handshake has one
-    rpc: oneshot::Receiver<Rpc>,
 }
 
 impl Supervisor {
     async fn run(mut self) {
-        let (status, self_exited) = tokio::select! {
+        let self_exited = tokio::select! {
             // an exit in the same tick as a close is still an exit
             biased;
-            waited = self.child.wait() => (waited.ok(), true),
+            _ = self.child.wait() => true,
             // `close`, or the `Bridge` dropped
-            _ = self.stop.changed() => (self.shutdown().await, false),
+            _ = self.stop.changed() => {
+                self.ask().await;
+                false
+            }
         };
+        // The one kill, of the group: the leader if it is still up — asked
+        // and not gone, or never bound to be asked — and whatever it forked
+        // and left behind, so nothing of the slot outlives it. A leader
+        // already reaped answers the wait at once with the status it kept.
+        let _ = self.child.start_kill();
+        let status = self.child.wait().await.ok();
         // before the drain: `Send` is still pending, so this is the run at exit
         let silent_ms = self.state.clock.silent_ms();
         let uptime_ms = elapsed_ms(self.state.started_at);
 
-        // the process is gone, so a grandchild holding the pipe open past the
-        // last lines has nothing worth waiting for
+        // the group is gone, so a pipe still open is held by a process that
+        // left it: not worth waiting for
         if timeout(EXIT_GRACE, &mut self.stderr).await.is_err() {
             self.stderr.abort();
         }
@@ -308,20 +323,18 @@ impl Supervisor {
         drop(self.state_root);
     }
 
-    // `Shutdown` once RPC is bound, otherwise kill
-    async fn shutdown(&mut self) -> Option<ExitStatus> {
-        if let Ok(rpc) = self.rpc.try_recv() {
-            let _ = timeout(SHUTDOWN_TIMEOUT, rpc.shutdown()).await;
-        } else {
-            let _ = self.child.start_kill();
-        }
-        match timeout(SHUTDOWN_TIMEOUT, self.child.wait()).await {
-            Ok(waited) => waited.ok(),
-            Err(_elapsed) => {
-                let _ = self.child.start_kill();
-                self.child.wait().await.ok()
-            }
-        }
+    // ask over the bound client and wait for the exit it brings, under one
+    // bound together; unbound, there is nothing to ask
+    async fn ask(&mut self) {
+        let Self { child, state, .. } = self;
+        let Some(rpc) = state.rpc.get() else {
+            return;
+        };
+        let asked = async {
+            let _ = rpc.shutdown().await;
+            let _ = child.wait().await;
+        };
+        let _ = timeout(SHUTDOWN_TIMEOUT, asked).await;
     }
 }
 

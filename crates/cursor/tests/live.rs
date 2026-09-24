@@ -191,28 +191,31 @@ impl SpawnedPids {
         self.0.lock().expect("pids lock").clone()
     }
 
-    /// Wait for every process spawned so far to be gone — the pool whole
-    /// again, since a slot reopens only once its process is.
+    /// Wait for every process spawned so far to be gone, and with it every
+    /// agent process it forked — the pool whole again, since a slot reopens
+    /// only once its process is.
     async fn await_gone(&self) -> Result<()> {
         let deadline = tokio::time::Instant::now() + GONE;
         loop {
-            let up: Vec<u32> = self.pids().into_iter().filter(|pid| alive(*pid)).collect();
+            let up: Vec<u32> = self.pids().into_iter().filter(|pid| group_alive(*pid)).collect();
             if up.is_empty() {
                 return Ok(());
             }
             anyhow::ensure!(
                 tokio::time::Instant::now() < deadline,
-                "bridge processes {up:?} still up after {GONE:?}: a lease did not release"
+                "bridge process groups {up:?} still up after {GONE:?}: a lease did not release, \
+                 or a bridge left an agent process behind"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
 
-/// Whether a process with this pid still exists (`kill -0`).
-fn alive(pid: u32) -> bool {
+/// Whether anything is left of the process group a bridge led (`kill -0`
+/// on the group): the bridge itself, or an agent process it forked.
+fn group_alive(pgid: u32) -> bool {
     std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
+        .args(["-0", "--", &format!("-{pgid}")])
         .status()
         .is_ok_and(|status| status.success())
 }

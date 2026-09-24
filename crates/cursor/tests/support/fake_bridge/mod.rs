@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 #[allow(unused_imports, reason = "the suites' side of the module")]
-pub use self::log::{Event, History, Kind, Log, Process, Rpc};
+pub use self::log::{Event, History, Kind, Log, Process, Rpc, alive};
 use self::server::{Callback, Server};
 #[allow(unused_imports, reason = "the suites' side of the module")]
 pub use self::server::{EXIT_ON_CREATE, MARKERS};
@@ -100,6 +100,9 @@ pub enum Fault {
     /// Hold the run's answer until another spawned process has recorded
     /// this RPC.
     WaitForPeer(Rpc),
+    /// Fork a `sleep` of our own before the ready line, inheriting our
+    /// stderr, and leave it running however we exit; its pid is recorded.
+    Grandchild,
 }
 
 /// A fault and the spawned process it targets: 1-based in start order
@@ -421,6 +424,19 @@ pub async fn run_spawned(args: Vec<String>) {
     // The fake's own bearer token: what the ready line carries, for a test
     // proving it never reaches a log.
     ready_event["token"] = Value::String(server.token().to_owned());
+
+    // As the real bridge forks an agent process: a child in our group,
+    // holding the stderr pipe the client reads, that nothing of ours reaps.
+    #[allow(clippy::zombie_processes, reason = "the fault is a child nobody waits for")]
+    if server.has(&Fault::Grandchild) {
+        let child = std::process::Command::new("sleep")
+            .arg("600")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("forking a grandchild");
+        server.recorder().record(Kind::Forked, None, json!({ "pid": child.id() }));
+    }
 
     if let Some(code) = server.find(|fault| match fault {
         Fault::ExitBeforeReady(code) => Some(*code),

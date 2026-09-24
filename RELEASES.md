@@ -15,6 +15,12 @@ Unreleased
   `cursor-sdk-bridge` and spawned per lease. A lease fully released is
   observed as its process gone; `Client::idle_slots` and `upstream_tripwire`
   are gone.
+- `omnia-cursor` spawns each bridge as the leader of its own process group
+  (via `process-wrap`), so the kill after an unanswered `Shutdown` reaches
+  the agent processes the bridge forks, and whatever a bridge left in its
+  group when it exited is swept as the exit is seen. A graceful exit is
+  bounded once — 5s for the `Shutdown` RPC and the exit together — rather
+  than once each.
 
 ---
 

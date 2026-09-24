@@ -3,16 +3,16 @@
 //! A completion takes a [`Lease`] before it creates its agent: a permit for
 //! one of the `max_agents` slots plus the bridge the agent runs on — a
 //! freshly spawned process, registered with the callback endpoint under its
-//! own token so its callbacks route to its own agent. Dropping the last
-//! handle to a lease closes the bridge and only then returns the permit, so
-//! a slot never reopens while its process is still around.
+//! own token so its callbacks route to its own agent. A task of the pool's
+//! holds the permit and the token until the process has exited, so a slot
+//! never reopens, and a token never routes, while its process is still
+//! around; dropping the lease only asks the bridge to go.
 
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use omnia_wasi_model::ToolHost;
-use tokio::runtime::Handle;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 
 use crate::bridge::{Bridge, Rpc};
@@ -36,9 +36,9 @@ impl Pool {
             endpoint: Endpoint::bind().await?,
             max_agents,
         };
-        
-        // closed here rather than on the lease's drop task, so the probe is
-        // gone before the first completion queues for its slot
+
+        // closed here rather than left to the drop, so the probe is gone
+        // before the first completion queues for its slot
         pool.lease().await?.bridge().close().await;
 
         Ok(pool)
@@ -54,14 +54,22 @@ impl Pool {
         let registration = Arc::new(self.endpoint.register()?);
         let spawned = async {
             let (bridge, handshake) = Bridge::spawn(&registration)?;
-            let slot = Slot {
-                permit: Some(permit),
-                bridge: Arc::new(bridge),
-                registration: Arc::clone(&registration),
-            };
+            // The slot reopens, and the token is revoked, only once the
+            // process is gone — however the lease ends, handshake included.
+            let died = bridge.died();
+            let token = Arc::clone(&registration);
+            tokio::spawn(async move {
+                died.await;
+                drop(permit);
+                drop(token);
+            });
             let rpc = handshake.complete().await?;
 
-            Ok(Arc::new(Lease { slot, rpc }))
+            Ok(Arc::new(Lease {
+                bridge,
+                registration,
+                rpc,
+            }))
         };
 
         spawned.await.inspect_err(|_error| {
@@ -78,16 +86,18 @@ impl Pool {
 }
 
 /// One agent slot with its bridge handshaken: the `sdk.v1` client is bound
-/// for as long as the lease lives.
+/// for as long as the lease lives, and dropping the lease asks the bridge
+/// to go.
 #[derive(Debug)]
 pub struct Lease {
-    slot: Slot,
+    bridge: Bridge,
+    registration: Arc<Registration>,
     rpc: Rpc,
 }
 
 impl Lease {
-    pub fn bridge(&self) -> &Bridge {
-        &self.slot.bridge
+    pub const fn bridge(&self) -> &Bridge {
+        &self.bridge
     }
 
     /// The bound `sdk.v1` client.
@@ -97,7 +107,7 @@ impl Lease {
 
     /// The bound `sdk.v1` client, while its bridge is still running.
     pub fn live_rpc(&self) -> Option<&Rpc> {
-        self.slot.bridge.is_running().then_some(&self.rpc)
+        self.bridge.is_running().then_some(&self.rpc)
     }
 
     /// Route the bridge's callbacks for `agent_id` into `tool_host` until
@@ -105,36 +115,6 @@ impl Lease {
     pub fn attach(
         &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
     ) -> Attached {
-        self.slot.registration.attach(agent_id, tool_host, abort)
-    }
-}
-
-// The permit, the process, and the process's own callback identity; held
-// from before the handshake so a spawn that fails or is abandoned still
-// closes the process before the permit returns.
-#[derive(Debug)]
-struct Slot {
-    permit: Option<OwnedSemaphorePermit>,
-    bridge: Arc<Bridge>,
-    registration: Arc<Registration>,
-}
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        let permit = self.permit.take();
-        let bridge = Arc::clone(&self.bridge);
-        let registration = Arc::clone(&self.registration);
-        if let Ok(handle) = Handle::try_current() {
-            // The token stays valid until the process is gone, and the
-            // permit rides along so the slot reopens only then.
-            handle.spawn(async move {
-                bridge.close().await;
-                drop(bridge);
-                drop(registration);
-                drop(permit);
-            });
-        }
-        // Without a runtime all three drop here; dropping the bridge still
-        // asks the watcher for the shutdown.
+        self.registration.attach(agent_id, tool_host, abort)
     }
 }

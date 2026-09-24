@@ -46,7 +46,11 @@ the environment per completion; it is never stored on `Client` /
 `ConnectOptions`, logged, or recorded into fixtures.
 
 Each live agent runs in its own bridge process, spawned for the completion
-and shut down after it (graceful `Shutdown` RPC, then kill): a bridge that
+as the leader of its own process group and shut down after it: a graceful
+`Shutdown` RPC with 5s for the exit it asks for, then a kill of the whole
+group, which reaches the agent processes the bridge forks; whatever a bridge
+left in its group when it exited on its own is swept as the exit is seen,
+so nothing of a slot's process outlives it. A bridge that
 crashes fails the completion running on it with the typed
 `cursor-sdk-bridge exited (…) during the run` (metric outcome `bridge_exit`)
 rather than as the next completion's stall. The exit is logged at WARN with
@@ -212,8 +216,9 @@ point of an agent's life and release it, the parks and releases going
 through files in the fake's home. A scripted `Config` decides the reply
 (`Echo`, `Replies`, `Tool`, `Paced`) and the faults (hang or park at a
 point, exit or `SIGKILL` on the nth call, a missing, refused, or
-non-loopback ready line, a reset stream, an empty id, a failing close),
-each fault aimed at one spawned process or all of them.
+non-loopback ready line, a reset stream, an empty id, a failing close, a
+forked child left running past the process's own exit), each fault aimed
+at one spawned process or all of them.
 
 **Tier 2 — guests through the runtime.** Every scenario is a guest
 component from [`crates/test-programs`](../test-programs) run through
@@ -236,9 +241,13 @@ process that answers; killed twice fails with the typed exit; killed after
 the guest's `check` has seen a candidate is not restarted; a run that stalls
 mid-stream is cancelled, not restarted; a stream reset restarts on a fresh
 process once the reset one has been asked to go, and reset twice fails with
-the typed transport error), a bridge that hangs on `Ping`, `CloseAgent`, or
-`Shutdown`, the callback endpoint's rejections and token revocation, and a
-check that the ready line and its token never reach a log. Guests are
+the typed transport error), the children a bridge forked swept with it
+whether it was killed mid-run, exited on `Shutdown`, or was dropped before
+its ready line, a bridge that hangs on `Ping`, `CloseAgent`, or `Shutdown`
+(the last killed as a group after the one bound, its forked child with
+it), the callback endpoint's rejections
+and token revocation, and a check that the ready line and its token never
+reach a log. Guests are
 compiled by the `test-programs` build script; there is no separate
 `--target` build to run.
 
@@ -253,7 +262,9 @@ under load fails its completion with `cursor-sdk-bridge exited`), and
 opening run and sees the completion answer from the restart. The rows that
 watch the spawned processes read their pids from the client's own
 `cursor-sdk-bridge spawned` events through the process's tracing
-subscriber, so they run one per process, as nextest does. All are
+subscriber, so they run one per process, as nextest does; "gone" is the
+whole process group each bridge led, so a `cursor-agent` left behind by a
+bridge is a failure here, not just the bridge itself. All are
 `#[ignore]`d so they never spawn a process in CI; run them with
 `cursor-sdk-bridge` installed:
 

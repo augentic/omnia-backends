@@ -107,6 +107,18 @@ pub async fn await_process_gone(process: &Process) {
     .await;
 }
 
+/// Wait for every child a spawned process forked to be gone with it.
+pub async fn await_forked_gone(process: &Process) {
+    let forked = process.forked();
+    assert!(!forked.is_empty(), "process {} forked a child", process.number);
+    fake_bridge::poll(
+        || forked.iter().all(|pid| !fake_bridge::alive(*pid)),
+        GONE,
+        &format!("process {}'s forked children {forked:?} gone", process.number),
+    )
+    .await;
+}
+
 /// The one agent a single-completion scenario created, with its RPCs.
 pub fn sole_agent(history: &impl History) -> (String, Vec<Rpc>) {
     let agents = history.agents();

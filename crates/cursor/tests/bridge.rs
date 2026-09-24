@@ -26,8 +26,8 @@ use support::fake_bridge::{
     self, Config, Event, Fault, History as _, Log, Point, Process, Rpc, Spawnable, Then,
 };
 use support::harness::{
-    AT_ONCE, CALLBACK_PATH, GONE, STARTUP, await_gone, await_gone_within, await_process_gone,
-    callback, connect, expect_error, options, run_guest, sole_agent, spawning,
+    AT_ONCE, CALLBACK_PATH, GONE, STARTUP, await_forked_gone, await_gone, await_gone_within,
+    await_process_gone, callback, connect, expect_error, options, run_guest, sole_agent, spawning,
 };
 use tokio::task::JoinHandle;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -36,7 +36,8 @@ use tracing_subscriber::layer::SubscriberExt as _;
 const WINDOW: Duration = Duration::from_secs(1);
 /// `agent.rs`'s bound on one teardown call.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// `bridge.rs`'s bound on the `Shutdown` RPC and again on the exit wait.
+/// `bridge.rs`'s bound on a graceful exit: the `Shutdown` RPC and the exit
+/// it asks for, together.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// `rpc.rs`'s bound on the `Ping`/`GetVersion` handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -188,9 +189,11 @@ async fn abandon_during_handshake() {
 
 #[tokio::test]
 async fn abandon_before_ready() {
-    // Process 2 never prints its ready line: the loser is dropped inside
-    // the stderr scan.
-    let fake = Spawnable::new(&Config::echo().fault_on(2, Fault::NeverReady));
+    // Process 2 forks a child, then never prints its ready line: the loser
+    // is dropped inside the stderr scan.
+    let fake = Spawnable::new(
+        &Config::echo().fault_on(2, Fault::Grandchild).fault_on(2, Fault::NeverReady),
+    );
     let client = spawning(&fake, 2).await;
     run_guest(test_programs::MODEL_FANOUT_ABANDON, &["2"], &client).await;
     await_gone_within(&fake, AT_ONCE).await;
@@ -203,6 +206,9 @@ async fn abandon_before_ready() {
     assert_eq!(loser.last_rpc(), None);
     assert_eq!(log.count(Rpc::CreateAgent), 1, "only the winner made an agent");
     killed(loser);
+    // Nothing was bound to ask, so the kill is the group's from the start:
+    // the forked child goes with it.
+    await_forked_gone(loser).await;
 }
 
 #[tokio::test]
@@ -542,6 +548,27 @@ async fn bridge_exited_on_create_restarts() {
 }
 
 #[tokio::test]
+async fn grandchildren_swept() {
+    // Each process forks a child that outlives it: process 1 dies on its
+    // `Send` with the child still up and holding the stderr pipe, process
+    // 2 exits on `Shutdown` the same way. Neither child is anyone's to
+    // reap; both go with their process as its exit is seen.
+    let fake =
+        Spawnable::new(&Config::echo().fault(Fault::Grandchild).fault_on(1, Fault::KillOnSend(1)));
+    let client = spawning(&fake, 1).await;
+    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let (first, second) = restarted(&log);
+    killed(&first);
+    assert!(second.ended_with(Rpc::Shutdown), "{}", second.summary());
+    for process in [&first, &second] {
+        await_forked_gone(process).await;
+    }
+}
+
+#[tokio::test]
 async fn bridge_killed_twice_fails() {
     // Every process dies on its opening `Send`: one restart, then the
     // second exit stands. The socket resets as each process dies; the typed
@@ -678,20 +705,26 @@ async fn hang_on_teardown() {
 
 #[tokio::test]
 async fn hang_on_shutdown() {
-    let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Shutdown)));
+    let fake = Spawnable::new(
+        &Config::echo().fault(Fault::Hang(Point::Shutdown)).fault(Fault::Grandchild),
+    );
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
     assert!(fake.log().workers()[0].alive(), "the process is still up");
-    // `Shutdown` unanswered for one bound, the exit waited for one more,
-    // then the kill.
-    await_gone_within(&fake, 2 * SHUTDOWN_TIMEOUT + GONE).await;
+    // `Shutdown` unanswered for the one bound, then the kill — of the
+    // group, so the child the process forked goes with it.
+    await_gone_within(&fake, SHUTDOWN_TIMEOUT + GONE).await;
     let gone = SystemTime::now();
 
     let worker = &fake.log().workers()[0];
     assert_eq!(worker.last_rpc(), Some(Rpc::Shutdown));
     let asked = worker.saw(Rpc::Shutdown)[0].at();
     let held = gone.duration_since(asked).unwrap_or_default();
-    assert!(held >= 2 * SHUTDOWN_TIMEOUT, "the process was gone {held:?} after Shutdown");
+    // The bound's timer starts a round trip before the fake records the
+    // arrival, hence the slack.
+    let bound = SHUTDOWN_TIMEOUT.saturating_sub(Duration::from_millis(50));
+    assert!(held >= bound, "the process was gone {held:?} after Shutdown");
+    await_forked_gone(worker).await;
 }
 
 #[tokio::test]

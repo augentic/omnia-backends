@@ -1,18 +1,16 @@
-use std::fmt;
-
-use crate::bridge::{Exit, RunStatus, TransportError};
+use crate::bridge::{Exit, RpcError, RunStatus};
 
 /// How a completion this backend ran came to fail, by variant rather than
 /// by message.
 ///
-/// `complete`'s error downcasts to one of these — or to a
-/// [`TransportError`], or to the typed `budget-exhausted` a rejected check
-/// ends on.
-#[derive(Debug)]
+/// `complete`'s error downcasts to one of these — or to an [`RpcError`], or
+/// to the typed `budget-exhausted` a rejected check ends on.
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Failure {
     /// The run reached a terminal status other than `finished`: the bridge
     /// or the provider answered with an error.
+    #[error("cursor run {status}: {}", .detail.as_deref().unwrap_or("<no detail>"))]
     Run {
         /// The status the stream's result carried.
         status: RunStatus,
@@ -21,11 +19,16 @@ pub enum Failure {
         detail: Option<String>,
     },
     /// Absolute wall-clock cap exceeded while the stream was still active.
+    #[error("cursor run timed out after {cap_secs}s (absolute cap exceeded while still active)")]
     Timeout {
         /// The cap in seconds, from connect options.
         cap_secs: u64,
     },
     /// No stream events within the inactivity window.
+    #[error(
+        "cursor run inactive for {idle_secs}s (no stream events; inactivity limit \
+         {inactivity_secs}s, absolute cap {cap_secs}s)"
+    )]
     Inactive {
         /// Observed idle span in seconds.
         idle_secs: u64,
@@ -35,9 +38,11 @@ pub enum Failure {
         cap_secs: u64,
     },
     /// Hard tool-host failure (or a closed abort channel).
+    #[error("completion aborted: {0}")]
     Aborted(String),
     /// The spawned bridge process exited under the completion — during its
     /// handshake, or with a run on it.
+    #[error("cursor-sdk-bridge exited ({0})")]
     BridgeExited(Exit),
 }
 
@@ -49,33 +54,6 @@ impl Failure {
         Outcome::of_failure(self).as_str()
     }
 }
-
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Run { status, detail } => {
-                write!(f, "cursor run {status}: {}", detail.as_deref().unwrap_or("<no detail>"))
-            }
-            Self::Timeout { cap_secs } => write!(
-                f,
-                "cursor run timed out after {cap_secs}s (absolute cap exceeded while still active)"
-            ),
-            Self::Inactive {
-                idle_secs,
-                inactivity_secs,
-                cap_secs,
-            } => write!(
-                f,
-                "cursor run inactive for {idle_secs}s (no stream events; inactivity limit \
-                 {inactivity_secs}s, absolute cap {cap_secs}s)"
-            ),
-            Self::Aborted(reason) => write!(f, "completion aborted: {reason}"),
-            Self::BridgeExited(exit) => write!(f, "cursor-sdk-bridge exited ({exit})"),
-        }
-    }
-}
-
-impl std::error::Error for Failure {}
 
 /// How one completion came out: the closed set of `outcome` labels the
 /// `cursor_completions` counter carries.
@@ -90,12 +68,13 @@ pub enum Outcome {
     /// [`Failure::Aborted`], or a completion dropped before it finished.
     Abort,
     BridgeExit,
-    /// A [`TransportError`]: the socket to the bridge failed below Connect.
+    /// An [`RpcError::Transport`]: the socket to the bridge failed below
+    /// Connect.
     Transport,
     /// The guest's check rejected every candidate.
     Exhausted,
     /// The bridge or the provider answered with an error: a
-    /// [`Failure::Run`], a Connect error, or anything else.
+    /// [`Failure::Run`], an [`RpcError::Connect`], or anything else.
     Error,
 }
 
@@ -105,8 +84,10 @@ impl Outcome {
         if let Some(failure) = error.downcast_ref::<Failure>() {
             return Self::of_failure(failure);
         }
-        if error.downcast_ref::<TransportError>().is_some() {
-            return Self::Transport;
+        match error.downcast_ref::<RpcError>() {
+            Some(RpcError::Transport { .. }) => return Self::Transport,
+            Some(RpcError::Connect { .. }) => return Self::Error,
+            None => {}
         }
         match error.downcast_ref::<omnia_wasi_model::Error>() {
             Some(omnia_wasi_model::Error::BudgetExhausted(_)) => Self::Exhausted,
@@ -151,7 +132,7 @@ impl Outcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{Exit, Failure, Outcome, RunStatus, TransportError};
+    use super::{Exit, Failure, Outcome, RpcError, RunStatus};
 
     // an exit whose status the wait never reported
     const EXITED: Exit = Exit { status: None, pid: 1 };
@@ -218,7 +199,7 @@ mod tests {
         assert_eq!(Outcome::of(&exited), Outcome::BridgeExit);
         assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown)");
 
-        let transport: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
+        let transport: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
         assert_eq!(Outcome::of(&transport), Outcome::Transport);
 
         let rejected: anyhow::Error =
@@ -239,9 +220,9 @@ mod tests {
         assert!(Outcome::of(&exited).lost_bridge());
         let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
         let socket: anyhow::Error =
-            TransportError::io("SdkAgentService/Send", "reading the stream", reset).into();
+            RpcError::io("SdkAgentService/Send", "reading the stream", reset).into();
         assert!(Outcome::of(&socket).lost_bridge());
-        let torn: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
+        let torn: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
         assert!(Outcome::of(&torn).lost_bridge());
 
         // The bridge answered, in one way or another.

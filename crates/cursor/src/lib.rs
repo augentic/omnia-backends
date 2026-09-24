@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, ensure};
-pub use bridge::{Exit, RunStatus, TransportError};
+pub use bridge::{Exit, RpcError, RunStatus};
 pub use failure::Failure;
 use omnia::Backend;
 use tokio::time::Instant;

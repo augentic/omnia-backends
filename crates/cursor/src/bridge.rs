@@ -22,7 +22,7 @@ pub use messages::{
     ModelSelection, RunStatus, RunStreamMessage, RunStreamResult, SdkMessage, TokenUsage, ToolList,
 };
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
-pub use rpc::{Rpc, RunStream, TransportError};
+pub use rpc::{Rpc, RpcError, RunStream};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{ChildStderr, ChildStdout, Command};
@@ -44,8 +44,6 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
 const TAIL_LINES: usize = 20;
-// What precedes the discovery payload on the ready line; always the upstream
-// name, whatever the executable is called locally.
 const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 
 /// A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`

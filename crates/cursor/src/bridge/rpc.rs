@@ -9,11 +9,11 @@
 //! use the Connect envelope — a 1-byte flag plus a 4-byte big-endian length
 //! per message, with flag `0x02` marking the JSON `EndStreamResponse`.
 //!
-//! Failures come in two typed classes a caller can tell apart: a
-//! [`ConnectError`] — the bridge answered, with a status and code on a unary
-//! call or an error frame closing a run stream — and a [`TransportError`] —
-//! the socket, the HTTP layer, or the framing gave out below Connect, so the
-//! bridge is not known to have seen the call at all.
+//! A failed call is an [`RpcError`] in one of two classes a caller can tell
+//! apart: [`RpcError::Connect`] — the bridge answered, with a status and code
+//! on a unary call or an error frame closing a run stream — and
+//! [`RpcError::Transport`] — the socket, the HTTP layer, or the framing gave
+//! out below Connect, so the bridge is not known to have seen the call at all.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -159,7 +159,8 @@ impl Rpc {
         })
     }
 
-    /// POST the body and map a non-success status onto a [`ConnectError`].
+    /// POST the body and map a non-success status onto an
+    /// [`RpcError::Connect`].
     async fn call(
         &self, method: &str, content_type: &str, body: Vec<u8>,
     ) -> Result<http::Response<Incoming>> {
@@ -167,14 +168,14 @@ impl Rpc {
             .hyper
             .request(self.post(method, content_type, body)?)
             .await
-            .map_err(|error| TransportError::io(method, "sending the request", error))?;
+            .map_err(|error| RpcError::io(method, "sending the request", error))?;
 
         let status = response.status();
         if status.is_success() {
             return Ok(response);
         }
         let bytes = read_body(method, "reading the error response", response.into_body()).await?;
-        Err(ConnectError::unary(method, status, &bytes).into())
+        Err(RpcError::unary(method, status, &bytes).into())
     }
 
     fn post(
@@ -210,7 +211,7 @@ impl RunStream {
     pub async fn next(&mut self) -> Result<Option<RunStreamMessage>> {
         while let Some(frame) = self.0.next().await? {
             if frame.is_end_stream() {
-                return ConnectError::end_stream(&self.0.method, &frame.payload)
+                return RpcError::end_stream(&self.0.method, &frame.payload)
                     .map_or(Ok(None), |error| Err(error.into()));
             }
             let message: RunStreamMessage = match serde_json::from_slice(&frame.payload) {
@@ -231,17 +232,40 @@ impl RunStream {
     }
 }
 
-/// The bridge answered one RPC with an error: a non-success status on a
-/// unary call, or an `EndStreamResponse` carrying an error on a stream.
-#[derive(Debug)]
-pub struct ConnectError {
-    method: String,
-    /// The HTTP status of a unary failure; a stream's error frame has none.
-    status: Option<StatusCode>,
-    answer: ConnectStatus,
+/// One bridge RPC failed: the bridge answered with an error, or the call
+/// never got an answer at all.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RpcError {
+    /// The bridge answered: a non-success status on a unary call, or an
+    /// `EndStreamResponse` carrying an error on a stream.
+    #[error(fmt = connect_fmt)]
+    Connect {
+        /// The `Service/Method` the call named.
+        method: String,
+        /// The HTTP status of a unary failure; a stream's error frame has none.
+        status: Option<StatusCode>,
+        /// Connect's error code; `unknown` when the body carried none.
+        code: String,
+        /// Connect's error message, else the raw body.
+        message: String,
+    },
+    /// Below Connect: the request could not be sent, or the response or run
+    /// stream could not be read (a socket failure, or a body that ended
+    /// inside a frame). The bridge is not known to have seen the call.
+    #[error("bridge RPC `{method}` transport failed {doing}")]
+    Transport {
+        /// The `Service/Method` the call named.
+        method: String,
+        /// What the client was doing when the transport gave out.
+        doing: &'static str,
+        /// The HTTP client's or the socket's own error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
 }
 
-impl ConnectError {
+impl RpcError {
     /// A non-200 unary response: Connect's error object, or a body that is
     /// not one (a crash's, a proxy's) as the message itself.
     fn unary(method: &str, status: StatusCode, body: &[u8]) -> Self {
@@ -265,113 +289,68 @@ impl ConnectError {
     }
 
     // Details are the bridge's own diagnostics: logged, never carried.
-    fn answered(method: &str, status: Option<StatusCode>, mut answer: ConnectStatus) -> Self {
-        if let Some(details) = answer.details.take() {
+    fn answered(method: &str, status: Option<StatusCode>, answer: ConnectStatus) -> Self {
+        let ConnectStatus {
+            code,
+            message,
+            details,
+        } = answer;
+        if let Some(details) = details {
             tracing::debug!(method, %details, "bridge error details");
         }
-        Self {
+        Self::Connect {
             method: method.to_owned(),
             status,
-            answer,
+            code,
+            message,
         }
+    }
+
+    /// A socket failure while `doing`.
+    pub(crate) fn io(
+        method: &str, doing: &'static str, source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Transport {
+            method: method.to_owned(),
+            doing,
+            source: Box::new(source),
+        }
+    }
+
+    /// The body ended with a partial envelope still buffered: an unexpected
+    /// EOF while reading the stream.
+    pub(crate) fn truncated(method: &str, buffered: usize) -> Self {
+        let eof = std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("stream ended mid-frame ({buffered} bytes buffered)"),
+        );
+        Self::io(method, "reading the stream", eof)
     }
 
     /// Whether the agent the call named is already gone. Cursor still
     /// mis-tags some of those as 500 `internal` with "Agent … not found".
     fn is_agent_gone(&self) -> bool {
-        if self.answer.code == "not_found" {
+        let Self::Connect { code, message, .. } = self else {
+            return false;
+        };
+        if code == "not_found" {
             return true;
         }
-        let message = self.answer.message.to_ascii_lowercase();
+        let message = message.to_ascii_lowercase();
         message.contains("agent") && message.contains("not found")
     }
 }
 
-impl fmt::Display for ConnectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self {
-            method,
-            status,
-            answer: ConnectStatus { code, message, .. },
-        } = self;
-        match status {
-            Some(status) => write!(f, "bridge RPC `{method}` failed ({status}, {code}): {message}"),
-            None => write!(f, "bridge RPC `{method}` stream failed ({code}): {message}"),
-        }
+// `#[error(fmt = ..)]` hands every field over by reference.
+#[expect(clippy::ref_option, clippy::trivially_copy_pass_by_ref)]
+fn connect_fmt(
+    method: &str, status: &Option<StatusCode>, code: &str, message: &str,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    match status {
+        Some(status) => write!(f, "bridge RPC `{method}` failed ({status}, {code}): {message}"),
+        None => write!(f, "bridge RPC `{method}` stream failed ({code}): {message}"),
     }
-}
-
-impl std::error::Error for ConnectError {}
-
-/// A failure below the Connect protocol on one bridge RPC.
-///
-/// The request could not be sent, the response or run stream could not be
-/// read, or the stream ended inside a frame: the bridge never answered the
-/// call, unlike a Connect error (`failed (status, code)`) or an end-stream
-/// error, both of which are the bridge answering.
-#[derive(Debug)]
-pub struct TransportError {
-    method: String,
-    cause: Cause,
-}
-
-impl TransportError {
-    /// A socket failure while `doing`.
-    #[must_use]
-    pub fn io(
-        method: &str, doing: &'static str, source: impl std::error::Error + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            method: method.to_owned(),
-            cause: Cause::Io {
-                doing,
-                source: Box::new(source),
-            },
-        }
-    }
-
-    /// The body ended with a partial envelope still buffered.
-    #[must_use]
-    pub fn truncated(method: &str, buffered: usize) -> Self {
-        Self {
-            method: method.to_owned(),
-            cause: Cause::Truncated { buffered },
-        }
-    }
-}
-
-// The source is left to `Error::source`, so an `{error:#}` chain names it
-// once.
-impl fmt::Display for TransportError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.cause {
-            Cause::Io { doing, .. } => {
-                write!(f, "bridge RPC `{}` transport failed {doing}", self.method)
-            }
-            Cause::Truncated { buffered } => write!(
-                f,
-                "bridge RPC `{}` stream ended mid-frame ({buffered} bytes buffered)",
-                self.method
-            ),
-        }
-    }
-}
-
-impl std::error::Error for TransportError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.cause {
-            Cause::Io { source, .. } => Some(source.as_ref()),
-            Cause::Truncated { .. } => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-enum Cause {
-    /// The HTTP client or the socket failed while `doing`.
-    Io { doing: &'static str, source: Box<dyn std::error::Error + Send + Sync + 'static> },
-    /// The body ended with a partial envelope still buffered.
-    Truncated { buffered: usize },
 }
 
 /// Incrementally decodes Connect envelopes from a streaming response body.
@@ -383,9 +362,9 @@ struct FrameStream {
 
 impl FrameStream {
     /// The next envelope, or `None` when the body ends cleanly at a frame
-    /// boundary. Fails with a [`TransportError`] on a socket failure or a
-    /// truncated frame, and plainly on a compressed frame (compression is
-    /// never negotiated).
+    /// boundary. Fails with an [`RpcError::Transport`] on a socket failure
+    /// or a truncated frame, and plainly on a compressed frame (compression
+    /// is never negotiated).
     async fn next(&mut self) -> Result<Option<Frame>> {
         loop {
             if let Some(frame) = decode_frame(&mut self.buffer)? {
@@ -393,12 +372,12 @@ impl FrameStream {
             }
             let Some(chunk) = self.body.frame().await else {
                 if !self.buffer.is_empty() {
-                    return Err(TransportError::truncated(&self.method, self.buffer.len()).into());
+                    return Err(RpcError::truncated(&self.method, self.buffer.len()).into());
                 }
                 return Ok(None);
             };
-            let chunk = chunk
-                .map_err(|error| TransportError::io(&self.method, "reading the stream", error))?;
+            let chunk =
+                chunk.map_err(|error| RpcError::io(&self.method, "reading the stream", error))?;
             if let Ok(data) = chunk.into_data() {
                 self.buffer.extend_from_slice(&data);
             }
@@ -477,19 +456,16 @@ fn decode_frame(buffer: &mut BytesMut) -> Result<Option<Frame>> {
 }
 
 /// Collect a response body whole; a failure below Connect while `doing` is
-/// a [`TransportError`].
+/// an [`RpcError::Transport`].
 async fn read_body(method: &str, doing: &'static str, body: Incoming) -> Result<Bytes> {
-    let collected =
-        body.collect().await.map_err(|error| TransportError::io(method, doing, error))?;
+    let collected = body.collect().await.map_err(|error| RpcError::io(method, doing, error))?;
     Ok(collected.to_bytes())
 }
 
 /// Close/delete of a missing agent is the desired end state.
 fn gone_ok(result: Result<()>) -> Result<()> {
     match result {
-        Err(error)
-            if error.downcast_ref::<ConnectError>().is_some_and(ConnectError::is_agent_gone) =>
-        {
+        Err(error) if error.downcast_ref::<RpcError>().is_some_and(RpcError::is_agent_gone) => {
             Ok(())
         }
         other => other,
@@ -504,7 +480,7 @@ mod tests {
     use bytes::BytesMut;
     use http::StatusCode;
 
-    use super::{ConnectError, END_STREAM, decode_frame, require_loopback_http};
+    use super::{END_STREAM, RpcError, decode_frame, require_loopback_http};
 
     fn envelope(payload: &[u8]) -> Vec<u8> {
         super::envelope(payload).expect("a test payload fits one frame")
@@ -595,7 +571,7 @@ mod tests {
 
     #[test]
     fn end_stream_error_body() {
-        let end = |payload: &[u8]| ConnectError::end_stream("SdkAgentService/Send", payload);
+        let end = |payload: &[u8]| RpcError::end_stream("SdkAgentService/Send", payload);
         assert!(end(b"{}").is_none(), "no error field, clean end");
         assert!(end(b"not json").is_none(), "an unparsable end frame is not an error");
         let error = end(br#"{"error":{"code":"unauthenticated","message":"Unauthorized"}}"#)
@@ -608,7 +584,7 @@ mod tests {
 
     #[test]
     fn connect_error_body() {
-        let error = ConnectError::unary(
+        let error = RpcError::unary(
             "SdkAgentService/CreateAgent",
             StatusCode::NOT_FOUND,
             br#"{"code":"not_found","message":"unknown agent"}"#,
@@ -619,7 +595,7 @@ mod tests {
              agent"
         );
 
-        let error = ConnectError::unary(
+        let error = RpcError::unary(
             "SdkAgentService/CreateAgent",
             StatusCode::INTERNAL_SERVER_ERROR,
             b"plain text\n",
@@ -628,8 +604,18 @@ mod tests {
     }
 
     #[test]
+    fn truncated_stream() {
+        let error: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
+        assert_eq!(
+            format!("{error:#}"),
+            "bridge RPC `SdkAgentService/Send` transport failed reading the stream: stream ended \
+             mid-frame (3 bytes buffered)"
+        );
+    }
+
+    #[test]
     fn agent_gone_codes() {
-        let unary = |status, body| ConnectError::unary("SdkAgentService/DeleteAgent", status, body);
+        let unary = |status, body| RpcError::unary("SdkAgentService/DeleteAgent", status, body);
 
         let typed =
             unary(StatusCode::NOT_FOUND, br#"{"code":"not_found","message":"unknown agent"}"#);

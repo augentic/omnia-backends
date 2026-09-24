@@ -3820,6 +3820,7 @@ dependencies = [
  "serde_repr",
  "tempfile",
  "test-programs",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3861,6 +3862,7 @@ dependencies = [
  "serde",
  "serde_json",
  "test-programs",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]

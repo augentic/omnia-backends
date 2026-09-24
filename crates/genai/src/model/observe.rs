@@ -115,9 +115,10 @@ impl Drop for Completion {
 
 /// A completion failure this crate constructs. [`outcome_of`] downcasts this
 /// so metric labels do not depend on message wording.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Failure {
     // Round budget spent without the model producing a final text answer.
+    #[error("no answer after {rounds} model round-trips")]
     Exhausted { rounds: usize },
 }
 
@@ -128,18 +129,6 @@ impl Failure {
         }
     }
 }
-
-impl std::fmt::Display for Failure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Exhausted { rounds } => {
-                write!(f, "no answer after {rounds} model round-trips")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Failure {}
 
 /// Classify a failed `complete`: a [`Failure`] by variant, the typed
 /// `budget-exhausted` a rejected check ends on, anything else `error`.

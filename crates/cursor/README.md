@@ -64,8 +64,8 @@ subprocess output and never reach WARN or the error a guest sees.
 A bridge lost under the *opening* of a completion is not the prompt's
 doing, so the completion restarts once: when `CreateAgent` or the opening
 `Send` fails because the process exited (`Failure::BridgeExited`) or its
-socket failed below Connect (`TransportError` — the request could not be
-sent, the stream reset, or it ended mid-frame), and no candidate has yet
+socket failed below Connect (`RpcError::Transport` — the request could not
+be sent, the stream reset, or it ended mid-frame), and no candidate has yet
 reached the guest, the dead lease is released, a fresh one is taken (with
 one slot that means waiting for the dead process to be reaped), and the
 original prompt is sent again with fresh deadlines. The restart is logged at
@@ -145,9 +145,9 @@ bridge log its RPCs to stderr, where this crate records them at DEBUG.
 
 A caller that needs to tell failures apart matches on the types `complete`'s
 error downcasts to — `Failure::{Run, Timeout, Inactive, Aborted, BridgeExited}`,
-`TransportError`, and `omnia_wasi_model::Error::BudgetExhausted` — rather
-than on message text; `Exit` is the process status a `BridgeExited` carries,
-and `RunStatus` the terminal status a `Run` ended in.
+`RpcError::{Connect, Transport}`, and `omnia_wasi_model::Error::BudgetExhausted`
+— rather than on message text; `Exit` is the process status a `BridgeExited`
+carries, and `RunStatus` the terminal status a `Run` ended in.
 
 MCP servers are supplied per-request: a prompt's `mcp` grant carries the
 endpoint `url` directly, passed inline through `CreateAgent`'s `mcp_servers`.

@@ -15,13 +15,14 @@ mod proto;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Write as _;
+use std::fmt::{self, Formatter};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, CONTENT_TYPE};
-use http::{HeaderMap, Method, StatusCode};
+use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -39,8 +40,6 @@ use crate::lock;
 const PATH: &str = "/sdk.v1.SdkCustomToolCallbackService/CallCustomTool";
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
-
-type Reply = http::Response<Full<Bytes>>;
 
 /// The bound loopback endpoint; dropping it stops serving.
 #[derive(Debug)]
@@ -200,7 +199,7 @@ impl Handler {
         lock(&self.bridges).get(token).cloned()
     }
 
-    async fn handle(&self, request: http::Request<Incoming>) -> Reply {
+    async fn handle(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
         let (parts, body) = request.into_parts();
 
         // Reject on the head alone — no body byte of an unauthenticated
@@ -246,8 +245,8 @@ impl Handler {
     }
 }
 
-impl std::fmt::Debug for Handler {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Handler {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Handler").field("bridges", &lock(&self.bridges).len()).finish()
     }
 }
@@ -321,7 +320,7 @@ impl ToolCall {
 }
 
 // Execute one decoded callback against the calling bridge's agent table.
-async fn call_tool(sessions: &Sessions, headers: &HeaderMap, body: Bytes) -> Reply {
+async fn call_tool(sessions: &Sessions, headers: &HeaderMap, body: Bytes) -> Response<Full<Bytes>> {
     let content_type =
         headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
     let codec = if content_type.contains("json") {
@@ -406,7 +405,7 @@ fn wrap_output(output: &str) -> Value {
     }
 }
 
-fn respond(codec: Codec, result: &Value) -> Reply {
+fn respond(codec: Codec, result: &Value) -> Response<Full<Bytes>> {
     match codec {
         Codec::Json => {
             reply(StatusCode::OK, "application/json", json!({ "result": result }).to_string())
@@ -420,12 +419,14 @@ fn respond(codec: Codec, result: &Value) -> Reply {
     }
 }
 
-fn connect_error(status: StatusCode, code: &str, message: &str) -> Reply {
+fn connect_error(status: StatusCode, code: &str, message: &str) -> Response<Full<Bytes>> {
     reply(status, "application/json", json!({ "code": code, "message": message }).to_string())
 }
 
-fn reply(status: StatusCode, content_type: &'static str, body: impl Into<Bytes>) -> Reply {
-    let mut response = http::Response::new(Full::new(body.into()));
+fn reply(
+    status: StatusCode, content_type: &'static str, body: impl Into<Bytes>,
+) -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(body.into()));
     *response.status_mut() = status;
     response.headers_mut().insert(CONTENT_TYPE, http::HeaderValue::from_static(content_type));
     response

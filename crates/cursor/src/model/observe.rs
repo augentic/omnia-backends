@@ -4,8 +4,7 @@
 //! transcript and capture the run id and last status text. Payload shapes
 //! mirror the public SDK — every field access is nullable and a malformed
 //! event is skipped, never fatal. [`Completion`] emits the start/finish INFO
-//! lines and tracing-opentelemetry metric fields; [`outcome_of`] and
-//! [`lost_bridge`] classify a failed completion's error.
+//! lines and tracing-opentelemetry metric fields.
 
 use std::collections::HashMap;
 
@@ -13,11 +12,12 @@ use omnia_wasi_model::{Format, ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::Instant;
 
-use crate::bridge::{RunStreamMessage, SdkMessage, TransportError};
-use crate::{Failure, elapsed_ms};
+use crate::bridge::{RunStreamMessage, SdkMessage};
+use crate::elapsed_ms;
+use crate::failure::Outcome;
 
 /// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
-/// records `outcome=abort` (a cancelled future).
+/// records [`Outcome::Abort`] (a cancelled future).
 pub struct Completion {
     model: String,
     format: String,
@@ -78,7 +78,7 @@ impl Completion {
 
     // INFO + OTEL metric fields for this completion; emitted once, so a
     // later `Drop` says nothing.
-    pub fn finish(&mut self, outcome: &'static str) {
+    pub fn finish(&mut self, outcome: Outcome) {
         if self.emitted {
             return;
         }
@@ -87,7 +87,7 @@ impl Completion {
         tracing::info!(
             model = %self.model,
             format = %self.format,
-            outcome,
+            outcome = outcome.as_str(),
             attempts = self.attempts,
             histogram.cursor_completion_duration_ms = duration_ms,
             histogram.cursor_prompt_bytes = self.prompt_bytes,
@@ -97,7 +97,7 @@ impl Completion {
             histogram.cursor_output_tokens = self.output_tokens,
             histogram.cursor_reasoning_tokens = self.reasoning_tokens,
             monotonic_counter.cursor_completions = 1_u64,
-            monotonic_counter.cursor_corrections = u64::from(outcome == "corrected"),
+            monotonic_counter.cursor_corrections = u64::from(outcome == Outcome::Corrected),
             "completion"
         );
     }
@@ -105,7 +105,7 @@ impl Completion {
 
 impl Drop for Completion {
     fn drop(&mut self) {
-        self.finish("abort");
+        self.finish(Outcome::Abort);
     }
 }
 
@@ -227,32 +227,6 @@ impl PendingCall {
     }
 }
 
-/// Classify a failed `complete`: a [`Failure`] by variant, a
-/// [`TransportError`] as `transport`, the typed `budget-exhausted` a
-/// rejected check ends on, anything else `error`.
-pub fn outcome_of(error: &anyhow::Error) -> &'static str {
-    if let Some(failure) = error.downcast_ref::<Failure>() {
-        return failure.outcome();
-    }
-    if error.downcast_ref::<TransportError>().is_some() {
-        return "transport";
-    }
-    match error.downcast_ref::<omnia_wasi_model::Error>() {
-        Some(omnia_wasi_model::Error::BudgetExhausted(_)) => "exhausted",
-        _ => "error",
-    }
-}
-
-/// Whether the bridge, or the socket to it, was lost under the completion:
-/// the process exited, or an RPC failed below Connect. Neither says anything
-/// about the prompt, so a fresh bridge may be given it again; a Connect
-/// error, an end-stream error, or a run that ended in a failing status is
-/// the bridge answering, and is not.
-pub fn lost_bridge(error: &anyhow::Error) -> bool {
-    matches!(error.downcast_ref::<Failure>(), Some(Failure::BridgeExited(_)))
-        || error.downcast_ref::<TransportError>().is_some()
-}
-
 // The first string found under any of `keys`, tolerating both `snake_case`
 // and `camelCase` spellings across bridge versions.
 fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -270,8 +244,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::EventLog;
-    use crate::Failure;
-    use crate::bridge::{Exit, SdkMessage, TransportError};
+    use crate::bridge::SdkMessage;
 
     fn observe_all(events: &[Value]) -> EventLog {
         let mut log = EventLog::default();
@@ -340,70 +313,5 @@ mod tests {
             json!({ "type": "tool_call", "message": { "subtype": "completed" } }),
         ]);
         assert!(log.finish().is_none(), "nothing usable, nothing recorded");
-    }
-
-    // an exit whose status the wait never reported
-    const EXITED: Exit = Exit { status: None, pid: 1 };
-
-    #[test]
-    fn classify_crate_errors() {
-        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
-        assert_eq!(super::outcome_of(&timeout), "timeout");
-
-        let inactive: anyhow::Error = Failure::Inactive {
-            idle_secs: 120,
-            inactivity_secs: 120,
-            cap_secs: 600,
-        }
-        .into();
-        assert_eq!(super::outcome_of(&inactive), "inactive");
-
-        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
-        assert_eq!(super::outcome_of(&aborted), "abort");
-
-        let exited: anyhow::Error = Failure::BridgeExited(EXITED).into();
-        assert_eq!(super::outcome_of(&exited), "bridge_exit");
-        assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown)");
-
-        let transport: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
-        assert_eq!(super::outcome_of(&transport), "transport");
-
-        let rejected: anyhow::Error =
-            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
-        assert_eq!(super::outcome_of(&rejected), "exhausted");
-
-        assert_eq!(super::outcome_of(&anyhow::anyhow!("bridge RPC failed")), "error");
-    }
-
-    #[test]
-    fn lost_bridge_classes() {
-        let exited: anyhow::Error = Failure::BridgeExited(EXITED).into();
-        assert!(super::lost_bridge(&exited));
-        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
-        let socket: anyhow::Error =
-            TransportError::io("SdkAgentService/Send", "reading the stream", reset).into();
-        assert!(super::lost_bridge(&socket));
-        let torn: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
-        assert!(super::lost_bridge(&torn));
-
-        // The bridge answered, in one way or another.
-        let inactive: anyhow::Error = Failure::Inactive {
-            idle_secs: 120,
-            inactivity_secs: 120,
-            cap_secs: 600,
-        }
-        .into();
-        assert!(!super::lost_bridge(&inactive));
-        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
-        assert!(!super::lost_bridge(&timeout));
-        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
-        assert!(!super::lost_bridge(&aborted));
-        let rejected: anyhow::Error =
-            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
-        assert!(!super::lost_bridge(&rejected));
-        assert!(!super::lost_bridge(&anyhow::anyhow!(
-            "bridge RPC `SdkAgentService/Send` failed (500 Internal Server Error, internal): boom"
-        )));
-        assert!(!super::lost_bridge(&anyhow::anyhow!("cursor run error: model overloaded")));
     }
 }

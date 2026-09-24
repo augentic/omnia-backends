@@ -54,12 +54,12 @@ so nothing of a slot's process outlives it. A bridge that
 crashes fails the completion running on it with the typed
 `cursor-sdk-bridge exited (…)` (metric outcome `bridge_exit`)
 rather than as the next completion's stall. The exit is logged at WARN with
-the process's `pid`, its `uptime_ms`, the `status` (`signal: 9 (SIGKILL)`,
-`exit status: 7`), whether a `run_in_flight` was on it, and how
-long that run's stream had been `silent_ms`, and counted as
-`cursor_bridge_exits`. The last lines the process wrote to stderr are logged
-at DEBUG only — they are untrusted subprocess output and never reach WARN or
-the error a guest sees.
+the process's `pid`, its `uptime_ms`, and the `status` (`signal: 9 (SIGKILL)`,
+`exit status: 7`), and counted as `cursor_bridge_exits`; the completion that
+lost its run to it logs `run lost with its process` at INFO under the same
+`pid`, with how long that run's stream had been `silent_ms`. The last lines
+the process wrote to stderr are logged at DEBUG only — they are untrusted
+subprocess output and never reach WARN or the error a guest sees.
 
 A bridge lost under the *opening* of a completion is not the prompt's
 doing, so the completion restarts once: when `CreateAgent` or the opening

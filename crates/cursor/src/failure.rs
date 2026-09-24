@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::bridge::Exit;
+use crate::bridge::{Exit, TransportError};
 
 /// How a completion this backend ran came to fail, by variant rather than
 /// by message.
@@ -37,12 +37,7 @@ impl Failure {
     /// this failure.
     #[must_use]
     pub const fn outcome(&self) -> &'static str {
-        match self {
-            Self::Timeout { .. } => "timeout",
-            Self::Inactive { .. } => "inactive",
-            Self::Aborted(_) => "abort",
-            Self::BridgeExited(_) => "bridge_exit",
-        }
+        Outcome::of_failure(self).as_str()
     }
 }
 
@@ -69,3 +64,172 @@ impl fmt::Display for Failure {
 }
 
 impl std::error::Error for Failure {}
+
+/// How one completion came out: the closed set of `outcome` labels the
+/// `cursor_completions` counter carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Answered on the opening prompt.
+    Ok,
+    /// Answered after the guest's check rejected a candidate.
+    Corrected,
+    Timeout,
+    Inactive,
+    /// [`Failure::Aborted`], or a completion dropped before it finished.
+    Abort,
+    BridgeExit,
+    /// A [`TransportError`]: the socket to the bridge failed below Connect.
+    Transport,
+    /// The guest's check rejected every candidate.
+    Exhausted,
+    /// Anything else: the bridge or the provider answered with an error.
+    Error,
+}
+
+impl Outcome {
+    /// Classify a failed `complete`.
+    pub fn of(error: &anyhow::Error) -> Self {
+        if let Some(failure) = error.downcast_ref::<Failure>() {
+            return Self::of_failure(failure);
+        }
+        if error.downcast_ref::<TransportError>().is_some() {
+            return Self::Transport;
+        }
+        match error.downcast_ref::<omnia_wasi_model::Error>() {
+            Some(omnia_wasi_model::Error::BudgetExhausted(_)) => Self::Exhausted,
+            _ => Self::Error,
+        }
+    }
+
+    const fn of_failure(failure: &Failure) -> Self {
+        match failure {
+            Failure::Timeout { .. } => Self::Timeout,
+            Failure::Inactive { .. } => Self::Inactive,
+            Failure::Aborted(_) => Self::Abort,
+            Failure::BridgeExited(_) => Self::BridgeExit,
+        }
+    }
+
+    /// Whether the bridge, or the socket to it, was lost under the
+    /// completion. Neither says anything about the prompt, so a fresh
+    /// bridge may be given it again; every other outcome is the bridge
+    /// answering — a Connect error, an end-stream error, a run that ended
+    /// in a failing status — and is not.
+    pub const fn lost_bridge(self) -> bool {
+        matches!(self, Self::BridgeExit | Self::Transport)
+    }
+
+    /// The metric label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Corrected => "corrected",
+            Self::Timeout => "timeout",
+            Self::Inactive => "inactive",
+            Self::Abort => "abort",
+            Self::BridgeExit => "bridge_exit",
+            Self::Transport => "transport",
+            Self::Exhausted => "exhausted",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Exit, Failure, Outcome, TransportError};
+
+    // an exit whose status the wait never reported
+    const EXITED: Exit = Exit { status: None, pid: 1 };
+
+    fn inactive() -> anyhow::Error {
+        Failure::Inactive {
+            idle_secs: 120,
+            inactivity_secs: 120,
+            cap_secs: 600,
+        }
+        .into()
+    }
+
+    // the labels are what dashboards key on
+    #[test]
+    fn labels() {
+        let labels = [
+            Outcome::Ok,
+            Outcome::Corrected,
+            Outcome::Timeout,
+            Outcome::Inactive,
+            Outcome::Abort,
+            Outcome::BridgeExit,
+            Outcome::Transport,
+            Outcome::Exhausted,
+            Outcome::Error,
+        ]
+        .map(Outcome::as_str);
+        assert_eq!(
+            labels,
+            [
+                "ok",
+                "corrected",
+                "timeout",
+                "inactive",
+                "abort",
+                "bridge_exit",
+                "transport",
+                "exhausted",
+                "error"
+            ]
+        );
+        assert_eq!(Failure::Timeout { cap_secs: 600 }.outcome(), "timeout");
+    }
+
+    #[test]
+    fn classified() {
+        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
+        assert_eq!(Outcome::of(&timeout), Outcome::Timeout);
+        assert_eq!(Outcome::of(&inactive()), Outcome::Inactive);
+
+        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
+        assert_eq!(Outcome::of(&aborted), Outcome::Abort);
+
+        let exited: anyhow::Error = Failure::BridgeExited(EXITED).into();
+        assert_eq!(Outcome::of(&exited), Outcome::BridgeExit);
+        assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown)");
+
+        let transport: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
+        assert_eq!(Outcome::of(&transport), Outcome::Transport);
+
+        let rejected: anyhow::Error =
+            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
+        assert_eq!(Outcome::of(&rejected), Outcome::Exhausted);
+
+        assert_eq!(Outcome::of(&anyhow::anyhow!("bridge RPC failed")), Outcome::Error);
+    }
+
+    #[test]
+    fn lost_bridge() {
+        let exited: anyhow::Error = Failure::BridgeExited(EXITED).into();
+        assert!(Outcome::of(&exited).lost_bridge());
+        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+        let socket: anyhow::Error =
+            TransportError::io("SdkAgentService/Send", "reading the stream", reset).into();
+        assert!(Outcome::of(&socket).lost_bridge());
+        let torn: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
+        assert!(Outcome::of(&torn).lost_bridge());
+
+        // The bridge answered, in one way or another.
+        assert!(!Outcome::of(&inactive()).lost_bridge());
+        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
+        assert!(!Outcome::of(&timeout).lost_bridge());
+        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
+        assert!(!Outcome::of(&aborted).lost_bridge());
+        let rejected: anyhow::Error =
+            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
+        assert!(!Outcome::of(&rejected).lost_bridge());
+        assert!(!Outcome::of(&anyhow::anyhow!(
+            "bridge RPC `SdkAgentService/Send` failed (500 Internal Server Error, internal): boom"
+        ))
+        .lost_bridge());
+        assert!(!Outcome::of(&anyhow::anyhow!("cursor run error: model overloaded")).lost_bridge());
+    }
+}

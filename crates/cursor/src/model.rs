@@ -32,6 +32,7 @@ use options::Turn;
 use tracing::{Instrument, info_span};
 
 use crate::Client;
+use crate::failure::Outcome;
 
 impl WasiModelCtx for Client {
     /// One completion on a bridge-managed agent of its own, restarted once
@@ -62,7 +63,7 @@ impl WasiModelCtx for Client {
                 let error = format!("{:#}", failed.error());
                 tracing::warn!(
                     monotonic_counter.cursor_bridge_restarts = 1_u64,
-                    outcome = observe::outcome_of(failed.error()),
+                    outcome = Outcome::of(failed.error()).as_str(),
                     pid = failed.pid(),
                     %error,
                     "bridge lost before any candidate; completion restarting on a fresh bridge"
@@ -84,6 +85,7 @@ async fn attempt(
     // the deadlines start inside `create`, after the wait. Neither failure
     // is a lost bridge — the probe proved the binary — so both stand.
     let turn = Turn::prepare(request, tool_host.local_path(), &client.model, &client.api_key)
+        .await
         .map_err(Unanswered::settled)?;
     let lease = client.pool.lease().await.map_err(Unanswered::settled)?;
     let agent = Agent::create(client, lease, turn, Arc::clone(tool_host))

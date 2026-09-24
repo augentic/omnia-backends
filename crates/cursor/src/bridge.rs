@@ -11,7 +11,7 @@ mod rpc;
 
 use std::fmt;
 use std::process::{ExitStatus, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -30,7 +30,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
 use crate::endpoint::Registration;
-use crate::{Failure, elapsed_ms, lock};
+use crate::{Failure, elapsed_ms};
 
 // for the exit a `Shutdown` RPC asks for
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -39,14 +39,11 @@ const EXIT_GRACE: Duration = Duration::from_millis(250);
 // how long a failure is given for the exit it usually runs ahead of
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
 
-// `None` until the supervisor publishes the exit
-type ExitWatch = watch::Receiver<Option<Exit>>;
-
 /// A spawned `cursor-sdk-bridge` process this client watches.
 #[derive(Debug)]
 pub struct Bridge {
     state: Arc<State>,
-    exit: ExitWatch,
+    exit: watch::Receiver<Option<Exit>>,
     shutdown: watch::Sender<()>,
 }
 
@@ -96,7 +93,6 @@ impl Bridge {
         let state = Arc::new(State {
             pid,
             started_at,
-            clock: Activity::default(),
             tail: Tail::default(),
             rpc: OnceLock::new(),
         });
@@ -132,13 +128,6 @@ impl Bridge {
     /// Whether the bridge has yet to exit.
     pub fn is_running(&self) -> bool {
         self.exit.borrow().is_none()
-    }
-
-    /// Record the run's activity clock for an uninvited exit.
-    ///
-    /// The sender lives as long as the run.
-    pub fn watch(&self, clock: watch::Receiver<Instant>) {
-        self.state.clock.set(clock);
     }
 
     /// Resolves once the bridge exits.
@@ -242,9 +231,7 @@ impl fmt::Display for Exit {
 struct State {
     pid: u32,
     started_at: Instant,
-    clock: Activity,
     tail: Tail,
-    // the bound client, once the handshake has one
     rpc: OnceLock<Rpc>,
 }
 
@@ -254,25 +241,6 @@ impl State {
         let tail = self.tail.to_string();
         if !tail.is_empty() {
             tracing::debug!(%tail, "cursor-sdk-bridge tail");
-        }
-    }
-}
-
-// activity clock of the in-flight run; the sender lives as long as the run
-#[derive(Debug, Default)]
-struct Activity(Mutex<Option<watch::Receiver<Instant>>>);
-
-impl Activity {
-    fn set(&self, clock: watch::Receiver<Instant>) {
-        *lock(&self.0) = Some(clock);
-    }
-
-    // how long the in-flight run's stream has been silent; `None` without a run
-    fn silent_ms(&self) -> Option<u64> {
-        match lock(&self.0).as_ref() {
-            // a closed channel is a `Send` that has returned
-            Some(clock) if clock.has_changed().is_ok() => Some(elapsed_ms(*clock.borrow())),
-            _ => None,
         }
     }
 }
@@ -299,11 +267,10 @@ impl Supervisor {
                 false
             }
         };
+        
         // the one kill, of the group: nothing of the slot outlives it
         let _ = self.child.start_kill();
         let status = self.child.wait().await.ok();
-        // before the drain: `Send` is still pending, so this is the run at exit
-        let silent_ms = self.state.clock.silent_ms();
         let uptime_ms = elapsed_ms(self.state.started_at);
 
         // the group is gone, so a pipe still open is held by a process that
@@ -311,18 +278,18 @@ impl Supervisor {
         if timeout(EXIT_GRACE, &mut self.stderr).await.is_err() {
             self.stderr.abort();
         }
+
         let exit = Exit {
             status,
             pid: self.state.pid,
         };
+
         // an exit nobody asked for is a crash: WARN, with the stderr behind it
         if self_exited {
             tracing::warn!(
                 pid = exit.pid,
                 uptime_ms,
                 status = %exit,
-                run_in_flight = silent_ms.is_some(),
-                silent_ms,
                 monotonic_counter.cursor_bridge_exits = 1_u64,
                 "cursor-sdk-bridge exited"
             );
@@ -333,24 +300,24 @@ impl Supervisor {
         drop(self.state_root);
     }
 
-    // ask over the bound client and wait for the exit it brings, under one
+    // Ask over the bound client and wait for the exit it brings, under one
     // bound together; unbound, there is nothing to ask
     async fn ask(&mut self) {
-        let Self { child, state, .. } = self;
-        let Some(rpc) = state.rpc.get() else {
+        let Some(rpc) = self.state.rpc.get() else {
             return;
         };
+
         let asked = async {
             let _ = rpc.shutdown().await;
-            let _ = child.wait().await;
+            let _ = self.child.wait().await;
         };
         let _ = timeout(SHUTDOWN_TIMEOUT, asked).await;
     }
 }
 
-// a closed channel is the supervisor gone, and the process with it
-// (`kill_on_drop`), so the exit is real even if its status never arrives
-async fn wait_exit(exit: &mut ExitWatch, pid: u32) -> Exit {
+// A closed channel means the supervisor is gone, and the process with it
+// (`kill_on_drop`). The exit is real even if its status never arrives.
+async fn wait_exit(exit: &mut watch::Receiver<Option<Exit>>, pid: u32) -> Exit {
     exit.wait_for(Option::is_some)
         .await
         .ok()
@@ -390,11 +357,8 @@ fn drain_stdout(stdout: ChildStdout) {
 mod tests {
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::ExitStatus;
-    use std::time::Duration;
 
-    use tokio::sync::watch;
-
-    use super::{Activity, Exit};
+    use super::Exit;
 
     // the crash WARN and `Failure::BridgeExited` both read this text
     #[test]
@@ -403,23 +367,5 @@ mod tests {
         assert_eq!(exit(Some(ExitStatus::from_raw(9))), "signal: 9 (SIGKILL)");
         assert_eq!(exit(Some(ExitStatus::from_raw(3 << 8))), "exit status: 3");
         assert_eq!(exit(None), "status unknown");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn activity_follows_the_send() {
-        let clock = Activity::default();
-        assert_eq!(clock.silent_ms(), None, "nothing has been sent yet");
-
-        let (tx, rx) = watch::channel(tokio::time::Instant::now());
-        clock.set(rx);
-        tokio::time::advance(Duration::from_millis(1500)).await;
-        assert_eq!(clock.silent_ms(), Some(1500), "a run in flight, silent since it began");
-
-        tx.send_replace(tokio::time::Instant::now());
-        tokio::time::advance(Duration::from_millis(200)).await;
-        assert_eq!(clock.silent_ms(), Some(200), "an event rearms the silence");
-
-        drop(tx);
-        assert_eq!(clock.silent_ms(), None, "the `Send` has returned");
     }
 }

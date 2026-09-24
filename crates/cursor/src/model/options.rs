@@ -5,7 +5,6 @@
 //! servers.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -13,15 +12,17 @@ use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::Value;
 
 use crate::bridge::{
-    AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
-    ToolList,
+    AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
+    ModelSelection, ToolList,
 };
 
 /// Everything one completion derives from the request: the `CreateAgent`
-/// options, the workspace they point into, the opening prompt, the format
-/// steering candidate extraction, and whether the guest checks answers.
+/// options, the pin every later call on the agent repeats, the workspace
+/// they point into, the opening prompt, the format steering candidate
+/// extraction, and whether the guest checks answers.
 pub struct Turn {
     pub options: AgentOptions,
+    pub operation: AgentOperationOptions,
     pub workspace: Workspace,
     pub prompt: String,
     pub format: Format,
@@ -36,18 +37,23 @@ impl Turn {
     ///
     /// Returns an error when the workspace cannot be prepared or the request
     /// does not map onto agent options.
-    pub fn prepare(
+    pub async fn prepare(
         request: &Request, lent: Option<&Path>, default_model: &str, api_key: &str,
     ) -> Result<Self> {
         if request.generation.is_some() {
             tracing::debug!("request.generation is ignored (CreateAgent has no sampling controls)");
         }
 
-        let workspace = Workspace::new(lent)?;
+        let workspace = Workspace::new(lent).await?;
         let options = agent_options(request, &workspace, default_model, api_key)?;
+        let operation = AgentOperationOptions {
+            cwd: workspace.cwd()?,
+            api_key: api_key.to_owned(),
+        };
         let prompt = with_mcp_hint(&request.mcp_servers(), request.to_string());
         Ok(Self {
             options,
+            operation,
             workspace,
             prompt,
             format: request.format.clone(),
@@ -64,22 +70,21 @@ pub enum Workspace {
 }
 
 impl Workspace {
-    /// The lent tree, created and canonicalized — or a private empty
-    /// temporary directory when no workspace is lent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the lent path cannot be created or canonicalized,
-    /// or when the private directory cannot be created.
-    fn new(lent: Option<&Path>) -> Result<Self> {
+    // the lent tree, created and canonicalized — or a private empty
+    // temporary directory when no workspace is lent
+    async fn new(lent: Option<&Path>) -> Result<Self> {
         match lent {
             Some(path) => {
-                fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
-                let path = path
-                    .canonicalize()
+                tokio::fs::create_dir_all(path)
+                    .await
+                    .with_context(|| format!("creating {}", path.display()))?;
+                let path = tokio::fs::canonicalize(path)
+                    .await
                     .with_context(|| format!("canonicalizing {}", path.display()))?;
                 Ok(Self::Lent(path))
             }
+            // `tempfile` has no async API; one `mkdir` under the temp root
+            // is not worth a blocking thread
             None => Ok(Self::Private(
                 tempfile::Builder::new()
                     .prefix("omnia-cursor-cwd-")
@@ -94,6 +99,14 @@ impl Workspace {
             Self::Lent(path) => path,
             Self::Private(dir) => dir.path(),
         }
+    }
+
+    // the path as the wire carries it
+    fn cwd(&self) -> Result<String> {
+        let path = self.path();
+        path.to_str()
+            .map(ToOwned::to_owned)
+            .with_context(|| format!("invalid workspace path {}", path.display()))
     }
 
     const fn is_lent(&self) -> bool {
@@ -134,17 +147,12 @@ fn agent_options(
 
     // request.model, else the client's default (CURSOR_MODEL at connect, else auto)
     let model = request.model.as_deref().unwrap_or(default_model).to_owned();
-    let path = workspace.path();
-    let cwd = path
-        .to_str()
-        .with_context(|| format!("invalid workspace path {}", path.display()))?
-        .to_owned();
 
     Ok(AgentOptions {
         model: ModelSelection { id: model },
         api_key: api_key.to_owned(),
         local: LocalAgentOptions {
-            cwd: vec![cwd],
+            cwd: vec![workspace.cwd()?],
             source: workspace.is_lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
             custom_tools,
         },

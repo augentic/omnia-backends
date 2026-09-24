@@ -24,6 +24,10 @@
 //! posted back to the client's own endpoint — and nothing else.
 
 pub mod log;
+// the crate's own callback codec, by path: this module is also a binary
+// built against `[dependencies]` alone, and one codec on both sides of the
+// callback is what keeps the fake honest
+#[path = "../../../src/endpoint/proto.rs"]
 mod proto;
 mod server;
 

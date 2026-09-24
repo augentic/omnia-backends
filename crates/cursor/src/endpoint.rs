@@ -14,6 +14,7 @@ mod proto;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -286,6 +287,9 @@ enum Codec {
     Proto,
 }
 
+/// One `CallCustomTool` request, as the JSON codec spells it.
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 struct ToolCall {
     tool_name: String,
     args: Value,
@@ -294,33 +298,25 @@ struct ToolCall {
 
 impl ToolCall {
     fn decode(codec: Codec, body: &[u8]) -> Result<Self> {
-        match codec {
+        let mut call = match codec {
             Codec::Json => {
-                #[derive(Default, serde::Deserialize)]
-                #[serde(rename_all = "camelCase", default)]
-                struct JsonCall {
-                    tool_name: String,
-                    args: Value,
-                    agent_id: String,
-                }
-                let call: JsonCall =
-                    serde_json::from_slice(body).context("decoding the JSON callback body")?;
-                Ok(Self {
-                    tool_name: call.tool_name,
-                    args: if call.args.is_null() { json!({}) } else { call.args },
-                    agent_id: call.agent_id,
-                })
+                serde_json::from_slice(body).context("decoding the JSON callback body")?
             }
             Codec::Proto => {
                 let call = CallCustomToolRequest::decode(body)
                     .context("decoding the protobuf callback body")?;
-                Ok(Self {
+                Self {
                     tool_name: call.tool_name,
-                    args: call.args.as_ref().map_or_else(|| json!({}), struct_to_value),
+                    args: call.args.as_ref().map_or(Value::Null, struct_to_value),
                     agent_id: call.agent_id,
-                })
+                }
             }
+        };
+        // a tool takes a JSON object; absent arguments are an empty one
+        if call.args.is_null() {
+            call.args = json!({});
         }
+        Ok(call)
     }
 }
 
@@ -388,15 +384,16 @@ async fn drain(mut body: Incoming, limit: usize) {
     }
 }
 
+// 256 bits of entropy as lowercase hex
 fn gen_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|error| anyhow::anyhow!("gathering entropy: {error}"))?;
-
-    Ok(bytes.iter().fold(String::with_capacity(64), |mut hex, byte| {
-        use std::fmt::Write as _;
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // writing to a `String` cannot fail
         let _ = write!(hex, "{byte:02x}");
-        hex
-    }))
+    }
+    Ok(hex)
 }
 
 // The SDK wants a JSON object for a tool result; anything else the tool
@@ -434,13 +431,14 @@ fn reply(status: StatusCode, content_type: &'static str, body: impl Into<Bytes>)
     response
 }
 
-// The output-wrapping policy alone is unit-tested here; the server itself
-// is exercised by a bridge calling back in `tests/model.rs` and
-// `tests/bridge.rs`.
+// The output-wrapping policy and the `Struct` codec — pure translation —
+// are unit-tested here; the server itself is exercised by a bridge calling
+// back in `tests/model.rs` and `tests/bridge.rs`.
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Map, Value, json};
 
+    use super::proto::{struct_to_value, value_to_struct};
     use super::wrap_output;
 
     #[test]
@@ -449,5 +447,34 @@ mod tests {
         assert_eq!(wrap_output("[1,2]"), json!({ "value": [1, 2] }));
         assert_eq!(wrap_output(r#""text""#), json!({ "value": "text" }));
         assert_eq!(wrap_output("not json"), json!({ "value": "not json" }));
+    }
+
+    fn object(value: Value) -> Map<String, Value> {
+        let Value::Object(object) = value else { panic!("an object: {value}") };
+        object
+    }
+
+    #[test]
+    fn struct_roundtrip() {
+        let original = json!({
+            "text": "hello",
+            "count": 3,
+            "ratio": 3.5,
+            "flag": true,
+            "none": null,
+            "nested": { "list": [1, -2.5, "two", false, null, { "deep": "yes" }] },
+        });
+        assert_eq!(struct_to_value(&value_to_struct(&object(original.clone()))), original);
+        assert_eq!(struct_to_value(&value_to_struct(&Map::new())), json!({}));
+    }
+
+    #[test]
+    fn integral_doubles() {
+        let read = |number: f64| struct_to_value(&value_to_struct(&object(json!({ "n": number }))));
+        assert_eq!(read(42.0), json!({ "n": 42 }));
+        assert_eq!(read(-7.0), json!({ "n": -7 }));
+        assert_eq!(read(2.5), json!({ "n": 2.5 }));
+        // past 2^53 an f64 no longer holds every integer, so the double stands
+        assert_eq!(read(9_007_199_254_740_994.0), json!({ "n": 9_007_199_254_740_994.0 }));
     }
 }

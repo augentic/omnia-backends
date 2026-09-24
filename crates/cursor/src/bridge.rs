@@ -82,7 +82,7 @@ impl Bridge {
         command.wrap(ProcessGroup::leader());
 
         // spawn the bridge
-        let mut child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
+        let mut child = command.spawn().context("issue spawning bridge")?;
         let pid = child.id().context("no pid for spawned bridge")?;
         let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
             bail!("no piped stdout and stderr for spawned bridge");
@@ -193,16 +193,17 @@ impl Handshake {
                 Err(anyhow!("the stderr reader ended without a ready line"))
             })
         };
+
         let discovery = bridge.step(scanned).await?;
         let rpc = bridge.step(discovery.into_rpc()).await?;
 
-        // from here a close is asked over the client; until now it is a kill
+        // the supervisor task is spawned before the Rpc exists
         let _ = bridge.state.rpc.set(rpc.clone());
 
         tracing::info!(
             pid = bridge.state.pid,
             histogram.cursor_bridge_spawn_ms = elapsed_ms(bridge.state.started_at),
-            "cursor-sdk-bridge spawned"
+            "bridge spawned"
         );
 
         Ok(rpc)
@@ -259,7 +260,7 @@ struct Supervisor {
 
 impl Supervisor {
     async fn run(mut self) {
-        let self_exited = tokio::select! {
+        let exited = tokio::select! {
             // an exit in the same tick as a close is still an exit
             biased;
             _ = self.child.wait() => true,
@@ -286,13 +287,13 @@ impl Supervisor {
         };
 
         // an exit nobody asked for is a crash
-        if self_exited {
+        if exited {
             tracing::warn!(
                 pid = exit.pid,
                 uptime_ms,
                 status = %exit,
                 monotonic_counter.cursor_bridge_exits = 1_u64,
-                "cursor-sdk-bridge exited"
+                "bridge exited"
             );
             self.state.trace_err();
         }

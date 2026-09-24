@@ -44,6 +44,9 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
 const TAIL_LINES: usize = 20;
+// What precedes the discovery payload on the ready line; always the upstream
+// name, whatever the executable is called locally.
+const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 
 /// A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`
 /// bound on it. Dropping it asks the bridge to go; [`Bridge::close`] also
@@ -438,9 +441,9 @@ fn read_stderr(
             // The ready line is the handshake's alone: it may carry the
             // bearer token, so it is neither logged nor kept. A dropped
             // receiver is an abandoned handshake; keep draining.
-            if let Some(scanned) = Discovery::parse(&line) {
+            if let Some(payload) = line.strip_prefix(READY_PREFIX) {
                 if let Some(tx) = ready.take() {
-                    let _ = tx.send(scanned);
+                    let _ = tx.send(payload.parse());
                 }
             } else {
                 tracing::debug!(%line, stream = "stderr", "bridge output");

@@ -1,18 +1,14 @@
-//! The ready line `cursor-sdk-bridge` writes to stderr.
+//! The payload of the ready line `cursor-sdk-bridge` writes to stderr.
 //!
-//! Parses the `cursor-sdk-bridge ready ` JSON payload. Unknown fields are
-//! forward-compatible additions and ignored; the whole line is never logged
-//! (older bridges inline `authToken`).
+//! Unknown fields are forward-compatible additions and ignored; the whole
+//! line is never logged (older bridges inline `authToken`).
 
 use std::net::IpAddr;
+use std::str::FromStr;
 
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use serde_repr::Deserialize_repr;
-
-// The ready line is always spelled with the upstream name, whatever the
-// executable is called locally.
-const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 
 /// The ready line's payload: where the bridge listens, and how to
 /// authenticate to it.
@@ -29,13 +25,15 @@ pub struct Discovery {
     protocol: Protocol,
 }
 
-impl Discovery {
-    /// Parse `line` as the ready line; `None` when it is any other line.
-    pub fn parse(line: &str) -> Option<Result<Self>> {
-        let json = line.strip_prefix(READY_PREFIX)?;
-        Some(serde_json::from_str(json).context("parsing discovery payload"))
-    }
+impl FromStr for Discovery {
+    type Err = anyhow::Error;
 
+    fn from_str(payload: &str) -> Result<Self> {
+        serde_json::from_str(payload).context("parsing discovery payload")
+    }
+}
+
+impl Discovery {
     /// Prefer `url`; fall back to `host` + `port` (bracketing `IPv6` hosts).
     pub fn base_url(&self) -> Result<String> {
         if let Some(url) = &self.url {
@@ -92,41 +90,31 @@ enum Protocol {
     Connect,
 }
 
-// Deliberate unit tests: pure discovery-line parsing (CI floor);
-// `tests/live.rs` proves the spawn-and-handshake path against a real bridge.
+// Deliberate unit tests: pure payload parsing (CI floor); `tests/bridge.rs`
+// proves the line reaches the handshake, `tests/live.rs` the real bridge.
 #[cfg(test)]
 mod tests {
     use super::Discovery;
 
     #[test]
-    fn ready_line() {
-        assert!(Discovery::parse("some other stderr line").is_none());
-        assert!(Discovery::parse("cursor-sdk-bridge ready").is_none(), "no payload, no match");
-        let discovery = Discovery::parse(
-            r#"cursor-sdk-bridge ready {"schemaVersion":1,"transport":"tcp","protocol":"connect","url":"http://127.0.0.1:1"}"#,
-        )
-        .expect("the ready line")
-        .expect("a well-formed payload");
-        assert_eq!(discovery.base_url().expect("url"), "http://127.0.0.1:1");
-        let malformed =
-            Discovery::parse("cursor-sdk-bridge ready {not json").expect("the ready line");
-        assert!(malformed.is_err(), "a malformed payload is the ready line, failing");
-    }
-
-    #[test]
     fn discovery_parsed() {
-        let discovery: Discovery = serde_json::from_str(
-            r#"{"schemaVersion":1,"serverVersion":"1.0.0","pid":12345,"transport":"tcp","protocol":"connect","host":"127.0.0.1","port":49152,"url":"http://127.0.0.1:49152","authTokenFile":"/tmp/auth-token","workspaceRef":"/home/me/project","stateRoot":"/home/me/.cursor/sdk-agent-store/abc"}"#
-        ).expect("should parse");
+        let discovery: Discovery = r#"{"schemaVersion":1,"serverVersion":"1.0.0","pid":12345,"transport":"tcp","protocol":"connect","host":"127.0.0.1","port":49152,"url":"http://127.0.0.1:49152","authTokenFile":"/tmp/auth-token","workspaceRef":"/home/me/project","stateRoot":"/home/me/.cursor/sdk-agent-store/abc"}"#
+            .parse()
+            .expect("should parse");
         assert_eq!(discovery.base_url().expect("url"), "http://127.0.0.1:49152");
         assert_eq!(discovery.auth_token_file.as_deref(), Some("/tmp/auth-token"));
     }
 
+    #[test]
+    fn discovery_malformed() {
+        assert!("{not json".parse::<Discovery>().is_err());
+    }
+
     #[tokio::test]
     async fn unknown_fields() {
-        let discovery: Discovery = serde_json::from_str(
-            r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","url":"http://127.0.0.1:1","authToken":"inline","futureField":{"nested":true}}"#,
-        ).expect("should parse");
+        let discovery: Discovery = r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","url":"http://127.0.0.1:1","authToken":"inline","futureField":{"nested":true}}"#
+            .parse()
+            .expect("should parse");
         let token = discovery.token().await.expect("inline token");
         assert_eq!(token, "inline");
     }
@@ -139,7 +127,7 @@ mod tests {
             r#"{"schemaVersion":1,"transport":"tcp","protocol":"grpc"}"#,
         ] {
             assert!(
-                serde_json::from_str::<Discovery>(payload).is_err(),
+                payload.parse::<Discovery>().is_err(),
                 "unsupported payload accepted: {payload}"
             );
         }
@@ -147,19 +135,19 @@ mod tests {
 
     #[test]
     fn base_url_fallback() {
-        let discovery: Discovery = serde_json::from_str(
-            r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"::1","port":9}"#,
-        )
-        .expect("host/port payload parses");
+        let discovery: Discovery =
+            r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"::1","port":9}"#
+                .parse()
+                .expect("host/port payload parses");
         assert_eq!(discovery.base_url().expect("base url"), "http://[::1]:9");
     }
 
     #[test]
     fn base_url_ipv6() {
-        let discovery: Discovery = serde_json::from_str(
-            r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"[::1]","port":9}"#,
-        )
-        .expect("pre-bracketed host/port payload parses");
+        let discovery: Discovery =
+            r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"[::1]","port":9}"#
+                .parse()
+                .expect("pre-bracketed host/port payload parses");
         assert_eq!(discovery.base_url().expect("base url"), "http://[::1]:9");
     }
 
@@ -175,8 +163,8 @@ mod tests {
             "url": "http://127.0.0.1:1",
             "authTokenFile": path,
         });
-        let discovery = serde_json::from_str::<Discovery>(&payload.to_string())
-            .expect("payload with a token file parses");
+        let discovery: Discovery =
+            payload.to_string().parse().expect("payload with a token file parses");
         let token = discovery.token().await.expect("token file");
         assert_eq!(token, "file-token");
     }

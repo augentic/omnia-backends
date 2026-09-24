@@ -69,10 +69,6 @@ async fn await_rpcs(log: impl Fn() -> Log + Sync, rpc: Rpc, count: usize, within
     fake_bridge::poll(|| log().count(rpc) >= count, within, &format!("{count} {rpc:?}(s)")).await;
 }
 
-fn without_cancel(sequence: &[Rpc]) -> Vec<Rpc> {
-    sequence.iter().copied().filter(|rpc| *rpc != Rpc::CancelRun).collect()
-}
-
 fn killed(process: &Process) {
     assert!(!process.alive(), "process {} (pid {}) is still up", process.number, process.pid);
     assert_eq!(process.count(Rpc::Shutdown), 0, "process {} was killed, not asked", process.number);
@@ -82,6 +78,11 @@ fn killed(process: &Process) {
 const KILLED: &str = "cursor-sdk-bridge exited (signal: 9 (SIGKILL))";
 /// The full sequence of a completion that answered.
 const ANSWERED: [Rpc; 4] = [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent];
+/// The full sequence of a completion whose run was still open when it ended
+/// — at a deadline, dropped, or with its stream lost — and was cancelled
+/// before its agent was torn down.
+const CANCELLED: [Rpc; 5] =
+    [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::CloseAgent, Rpc::DeleteAgent];
 
 /// The two workers of a two-way abandon: the one that recorded `rpc`, and
 /// the one that did not.
@@ -338,11 +339,7 @@ async fn abandon_while_queued() {
     let (_, winner) = sole_agent(&workers[0]);
     assert_eq!(winner, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
     let (_, loser) = sole_agent(&workers[1]);
-    assert_eq!(
-        loser,
-        [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::CloseAgent, Rpc::DeleteAgent],
-        "the mid-run loser is cancelled and torn down"
-    );
+    assert_eq!(loser, CANCELLED, "the mid-run loser is cancelled and torn down");
     for process in &workers {
         assert!(process.ended_with(Rpc::Shutdown), "process {}", process.number);
     }
@@ -480,14 +477,8 @@ async fn cap_hits() {
         .await;
     await_gone(&fake).await;
 
-    let log = fake.log();
-    let (_, sequence) = sole_agent(&log);
-    assert_eq!(log.count(Rpc::CancelRun), 1, "{sequence:?}");
-    // `CancelRun` goes out on its own task, racing the teardown's calls.
-    assert_eq!(
-        without_cancel(&sequence),
-        [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]
-    );
+    let (_, sequence) = sole_agent(&fake.log());
+    assert_eq!(sequence, CANCELLED);
 }
 
 #[tokio::test]
@@ -628,8 +619,7 @@ async fn inactive_run_not_restarted() {
     let workers = log.workers();
     assert_eq!(workers.len(), 1, "no restart on a stall: {}", log.summary());
     let (_, sequence) = sole_agent(&log);
-    assert_eq!(log.count(Rpc::CancelRun), 1, "{sequence:?}");
-    assert_eq!(without_cancel(&sequence), ANSWERED);
+    assert_eq!(sequence, CANCELLED);
     assert!(workers[0].ended_with(Rpc::Shutdown));
 }
 
@@ -763,16 +753,12 @@ async fn close_500() {
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
 }
 
-/// The first attempt's stream was reset after its first frame: the run id
-/// that frame carried is cancelled before the agent is torn down.
-const RESET: [Rpc; 5] =
-    [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::CloseAgent, Rpc::DeleteAgent];
-
 #[tokio::test]
 async fn stream_reset_restarts() {
-    // Process 1 resets its opening run's stream and stays up: the socket
-    // failure alone is the lost bridge. Its agent is torn down and the
-    // process asked to go before the restart takes the slot.
+    // Process 1 resets its opening run's stream after its first frame and
+    // stays up: the socket failure alone is the lost bridge. The run id that
+    // frame carried is cancelled, the agent torn down and the process asked
+    // to go before the restart takes the slot.
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::ResetStream(1)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
@@ -781,7 +767,7 @@ async fn stream_reset_restarts() {
     let log = fake.log();
     let (first, second) = restarted(&log);
     let (_, sequence) = sole_agent(&first);
-    assert_eq!(sequence, RESET, "{}", first.summary());
+    assert_eq!(sequence, CANCELLED, "{}", first.summary());
     assert_eq!(first.saw(Rpc::CancelRun)[0].text("runId"), "run-1");
     assert!(first.ended_with(Rpc::Shutdown), "{}", first.summary());
     let (_, sequence) = sole_agent(&second);
@@ -808,7 +794,7 @@ async fn stream_reset_twice_fails() {
     let (first, second) = restarted(&log);
     for process in [&first, &second] {
         let (_, sequence) = sole_agent(process);
-        assert_eq!(sequence, RESET, "{}", process.summary());
+        assert_eq!(sequence, CANCELLED, "{}", process.summary());
         assert!(process.ended_with(Rpc::Shutdown), "{}", process.summary());
     }
 }

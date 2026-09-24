@@ -58,7 +58,7 @@ impl Client {
         let lease = self.pool.lease().await.map_err(Unanswered::settled)?;
 
         // create the agent
-        let agent = Agent::create(self, lease, turn, Arc::clone(tool_host))
+        let agent = Agent::create(lease, turn, Arc::clone(tool_host), self.deadlines)
             .await
             .map_err(Unanswered::before_candidate)?;
         agent.complete().await

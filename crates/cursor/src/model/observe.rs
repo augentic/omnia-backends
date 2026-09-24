@@ -3,7 +3,8 @@
 //! [`EventLog`] follows a run's `sdk_message` events to rebuild the tool
 //! transcript and capture the run id and last status text. Payload shapes
 //! mirror the public SDK — every field access is nullable and a malformed
-//! event is skipped, never fatal. [`Completion`] emits the start/finish INFO
+//! event is skipped, never fatal. The result's token counts become the
+//! guest's [`Usage`] here too. [`Completion`] emits the start/finish INFO
 //! lines and tracing-opentelemetry metric fields.
 
 use std::collections::HashMap;
@@ -12,7 +13,7 @@ use omnia_wasi_model::{Format, ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::Instant;
 
-use crate::bridge::{RunStreamMessage, SdkMessage};
+use crate::bridge::{RunStreamMessage, SdkMessage, TokenUsage};
 use crate::elapsed_ms;
 use crate::failure::Outcome;
 
@@ -228,6 +229,21 @@ impl PendingCall {
     }
 }
 
+impl From<TokenUsage> for Usage {
+    fn from(usage: TokenUsage) -> Self {
+        Self {
+            input_tokens: clamp_u32(usage.input_tokens),
+            output_tokens: clamp_u32(usage.output_tokens),
+            reasoning_tokens: usage.reasoning_tokens.map(clamp_u32),
+        }
+    }
+}
+
+// Wire counts are `i64`; negatives become 0, values above `u32::MAX` saturate.
+fn clamp_u32(count: i64) -> u32 {
+    if count.is_negative() { 0 } else { u32::try_from(count).unwrap_or(u32::MAX) }
+}
+
 // Find the first string under any of `keys`, tolerating both `snake_case`
 // and `camelCase` spellings across bridge versions.
 fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -242,10 +258,43 @@ fn len_u64(len: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use omnia_wasi_model::Usage;
     use serde_json::{Value, json};
 
     use super::EventLog;
-    use crate::bridge::SdkMessage;
+    use crate::bridge::{SdkMessage, TokenUsage};
+
+    fn usage(input: i64, output: i64, reasoning: Option<i64>) -> Usage {
+        Usage::from(TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            reasoning_tokens: reasoning,
+        })
+    }
+
+    #[test]
+    fn token_counts() {
+        assert_eq!(
+            usage(-1, -1, Some(-1)),
+            Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                reasoning_tokens: Some(0),
+            }
+        );
+        let saturated = usage(i64::MAX, i64::MAX, Some(i64::MAX));
+        assert_eq!(saturated.input_tokens, u32::MAX);
+        assert_eq!(saturated.output_tokens, u32::MAX);
+        assert_eq!(saturated.reasoning_tokens, Some(u32::MAX));
+        assert_eq!(
+            usage(7, 3, None),
+            Usage {
+                input_tokens: 7,
+                output_tokens: 3,
+                reasoning_tokens: None,
+            }
+        );
+    }
 
     fn observe_all(events: &[Value]) -> EventLog {
         let mut log = EventLog::default();

@@ -23,7 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow};
 use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -466,9 +466,12 @@ impl<'a> OpenSend<'a> {
             let detail = outcome
                 .error_code
                 .filter(|code| !code.is_empty())
-                .or_else(|| log.status_message().map(ToOwned::to_owned))
-                .unwrap_or_else(|| "<no detail>".to_owned());
-            bail!("cursor run {}: {detail}", outcome.status);
+                .or_else(|| log.status_message().map(ToOwned::to_owned));
+            return Err(Failure::Run {
+                status: outcome.status,
+                detail,
+            }
+            .into());
         }
         let result = outcome.result.unwrap_or_default();
 

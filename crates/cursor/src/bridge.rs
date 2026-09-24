@@ -9,16 +9,17 @@ mod discovery;
 mod messages;
 mod rpc;
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::process::{ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use discovery::{Discovery, Tail};
+use discovery::Discovery;
 pub use messages::{
     AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
-    ModelSelection, RunStatus, RunStreamMessage, RunStreamResult, SdkMessage, ToolList,
+    ModelSelection, RunStatus, RunStreamMessage, RunStreamResult, SdkMessage, TokenUsage, ToolList,
 };
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
 pub use rpc::{Rpc, RunStream, TransportError};
@@ -30,11 +31,19 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
 use crate::endpoint::Registration;
-use crate::{Failure, elapsed_ms};
+use crate::{Failure, elapsed_ms, lock};
 
+// The handshake's two bounds: the ready line on stderr, then `sdk.v1`
+// bound over it (token read, `Ping`, `GetVersion`).
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+// The grace `Shutdown` asks the bridge for, and the bound on the whole ask —
+// grace, reply and exit — before the kill; the grace must sit well inside.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
+const TAIL_LINES: usize = 20;
 
 /// A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`
 /// bound on it. Dropping it asks the bridge to go; [`Bridge::close`] also
@@ -225,7 +234,7 @@ impl Supervisor {
     // Ask over `rpc` and wait for the exit it brings, both under one bound.
     async fn ask(&mut self, rpc: &Rpc) {
         let asked = async {
-            let _ = rpc.shutdown().await;
+            let _ = rpc.shutdown(SHUTDOWN_GRACE).await;
             let _ = self.child.wait().await;
         };
         let _ = timeout(SHUTDOWN_TIMEOUT, asked).await;
@@ -246,7 +255,7 @@ impl Spawned {
         self.watched.exited()
     }
 
-    /// Finish the ready-line scan and bind `sdk.v1`.
+    /// Wait for the ready line and bind `sdk.v1` over it.
     ///
     /// # Errors
     ///
@@ -259,9 +268,14 @@ impl Spawned {
                 Err(anyhow!("the stderr reader ended without a ready line"))
             })
         };
+        let discovery = watched.step("no ready line", READY_TIMEOUT, scanned).await?;
 
-        let discovery = watched.step(scanned).await?;
-        let rpc = watched.step(discovery.into_rpc()).await?;
+        let bound = async {
+            let base_url = discovery.base_url()?;
+            let token = discovery.token().await?;
+            Rpc::connect(&base_url, &token).await
+        };
+        let rpc = watched.step("no answer to the sdk.v1 handshake", CONNECT_TIMEOUT, bound).await?;
 
         tracing::info!(
             pid = watched.state.pid,
@@ -317,10 +331,18 @@ impl Watched {
         }
     }
 
-    // Run one handshake step under the process's exit. The stderr tail
-    // behind a failure is logged at DEBUG; it never reaches the error.
-    async fn step<T>(&self, step: impl Future<Output = Result<T>>) -> Result<T> {
-        self.fail_on_exit(step)
+    // Run one handshake step within `bound` and under the process's exit;
+    // past the bound it fails as `missing`. The stderr tail behind a failure
+    // is logged at DEBUG; it never reaches the error.
+    async fn step<T>(
+        &self, missing: &str, bound: Duration, step: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let bounded = async {
+            timeout(bound, step)
+                .await
+                .unwrap_or_else(|_elapsed| Err(anyhow!("{missing} within {}s", bound.as_secs())))
+        };
+        self.fail_on_exit(bounded)
             .await
             .inspect_err(|_error| self.state.trace_err())
             .context("cursor sdk handshake failed")
@@ -343,6 +365,33 @@ impl State {
         if !tail.is_empty() {
             tracing::debug!(%tail, "cursor-sdk-bridge tail");
         }
+    }
+}
+
+// The last few lines the bridge wrote to stderr (the ready line aside),
+// shared between the reader and whoever reports how the process ended.
+#[derive(Debug, Default)]
+struct Tail(Mutex<VecDeque<String>>);
+
+impl Tail {
+    fn push(&self, line: String) {
+        let mut lines = lock(&self.0);
+        if lines.len() == TAIL_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line);
+    }
+}
+
+impl fmt::Display for Tail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, line) in lock(&self.0).iter().enumerate() {
+            if index > 0 {
+                f.write_str("\n")?;
+            }
+            write!(f, "  {line}")?;
+        }
+        Ok(())
     }
 }
 
@@ -374,20 +423,29 @@ async fn wait_exit(exit: &mut watch::Receiver<Option<Exit>>, pid: u32) -> Exit {
         .unwrap_or(Exit { status: None, pid })
 }
 
-// Scan stderr for the ready line, then hold the pipe to EOF so an abandoned
-// handshake never closes it under a live writer.
+// Read stderr to EOF, handing the ready line to the handshake and keeping
+// the rest in the tail. The pipe is held however the handshake goes, so an
+// abandoned one never closes it under a live writer; an EOF before the
+// ready line reaches the handshake as the dropped sender.
 fn read_stderr(
     stderr: ChildStderr, state: Arc<State>,
 ) -> (oneshot::Receiver<Result<Discovery>>, JoinHandle<()>) {
     let (discovery_tx, discovery_rx) = oneshot::channel();
     let reader = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
-        let scanned = discovery::from_stderr(&mut lines, &state.tail).await;
-        // a dropped receiver is an abandoned handshake; keep draining
-        let _ = discovery_tx.send(scanned);
+        let mut ready = Some(discovery_tx);
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(%line, stream = "stderr", "bridge output");
-            state.tail.push(line);
+            // The ready line is the handshake's alone: it may carry the
+            // bearer token, so it is neither logged nor kept. A dropped
+            // receiver is an abandoned handshake; keep draining.
+            if let Some(scanned) = Discovery::parse(&line) {
+                if let Some(tx) = ready.take() {
+                    let _ = tx.send(scanned);
+                }
+            } else {
+                tracing::debug!(%line, stream = "stderr", "bridge output");
+                state.tail.push(line);
+            }
         }
     });
     (discovery_rx, reader)
@@ -408,7 +466,7 @@ mod tests {
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::ExitStatus;
 
-    use super::Exit;
+    use super::{Exit, TAIL_LINES, Tail};
 
     // The crash WARN and `Failure::BridgeExited` both read this text.
     #[test]
@@ -417,5 +475,18 @@ mod tests {
         assert_eq!(exit(Some(ExitStatus::from_raw(9))), "signal: 9 (SIGKILL)");
         assert_eq!(exit(Some(ExitStatus::from_raw(3 << 8))), "exit status: 3");
         assert_eq!(exit(None), "status unknown");
+    }
+
+    #[test]
+    fn tail_bounded() {
+        let tail = Tail::default();
+        assert!(tail.to_string().is_empty());
+        for index in 0..TAIL_LINES + 5 {
+            tail.push(format!("line {index}"));
+        }
+        let text = tail.to_string();
+        assert_eq!(text.lines().count(), TAIL_LINES);
+        assert!(text.starts_with("  line 5\n"), "the oldest lines are dropped: {text}");
+        assert!(text.ends_with(&format!("  line {}", TAIL_LINES + 4)), "{text}");
     }
 }

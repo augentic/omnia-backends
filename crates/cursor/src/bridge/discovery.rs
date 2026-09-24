@@ -1,29 +1,21 @@
-//! Ready-line handshake with `cursor-sdk-bridge`.
+//! The ready line `cursor-sdk-bridge` writes to stderr.
 //!
-//! Scans stderr for the `cursor-sdk-bridge ready ` JSON payload. Unknown
-//! fields are forward-compatible additions and ignored; the whole line is
-//! never logged (older bridges inline `authToken`).
+//! Parses the `cursor-sdk-bridge ready ` JSON payload. Unknown fields are
+//! forward-compatible additions and ignored; the whole line is never logged
+//! (older bridges inline `authToken`).
 
-use std::collections::VecDeque;
-use std::fmt;
 use std::net::IpAddr;
-use std::sync::Mutex;
-use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use serde_repr::Deserialize_repr;
-use tokio::io::{AsyncBufRead, Lines};
-
-use super::rpc::Rpc;
-use crate::lock;
 
 // The ready line is always spelled with the upstream name, whatever the
 // executable is called locally.
 const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
-const TAIL_LINES: usize = 20;
 
+/// The ready line's payload: where the bridge listens, and how to
+/// authenticate to it.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Discovery {
@@ -38,14 +30,14 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    pub async fn into_rpc(self) -> Result<Rpc> {
-        let base_url = self.base_url()?;
-        let token = self.token().await?;
-        Rpc::connect(&base_url, &token).await
+    /// Parse `line` as the ready line; `None` when it is any other line.
+    pub fn parse(line: &str) -> Option<Result<Self>> {
+        let json = line.strip_prefix(READY_PREFIX)?;
+        Some(serde_json::from_str(json).context("parsing discovery payload"))
     }
 
     /// Prefer `url`; fall back to `host` + `port` (bracketing `IPv6` hosts).
-    fn base_url(&self) -> Result<String> {
+    pub fn base_url(&self) -> Result<String> {
         if let Some(url) = &self.url {
             return Ok(url.trim_end_matches('/').to_owned());
         }
@@ -65,7 +57,7 @@ impl Discovery {
     }
 
     /// Prefer an inline token when present; else read `authTokenFile`.
-    async fn token(self) -> Result<String> {
+    pub async fn token(self) -> Result<String> {
         if let Some(token) = self.auth_token {
             return Ok(token);
         }
@@ -76,33 +68,6 @@ impl Discovery {
             .await
             .with_context(|| format!("reading token file {path}"))?;
         Ok(token.trim().to_owned())
-    }
-}
-
-/// The last few lines the bridge wrote to stderr (the ready line aside),
-/// shared between the reader and whoever reports how the process ended.
-#[derive(Debug, Default)]
-pub struct Tail(Mutex<VecDeque<String>>);
-
-impl Tail {
-    pub fn push(&self, line: String) {
-        let mut lines = lock(&self.0);
-        if lines.len() == TAIL_LINES {
-            lines.pop_front();
-        }
-        lines.push_back(line);
-    }
-}
-
-impl fmt::Display for Tail {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, line) in lock(&self.0).iter().enumerate() {
-            if index > 0 {
-                f.write_str("\n")?;
-            }
-            write!(f, "  {line}")?;
-        }
-        Ok(())
     }
 }
 
@@ -127,47 +92,25 @@ enum Protocol {
     Connect,
 }
 
-// Scan stderr for the ready line and parse its JSON payload; the lines
-// skipped on the way are kept in `tail` for a failure report.
-pub async fn from_stderr(
-    lines: &mut Lines<impl AsyncBufRead + Unpin>, tail: &Tail,
-) -> Result<Discovery> {
-    tokio::time::timeout(READY_TIMEOUT, async {
-        while let Some(line) = lines.next_line().await.context("reading stderr")? {
-            let Some(json) = line.strip_prefix(READY_PREFIX) else {
-                tracing::debug!(line = %line, "stderr");
-                tail.push(line);
-                continue;
-            };
-
-            let discovery: Discovery =
-                serde_json::from_str(json).context("parsing discovery payload")?;
-            return Ok(discovery);
-        }
-
-        bail!("no ready line found")
-    })
-    .await
-    .map_err(|_elapsed| anyhow!("no ready line within {}s", READY_TIMEOUT.as_secs()))?
-}
-
 // Deliberate unit tests: pure discovery-line parsing (CI floor);
 // `tests/live.rs` proves the spawn-and-handshake path against a real bridge.
 #[cfg(test)]
 mod tests {
-    use super::{Discovery, TAIL_LINES, Tail};
+    use super::Discovery;
 
     #[test]
-    fn tail_bounded() {
-        let tail = Tail::default();
-        assert!(tail.to_string().is_empty());
-        for index in 0..TAIL_LINES + 5 {
-            tail.push(format!("line {index}"));
-        }
-        let text = tail.to_string();
-        assert_eq!(text.lines().count(), TAIL_LINES);
-        assert!(text.starts_with("  line 5\n"), "the oldest lines are dropped: {text}");
-        assert!(text.ends_with(&format!("  line {}", TAIL_LINES + 4)), "{text}");
+    fn ready_line() {
+        assert!(Discovery::parse("some other stderr line").is_none());
+        assert!(Discovery::parse("cursor-sdk-bridge ready").is_none(), "no payload, no match");
+        let discovery = Discovery::parse(
+            r#"cursor-sdk-bridge ready {"schemaVersion":1,"transport":"tcp","protocol":"connect","url":"http://127.0.0.1:1"}"#,
+        )
+        .expect("the ready line")
+        .expect("a well-formed payload");
+        assert_eq!(discovery.base_url().expect("url"), "http://127.0.0.1:1");
+        let malformed =
+            Discovery::parse("cursor-sdk-bridge ready {not json").expect("the ready line");
+        assert!(malformed.is_err(), "a malformed payload is the ready line, failing");
     }
 
     #[test]

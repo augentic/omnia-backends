@@ -30,21 +30,17 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
 
 use super::messages::{
-    AgentOperationOptions, AgentOptions, CancelRunRequest, CloseAgentRequest, CreateAgentRequest,
-    CreateAgentResponse, DeleteAgentRequest, Empty, GetVersionResponse, RunStreamMessage,
-    SendRequest, ShutdownRequest, UserMessage,
+    AgentOperationOptions, AgentOptions, CancelRunRequest, CloseAgentRequest, ConnectStatus,
+    CreateAgentRequest, CreateAgentResponse, DeleteAgentRequest, Empty, EndStreamResponse,
+    GetVersionResponse, RunStreamMessage, SendRequest, ShutdownRequest, UserMessage,
 };
 
 /// Envelope flag bit marking the end-of-stream frame.
 const END_STREAM: u8 = 0x02;
 /// Envelope flag bit marking a compressed frame (never negotiated here).
 const COMPRESSED: u8 = 0x01;
-/// Bound on the handshake (`Ping`, then `GetVersion`) that proves a bridge
-/// answers; a spawned bridge is already past its ready line by then.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A cloneable `sdk.v1` client bound to one bridge endpoint and bearer token.
 #[derive(Clone)]
@@ -55,7 +51,8 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    /// Bind to `base` and prove the bridge answers `sdk.v1`.
+    /// Bind to `base` and prove the bridge answers `sdk.v1` (`Ping`, then
+    /// `GetVersion`). Unbounded: the caller holds the handshake's bound.
     pub async fn connect(base: &str, token: &str) -> Result<Self> {
         // The client is HTTP-only: refuse anything that is not loopback
         // before the bearer token or `DeleteAgent`'s API key go on the wire.
@@ -65,14 +62,8 @@ impl Rpc {
             base: base.to_owned(),
             bearer: format!("Bearer {token}"),
         };
-        let version = tokio::time::timeout(CONNECT_TIMEOUT, async {
-            rpc.ping().await?;
-            rpc.get_version().await
-        })
-        .await
-        .map_err(|_elapsed| {
-            anyhow!("bridge did not answer the handshake within {}s", CONNECT_TIMEOUT.as_secs())
-        })??;
+        rpc.ping().await?;
+        let version = rpc.get_version().await?;
         ensure!(version.protocol_version == "sdk.v1", "unsupported protocol version");
         tracing::debug!(?version.capabilities, "ready");
         Ok(rpc)
@@ -88,10 +79,13 @@ impl Rpc {
         self.unary("SdkBridgeControlService/GetVersion", &Empty {}).await
     }
 
-    /// `Shutdown`: ask the bridge to exit gracefully.
-    pub async fn shutdown(&self) -> Result<()> {
-        self.unary_empty("SdkBridgeControlService/Shutdown", &ShutdownRequest { grace_seconds: 1 })
-            .await
+    /// `Shutdown`: ask the bridge to exit, giving its agents `grace` to
+    /// finish (whole seconds, saturating).
+    pub async fn shutdown(&self, grace: Duration) -> Result<()> {
+        let request = ShutdownRequest {
+            grace_seconds: u32::try_from(grace.as_secs()).unwrap_or(u32::MAX),
+        };
+        self.unary_empty("SdkBridgeControlService/Shutdown", &request).await
     }
 
     /// `CreateAgent`: one fresh agent from the completion's options.
@@ -144,12 +138,7 @@ impl Rpc {
     ) -> Result<Resp> {
         let body = serde_json::to_vec(request).with_context(|| format!("encoding `{method}`"))?;
         let response = self.call(method, "application/json", body).await?;
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .map_err(|error| TransportError::io(method, "reading the response", error))?
-            .to_bytes();
+        let bytes = read_body(method, "reading the response", response.into_body()).await?;
         serde_json::from_slice(&bytes).with_context(|| format!("decoding `{method}` response"))
     }
 
@@ -184,12 +173,7 @@ impl Rpc {
         if status.is_success() {
             return Ok(response);
         }
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .map_err(|error| TransportError::io(method, "reading the error response", error))?
-            .to_bytes();
+        let bytes = read_body(method, "reading the error response", response.into_body()).await?;
         Err(ConnectError::unary(method, status, &bytes).into())
     }
 
@@ -254,52 +238,51 @@ pub struct ConnectError {
     method: String,
     /// The HTTP status of a unary failure; a stream's error frame has none.
     status: Option<StatusCode>,
-    code: String,
-    message: String,
+    answer: ConnectStatus,
 }
 
 impl ConnectError {
-    /// A non-200 unary response: `{"code", "message", ...}`, or plain text.
+    /// A non-200 unary response: Connect's error object, or a body that is
+    /// not one (a crash's, a proxy's) as the message itself.
     fn unary(method: &str, status: StatusCode, body: &[u8]) -> Self {
-        let parsed: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-        let code = parsed.get("code").and_then(Value::as_str).unwrap_or("unknown");
-        let message = parsed
-            .get("message")
-            .and_then(Value::as_str)
-            .map_or_else(|| String::from_utf8_lossy(body).into_owned(), ToOwned::to_owned);
-        if let Some(details) = parsed.get("details") {
-            tracing::debug!(method, %details, "bridge error details");
-        }
-        Self {
-            method: method.to_owned(),
-            status: Some(status),
-            code: code.to_owned(),
-            message: message.trim().to_owned(),
-        }
+        let answer: ConnectStatus = serde_json::from_slice(body).unwrap_or_default();
+        let answer = if answer.message.is_empty() {
+            ConnectStatus {
+                message: String::from_utf8_lossy(body).trim().to_owned(),
+                ..answer
+            }
+        } else {
+            answer
+        };
+        Self::answered(method, Some(status), answer)
     }
 
     /// The error an `EndStreamResponse` carries, if any: a clean end frame,
     /// or one this backend cannot parse, is not an error.
     fn end_stream(method: &str, payload: &[u8]) -> Option<Self> {
-        let parsed: Value = serde_json::from_slice(payload).unwrap_or(Value::Null);
-        let error = parsed.get("error").filter(|error| !error.is_null())?;
-        let code = error.get("code").and_then(Value::as_str).unwrap_or("unknown");
-        let message = error.get("message").and_then(Value::as_str).unwrap_or_default();
-        Some(Self {
+        let end: EndStreamResponse = serde_json::from_slice(payload).unwrap_or_default();
+        Some(Self::answered(method, None, end.error?))
+    }
+
+    // Details are the bridge's own diagnostics: logged, never carried.
+    fn answered(method: &str, status: Option<StatusCode>, mut answer: ConnectStatus) -> Self {
+        if let Some(details) = answer.details.take() {
+            tracing::debug!(method, %details, "bridge error details");
+        }
+        Self {
             method: method.to_owned(),
-            status: None,
-            code: code.to_owned(),
-            message: message.to_owned(),
-        })
+            status,
+            answer,
+        }
     }
 
     /// Whether the agent the call named is already gone. Cursor still
     /// mis-tags some of those as 500 `internal` with "Agent … not found".
     fn is_agent_gone(&self) -> bool {
-        if self.code == "not_found" {
+        if self.answer.code == "not_found" {
             return true;
         }
-        let message = self.message.to_ascii_lowercase();
+        let message = self.answer.message.to_ascii_lowercase();
         message.contains("agent") && message.contains("not found")
     }
 }
@@ -309,8 +292,7 @@ impl fmt::Display for ConnectError {
         let Self {
             method,
             status,
-            code,
-            message,
+            answer: ConnectStatus { code, message, .. },
         } = self;
         match status {
             Some(status) => write!(f, "bridge RPC `{method}` failed ({status}, {code}): {message}"),
@@ -335,6 +317,7 @@ pub struct TransportError {
 
 impl TransportError {
     /// A socket failure while `doing`.
+    #[must_use]
     pub fn io(
         method: &str, doing: &'static str, source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
@@ -491,6 +474,14 @@ fn decode_frame(buffer: &mut BytesMut) -> Result<Option<Frame>> {
     let mut frame = buffer.split_to(5 + length);
     let payload = frame.split_off(5).freeze();
     Ok(Some(Frame { flags, payload }))
+}
+
+/// Collect a response body whole; a failure below Connect while `doing` is
+/// a [`TransportError`].
+async fn read_body(method: &str, doing: &'static str, body: Incoming) -> Result<Bytes> {
+    let collected =
+        body.collect().await.map_err(|error| TransportError::io(method, doing, error))?;
+    Ok(collected.to_bytes())
 }
 
 /// Close/delete of a missing agent is the desired end state.

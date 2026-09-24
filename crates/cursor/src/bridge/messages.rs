@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use omnia_wasi_model::Usage;
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -151,6 +150,35 @@ pub struct UserMessage {
     pub text: String,
 }
 
+// --- Connect errors ---
+
+/// Connect's error object: the body of a failed unary call, and the `error`
+/// of an `EndStreamResponse`. A code the body does not carry is `unknown`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ConnectStatus {
+    pub code: String,
+    pub message: String,
+    pub details: Option<Value>,
+}
+
+impl Default for ConnectStatus {
+    fn default() -> Self {
+        Self {
+            code: "unknown".to_owned(),
+            message: String::new(),
+            details: None,
+        }
+    }
+}
+
+/// The payload of the frame that closes a server stream.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EndStreamResponse {
+    pub error: Option<ConnectStatus>,
+}
+
 // --- Run streaming ---
 
 /// One frame of a `Send` stream. A frame with no envelope case and no offset
@@ -200,21 +228,29 @@ pub struct RunStreamResult {
 /// not know is `Unknown`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 pub enum RunStatus {
+    /// The stream's result carried no status.
     #[default]
     #[serde(rename = "RUN_LIFECYCLE_STATUS_UNSPECIFIED")]
     Unspecified,
+    /// The run is being set up.
     #[serde(rename = "RUN_LIFECYCLE_STATUS_CREATING")]
     Creating,
+    /// The run is in progress.
     #[serde(rename = "RUN_LIFECYCLE_STATUS_RUNNING")]
     Running,
+    /// The run completed with a result.
     #[serde(rename = "RUN_LIFECYCLE_STATUS_FINISHED")]
     Finished,
+    /// The run failed.
     #[serde(rename = "RUN_LIFECYCLE_STATUS_ERROR")]
     Error,
+    /// The run was cancelled.
     #[serde(rename = "RUN_LIFECYCLE_STATUS_CANCELLED")]
     Cancelled,
+    /// The run outlived its server-side lifetime.
     #[serde(rename = "RUN_LIFECYCLE_STATUS_EXPIRED")]
     Expired,
+    /// A status this backend does not know.
     #[serde(other)]
     Unknown,
 }
@@ -290,21 +326,6 @@ pub struct TokenUsage {
     pub reasoning_tokens: Option<i64>,
 }
 
-impl From<TokenUsage> for Usage {
-    fn from(usage: TokenUsage) -> Self {
-        Self {
-            input_tokens: clamp_u32(usage.input_tokens),
-            output_tokens: clamp_u32(usage.output_tokens),
-            reasoning_tokens: usage.reasoning_tokens.map(clamp_u32),
-        }
-    }
-}
-
-/// Wire counts are `i64`; negatives become 0, values above `u32::MAX` saturate.
-fn clamp_u32(count: i64) -> u32 {
-    if count.is_negative() { 0 } else { u32::try_from(count).unwrap_or(u32::MAX) }
-}
-
 fn flexible_i64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
     Ok(flexible_i64_opt(deserializer)?.unwrap_or_default())
 }
@@ -320,41 +341,37 @@ fn flexible_i64_opt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option
 
 #[cfg(test)]
 mod tests {
-    use omnia_wasi_model::Usage;
     use serde_json::json;
 
-    use super::{RunStatus, RunStreamResult, TokenUsage};
+    use super::{ConnectStatus, EndStreamResponse, RunStatus, RunStreamResult, TokenUsage};
 
-    fn usage(input: i64, output: i64, reasoning: Option<i64>) -> Usage {
-        Usage::from(TokenUsage {
-            input_tokens: input,
-            output_tokens: output,
-            reasoning_tokens: reasoning,
-        })
+    #[test]
+    fn token_encodings() {
+        let usage: TokenUsage = serde_json::from_value(json!({
+            "inputTokens": "7",
+            "outputTokens": 3,
+            "reasoningTokens": "not a number",
+        }))
+        .expect("int64 as string or number");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (7, 3));
+        assert_eq!(usage.reasoning_tokens, None, "an unparsable count is absent");
     }
 
     #[test]
-    fn token_counts() {
-        assert_eq!(
-            usage(-1, -1, Some(-1)),
-            Usage {
-                input_tokens: 0,
-                output_tokens: 0,
-                reasoning_tokens: Some(0),
-            }
-        );
-        let saturated = usage(i64::MAX, i64::MAX, Some(i64::MAX));
-        assert_eq!(saturated.input_tokens, u32::MAX);
-        assert_eq!(saturated.output_tokens, u32::MAX);
-        assert_eq!(saturated.reasoning_tokens, Some(u32::MAX));
-        assert_eq!(
-            usage(7, 3, None),
-            Usage {
-                input_tokens: 7,
-                output_tokens: 3,
-                reasoning_tokens: None,
-            }
-        );
+    fn connect_status_defaults() {
+        let bare: ConnectStatus = serde_json::from_value(json!({})).expect("all defaulted");
+        assert_eq!((bare.code.as_str(), bare.message.as_str()), ("unknown", ""));
+        assert!(bare.details.is_none());
+
+        let end: EndStreamResponse =
+            serde_json::from_value(json!({ "error": null })).expect("a null error parses");
+        assert!(end.error.is_none(), "a null error is a clean end");
+        let end: EndStreamResponse =
+            serde_json::from_value(json!({ "error": { "message": "boom", "details": [] } }))
+                .expect("an error with no code");
+        let error = end.error.expect("the error");
+        assert_eq!((error.code.as_str(), error.message.as_str()), ("unknown", "boom"));
+        assert!(error.details.is_some());
     }
 
     #[test]

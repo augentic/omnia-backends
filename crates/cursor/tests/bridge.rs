@@ -39,7 +39,8 @@ const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// `bridge.rs`'s bound on a graceful exit: the `Shutdown` RPC and the exit
 /// it asks for, together.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// `rpc.rs`'s bound on the `Ping`/`GetVersion` handshake.
+/// `bridge.rs`'s bound on binding `sdk.v1` over the ready line (token read,
+/// `Ping`, `GetVersion`).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn with_window(window: Duration, max_agents: usize) -> ConnectOptions {
@@ -733,7 +734,7 @@ async fn handshake_hangs() {
     let client = spawning(&fake, 1).await;
     let started = Instant::now();
     expect_error(
-        &format!("did not answer the handshake within {}s", CONNECT_TIMEOUT.as_secs()),
+        &format!("no answer to the sdk.v1 handshake within {}s", CONNECT_TIMEOUT.as_secs()),
         &[],
         &client,
     )

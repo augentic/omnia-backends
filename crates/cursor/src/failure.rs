@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::bridge::{Exit, TransportError};
+use crate::bridge::{Exit, RunStatus, TransportError};
 
 /// How a completion this backend ran came to fail, by variant rather than
 /// by message.
@@ -11,6 +11,15 @@ use crate::bridge::{Exit, TransportError};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Failure {
+    /// The run reached a terminal status other than `finished`: the bridge
+    /// or the provider answered with an error.
+    Run {
+        /// The status the stream's result carried.
+        status: RunStatus,
+        /// The result's error code, else the last status message; `None`
+        /// when the stream carried neither.
+        detail: Option<String>,
+    },
     /// Absolute wall-clock cap exceeded while the stream was still active.
     Timeout {
         /// The cap in seconds, from connect options.
@@ -44,6 +53,9 @@ impl Failure {
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Run { status, detail } => {
+                write!(f, "cursor run {status}: {}", detail.as_deref().unwrap_or("<no detail>"))
+            }
             Self::Timeout { cap_secs } => write!(
                 f,
                 "cursor run timed out after {cap_secs}s (absolute cap exceeded while still active)"
@@ -82,7 +94,8 @@ pub enum Outcome {
     Transport,
     /// The guest's check rejected every candidate.
     Exhausted,
-    /// Anything else: the bridge or the provider answered with an error.
+    /// The bridge or the provider answered with an error: a
+    /// [`Failure::Run`], a Connect error, or anything else.
     Error,
 }
 
@@ -103,6 +116,7 @@ impl Outcome {
 
     const fn of_failure(failure: &Failure) -> Self {
         match failure {
+            Failure::Run { .. } => Self::Error,
             Failure::Timeout { .. } => Self::Timeout,
             Failure::Inactive { .. } => Self::Inactive,
             Failure::Aborted(_) => Self::Abort,
@@ -137,7 +151,7 @@ impl Outcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{Exit, Failure, Outcome, TransportError};
+    use super::{Exit, Failure, Outcome, RunStatus, TransportError};
 
     // an exit whose status the wait never reported
     const EXITED: Exit = Exit { status: None, pid: 1 };
@@ -147,6 +161,14 @@ mod tests {
             idle_secs: 120,
             inactivity_secs: 120,
             cap_secs: 600,
+        }
+        .into()
+    }
+
+    fn run_error(detail: Option<&str>) -> anyhow::Error {
+        Failure::Run {
+            status: RunStatus::Error,
+            detail: detail.map(ToOwned::to_owned),
         }
         .into()
     }
@@ -203,6 +225,11 @@ mod tests {
             omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
         assert_eq!(Outcome::of(&rejected), Outcome::Exhausted);
 
+        let failed = run_error(Some("model overloaded"));
+        assert_eq!(Outcome::of(&failed), Outcome::Error);
+        assert_eq!(failed.to_string(), "cursor run error: model overloaded");
+        assert_eq!(run_error(None).to_string(), "cursor run error: <no detail>");
+
         assert_eq!(Outcome::of(&anyhow::anyhow!("bridge RPC failed")), Outcome::Error);
     }
 
@@ -230,6 +257,6 @@ mod tests {
             "bridge RPC `SdkAgentService/Send` failed (500 Internal Server Error, internal): boom"
         ))
         .lost_bridge());
-        assert!(!Outcome::of(&anyhow::anyhow!("cursor run error: model overloaded")).lost_bridge());
+        assert!(!Outcome::of(&run_error(Some("model overloaded"))).lost_bridge());
     }
 }

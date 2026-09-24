@@ -144,9 +144,10 @@ passes straight through: set it on the host process to have every spawned
 bridge log its RPCs to stderr, where this crate records them at DEBUG.
 
 A caller that needs to tell failures apart matches on the types `complete`'s
-error downcasts to — `Failure::{Timeout, Inactive, Aborted, BridgeExited}`,
+error downcasts to — `Failure::{Run, Timeout, Inactive, Aborted, BridgeExited}`,
 `TransportError`, and `omnia_wasi_model::Error::BudgetExhausted` — rather
-than on message text; `Exit` is the process status a `BridgeExited` carries.
+than on message text; `Exit` is the process status a `BridgeExited` carries,
+and `RunStatus` the terminal status a `Run` ended in.
 
 MCP servers are supplied per-request: a prompt's `mcp` grant carries the
 endpoint `url` directly, passed inline through `CreateAgent`'s `mcp_servers`.

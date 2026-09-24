@@ -120,138 +120,6 @@ impl Drop for Bridge {
     }
 }
 
-/// A process [`Bridge::spawn`] spawned, watched and killable, with its
-/// ready-line handshake still to run. Dropped, it is killed: nothing is
-/// bound to ask over.
-pub struct Spawned {
-    watched: Watched,
-    discovery: oneshot::Receiver<Result<Discovery>>,
-}
-
-impl Spawned {
-    /// Resolves once the process exits, however the handshake goes.
-    pub fn exited(&self) -> impl Future<Output = Exit> + Send + 'static {
-        self.watched.exited()
-    }
-
-    /// Finish the ready-line scan and bind `sdk.v1`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the ready line never arrives or the RPC
-    /// handshake fails; the process is killed with it.
-    pub async fn handshake(self) -> Result<Bridge> {
-        let Self { watched, discovery } = self;
-        let scanned = async {
-            discovery.await.unwrap_or_else(|_gone| {
-                Err(anyhow!("the stderr reader ended without a ready line"))
-            })
-        };
-
-        let discovery = watched.step(scanned).await?;
-        let rpc = watched.step(discovery.into_rpc()).await?;
-
-        tracing::info!(
-            pid = watched.state.pid,
-            histogram.cursor_bridge_spawn_ms = elapsed_ms(watched.state.started_at),
-            "cursor-sdk-bridge spawned"
-        );
-
-        Ok(Bridge { watched, rpc })
-    }
-}
-
-/// How a spawned bridge ended.
-#[derive(Clone, Copy, Debug)]
-pub struct Exit {
-    /// The exit status, when the wait reported one.
-    pub status: Option<ExitStatus>,
-    /// The process id.
-    pub pid: u32,
-}
-
-impl fmt::Display for Exit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.status {
-            Some(status) => status.fmt(f),
-            None => f.write_str("status unknown"),
-        }
-    }
-}
-
-// The client's end of one watched process: the facts shared with its
-// supervisor, the exit the supervisor publishes, and the stop that asks it
-// to end the process — over the client the stop carries, or by a kill when
-// the sender drops without one.
-#[derive(Debug)]
-struct Watched {
-    state: Arc<State>,
-    exit: watch::Receiver<Option<Exit>>,
-    shutdown: watch::Sender<Option<Rpc>>,
-}
-
-impl Watched {
-    fn is_running(&self) -> bool {
-        self.exit.borrow().is_none()
-    }
-
-    fn exited(&self) -> impl Future<Output = Exit> + Send + 'static {
-        let mut exit = self.exit.clone();
-        let pid = self.state.pid;
-        async move { wait_exit(&mut exit, pid).await }
-    }
-
-    async fn fail_on_exit<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
-        let exited = self.exited();
-        tokio::pin!(exited);
-
-        // wait for the future or the process to exit
-        let error = tokio::select! {
-            // branch 1: the future completed
-            outcome = future => match outcome {
-                Ok(value) => return Ok(value),
-                Err(error) => error,
-            },
-            // branch 2: the process exited before the future completed
-            exit = &mut exited => return Err(Failure::BridgeExited(exit).into()),
-        };
-
-        // wait for the exit that explains the failure
-        match timeout(EXIT_WAIT, exited).await {
-            Ok(exit) => Err(Failure::BridgeExited(exit).into()),
-            Err(_elapsed) => Err(error),
-        }
-    }
-
-    // Run one handshake step under the process's exit. The stderr tail
-    // behind a failure is logged at DEBUG; it never reaches the error.
-    async fn step<T>(&self, step: impl Future<Output = Result<T>>) -> Result<T> {
-        self.fail_on_exit(step)
-            .await
-            .inspect_err(|_error| self.state.trace_err())
-            .context("cursor sdk handshake failed")
-    }
-}
-
-// what the bridge, its handshake and its supervisor all see of one process
-#[derive(Debug)]
-struct State {
-    pid: u32,
-    started_at: Instant,
-    tail: Tail,
-}
-
-impl State {
-    // The tail is untrusted subprocess output (paths, provider context,
-    // session fragments), so it is logged at DEBUG only.
-    fn trace_err(&self) {
-        let tail = self.tail.to_string();
-        if !tail.is_empty() {
-            tracing::debug!(%tail, "cursor-sdk-bridge tail");
-        }
-    }
-}
-
 // waits on the process, tears it down on request, and publishes its exit
 struct Supervisor {
     child: Box<dyn ChildWrapper>,
@@ -361,6 +229,138 @@ impl Supervisor {
             let _ = self.child.wait().await;
         };
         let _ = timeout(SHUTDOWN_TIMEOUT, asked).await;
+    }
+}
+
+/// A process [`Bridge::spawn`] spawned, watched and killable, with its
+/// ready-line handshake still to run. Dropped, it is killed: nothing is
+/// bound to ask over.
+pub struct Spawned {
+    watched: Watched,
+    discovery: oneshot::Receiver<Result<Discovery>>,
+}
+
+impl Spawned {
+    /// Resolves once the process exits, however the handshake goes.
+    pub fn exited(&self) -> impl Future<Output = Exit> + Send + 'static {
+        self.watched.exited()
+    }
+
+    /// Finish the ready-line scan and bind `sdk.v1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ready line never arrives or the RPC
+    /// handshake fails; the process is killed with it.
+    pub async fn handshake(self) -> Result<Bridge> {
+        let Self { watched, discovery } = self;
+        let scanned = async {
+            discovery.await.unwrap_or_else(|_gone| {
+                Err(anyhow!("the stderr reader ended without a ready line"))
+            })
+        };
+
+        let discovery = watched.step(scanned).await?;
+        let rpc = watched.step(discovery.into_rpc()).await?;
+
+        tracing::info!(
+            pid = watched.state.pid,
+            histogram.cursor_bridge_spawn_ms = elapsed_ms(watched.state.started_at),
+            "cursor-sdk-bridge spawned"
+        );
+
+        Ok(Bridge { watched, rpc })
+    }
+}
+
+// The client's end of one watched process: the facts shared with its
+// supervisor, the exit the supervisor publishes, and the stop that asks it
+// to end the process — over the client the stop carries, or by a kill when
+// the sender drops without one.
+#[derive(Debug)]
+struct Watched {
+    state: Arc<State>,
+    exit: watch::Receiver<Option<Exit>>,
+    shutdown: watch::Sender<Option<Rpc>>,
+}
+
+impl Watched {
+    fn is_running(&self) -> bool {
+        self.exit.borrow().is_none()
+    }
+
+    fn exited(&self) -> impl Future<Output = Exit> + Send + 'static {
+        let mut exit = self.exit.clone();
+        let pid = self.state.pid;
+        async move { wait_exit(&mut exit, pid).await }
+    }
+
+    async fn fail_on_exit<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
+        let exited = self.exited();
+        tokio::pin!(exited);
+
+        // wait for the future or the process to exit
+        let error = tokio::select! {
+            // branch 1: the future completed
+            outcome = future => match outcome {
+                Ok(value) => return Ok(value),
+                Err(error) => error,
+            },
+            // branch 2: the process exited before the future completed
+            exit = &mut exited => return Err(Failure::BridgeExited(exit).into()),
+        };
+
+        // wait for the exit that explains the failure
+        match timeout(EXIT_WAIT, exited).await {
+            Ok(exit) => Err(Failure::BridgeExited(exit).into()),
+            Err(_elapsed) => Err(error),
+        }
+    }
+
+    // Run one handshake step under the process's exit. The stderr tail
+    // behind a failure is logged at DEBUG; it never reaches the error.
+    async fn step<T>(&self, step: impl Future<Output = Result<T>>) -> Result<T> {
+        self.fail_on_exit(step)
+            .await
+            .inspect_err(|_error| self.state.trace_err())
+            .context("cursor sdk handshake failed")
+    }
+}
+
+// what the bridge, its handshake and its supervisor all see of one process
+#[derive(Debug)]
+struct State {
+    pid: u32,
+    started_at: Instant,
+    tail: Tail,
+}
+
+impl State {
+    // The tail is untrusted subprocess output (paths, provider context,
+    // session fragments), so it is logged at DEBUG only.
+    fn trace_err(&self) {
+        let tail = self.tail.to_string();
+        if !tail.is_empty() {
+            tracing::debug!(%tail, "cursor-sdk-bridge tail");
+        }
+    }
+}
+
+/// How a spawned bridge ended.
+#[derive(Clone, Copy, Debug)]
+pub struct Exit {
+    /// The exit status, when the wait reported one.
+    pub status: Option<ExitStatus>,
+    /// The process id.
+    pub pid: u32,
+}
+
+impl fmt::Display for Exit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.status {
+            Some(status) => status.fmt(f),
+            None => f.write_str("status unknown"),
+        }
     }
 }
 

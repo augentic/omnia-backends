@@ -11,7 +11,7 @@ mod rpc;
 
 use std::fmt;
 use std::process::{ExitStatus, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -36,24 +36,25 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
 
-/// A spawned `cursor-sdk-bridge` process this client watches.
+/// A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`
+/// bound on it. Dropping it asks the bridge to go; [`Bridge::close`] also
+/// waits for it to.
 #[derive(Debug)]
 pub struct Bridge {
-    state: Arc<State>,
-    exit: watch::Receiver<Option<Exit>>,
-    shutdown: watch::Sender<()>,
+    watched: Watched,
+    rpc: Rpc,
 }
 
 impl Bridge {
     /// Spawn `cursor-sdk-bridge` calling back as `callback`, and watch it.
-    /// The ready-line handshake is left on the returned [`Handshake`] so a
-    /// pool lease can occupy the slot first.
+    /// The ready-line handshake is left to [`Spawned::handshake`] so a pool
+    /// lease can occupy the slot first.
     ///
     /// # Errors
     ///
     /// Returns an error when the state root cannot be created or the
     /// executable cannot be spawned.
-    pub fn spawn(callback: &Registration) -> Result<(Self, Handshake)> {
+    pub fn spawn(callback: &Registration) -> Result<Spawned> {
         let started_at = Instant::now();
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-")
@@ -82,7 +83,7 @@ impl Bridge {
         command.wrap(ProcessGroup::leader());
 
         // spawn the bridge
-        let mut child = command.spawn().context("issue spawning bridge")?;
+        let mut child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
         let pid = child.id().context("no pid for spawned bridge")?;
         let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
             bail!("no piped stdout and stderr for spawned bridge");
@@ -92,14 +93,13 @@ impl Bridge {
             pid,
             started_at,
             tail: Tail::default(),
-            rpc: OnceLock::new(),
         });
 
         drain_stdout(stdout);
         let (discovery, stderr) = read_stderr(stderr, Arc::clone(&state));
 
         // spawn the supervisor
-        let (shutdown, stop) = watch::channel(());
+        let (shutdown, stop) = watch::channel(None);
         let (exit_tx, exit) = watch::channel(None);
         tokio::spawn(
             Supervisor {
@@ -113,100 +113,88 @@ impl Bridge {
             .run(),
         );
 
-        Ok((
-            Self {
+        Ok(Spawned {
+            watched: Watched {
                 state,
                 exit,
                 shutdown,
             },
-            Handshake(discovery),
-        ))
+            discovery,
+        })
     }
 
-    /// Whether the bridge has yet to exit.
-    pub fn is_running(&self) -> bool {
-        self.exit.borrow().is_none()
+    /// The bound `sdk.v1` client.
+    pub const fn rpc(&self) -> &Rpc {
+        &self.rpc
     }
 
-    /// Resolves once the bridge exits.
-    pub fn exited(&self) -> impl Future<Output = Exit> + Send + 'static {
-        let mut exit = self.exit.clone();
-        let pid = self.state.pid;
-        async move { wait_exit(&mut exit, pid).await }
+    /// The bound `sdk.v1` client, while the bridge is still running.
+    pub fn live_rpc(&self) -> Option<&Rpc> {
+        self.watched.is_running().then_some(&self.rpc)
     }
 
     /// `future`, failing as the bridge's exit when it exits under it.
     pub async fn fail_on_exit<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
-        let exited = self.exited();
-        tokio::pin!(exited);
-
-        // wait for the future or the bridge to exit
-        let error = tokio::select! {
-            // branch 1: the future completed
-            outcome = future => match outcome {
-                Ok(value) => return Ok(value),
-                Err(error) => error,
-            },
-            // branch 2: the bridge exited before the future completed
-            exit = &mut exited => return Err(Failure::BridgeExited(exit).into()),
-        };
-
-        // wait for the exit that explains the failure
-        match timeout(EXIT_WAIT, exited).await {
-            Ok(exit) => Err(Failure::BridgeExited(exit).into()),
-            Err(_elapsed) => Err(error),
-        }
+        self.watched.fail_on_exit(future).await
     }
 
-    /// Shut the bridge down and wait for it to exit.
+    /// Ask the bridge to go, and wait for it to exit.
     pub async fn close(&self) {
-        let _ = self.shutdown.send(());
-        self.exited().await;
+        self.ask();
+        self.watched.exited().await;
     }
 
-    // Run one handshake step under the bridge's exit. The stderr tail behind
-    // a failure is logged at DEBUG; it never reaches the error.
-    async fn step<T>(&self, step: impl Future<Output = Result<T>>) -> Result<T> {
-        self.fail_on_exit(step)
-            .await
-            .inspect_err(|_error| self.state.trace_err())
-            .context("cursor sdk handshake failed")
+    // Hand the client to the supervisor to ask over. A `Watched` that drops
+    // without one is killed outright.
+    fn ask(&self) {
+        let _ = self.watched.shutdown.send(Some(self.rpc.clone()));
     }
 }
 
-/// Ready-line scan and RPC connect for a process [`Bridge::spawn`] spawned.
-///
-/// The [`Bridge`] is already watched, so the caller can occupy the agent
-/// slot before [`Handshake::complete`] returns.
-pub struct Handshake(oneshot::Receiver<Result<Discovery>>);
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        self.ask();
+    }
+}
 
-impl Handshake {
-    /// Finish the ready-line scan and bind `sdk.v1` on `bridge`, returning
-    /// the client.
+/// A process [`Bridge::spawn`] spawned, watched and killable, with its
+/// ready-line handshake still to run. Dropped, it is killed: nothing is
+/// bound to ask over.
+pub struct Spawned {
+    watched: Watched,
+    discovery: oneshot::Receiver<Result<Discovery>>,
+}
+
+impl Spawned {
+    /// Resolves once the process exits, however the handshake goes.
+    pub fn exited(&self) -> impl Future<Output = Exit> + Send + 'static {
+        self.watched.exited()
+    }
+
+    /// Finish the ready-line scan and bind `sdk.v1`.
     ///
     /// # Errors
     ///
-    /// Returns an error when the ready line never arrives or the RPC handshake fails.
-    pub async fn complete(self, bridge: &Bridge) -> Result<Rpc> {
+    /// Returns an error when the ready line never arrives or the RPC
+    /// handshake fails; the process is killed with it.
+    pub async fn handshake(self) -> Result<Bridge> {
+        let Self { watched, discovery } = self;
         let scanned = async {
-            self.0.await.unwrap_or_else(|_gone| {
+            discovery.await.unwrap_or_else(|_gone| {
                 Err(anyhow!("the stderr reader ended without a ready line"))
             })
         };
 
-        let discovery = bridge.step(scanned).await?;
-        let rpc = bridge.step(discovery.into_rpc()).await?;
-
-        // the supervisor task is spawned before the Rpc exists
-        let _ = bridge.state.rpc.set(rpc.clone());
+        let discovery = watched.step(scanned).await?;
+        let rpc = watched.step(discovery.into_rpc()).await?;
 
         tracing::info!(
-            pid = bridge.state.pid,
-            histogram.cursor_bridge_spawn_ms = elapsed_ms(bridge.state.started_at),
-            "bridge spawned"
+            pid = watched.state.pid,
+            histogram.cursor_bridge_spawn_ms = elapsed_ms(watched.state.started_at),
+            "cursor-sdk-bridge spawned"
         );
 
-        Ok(rpc)
+        Ok(Bridge { watched, rpc })
     }
 }
 
@@ -228,13 +216,66 @@ impl fmt::Display for Exit {
     }
 }
 
+// The client's end of one watched process: the facts shared with its
+// supervisor, the exit the supervisor publishes, and the stop that asks it
+// to end the process — over the client the stop carries, or by a kill when
+// the sender drops without one.
+#[derive(Debug)]
+struct Watched {
+    state: Arc<State>,
+    exit: watch::Receiver<Option<Exit>>,
+    shutdown: watch::Sender<Option<Rpc>>,
+}
+
+impl Watched {
+    fn is_running(&self) -> bool {
+        self.exit.borrow().is_none()
+    }
+
+    fn exited(&self) -> impl Future<Output = Exit> + Send + 'static {
+        let mut exit = self.exit.clone();
+        let pid = self.state.pid;
+        async move { wait_exit(&mut exit, pid).await }
+    }
+
+    async fn fail_on_exit<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
+        let exited = self.exited();
+        tokio::pin!(exited);
+
+        // wait for the future or the process to exit
+        let error = tokio::select! {
+            // branch 1: the future completed
+            outcome = future => match outcome {
+                Ok(value) => return Ok(value),
+                Err(error) => error,
+            },
+            // branch 2: the process exited before the future completed
+            exit = &mut exited => return Err(Failure::BridgeExited(exit).into()),
+        };
+
+        // wait for the exit that explains the failure
+        match timeout(EXIT_WAIT, exited).await {
+            Ok(exit) => Err(Failure::BridgeExited(exit).into()),
+            Err(_elapsed) => Err(error),
+        }
+    }
+
+    // Run one handshake step under the process's exit. The stderr tail
+    // behind a failure is logged at DEBUG; it never reaches the error.
+    async fn step<T>(&self, step: impl Future<Output = Result<T>>) -> Result<T> {
+        self.fail_on_exit(step)
+            .await
+            .inspect_err(|_error| self.state.trace_err())
+            .context("cursor sdk handshake failed")
+    }
+}
+
 // what the bridge, its handshake and its supervisor all see of one process
 #[derive(Debug)]
 struct State {
     pid: u32,
     started_at: Instant,
     tail: Tail,
-    rpc: OnceLock<Rpc>,
 }
 
 impl State {
@@ -254,19 +295,24 @@ struct Supervisor {
     state_root: TempDir,
     stderr: JoinHandle<()>,
     state: Arc<State>,
-    stop: watch::Receiver<()>,
+    stop: watch::Receiver<Option<Rpc>>,
     exit: watch::Sender<Option<Exit>>,
 }
 
 impl Supervisor {
     async fn run(mut self) {
-        let exited = tokio::select! {
+        let self_exited = tokio::select! {
             // an exit in the same tick as a close is still an exit
             biased;
             _ = self.child.wait() => true,
-            // `close`, or the `Bridge` dropped
+            // `close`, or the `Bridge` or `Spawned` dropped
             _ = self.stop.changed() => {
-                self.ask().await;
+                // a `Bridge` hands its client over to be asked; a `Spawned`
+                // has none to hand over, and is killed outright
+                let rpc = self.stop.borrow().clone();
+                if let Some(rpc) = rpc {
+                    self.ask(&rpc).await;
+                }
                 false
             }
         };
@@ -287,13 +333,13 @@ impl Supervisor {
         };
 
         // an exit nobody asked for is a crash
-        if exited {
+        if self_exited {
             tracing::warn!(
                 pid = exit.pid,
                 uptime_ms,
                 status = %exit,
                 monotonic_counter.cursor_bridge_exits = 1_u64,
-                "bridge exited"
+                "cursor-sdk-bridge exited"
             );
             self.state.trace_err();
         }
@@ -302,13 +348,8 @@ impl Supervisor {
         drop(self.state_root);
     }
 
-    // Ask over the bound client and wait for the exit it brings, both under
-    // one bound. With no client bound yet, there is nothing to ask.
-    async fn ask(&mut self) {
-        let Some(rpc) = self.state.rpc.get() else {
-            return;
-        };
-
+    // Ask over `rpc` and wait for the exit it brings, both under one bound.
+    async fn ask(&mut self, rpc: &Rpc) {
         let asked = async {
             let _ = rpc.shutdown().await;
             let _ = self.child.wait().await;

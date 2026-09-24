@@ -15,7 +15,7 @@ use omnia_wasi_model::ToolHost;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 
-use crate::bridge::{Bridge, Rpc};
+use crate::bridge::Bridge;
 use crate::elapsed_ms;
 use crate::endpoint::{Attached, Endpoint, Registration};
 
@@ -52,11 +52,11 @@ impl Pool {
         tracing::info!(histogram.cursor_lease_wait_ms = elapsed_ms(queued), "agent slot acquired");
 
         let registration = Arc::new(self.endpoint.register()?);
-        let spawned = async {
-            let (bridge, handshake) = Bridge::spawn(&registration)?;
+        let spawning = async {
+            let spawned = Bridge::spawn(&registration)?;
             // The slot reopens, and the token is revoked, only once the
             // process is gone — however the lease ends, handshake included.
-            let exited = bridge.exited();
+            let exited = spawned.exited();
             let token = Arc::clone(&registration);
 
             tokio::spawn(async move {
@@ -65,16 +65,11 @@ impl Pool {
                 drop(token);
             });
 
-            let rpc = handshake.complete(&bridge).await?;
-            
-            Ok(Arc::new(Lease {
-                bridge,
-                registration,
-                rpc,
-            }))
+            let bridge = spawned.handshake().await?;
+            Ok(Arc::new(Lease { bridge, registration }))
         };
 
-        spawned.await.inspect_err(|_error| {
+        spawning.await.inspect_err(|_error| {
             tracing::warn!(
                 monotonic_counter.cursor_bridge_spawn_failures = 1_u64,
                 "cursor-sdk-bridge failed to spawn"
@@ -87,29 +82,17 @@ impl Pool {
     }
 }
 
-/// One agent slot with its bridge handshaken: the `sdk.v1` client is bound
-/// for as long as the lease lives, and dropping the lease asks the bridge
-/// to go.
+/// One agent slot with its bridge handshaken; dropping the lease asks the
+/// bridge to go.
 #[derive(Debug)]
 pub struct Lease {
     bridge: Bridge,
     registration: Arc<Registration>,
-    rpc: Rpc,
 }
 
 impl Lease {
     pub const fn bridge(&self) -> &Bridge {
         &self.bridge
-    }
-
-    /// The bound `sdk.v1` client.
-    pub const fn rpc(&self) -> &Rpc {
-        &self.rpc
-    }
-
-    /// The bound `sdk.v1` client, while its bridge is still running.
-    pub fn live_rpc(&self) -> Option<&Rpc> {
-        self.bridge.is_running().then_some(&self.rpc)
     }
 
     /// Route the bridge's callbacks for `agent_id` into `tool_host` until

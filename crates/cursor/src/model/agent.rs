@@ -174,7 +174,7 @@ impl Agent {
         let deadline = self.deadlines.watch(&activity);
         tokio::pin!(deadline);
 
-        let send = self.lease.rpc().send(self.id.clone(), text.to_owned());
+        let send = self.lease.bridge().rpc().send(self.id.clone(), text.to_owned());
         let opened = tokio::select! {
             stream = self.lease.bridge().fail_on_exit(send) => stream,
             error = &mut deadline => Err(error.into()),
@@ -208,7 +208,7 @@ impl Agent {
         let Some(run_id) = self.live_run.take() else {
             return;
         };
-        let Some(rpc) = self.lease.live_rpc().cloned() else {
+        let Some(rpc) = self.lease.bridge().live_rpc().cloned() else {
             return;
         };
         let agent_id = self.id.clone();
@@ -341,7 +341,7 @@ impl Creating {
     ) -> Self {
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
-            let rpc = lease.rpc().clone();
+            let rpc = lease.bridge().rpc().clone();
             let limit = window.saturating_mul(2);
             let Ok(answered) = timeout(limit, rpc.create_agent(options)).await else {
                 tracing::warn!(
@@ -538,7 +538,7 @@ struct Release {
 
 impl Release {
     async fn run(self) {
-        if let Some(rpc) = self.lease.live_rpc() {
+        if let Some(rpc) = self.lease.bridge().live_rpc() {
             if let Some(run_id) = self.run_id {
                 teardown("CancelRun", rpc.cancel_run(run_id, self.id.clone())).await;
             }

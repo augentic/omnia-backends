@@ -27,12 +27,6 @@ as published crates.io dependencies (currently 0.36.0), declared once under
 | Supply chain | `cargo make vet` after any dependency change |
 | Task runner | `cargo make <task>` (see `Makefile.toml`; `cargo make ci` is the full gate) |
 
-`--all-features` is not optional for the model backends: `omnia-cursor`'s
-`model` and `bridge` suites and its fake bridge binary sit behind the
-`fake-bridge` feature (`required-features` on the `[[test]]` and `[[bin]]`
-targets), so a plain `cargo nextest run -p omnia-cursor` skips them without
-a word.
-
 ## Verifying a change
 
 - Run the suite of the crate you changed, `cargo clippy --workspace
@@ -139,6 +133,10 @@ so the policy splits into three tiers:
   log the test folds back into per-process histories; faults can target one
   spawned process by ordinal, so one guest run can see a healthy process and
   a faulted one side by side.
+- The fake bridge is a `[[bin]]` of `omnia-cursor`, so it compiles against
+  the crate's `[dependencies]` alone — never a dev-dependency. The suites'
+  side of its module (`Spawnable`, the liveness probe and its `libc`) is
+  `cfg(test)`, which the binary never is (`test = false`, `bench = false`).
 - The omnia crates come from crates.io, pinned by the single
   `[workspace.dependencies]` declarations (`omnia = "0.36.0"` and friends);
   every `omnia-*` must stay on the same line, so bump them all together and

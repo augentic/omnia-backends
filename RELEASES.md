@@ -21,6 +21,10 @@ Unreleased
   group when it exited is swept as the exit is seen. A graceful exit is
   bounded once — 5s for the `Shutdown` RPC and the exit together — rather
   than once each.
+- `omnia-cursor` has no `fake-bridge` feature. The fake bridge binary and
+  the `model` and `bridge` suites build on every `cargo nextest run -p
+  omnia-cursor`; `libc` is a dev-dependency, and `http-body-util`'s `channel`
+  (the fake's run stream, no crate of its own) is always on.
 
 ---
 

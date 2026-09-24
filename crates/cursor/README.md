@@ -197,16 +197,15 @@ The full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor
 
 ## Tests
 
-Three tiers. The first two run on every `cargo nextest run -p omnia-cursor
---all-features` with no bridge installed and no key; the third is the real
-bridge, by hand.
+Three tiers. The first two run on every `cargo nextest run -p omnia-cursor`
+with no bridge installed and no key; the third is the real bridge, by hand.
 
 **Tier 1 — the fake bridge.** [`tests/support/fake_bridge`](tests/support/fake_bridge)
 is a protocol-faithful `cursor-sdk-bridge`: bearer-checked `sdk.v1` Connect
 RPCs, `agent-<n>` ids counted per process (so two processes hand out the
 same id, as the real one does), `Send` as an enveloped run stream, and
 `CallCustomTool` posted back to this crate's own callback endpoint. It is
-built as the `fake-cursor-sdk-bridge` binary (feature `fake-bridge`) and
+built as the `fake-cursor-sdk-bridge` binary alongside the suites and
 linked onto the test process's `PATH` as `cursor-sdk-bridge`, so the
 client finds it exactly as a deployment finds the real one — nothing on
 `Client` or `ConnectOptions` exists for the tests' sake. The client starts
@@ -270,7 +269,7 @@ bridge is a failure here, not just the bridge itself. All are
 
 ```bash
 CURSOR_API_KEY=... \
-  cargo nextest run -p omnia-cursor --all-features --run-ignored all
+  cargo nextest run -p omnia-cursor --run-ignored all
 ```
 
 Add `CURSOR_SDK_BRIDGE_LOG=1` when a live failure needs the bridge's

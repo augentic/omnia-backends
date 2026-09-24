@@ -347,8 +347,7 @@ impl Server {
             _ => None,
         }) {
             write_markers();
-            // SAFETY: delivering SIGKILL to ourselves involves no memory.
-            unsafe { libc::raise(libc::SIGKILL) };
+            kill_self();
         }
         self.checkpoint(Point::Send).await;
 
@@ -614,6 +613,15 @@ pub fn write_markers() {
     for marker in MARKERS {
         eprintln!("{marker}");
     }
+}
+
+// `SIGKILL` ourselves as an OOM killer would: no handler runs, and the
+// client sees `signal: 9 (SIGKILL)`. Delivered by a child, since std has no
+// `raise`; the signal lands before `kill` has even exited.
+fn kill_self() -> ! {
+    let pid = std::process::id().to_string();
+    let status = std::process::Command::new("kill").args(["-KILL", &pid]).status();
+    panic!("kill -KILL {pid} left us running: {status:?}");
 }
 
 fn keys(object: &Value) -> Vec<String> {

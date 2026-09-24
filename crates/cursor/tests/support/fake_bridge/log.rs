@@ -10,7 +10,6 @@
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
-use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -150,9 +149,7 @@ fn lock(path: &Path) -> File {
         OpenOptions::new().create(true).append(true).open(path).unwrap_or_else(|error| {
             panic!("opening the fake bridge log {}: {error}", path.display())
         });
-    // SAFETY: `flock` on a descriptor this handle owns; no memory is involved.
-    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    assert_eq!(locked, 0, "locking the fake bridge log");
+    file.lock().expect("locking the fake bridge log");
     file
 }
 
@@ -240,6 +237,7 @@ impl Process {
     }
 
     /// Whether a process with this pid still exists.
+    #[cfg(test)]
     pub fn alive(&self) -> bool {
         alive(self.pid)
     }
@@ -270,6 +268,7 @@ impl Process {
 /// Whether a process with `pid` is still running: a pid that answers a
 /// probe, and is not a zombie waiting on a parent that may never reap it
 /// (a forked child, reparented to a pid 1 that does not).
+#[cfg(test)]
 pub fn alive(pid: u32) -> bool {
     let Ok(signed) = i32::try_from(pid) else {
         return false;
@@ -281,21 +280,21 @@ pub fn alive(pid: u32) -> bool {
     !zombie(pid)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn zombie(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|stat| proc_state(&stat))
         == Some('Z')
 }
 
 // elsewhere, what is reparented to pid 1 is reaped as it exits
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(test, not(target_os = "linux")))]
 const fn zombie(_pid: u32) -> bool {
     false
 }
 
 // The state field of `/proc/<pid>/stat` follows the parenthesised command
 // name, which may itself hold spaces and parentheses: split from the right.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 fn proc_state(stat: &str) -> Option<char> {
     let (_, after_name) = stat.rsplit_once(") ")?;
     after_name.chars().next()

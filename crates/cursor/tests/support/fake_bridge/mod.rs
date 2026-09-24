@@ -14,6 +14,10 @@
 //! process records the park in the log and waits for the release count the
 //! test writes beside it to pass its ticket.
 //!
+//! The suites' side — [`Spawnable`] and the liveness probe — is `cfg(test)`:
+//! the binary is built against the crate's `[dependencies]` alone, and the
+//! probe's `libc` is a dev-dependency.
+//!
 //! The fake answers `sdk.v1` the way the real bridge does — bearer-checked
 //! Connect JSON, `agent-<n>` ids counted per process so two processes hand
 //! out the same id, `Send` as an enveloped run stream, `CallCustomTool`
@@ -32,8 +36,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
+#[cfg(test)]
+pub use self::log::alive;
 #[allow(unused_imports, reason = "the suites' side of the module")]
-pub use self::log::{Event, History, Kind, Log, Process, Rpc, alive};
+pub use self::log::{Event, History, Kind, Log, Process, Rpc};
 use self::server::{Callback, Server};
 #[allow(unused_imports, reason = "the suites' side of the module")]
 pub use self::server::{EXIT_ON_CREATE, MARKERS};
@@ -239,19 +245,17 @@ pub fn dummy_key() {
 /// The fake as the process the client spawns: a home directory holding the
 /// script, the shared log, the release counts, and the `cursor-sdk-bridge`
 /// link to `fake-cursor-sdk-bridge`, put on `PATH` for this test process.
+#[cfg(test)]
 pub struct Spawnable {
     home: tempfile::TempDir,
 }
 
+#[cfg(test)]
 impl Spawnable {
     /// Lay out `config` for the binary to pick up and put the fake on `PATH`.
     ///
     /// `PATH` and `FAKE_BRIDGE_HOME` are process-wide, so one `Spawnable`
     /// per test process: the suites run under nextest, one test each.
-    #[allow(
-        clippy::option_env_unwrap,
-        reason = "set for the suites; unset in the binary's own build, which never gets here"
-    )]
     pub fn new(config: &Config) -> Self {
         let home =
             tempfile::Builder::new().prefix("fake-bridge-").tempdir().expect("a home directory");
@@ -260,10 +264,11 @@ impl Spawnable {
             serde_json::to_vec_pretty(config).expect("a config serializes"),
         )
         .expect("writing the script");
-        let target = option_env!("CARGO_BIN_EXE_fake-cursor-sdk-bridge")
-            .expect("the fake binary is built alongside the suites (feature `fake-bridge`)");
-        std::os::unix::fs::symlink(target, home.path().join(BIN_NAME))
-            .expect("linking the fake binary");
+        std::os::unix::fs::symlink(
+            env!("CARGO_BIN_EXE_fake-cursor-sdk-bridge"),
+            home.path().join(BIN_NAME),
+        )
+        .expect("linking the fake binary");
 
         let mut path = home.path().as_os_str().to_owned();
         if let Some(rest) = std::env::var_os("PATH") {

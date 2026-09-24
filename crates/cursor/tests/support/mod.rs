@@ -2,9 +2,7 @@
 
 #![allow(dead_code, unused_imports, reason = "each suite uses its own subset")]
 
-#[cfg(feature = "fake-bridge")]
 pub mod fake_bridge;
-#[cfg(feature = "fake-bridge")]
 pub mod harness;
 pub mod local_path_tool_host;
 pub mod mcp_server;

@@ -18,21 +18,15 @@ workspace = true
 [package.metadata.docs.rs]
 all-features = true
 
-[features]
-# The protocol-faithful fake `cursor-sdk-bridge` the e2e suites spawn
-# (`fake-cursor-sdk-bridge`), and the suites themselves.
-fake-bridge = ["dep:libc", "http-body-util/channel", "tokio/rt-multi-thread"]
-
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
 fromenv.workspace = true
 getrandom.workspace = true
 http.workspace = true
-http-body-util.workspace = true
+http-body-util = { workspace = true, features = ["channel"] }
 hyper = { workspace = true, features = ["client", "http1", "server"] }
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
-libc = { workspace = true, optional = true }
 omnia.workspace = true
 omnia-wasi-model.workspace = true
 process-wrap = { workspace = true, features = ["kill-on-drop", "process-group", "tokio1"] }
@@ -42,11 +36,12 @@ serde.workspace = true
 serde_json.workspace = true
 serde_repr.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
+libc.workspace = true
 omnia-test = { workspace = true, features = ["host"] }
 test-programs.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "test-util", "time"] }
@@ -54,18 +49,13 @@ tracing-subscriber.workspace = true
 
 # The fake bridge is a binary of this package so the suites find it through
 # `CARGO_BIN_EXE_fake-cursor-sdk-bridge` and link it onto `PATH` as
-# `cursor-sdk-bridge`; its source is `tests/support/fake_bridge`.
+# `cursor-sdk-bridge`. Its source is `tests/support/fake_bridge`, compiled
+# against `[dependencies]` alone (hence `http-body-util/channel` above); the
+# suites' side of that module is `cfg(test)`, which this binary never is
+# because no test or bench harness is ever built for it.
 [[bin]]
 name = "fake-cursor-sdk-bridge"
 path = "tests/support/fake_bridge/main.rs"
-required-features = ["fake-bridge"]
 test = false
+bench = false
 doc = false
-
-[[test]]
-name = "model"
-required-features = ["fake-bridge"]
-
-[[test]]
-name = "bridge"
-required-features = ["fake-bridge"]

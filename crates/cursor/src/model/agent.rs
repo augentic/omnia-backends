@@ -27,7 +27,7 @@ use super::options::{Turn, Workspace};
 use crate::endpoint::Attached;
 use crate::failure::Outcome;
 use crate::pool::Lease;
-use crate::sdk::{AgentOperationOptions, AgentOptions, RunStatus, RunStream, RunStreamResult};
+use crate::protocol::{AgentOperationOptions, AgentOptions, RunStatus, RunStream, RunStreamResult};
 use crate::{Failure, elapsed_ms};
 
 const MAX_ROUNDS: u32 = 2;
@@ -512,7 +512,7 @@ mod tests {
 
     use super::{Deadlines, Unanswered};
     use crate::Failure;
-    use crate::sdk::RpcError;
+    use crate::protocol::RpcError;
     use crate::worker::Exit;
 
     const DEADLINES: Deadlines = Deadlines {

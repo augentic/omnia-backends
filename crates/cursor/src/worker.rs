@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
 use crate::endpoint::Registration;
-use crate::sdk::Rpc;
+use crate::protocol::Rpc;
 use crate::{Failure, elapsed_ms, lock};
 
 // The handshake's two bounds: the ready line on stderr, then `sdk.v1`

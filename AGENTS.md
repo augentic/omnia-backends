@@ -95,7 +95,7 @@ so the policy splits into three tiers:
 - **Unit tests for deterministic, service-free logic, wherever it lives**:
   OData filter building (`azure-table/store/filter.rs`), Postgres type
   mapping, the Kafka partitioner, cursor's ready-line and Connect-frame
-  parsing (`cursor/src/worker/discovery.rs`, `sdk/rpc.rs`), genai's
+  parsing (`cursor/src/worker/discovery.rs`, `protocol/rpc.rs`), genai's
   request translation (`genai/src/model/options.rs`). A behaviour a guest
   boundary reaches is an e2e row, not a unit test: the scripted-server unit
   tests the model backends once carried inside `src/` were retired for

@@ -4,7 +4,7 @@ mod endpoint;
 mod failure;
 mod model;
 mod pool;
-mod sdk;
+mod protocol;
 mod worker;
 
 use std::env;
@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, ensure};
 pub use failure::Failure;
 use omnia::Backend;
-pub use sdk::{RpcError, RunStatus};
+pub use protocol::{RpcError, RunStatus};
 use tokio::time::Instant;
 use tracing::instrument;
 pub use worker::Exit;

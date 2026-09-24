@@ -1,4 +1,4 @@
-use crate::sdk::{RpcError, RunStatus};
+use crate::protocol::{RpcError, RunStatus};
 use crate::worker::Exit;
 
 /// How a completion this backend ran came to fail, by variant rather than

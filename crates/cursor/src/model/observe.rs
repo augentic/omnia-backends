@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 use crate::elapsed_ms;
 use crate::failure::Outcome;
-use crate::sdk::{RunStreamMessage, SdkMessage, TokenUsage};
+use crate::protocol::{RunStreamMessage, SdkMessage, TokenUsage};
 
 /// One completion's start/finish events. Drop without [`Self::finish`]
 /// records [`Outcome::Abort`] (a cancelled future).
@@ -257,7 +257,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::EventLog;
-    use crate::sdk::{SdkMessage, TokenUsage};
+    use crate::protocol::{SdkMessage, TokenUsage};
 
     fn usage(input: i64, output: i64, reasoning: Option<i64>) -> Usage {
         Usage::from(TokenUsage {

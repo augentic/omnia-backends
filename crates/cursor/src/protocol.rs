@@ -1,6 +1,6 @@
-//! The `sdk.v1` protocol `cursor-sdk-bridge` serves: the messages this
-//! backend exchanges with it, and a Connect client with one typed method
-//! per procedure.
+//! The protocol `cursor-sdk-bridge` speaks — `sdk.v1` over Connect on a
+//! loopback port: the messages this backend exchanges with it, and a client
+//! with one typed method per procedure.
 
 mod messages;
 mod rpc;

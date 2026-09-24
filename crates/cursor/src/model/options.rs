@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result};
 use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::Value;
 
-use crate::sdk::{
+use crate::protocol::{
     AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
     ModelSelection, ToolList,
 };

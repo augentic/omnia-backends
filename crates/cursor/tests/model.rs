@@ -42,7 +42,6 @@ async fn model_echo_text() {
     let (agent, sequence) = sole_agent(&workers[0]);
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
     assert!(workers[0].ended_with(Rpc::Shutdown), "the lease closed its process");
-    assert!(log.process(0).is_some_and(|probe| probe.ended_with(Rpc::Shutdown)));
 
     // The answer waits on the teardown.
     let deleted = workers[0].saw(Rpc::DeleteAgent)[0];

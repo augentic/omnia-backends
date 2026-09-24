@@ -215,8 +215,10 @@ async fn abandon_before_ready() {
 
 #[tokio::test]
 async fn abandon_during_create() {
+    // The loser's create is held until the row releases it, inside the
+    // window the client waits for an id, so the window is a wide one.
     let fake = Spawnable::new(&Config::echo().fault(Fault::Park(Point::CreateAgent)));
-    let client = spawning(&fake, 2).await;
+    let client = connect(with_window(Duration::from_secs(30), 2)).await;
 
     let guest = abandon_guest(&client, 2);
     fake.await_parked(Point::CreateAgent, 2).await;
@@ -224,7 +226,7 @@ async fn abandon_during_create() {
     guest.await.expect("the guest task joins");
 
     // The loser's `CreateAgent` is still held: its task owns the slot — and
-    // so the process — until the id it will get is torn down, while the
+    // so the process — until the id it will get is deleted, while the
     // winner's process is asked to go.
     assert_eq!(fake.parked(Point::CreateAgent), 1);
     let (winner, loser) = split_by(&fake.log(), Rpc::Send);
@@ -377,8 +379,8 @@ async fn lease_waits() {
 }
 
 /// `CreateAgent` never answered, one slot: the completion gives up after
-/// one window; its task holds the slot for one more, then reopens it with
-/// nothing to tear down, and the next completion reaches its own
+/// one window and its worker is asked to go with nothing to tear down; the
+/// next completion gets a worker of its own and reaches its own
 /// `CreateAgent`.
 #[tokio::test]
 async fn hang_on_create() {
@@ -389,45 +391,14 @@ async fn hang_on_create() {
     await_gone(&fake).await;
 
     let log = fake.log();
-    let creates = log.saw(Rpc::CreateAgent);
-    assert_eq!(creates.len(), 2, "{}", log.summary());
-    let gap = creates[1].at().duration_since(creates[0].at()).unwrap_or_default();
-    // The task's timer starts a round trip before the fake records the
-    // arrival, hence the slack.
-    let reopen = (2 * WINDOW).saturating_sub(Duration::from_millis(50));
-    assert!(gap >= reopen, "the slot reopened after {gap:?}");
+    let workers = log.workers();
+    assert_eq!(workers.len(), 2, "{}", log.summary());
     assert_eq!(log.count(Rpc::CloseAgent), 0, "no id arrived to close");
     assert_eq!(log.count(Rpc::DeleteAgent), 0);
-    for process in log.workers() {
+    for process in &workers {
+        assert_eq!(process.count(Rpc::CreateAgent), 1, "process {}", process.number);
         assert!(process.ended_with(Rpc::Shutdown), "process {}", process.number);
     }
-}
-
-#[tokio::test]
-async fn create_reaps_late_agent() {
-    // The task holds the slot for the late id for one more window after the
-    // completion gives up; the id must arrive inside it, and the guest's
-    // exit sits between the two under load, so the window is a wide one.
-    const HOLD: Duration = Duration::from_secs(5);
-    let fake = Spawnable::new(&Config::echo().fault(Fault::Park(Point::CreateAgent)));
-    let client = connect(with_window(HOLD, 1)).await;
-    expect_error("unanswered after 5s", &[], &client).await;
-    assert_eq!(fake.parked(Point::CreateAgent), 1, "the create is still in flight");
-    assert_eq!(fake.log().count(Rpc::CloseAgent), 0, "nothing to reap before the id arrives");
-
-    // The id nobody is waiting for is closed and deleted by the task that
-    // asked for it, against the create-time cwd.
-    fake.release_all();
-    await_rpcs(|| fake.log(), Rpc::DeleteAgent, 1, GONE).await;
-    await_gone(&fake).await;
-    let log = fake.log();
-    let (agent, sequence) = sole_agent(&log);
-    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::CloseAgent, Rpc::DeleteAgent], "{agent}");
-    let created = log.saw(Rpc::CreateAgent)[0];
-    let deleted = log.saw(Rpc::DeleteAgent)[0];
-    assert_eq!(deleted.agent.as_deref(), Some(agent.as_str()));
-    assert_eq!(deleted.text("cwd"), created.text("cwd"));
-    assert!(!deleted.text("apiKey").is_empty());
 }
 
 #[tokio::test]

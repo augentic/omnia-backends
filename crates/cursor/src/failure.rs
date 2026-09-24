@@ -38,7 +38,8 @@ pub enum Failure {
         /// Configured absolute cap in seconds.
         cap_secs: u64,
     },
-    /// Hard tool-host failure (or a closed abort channel).
+    /// Hard tool-host failure, or the guest dropping the completion (a
+    /// failure that then reaches no one).
     #[error("completion aborted: {0}")]
     Aborted(String),
     /// The spawned worker exited under the completion — during its

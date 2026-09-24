@@ -57,7 +57,7 @@ pub struct Callback {
 
 pub struct Server {
     config: Config,
-    /// The process number claimed through the log (the probe is 0).
+    /// The process number claimed through the log (1-based, in start order).
     process: usize,
     token: String,
     callback: Option<Callback>,

@@ -40,10 +40,10 @@ pub fn options(max_agents: usize) -> ConnectOptions {
 
 /// A client spawning one process of `fake` per lease: the fake is on
 /// `PATH` from the moment it is laid out, so this is `connect` with the
-/// dependency spelled out.
+/// dependency spelled out — nothing spawned until the first lease.
 pub async fn spawning(fake: &Spawnable, max_agents: usize) -> Client {
     let client = connect(options(max_agents)).await;
-    assert!(fake.log().process(0).is_some(), "the probe spawned the fake");
+    assert!(fake.log().processes().is_empty(), "connect spawns nothing: {}", fake.log().summary());
     client
 }
 

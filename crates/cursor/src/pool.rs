@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use omnia_wasi_model::ToolHost;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use crate::elapsed_ms;
@@ -27,21 +27,14 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// Bind the callback endpoint and prove the worker is spawnable — one
-    /// probe lease, closed again — so a missing or broken binary fails here
-    /// rather than at the first completion.
+    /// Bind the callback endpoint. Nothing is spawned until the first lease,
+    /// so a missing or broken binary surfaces as that lease's failure.
     pub async fn connect(max_agents: usize) -> Result<Self> {
-        let pool = Self {
+        Ok(Self {
             permits: Arc::new(Semaphore::new(max_agents.min(Semaphore::MAX_PERMITS))),
             endpoint: Endpoint::bind().await?,
             max_agents,
-        };
-
-        // closed here rather than left to the drop, so the probe is gone
-        // before the first completion queues for its slot
-        pool.lease().await?.worker().close().await;
-
-        Ok(pool)
+        })
     }
 
     /// Wait for a slot, in arrival order, then for the worker to run on.
@@ -87,11 +80,9 @@ impl Lease {
     }
 
     /// Route the worker's callbacks for `agent_id` into `tool_host` until
-    /// the returned guard drops; the first hard tool failure is sent on
-    /// `abort`.
-    pub fn attach(
-        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: oneshot::Sender<String>,
-    ) -> Attached {
-        self.registration.attach(agent_id, tool_host, abort)
+    /// the returned guard drops; the guard also carries the abort the first
+    /// hard tool failure ends the completion with.
+    pub fn attach(&self, agent_id: String, tool_host: Arc<dyn ToolHost>) -> Attached {
+        self.registration.attach(agent_id, tool_host)
     }
 }

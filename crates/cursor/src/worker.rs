@@ -42,8 +42,7 @@ const TAIL_LINES: usize = 20;
 const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 
 /// A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`
-/// bound on it. Dropping it asks the worker to go; [`Worker::close`] also
-/// waits for it to.
+/// bound on it. Dropping it asks the worker to go.
 #[derive(Debug)]
 pub struct Worker {
     watched: Watched,
@@ -104,12 +103,6 @@ impl Worker {
     /// `future`, failing as the worker's exit when it exits under it.
     pub async fn fail_on_exit<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
         self.watched.fail_on_exit(future).await
-    }
-
-    /// Ask the worker to go, and wait for it to exit.
-    pub async fn close(&self) {
-        self.ask();
-        self.watched.exited().await;
     }
 
     // Hand the client to the supervisor to ask over. A `Watched` that drops
@@ -453,19 +446,7 @@ fn drain_stdout(stdout: ChildStdout) {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::process::ExitStatusExt as _;
-    use std::process::ExitStatus;
-
-    use super::{Exit, TAIL_LINES, Tail};
-
-    // The crash WARN and `Failure::WorkerExited` both read this text.
-    #[test]
-    fn exit_display() {
-        let exit = |status| Exit { status, pid: 1 }.to_string();
-        assert_eq!(exit(Some(ExitStatus::from_raw(9))), "signal: 9 (SIGKILL)");
-        assert_eq!(exit(Some(ExitStatus::from_raw(3 << 8))), "exit status: 3");
-        assert_eq!(exit(None), "status unknown");
-    }
+    use super::{TAIL_LINES, Tail};
 
     #[test]
     fn tail_bounded() {

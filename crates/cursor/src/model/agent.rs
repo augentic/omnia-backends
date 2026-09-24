@@ -1,14 +1,14 @@
-//! An agent on a leased worker: one completion's `CreateAgent`, the `Send` of
-//! its prompt and of each correction the guest's check returns, and the
-//! teardown that gives the slot back.
+//! An agent on a leased worker: one completion's `CreateAgent`, the `Send`
+//! of its prompt and of each correction the guest's check returns, and the
+//! `DeleteAgent` that gives the slot back.
 //!
-//! No wait on the worker is unbounded — the inactivity window that stream
-//! progress rearms, the absolute cap, the callback's abort and the worker's
-//! own exit each end one — so a worker alive but silent unblocks the guest.
-//! The completion future is the guest's to drop at any `.await`, so
-//! `CreateAgent` and the teardown each run on a task of their own with the
-//! lease riding on it: the worker closes only once nothing of the agent is
-//! left on it.
+//! The whole of it runs on a task of its own, because the completion future
+//! is the guest's to drop at any `.await`: the drop cancels a token the task
+//! watches, and the task ends its run — cancelled by id once the stream has
+//! named one — and still deletes its agent. No wait on the worker is
+//! unbounded — the inactivity window that stream progress rearms, the
+//! absolute cap, the callback's abort and the worker's own exit each end
+//! one — so a worker alive but silent unblocks the guest.
 
 use std::mem;
 use std::pin::Pin;
@@ -16,108 +16,135 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
-use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
-use tokio::runtime::Handle;
-use tokio::sync::{oneshot, watch};
-use tokio::task::JoinHandle;
+use omnia_wasi_model::{Answer, Error, ToolHost, Transcript, Usage};
+use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until, timeout};
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument as _, Span};
 
 use super::observe::{Completion, EventLog};
-use super::options::{AgentSpec, Turn, Workspace};
+use super::options::{AgentSpec, Prompt, Turn, Workspace};
 use crate::endpoint::Attached;
 use crate::failure::Outcome;
 use crate::pool::Lease;
 use crate::protocol::{AgentOperationOptions, RunStatus, RunStream, RunStreamResult};
+use crate::worker::Worker;
 use crate::{Failure, elapsed_ms};
 
 const MAX_ROUNDS: u32 = 2;
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const RUN_ID_WAIT: Duration = Duration::from_secs(2);
 
-/// Run `turn` as an agent on `lease`, with its callbacks routed into
-/// `tool_host`: `CreateAgent`, the prompt to an answer, then the teardown.
-///
-/// # Errors
-///
-/// Returns the failure, marked as before any candidate when it struck in
-/// `CreateAgent` or the opening `Send`.
-pub async fn complete(
-    lease: Arc<Lease>, turn: Turn, tool_host: Arc<dyn ToolHost>, deadlines: Deadlines,
-) -> Result<Answer, Unanswered> {
-    Agent::new(lease, turn, tool_host, deadlines).await?.run().await
+/// One attempt at a completion: the turn to run as an agent on a leased
+/// worker, with the agent's callbacks routed into the tool host.
+pub struct Attempt {
+    pub lease: Arc<Lease>,
+    pub turn: Turn,
+    pub tool_host: Arc<dyn ToolHost>,
+    pub deadlines: Deadlines,
 }
 
-/// One completion's agent on a leased worker, from `CreateAgent` to its
-/// teardown.
-struct Agent {
-    lease: Arc<Lease>,
-    id: String,
-    deadlines: Deadlines,
-    prompt: String,
-    format: Format,
-    check: bool,
-    tool_host: Arc<dyn ToolHost>,
-    abort: oneshot::Receiver<String>,
-    completion: Completion,
-    stream: Option<RunStream>,
-    run_id: Option<String>,
-    created: Option<Created>,
-    _attached: Attached,
-}
+impl Attempt {
+    /// `CreateAgent`, the prompt to an answer, then `DeleteAgent`, on a task
+    /// of its own: dropping this future ends the run, never the delete.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure, marked as before any candidate when it struck
+    /// in `CreateAgent` or the opening `Send`.
+    pub async fn complete(self) -> Result<Answer, Unanswered> {
+        // the guard's cancel is how the task learns nobody is waiting any more
+        let cancel = CancellationToken::new();
+        let _cancel_on_drop = cancel.clone().drop_guard();
 
-impl Agent {
-    // `CreateAgent`: a failure here is one the guest has seen nothing of.
-    async fn new(
-        lease: Arc<Lease>, turn: Turn, tool_host: Arc<dyn ToolHost>, deadlines: Deadlines,
-    ) -> Result<Self, Unanswered> {
-        let mut completion = Completion::from(&turn);
-        let created = Created::create(&lease, turn.agent, deadlines.inactivity)
-            .await
-            .inspect_err(|error| completion.finish(Outcome::of(error)))
-            .map_err(Unanswered::before_candidate)?;
-
-        let (abort_tx, abort) = oneshot::channel();
-        let attached = lease.attach(created.id.clone(), Arc::clone(&tool_host), abort_tx);
-
-        Ok(Self {
-            lease,
-            id: created.id.clone(),
-            deadlines,
-            prompt: turn.prompt,
-            format: turn.format,
-            check: turn.check,
-            tool_host,
-            abort,
-            completion,
-            stream: None,
-            run_id: None,
-            created: Some(created),
-            _attached: attached,
+        let task = tokio::spawn(self.run(cancel).instrument(Span::current()));
+        task.await.unwrap_or_else(|panicked| {
+            let error =
+                anyhow::Error::new(panicked).context("the agent's task ended with no answer");
+            Err(Unanswered::settled(error))
         })
     }
 
-    // Drive the prompt to an answer, then tear the agent down. The answer
-    // waits on the teardown, so the lease — and the worker — go only after.
-    async fn run(mut self) -> Result<Answer, Unanswered> {
-        let prompt = mem::take(&mut self.prompt);
-        let result = self.rounds(prompt).await;
-        let outcome = match &result {
-            Ok(_) if self.completion.attempts() > 1 => Outcome::Corrected,
-            Ok(_) => Outcome::Ok,
-            Err(unanswered) => Outcome::of(unanswered.error()),
-        };
-        self.completion.finish(outcome);
-        // a completion dropped here leaves the teardown running: `Drop`
-        // finds nothing left to hand over
-        if let Some(teardown) = self.detach_teardown() {
-            let _ = teardown.await;
-        }
+    // The whole life of one agent, in order. The answer waits on the
+    // delete, so the lease — and the worker — go only after.
+    async fn run(self, cancel: CancellationToken) -> Result<Answer, Unanswered> {
+        let mut agent = Agent::create(self, cancel).await.map_err(Unanswered::before_candidate)?;
+        let result = agent.rounds().await;
+        agent.finish(&result);
+        agent.delete().await;
         result
+    }
+}
+
+/// One completion's agent on a leased worker, from `CreateAgent` to
+/// `DeleteAgent`.
+struct Agent {
+    handle: Handle,
+    prompt: Prompt,
+    tool_host: Arc<dyn ToolHost>,
+    deadlines: Deadlines,
+    cancel: CancellationToken,
+    completion: Completion,
+    session: Attached,
+}
+
+impl Agent {
+    // `CreateAgent`, bounded by one inactivity window and the worker's exit.
+    // A failure here is one the guest has seen nothing of.
+    async fn create(attempt: Attempt, cancel: CancellationToken) -> Result<Self> {
+        let Attempt {
+            lease,
+            turn,
+            tool_host,
+            deadlines,
+        } = attempt;
+
+        let mut completion = Completion::from(&turn);
+        let Turn { agent, prompt } = turn;
+        let AgentSpec {
+            options,
+            operation,
+            workspace,
+        } = agent;
+
+        let worker = lease.worker();
+        let window = deadlines.inactivity;
+        let created = worker.fail_on_exit(worker.rpc().create_agent(options));
+
+        let id = match timeout(window, created).await {
+            Ok(Ok(created)) if created.agent_id.is_empty() => {
+                Err(anyhow!("sdk.v1 RPC `CreateAgent` returned an empty agent id"))
+            }
+            Ok(Ok(created)) => Ok(created.agent_id),
+            Ok(Err(error)) => Err(error),
+            Err(_elapsed) => {
+                Err(anyhow!("sdk.v1 RPC `CreateAgent` unanswered after {}s", window.as_secs()))
+            }
+        }
+        .inspect_err(|error| completion.finish(Outcome::of(error)))?;
+
+        let session = lease.attach(id.clone(), Arc::clone(&tool_host));
+
+        Ok(Self {
+            handle: Handle {
+                lease,
+                id,
+                operation,
+                workspace,
+                run_id: None,
+            },
+            prompt,
+            tool_host,
+            deadlines,
+            cancel,
+            completion,
+            session,
+        })
     }
 
     // Send the prompt, then each correction the guest's check returns on
     // the same session, until a candidate passes or the rounds run out.
-    async fn rounds(&mut self, mut prompt: String) -> Result<Answer, Unanswered> {
+    async fn rounds(&mut self) -> Result<Answer, Unanswered> {
+        let mut prompt = mem::take(&mut self.prompt.text);
         let mut round = 1;
         loop {
             self.completion.attempt();
@@ -132,12 +159,11 @@ impl Agent {
             let tools = response.transcript.as_ref().map_or(0, |t| t.turns.len());
             self.completion.record(response.result.len(), tools, response.usage.as_ref());
 
-            let candidate = self.format.candidate(&response.result);
-            if !self.check {
+            let candidate = self.prompt.format.candidate(&response.result);
+            if !self.prompt.check {
                 return Ok(response.answer(candidate));
             }
 
-            // check for error and rounds left
             match self.tool_host.check(candidate.clone()).await.map_err(Unanswered::settled)? {
                 Ok(()) => return Ok(response.answer(candidate)),
                 Err(correction) if round < MAX_ROUNDS => {
@@ -161,21 +187,15 @@ impl Agent {
         let deadline = self.deadlines.watch(&activity);
         tokio::pin!(deadline);
 
-        let worker = self.lease.worker();
-        let send = worker.rpc().send(self.id.clone(), text.to_owned());
         let opened = tokio::select! {
-            stream = worker.fail_on_exit(send) => stream,
+            // in this order, so a guest already gone sends nothing
+            biased;
+            () = self.cancel.cancelled() => Err(abandoned()),
+            stream = self.handle.worker().fail_on_exit(self.handle.send(text)) => stream,
             failure = &mut deadline => Err(failure.into()),
         };
         let outcome = match opened {
-            Ok(stream) => {
-                // `follow` holds the stream on `self` while it runs, so a
-                // drop mid-way — the guest abandoning the completion at that
-                // await — hands it to the teardown; a return is the turn over
-                let outcome = self.follow(stream, &activity, deadline.as_mut()).await;
-                self.stream = None;
-                outcome
-            }
+            Ok(stream) => self.follow(stream, &activity, deadline.as_mut()).await,
             Err(error) => Err(error),
         };
 
@@ -194,30 +214,22 @@ impl Agent {
     }
 
     // Follow the run to its terminal result, noting the run id as the
-    // stream names it so a teardown at any point can cancel the run.
+    // stream names it so a run ended early can be cancelled.
     async fn follow(
-        &mut self, stream: RunStream, activity: &watch::Sender<Instant>,
+        &mut self, mut stream: RunStream, activity: &watch::Sender<Instant>,
         mut deadline: Pin<&mut impl Future<Output = Failure>>,
     ) -> Result<Response> {
-        let Self {
-            lease,
-            stream: open,
-            run_id,
-            abort,
-            ..
-        } = self;
-        let stream = open.insert(stream);
         let mut log = EventLog::default();
         let mut outcome: Option<RunStreamResult> = None;
 
         loop {
             tokio::select! {
-                message = lease.worker().fail_on_exit(stream.next()) => {
+                message = self.handle.worker().fail_on_exit(stream.next()) => {
                     let Some(message) = message? else { break };
                     activity.send_replace(Instant::now());
                     log.observe_message(&message);
-                    if run_id.is_none() {
-                        *run_id = log.run_id().map(ToOwned::to_owned);
+                    if self.handle.run_id.is_none() {
+                        self.handle.run_id = log.run_id().map(ToOwned::to_owned);
                     }
                     if message.result.is_some() {
                         outcome = message.result;
@@ -227,14 +239,17 @@ impl Agent {
                     }
                 }
                 failure = &mut deadline => return Err(failure.into()),
-                // the sender lives in the session `_attached` keeps
-                // registered, so it never drops unsent under this
-                Ok(reason) = &mut *abort => return Err(Failure::Aborted(reason).into()),
+                reason = self.session.aborted() => return Err(Failure::Aborted(reason).into()),
+                // an abandoned run is cancelled by the id its opening frame
+                // names, so the stream is followed as far as that frame
+                () = self.cancel.cancelled(), if self.handle.run_id.is_some() => {
+                    return Err(abandoned());
+                }
             }
         }
 
         // the run reached a terminal state; nothing is left to cancel
-        *run_id = None;
+        self.handle.run_id = None;
         let outcome = outcome.context("the run stream ended without a result")?;
         if outcome.status != RunStatus::Finished {
             let detail = outcome
@@ -256,114 +271,67 @@ impl Agent {
         })
     }
 
-    // Hand the agent to its teardown on a task of its own, with the run to
-    // cancel and the stream an abandoned turn left open; once, then `None`.
-    fn detach_teardown(&mut self) -> Option<JoinHandle<()>> {
-        let created = self.created.take()?;
-        detach(created.teardown(self.run_id.take(), self.stream.take()))
+    // The one `completion` line, emitted before the delete so its
+    // `duration_ms` ends with the run.
+    fn finish(&mut self, result: &Result<Answer, Unanswered>) {
+        let outcome = match result {
+            Ok(_) if self.completion.attempts() > 1 => Outcome::Corrected,
+            Ok(_) => Outcome::Ok,
+            Err(unanswered) => Outcome::of(unanswered.error()),
+        };
+        self.completion.finish(outcome);
+    }
+
+    // Delete the agent on the worker; its callback route goes after, with
+    // the rest of `self`.
+    async fn delete(self) {
+        self.handle.delete().await;
     }
 }
 
-impl Drop for Agent {
-    fn drop(&mut self) {
-        self.detach_teardown();
-    }
-}
-
-/// The agent `CreateAgent` made, with what tearing it down needs: the lease,
-/// so the worker outlives the teardown, and the workspace, so a private one
-/// is still there for the local store to delete from.
-struct Created {
+/// One agent on the worker it was created on, with what deleting it needs:
+/// the lease that keeps that worker, the pin and workspace the delete names,
+/// and the run still open on it.
+struct Handle {
     lease: Arc<Lease>,
     id: String,
     operation: AgentOperationOptions,
     workspace: Workspace,
+    run_id: Option<String>,
 }
 
-impl Created {
-    /// `CreateAgent` on a task of its own, which holds the lease and owns
-    /// the agent it makes until the caller claims it. A caller that stops
-    /// waiting — at `window`, or dropped — leaves an agent the task tears
-    /// down itself; a worker silent for one more window gives the slot back
-    /// with nothing to tear down.
-    async fn create(lease: &Arc<Lease>, spec: AgentSpec, window: Duration) -> Result<Self> {
-        let AgentSpec {
-            options,
-            operation,
-            workspace,
-        } = spec;
-
-        let (tx, rx) = oneshot::channel();
-        tokio::spawn({
-            let lease = Arc::clone(lease);
-            async move {
-                let rpc = lease.worker().rpc().clone();
-                let limit = window.saturating_mul(2);
-                let Ok(answered) = timeout(limit, rpc.create_agent(options)).await else {
-                    tracing::warn!(
-                        secs = limit.as_secs(),
-                        "CreateAgent still unanswered; its slot reopens with no agent torn down"
-                    );
-                    return;
-                };
-
-                let created = match answered {
-                    Ok(created) if created.agent_id.is_empty() => {
-                        Err(anyhow!("sdk.v1 RPC `CreateAgent` returned an empty agent id"))
-                    }
-                    Ok(created) => Ok(Self {
-                        lease,
-                        id: created.agent_id,
-                        operation,
-                        workspace,
-                    }),
-                    Err(error) => Err(error),
-                };
-
-                match tx.send(created) {
-                    Ok(()) => {}
-                    // nobody waiting: the caller timed out or was dropped,
-                    // so the agent is this task's to tear down
-                    Err(Ok(unclaimed)) => unclaimed.teardown(None, None).await,
-                    Err(Err(error)) => tracing::debug!(%error, "abandoned CreateAgent failed"),
-                }
-            }
-        });
-
-        let claimed = async {
-            rx.await.unwrap_or_else(|_closed| {
-                Err(anyhow!("sdk.v1 RPC `CreateAgent` ended without an outcome"))
-            })
-        };
-
-        timeout(window, lease.worker().fail_on_exit(claimed)).await.unwrap_or_else(|_elapsed| {
-            Err(anyhow!("sdk.v1 RPC `CreateAgent` unanswered after {}s", window.as_secs()))
-        })
+impl Handle {
+    fn worker(&self) -> &Worker {
+        self.lease.worker()
     }
 
-    /// Cancel the run, close, then delete — each call bounded, all of them
-    /// skipped once the worker is gone — then let the workspace go.
-    async fn teardown(self, run_id: Option<String>, stream: Option<RunStream>) {
-        let run_id = match (run_id, stream) {
-            // an abandoned turn's stream may still carry the run id — the
-            // init frame flushed and not yet polled — so it is read before
-            // anything is dropped
-            (None, Some(stream)) => observe_run_id(stream).await,
-            (run_id, stream) => {
-                drop(stream);
-                run_id
-            }
-        };
-        if let Some(rpc) = self.lease.worker().live_rpc() {
+    async fn send(&self, text: &str) -> Result<RunStream> {
+        self.worker().rpc().send(self.id.clone(), text.to_owned()).await
+    }
+
+    // Cancel the run still open, close, then delete — each call bounded,
+    // all of them skipped once the worker is gone — then let the workspace
+    // go, and the lease last.
+    async fn delete(self) {
+        let Self {
+            lease,
+            id,
+            operation,
+            workspace,
+            run_id,
+        } = self;
+
+        if let Some(rpc) = lease.worker().live_rpc() {
             if let Some(run_id) = run_id {
-                call("CancelRun", rpc.cancel_run(run_id, self.id.clone())).await;
+                call("CancelRun", rpc.cancel_run(run_id, id.clone())).await;
             }
-            call("CloseAgent", rpc.close_agent(self.id.clone())).await;
-            call("DeleteAgent", rpc.delete_agent(self.id, self.operation)).await;
+            call("CloseAgent", rpc.close_agent(id.clone())).await;
+            call("DeleteAgent", rpc.delete_agent(id, operation)).await;
         } else {
-            tracing::debug!(agent = %self.id, "worker exited; skipping agent teardown");
+            tracing::debug!(agent = %id, "worker exited; skipping agent teardown");
         }
-        drop(self.workspace);
+        drop(workspace);
+        drop(lease);
     }
 }
 
@@ -477,10 +445,10 @@ impl Unanswered {
     }
 }
 
-// Spawn `task` so the caller's fate does not cut it short. Without a
-// runtime to spawn on, this is `None`.
-fn detach(task: impl Future<Output = ()> + Send + 'static) -> Option<JoinHandle<()>> {
-    Handle::try_current().ok().map(|handle| handle.spawn(task))
+// The failure a run ends with once the guest has dropped the completion: it
+// reaches no one, and the `completion` line reads `abort`.
+fn abandoned() -> anyhow::Error {
+    Failure::Aborted("the guest dropped the completion".to_owned()).into()
 }
 
 // One best-effort teardown call: a failure is logged and a silence is
@@ -491,22 +459,6 @@ async fn call(method: &'static str, rpc: impl Future<Output = Result<()>>) {
         Ok(Err(error)) => tracing::debug!(%error, method, "agent teardown call failed"),
         Err(_elapsed) => tracing::warn!(method, "agent teardown call unanswered"),
     }
-}
-
-/// The first run id on `stream`, or `None` when the stream ends without one
-/// or stays silent for [`RUN_ID_WAIT`].
-async fn observe_run_id(mut stream: RunStream) -> Option<String> {
-    let read = async {
-        let mut log = EventLog::default();
-        while let Ok(Some(message)) = stream.next().await {
-            log.observe_message(&message);
-            if log.run_id().is_some() || message.done.is_some() {
-                break;
-            }
-        }
-        log.run_id().map(ToOwned::to_owned)
-    };
-    timeout(RUN_ID_WAIT, read).await.ok().flatten()
 }
 
 #[cfg(test)]

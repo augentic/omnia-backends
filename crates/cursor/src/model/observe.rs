@@ -34,7 +34,7 @@ impl From<&Turn> for Completion {
     // The start event: the clock runs from here.
     fn from(turn: &Turn) -> Self {
         tracing::debug!(
-            prompt_bytes = turn.prompt.len(),
+            prompt_bytes = turn.prompt.text.len(),
             mcp = turn.agent.options.mcp_servers.len(),
             "completion started"
         );

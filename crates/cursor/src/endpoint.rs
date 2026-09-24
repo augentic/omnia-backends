@@ -145,11 +145,10 @@ impl Registration {
     }
 
     /// Route this worker's callbacks for `agent_id` into `tool_host` until
-    /// the returned guard drops; the first hard tool failure is sent on
-    /// `abort`.
-    pub fn attach(
-        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: oneshot::Sender<String>,
-    ) -> Attached {
+    /// the returned guard drops; the guard also carries the abort the first
+    /// hard tool failure ends the completion with.
+    pub fn attach(&self, agent_id: String, tool_host: Arc<dyn ToolHost>) -> Attached {
+        let (abort, aborted) = oneshot::channel();
         self.sessions.insert(
             agent_id.clone(),
             Session {
@@ -160,6 +159,7 @@ impl Registration {
         Attached {
             sessions: Arc::clone(&self.sessions),
             agent_id,
+            aborted,
         }
     }
 }
@@ -179,11 +179,24 @@ impl Drop for Registration {
     }
 }
 
-/// Detaches its agent on drop.
+/// One agent's callback route, detached on drop.
 #[must_use]
 pub struct Attached {
     sessions: Arc<Sessions>,
     agent_id: String,
+    aborted: oneshot::Receiver<String>,
+}
+
+impl Attached {
+    /// The reason the first hard tool failure aborted the completion with;
+    /// resolves once at most.
+    pub async fn aborted(&mut self) -> String {
+        // the sender lives in the session until this guard drops, so the
+        // channel never closes unsent under a live guard
+        (&mut self.aborted)
+            .await
+            .unwrap_or_else(|_closed| unreachable!("session gone under its guard"))
+    }
 }
 
 impl Drop for Attached {

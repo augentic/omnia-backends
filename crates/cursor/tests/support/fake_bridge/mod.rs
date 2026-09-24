@@ -115,9 +115,8 @@ pub enum Fault {
     Grandchild,
 }
 
-/// A fault and the spawned process it targets: 1-based in start order
-/// (`Client::connect`'s probe is process 0), or every process but the
-/// probe when unset.
+/// A fault and the spawned process it targets: 1-based in start order, or
+/// every process when unset.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Injected {
     pub fault: Fault,
@@ -126,7 +125,7 @@ pub struct Injected {
 
 impl Injected {
     pub fn applies(&self, process: usize) -> bool {
-        self.process.map_or(process != 0, |selected| selected == process)
+        self.process.is_none_or(|selected| selected == process)
     }
 }
 
@@ -215,7 +214,7 @@ impl Config {
         self
     }
 
-    /// A fault for every process but the probe.
+    /// A fault for every spawned process.
     #[must_use]
     pub fn fault(mut self, fault: Fault) -> Self {
         self.faults.push(Injected { fault, process: None });
@@ -280,7 +279,8 @@ impl Spawnable {
             path.push(rest);
         }
         // SAFETY: set before the test spawns any thread of its own, and
-        // read only by the child processes the client spawns from here on.
+        // read only by the client's spawns, and the child processes they
+        // start, from here on.
         unsafe { std::env::set_var("PATH", path) };
         // SAFETY: as above.
         unsafe { std::env::set_var(HOME_VAR, home.path()) };

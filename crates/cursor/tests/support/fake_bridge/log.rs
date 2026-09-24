@@ -4,8 +4,7 @@
 //!
 //! Every spawned fake appends JSONL lines to the one log in its home under
 //! `flock`, so several processes share it and number themselves through it:
-//! the probe `Client::connect` spawns is process 0, each lease's process
-//! counts up from 1.
+//! each lease's process counts up from 1, in start order.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -94,13 +93,13 @@ pub struct Recorder {
 
 impl Recorder {
     /// The record for a spawned process, which claims the next process
-    /// number under the log's lock and announces itself.
+    /// number (from 1) under the log's lock and announces itself.
     pub fn to_file(path: &Path) -> Self {
         let file = lock(path);
         let started = Log::read(path).events.iter().filter(|e| e.kind == Kind::Started).count();
         let recorder = Self {
             pid: std::process::id(),
-            process: started,
+            process: started + 1,
             file: path.to_path_buf(),
         };
         append(&file, &recorder.event(Kind::Started, None, Value::Null));
@@ -212,9 +211,10 @@ impl Log {
         Some(Process { number, pid, events })
     }
 
-    /// Every process but the probe (`Client::connect`'s handshake spawn).
+    /// Every spawned process, in start order — one per lease, since
+    /// `Client::connect` spawns nothing.
     pub fn workers(&self) -> Vec<Process> {
-        self.processes().into_iter().filter(|process| process.number != 0).collect()
+        self.processes()
     }
 }
 

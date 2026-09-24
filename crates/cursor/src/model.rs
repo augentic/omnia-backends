@@ -13,7 +13,7 @@ mod options;
 use std::sync::Arc;
 
 pub use agent::Deadlines;
-use agent::Unanswered;
+use agent::{Attempt, Unanswered};
 use omnia_wasi_model::{Answer, FutureResult, Request, ToolHost, WasiModelCtx};
 use options::Turn;
 use tracing::{Instrument, info_span};
@@ -55,6 +55,13 @@ impl Client {
             .await
             .map_err(Unanswered::settled)?;
         let lease = self.pool.lease().await.map_err(Unanswered::settled)?;
-        agent::complete(lease, turn, Arc::clone(tool_host), self.deadlines).await
+        Attempt {
+            lease,
+            turn,
+            tool_host: Arc::clone(tool_host),
+            deadlines: self.deadlines,
+        }
+        .complete()
+        .await
     }
 }

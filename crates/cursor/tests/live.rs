@@ -256,8 +256,8 @@ impl tracing::field::Visit for Spawn {
 }
 
 /// A real worker `kill -9`ed under its opening run: the completion restarts
-/// on a fresh process and still answers. The probe is the first spawn, the
-/// completion's own process the second, the restart the third.
+/// on a fresh process and still answers. The completion's own process is the
+/// first spawn, the restart the second.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
 async fn worker_killed_mid_run_recovers() -> Result<()> {
@@ -277,11 +277,11 @@ async fn worker_killed_mid_run_recovers() -> Result<()> {
     };
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while pids.pids().len() < 2 {
-        anyhow::ensure!(tokio::time::Instant::now() < deadline, "no second worker spawned");
+    while pids.pids().is_empty() {
+        anyhow::ensure!(tokio::time::Instant::now() < deadline, "no worker spawned");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let victim = pids.pids()[1];
+    let victim = pids.pids()[0];
     // A moment for `CreateAgent` and `Send` to go out, well short of a
     // real answer.
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -298,9 +298,9 @@ async fn worker_killed_mid_run_recovers() -> Result<()> {
     );
     let spawned = pids.pids();
     anyhow::ensure!(
-        spawned.len() == 3,
-        "expected the probe, the killed process, and the restart; saw {spawned:?} (did the kill \
-         land after the answer?)"
+        spawned.len() == 2,
+        "expected the killed process and the restart; saw {spawned:?} (did the kill land after \
+         the answer?)"
     );
     pids.await_gone().await
 }

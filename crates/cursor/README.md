@@ -32,8 +32,8 @@ provider's prompt cache stays warm. Two rounds are allowed; a rejection of
 the second fails the completion with the typed `budget-exhausted` carrying
 that correction. Agent scope is strictly one `complete` call: agents are
 never reused across completions. Each is closed and then deleted against
-the create-time workspace (a missing agent is already gone); `Drop` only
-retries that cleanup if `complete` never ran.
+the create-time workspace (a missing agent is already gone) before its
+answer is returned.
 
 MSRV: Rust 1.97
 
@@ -89,14 +89,16 @@ the prompt. A worker
 that stays alive but stops answering is bounded too: no call waits on it
 longer than the inactivity window, and the teardown calls after a
 completion are bounded at a few seconds each, so a silent worker frees its
-slot instead of holding it. `CreateAgent` and the teardown run on tasks of
-their own rather than on the completion future, so a completion the guest
-drops mid-create still closes and deletes the id that arrives, and one
-dropped mid-teardown still finishes it; an unanswered `CreateAgent` keeps
-its slot for one more window for that late id, then gives it up.
-`Client::connect()` still fails fast when the
-binary is missing or broken — it binds the loopback callback endpoint, then
-spawns and closes one probe worker — and every spawn passes a private
+slot instead of holding it. The agent's whole life — `CreateAgent`, the
+run, the teardown — runs on a task of its own rather than on the completion
+future, so a completion the guest drops at any point ends its run
+(cancelled by id once the stream has named one) and still closes and
+deletes its agent, the id of a create still in flight included; an
+unanswered `CreateAgent` fails the completion after one window, and its
+worker is asked to go with nothing to tear down.
+`Client::connect()` binds the loopback callback endpoint and spawns nothing
+until the first lease, so a missing or broken `cursor-sdk-bridge` surfaces
+as that lease's spawn or handshake failure. Every spawn passes a private
 `--state-root` so no durable agent state lands in `~/.cursor`, registers
 with the callback endpoint under its own bearer token (agent ids are each
 process's own to choose, so a callback routes by the token that carries it
@@ -237,7 +239,8 @@ and a fan-out whose losers are dropped mid-run.
 [`tests/worker.rs`](tests/worker.rs) is the lifecycle and fault matrix:
 option validation, a completion dropped at every point it can be waiting
 (handshake, pre-ready, create, pre-stream, teardown, and still queued for a
-slot), pooling and the late-create reap, the inactivity and cap deadlines,
+slot), pooling and a `CreateAgent` never answered, the inactivity and cap
+deadlines,
 process death before the ready line, the restart matrix (a worker killed on
 the opening `Send` or exited on `CreateAgent` restarts once on a fresh
 process that answers; killed twice fails with the typed exit; killed after

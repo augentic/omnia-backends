@@ -55,7 +55,6 @@ impl Bridge {
     /// Returns an error when the state root cannot be created or the
     /// executable cannot be spawned.
     pub fn spawn(callback: &Registration) -> Result<Spawned> {
-        let started_at = Instant::now();
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-")
             .tempdir()
@@ -83,44 +82,8 @@ impl Bridge {
         command.wrap(ProcessGroup::leader());
 
         // spawn the bridge
-        let mut child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
-        let pid = child.id().context("no pid for spawned bridge")?;
-        let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
-            bail!("no piped stdout and stderr for spawned bridge");
-        };
-
-        let state = Arc::new(State {
-            pid,
-            started_at,
-            tail: Tail::default(),
-        });
-
-        drain_stdout(stdout);
-        let (discovery, stderr) = read_stderr(stderr, Arc::clone(&state));
-
-        // spawn the supervisor
-        let (shutdown, stop) = watch::channel(None);
-        let (exit_tx, exit) = watch::channel(None);
-        tokio::spawn(
-            Supervisor {
-                child,
-                state_root,
-                stderr,
-                state: Arc::clone(&state),
-                stop,
-                exit: exit_tx,
-            }
-            .run(),
-        );
-
-        Ok(Spawned {
-            watched: Watched {
-                state,
-                exit,
-                shutdown,
-            },
-            discovery,
-        })
+        let child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
+        Supervisor::spawn(child, state_root)
     }
 
     /// The bound `sdk.v1` client.
@@ -300,6 +263,49 @@ struct Supervisor {
 }
 
 impl Supervisor {
+    // Take the process under supervision: wire its pipes, spawn the
+    // supervisor as a task, and hand back the client's end of it.
+    fn spawn(mut child: Box<dyn ChildWrapper>, state_root: TempDir) -> Result<Spawned> {
+        let started_at = Instant::now();
+
+        let pid = child.id().context("no pid for spawned bridge")?;
+        let (Some(stdout), Some(stderr)) = (child.stdout().take(), child.stderr().take()) else {
+            bail!("no piped stdout and stderr for spawned bridge");
+        };
+
+        let state = Arc::new(State {
+            pid,
+            started_at,
+            tail: Tail::default(),
+        });
+
+        drain_stdout(stdout);
+        let (discovery, stderr) = read_stderr(stderr, Arc::clone(&state));
+
+        let (shutdown, stop) = watch::channel(None);
+        let (exit_tx, exit) = watch::channel(None);
+        tokio::spawn(
+            Self {
+                child,
+                state_root,
+                stderr,
+                state: Arc::clone(&state),
+                stop,
+                exit: exit_tx,
+            }
+            .run(),
+        );
+
+        Ok(Spawned {
+            watched: Watched {
+                state,
+                exit,
+                shutdown,
+            },
+            discovery,
+        })
+    }
+
     async fn run(mut self) {
         let self_exited = tokio::select! {
             // an exit in the same tick as a close is still an exit

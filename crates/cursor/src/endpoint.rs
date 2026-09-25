@@ -8,7 +8,7 @@
 //! table: agent ids are the worker's to choose, so two live processes may
 //! pick the same one, and a callback routes by the token it carries as well
 //! as the id it names. Budgets, per-call timeouts, oversize checks, and id
-//! correlation are enforced host-side inside `call_tool`.
+//! correlation are enforced host-side inside [`ToolHost::call_tool`].
 
 mod proto;
 
@@ -90,6 +90,12 @@ impl Endpoint {
     }
 }
 
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
 // Accept until the `Endpoint` drops, one connection task per worker socket.
 async fn serve(listener: TcpListener, handler: Arc<Handler>) {
     loop {
@@ -102,24 +108,20 @@ async fn serve(listener: TcpListener, handler: Arc<Handler>) {
                 continue;
             }
         };
+
         let handler = Arc::clone(&handler);
         tokio::spawn(async move {
             let service = service_fn(move |request| {
                 let handler = Arc::clone(&handler);
                 async move { Ok::<_, Infallible>(handler.handle(request).await) }
             });
+
             if let Err(error) =
                 http1::Builder::new().serve_connection(TokioIo::new(stream), service).await
             {
                 tracing::warn!(%error, "tool-callback connection error");
             }
         });
-    }
-}
-
-impl Drop for Endpoint {
-    fn drop(&mut self) {
-        self.server.abort();
     }
 }
 
@@ -212,12 +214,6 @@ struct Handler {
 }
 
 impl Handler {
-    /// The agent table of the worker whose bearer token the request carries.
-    fn authorize(&self, headers: &HeaderMap) -> Option<Arc<Sessions>> {
-        let token = headers.get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?;
-        lock(&self.workers).get(token).cloned()
-    }
-
     async fn handle(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
         let (parts, body) = request.into_parts();
 
@@ -260,7 +256,13 @@ impl Handler {
             }
         };
 
-        call_tool(&sessions, &parts.headers, body).await
+        sessions.call_tool(&parts.headers, body).await
+    }
+
+    /// The agent table of the worker whose bearer token the request carries.
+    fn authorize(&self, headers: &HeaderMap) -> Option<Arc<Sessions>> {
+        let token = headers.get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?;
+        lock(&self.workers).get(token).cloned()
     }
 }
 
@@ -283,6 +285,55 @@ impl Sessions {
 
     fn remove(&self, agent_id: &str) {
         lock(&self.entries).remove(agent_id);
+    }
+
+    // Decode one callback and run it against this worker's agent table.
+    async fn call_tool(&self, headers: &HeaderMap, body: Bytes) -> Response<Full<Bytes>> {
+        let content_type =
+            headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
+        let codec = if content_type.contains("json") {
+            Codec::Json
+        } else if content_type.contains("proto") {
+            Codec::Proto
+        } else {
+            return connect_error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unknown",
+                &format!("unsupported content type `{content_type}`"),
+            );
+        };
+
+        let call = match ToolCall::decode(codec, &body) {
+            Ok(call) => call,
+            Err(error) => {
+                return connect_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_argument",
+                    &format!("{error:#}"),
+                );
+            }
+        };
+
+        let Some(tool_host) = self.tool_host(&call.agent_id) else {
+            return connect_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                &format!("no live completion for agent `{}`", call.agent_id),
+            );
+        };
+
+        let arguments = call.args.to_string();
+        tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
+
+        match tool_host.call_tool(call.tool_name.clone(), arguments).await {
+            Ok(Ok(output)) => respond(codec, &wrap_output(&output)),
+            Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
+            Err(error) => {
+                let message = format!("tool `{}` failed: {error:#}", call.tool_name);
+                self.abort(&call.agent_id, message.clone());
+                connect_error(StatusCode::CONFLICT, "aborted", &message)
+            }
+        }
     }
 
     fn tool_host(&self, agent_id: &str) -> Option<Arc<dyn ToolHost>> {
@@ -345,55 +396,6 @@ impl ToolCall {
             call.args = json!({});
         }
         Ok(call)
-    }
-}
-
-// Execute one decoded callback against the calling worker's agent table.
-async fn call_tool(sessions: &Sessions, headers: &HeaderMap, body: Bytes) -> Response<Full<Bytes>> {
-    let content_type =
-        headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
-    let codec = if content_type.contains("json") {
-        Codec::Json
-    } else if content_type.contains("proto") {
-        Codec::Proto
-    } else {
-        return connect_error(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "unknown",
-            &format!("unsupported content type `{content_type}`"),
-        );
-    };
-
-    let call = match ToolCall::decode(codec, &body) {
-        Ok(call) => call,
-        Err(error) => {
-            return connect_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_argument",
-                &format!("{error:#}"),
-            );
-        }
-    };
-
-    let Some(tool_host) = sessions.tool_host(&call.agent_id) else {
-        return connect_error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            &format!("no live completion for agent `{}`", call.agent_id),
-        );
-    };
-
-    let arguments = call.args.to_string();
-    tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
-
-    match tool_host.call_tool(call.tool_name.clone(), arguments).await {
-        Ok(Ok(output)) => respond(codec, &wrap_output(&output)),
-        Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
-        Err(error) => {
-            let message = format!("tool `{}` failed: {error:#}", call.tool_name);
-            sessions.abort(&call.agent_id, message.clone());
-            connect_error(StatusCode::CONFLICT, "aborted", &message)
-        }
     }
 }
 

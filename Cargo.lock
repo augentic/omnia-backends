@@ -93,7 +93,7 @@ dependencies = [
  "serde_json",
  "strum 0.27.2",
  "strum_macros 0.27.2",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "uuid",
 ]
 
@@ -165,7 +165,7 @@ dependencies = [
  "serde_json",
  "serde_nanos",
  "serde_repr",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "time",
  "tokio",
  "tokio-rustls",
@@ -798,7 +798,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1454,7 +1454,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2286,7 +2286,7 @@ dependencies = [
  "ipnet",
  "jni",
  "rand 0.10.3",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tinyvec",
  "tokio",
  "tracing",
@@ -2307,7 +2307,7 @@ dependencies = [
  "prefix-trie",
  "rand 0.10.3",
  "ring",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tinyvec",
  "tracing",
  "url",
@@ -2334,7 +2334,7 @@ dependencies = [
  "resolv-conf",
  "smallvec",
  "system-configuration",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]
@@ -2800,7 +2800,7 @@ dependencies = [
  "jni-sys",
  "log",
  "simd_cesu8",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "walkdir",
  "windows-link",
 ]
@@ -3316,7 +3316,7 @@ dependencies = [
  "stringprep",
  "strsim",
  "take_mut",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -3375,6 +3375,18 @@ name = "ndk-context"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
 
 [[package]]
 name = "nkeys"
@@ -3607,7 +3619,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "unicase",
@@ -3627,7 +3639,7 @@ dependencies = [
  "serde_json",
  "strum 0.27.2",
  "strum_macros 0.27.2",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3661,7 +3673,7 @@ dependencies = [
 [[package]]
 name = "omnia"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "futures",
@@ -3750,7 +3762,7 @@ dependencies = [
 [[package]]
 name = "omnia-cli"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "clap",
@@ -3759,7 +3771,7 @@ dependencies = [
 [[package]]
 name = "omnia-core"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "cap-fs-ext",
@@ -3800,6 +3812,7 @@ dependencies = [
  "omnia",
  "omnia-test",
  "omnia-wasi-model",
+ "process-wrap",
  "prost 0.14.4",
  "prost-types 0.14.4",
  "serde",
@@ -3807,7 +3820,9 @@ dependencies = [
  "serde_repr",
  "tempfile",
  "test-programs",
+ "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3848,6 +3863,7 @@ dependencies = [
  "serde",
  "serde_json",
  "test-programs",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]
@@ -3855,7 +3871,7 @@ dependencies = [
 [[package]]
 name = "omnia-guest-macros"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3865,7 +3881,7 @@ dependencies = [
 [[package]]
 name = "omnia-host-macros"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3897,7 +3913,7 @@ dependencies = [
 [[package]]
 name = "omnia-link"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "futures",
@@ -3959,10 +3975,9 @@ dependencies = [
 [[package]]
 name = "omnia-plugin"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
- "cap-std",
  "futures",
  "omnia-core",
  "tokio",
@@ -4008,7 +4023,7 @@ dependencies = [
 [[package]]
 name = "omnia-sdk"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "bon",
@@ -4030,7 +4045,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
  "wasip3",
  "wit-bindgen 0.62.0",
@@ -4039,7 +4054,7 @@ dependencies = [
 [[package]]
 name = "omnia-test"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "futures",
@@ -4062,7 +4077,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-blobstore"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4078,7 +4093,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-config"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "omnia-core",
@@ -4091,7 +4106,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-docstore"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4107,7 +4122,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-http"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "axum",
@@ -4134,7 +4149,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-identity"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "fromenv",
@@ -4151,7 +4166,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-keyvalue"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4169,7 +4184,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-messaging"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "futures",
@@ -4185,7 +4200,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-model"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "cap-std",
@@ -4204,7 +4219,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-otel"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "futures",
@@ -4226,7 +4241,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-sql"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "fromenv",
@@ -4244,7 +4259,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-vault"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "futures",
@@ -4259,7 +4274,7 @@ dependencies = [
 [[package]]
 name = "omnia-wasi-websocket"
 version = "0.37.0"
-source = "git+https://github.com/augentic/omnia#136d8cb7643178c61a2bb7fff66cf1296e19003a"
+source = "git+https://github.com/augentic/omnia#533ac351c2ca6cff63ab8abaa7daaac341d0fe0c"
 dependencies = [
  "anyhow",
  "dashmap 6.2.1",
@@ -4324,7 +4339,7 @@ dependencies = [
  "futures-sink",
  "js-sys",
  "pin-project-lite",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -4339,7 +4354,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost 0.14.4",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tonic",
  "tonic-types",
@@ -4374,7 +4389,7 @@ dependencies = [
  "percent-encoding",
  "portable-atomic",
  "rand 0.9.5",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
 ]
@@ -4675,6 +4690,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "process-wrap"
+version = "10.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f21b97672d2dc848e7b25701ab4535618b92f4861c13cc3f7f7bed52ad3c8da"
+dependencies = [
+ "futures",
+ "indexmap 2.14.2",
+ "nix",
+ "tokio",
+]
+
+[[package]]
 name = "proptest"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4872,7 +4899,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "web-time",
@@ -4895,7 +4922,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tinyvec",
  "tracing",
  "web-time",
@@ -5342,7 +5369,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
 dependencies = [
  "hashbrown 0.16.1",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5551,7 +5578,7 @@ dependencies = [
  "reqwest 0.13.5",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tink-core",
  "tokio",
  "trait-variant",
@@ -6211,11 +6238,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl 2.0.20",
+ "thiserror-impl 2.0.21",
 ]
 
 [[package]]
@@ -6231,9 +6258,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6774,7 +6801,7 @@ dependencies = [
  "log",
  "rand 0.10.3",
  "sha1",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -7064,7 +7091,7 @@ dependencies = [
  "bytes",
  "http",
  "http-body",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "wit-bindgen 0.62.0",
 ]
 
@@ -7249,7 +7276,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "toml",
@@ -7278,7 +7305,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "toml",
  "tracing",
@@ -7482,7 +7509,7 @@ dependencies = [
  "pulley-interpreter",
  "smallvec",
  "target-lexicon",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "wasmparser 0.258.0",
  "wasmtime-environ",
  "wasmtime-internal-core",
@@ -7576,7 +7603,7 @@ dependencies = [
  "rand 0.10.3",
  "rustix",
  "rustix-linux-procfs",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "url",
@@ -8264,18 +8291,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.57"
+version = "0.8.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d35102a9f36d089ccae9e4c6802bc118be4487b80aaffc0ab4e0cf5ce92d2873"
+checksum = "c17e8fafad82b542ff3717217ecdc736231b59e387768c9630123b4ce4d2db44"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.57"
+version = "0.8.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "146c01f5ab44258da43cf276c74a2763db2ff3969c9c652c3f2de07041d0b2bc"
+checksum = "595f56e044df4f46a0c9a626f65c3d99eb8488f7e8a8baa12dd76326d9710bf2"
 dependencies = [
  "proc-macro2",
  "quote",

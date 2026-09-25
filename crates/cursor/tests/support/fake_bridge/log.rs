@@ -4,13 +4,11 @@
 //!
 //! Every spawned fake appends JSONL lines to the one log in its home under
 //! `flock`, so several processes share it and number themselves through it:
-//! the probe `Client::connect` spawns is process 0, each lease's process
-//! counts up from 1.
+//! each lease's process counts up from 1, in start order.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
-use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -47,6 +45,8 @@ pub enum Kind {
     /// The fake posted `CallCustomTool`; `arg` carries the status and the
     /// bearer token it used.
     Callback,
+    /// The process forked a child of its own; `arg` carries its pid.
+    Forked,
 }
 
 /// One recorded moment, timestamped in epoch microseconds so events from
@@ -93,13 +93,13 @@ pub struct Recorder {
 
 impl Recorder {
     /// The record for a spawned process, which claims the next process
-    /// number under the log's lock and announces itself.
+    /// number (from 1) under the log's lock and announces itself.
     pub fn to_file(path: &Path) -> Self {
         let file = lock(path);
         let started = Log::read(path).events.iter().filter(|e| e.kind == Kind::Started).count();
         let recorder = Self {
             pid: std::process::id(),
-            process: started,
+            process: started + 1,
             file: path.to_path_buf(),
         };
         append(&file, &recorder.event(Kind::Started, None, Value::Null));
@@ -148,9 +148,7 @@ fn lock(path: &Path) -> File {
         OpenOptions::new().create(true).append(true).open(path).unwrap_or_else(|error| {
             panic!("opening the fake bridge log {}: {error}", path.display())
         });
-    // SAFETY: `flock` on a descriptor this handle owns; no memory is involved.
-    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    assert_eq!(locked, 0, "locking the fake bridge log");
+    file.lock().expect("locking the fake bridge log");
     file
 }
 
@@ -213,9 +211,10 @@ impl Log {
         Some(Process { number, pid, events })
     }
 
-    /// Every process but the probe (`Client::connect`'s handshake spawn).
+    /// Every spawned process, in start order — one per lease, since
+    /// `Client::connect` spawns nothing.
     pub fn workers(&self) -> Vec<Process> {
-        self.processes().into_iter().filter(|process| process.number != 0).collect()
+        self.processes()
     }
 }
 
@@ -238,12 +237,19 @@ impl Process {
     }
 
     /// Whether a process with this pid still exists.
+    #[cfg(test)]
     pub fn alive(&self) -> bool {
-        let Ok(pid) = i32::try_from(self.pid) else {
-            return false;
-        };
-        // SAFETY: signal 0 probes for existence and delivers nothing.
-        unsafe { libc::kill(pid, 0) == 0 }
+        alive(self.pid)
+    }
+
+    /// The pids of the children the process forked, in order.
+    pub fn forked(&self) -> Vec<u32> {
+        self.events
+            .iter()
+            .filter(|e| e.kind == Kind::Forked)
+            .filter_map(|e| e.arg.get("pid").and_then(Value::as_u64))
+            .filter_map(|pid| u32::try_from(pid).ok())
+            .collect()
     }
 
     /// The callback URL and bearer token the process was started with.
@@ -253,10 +259,46 @@ impl Process {
     }
 
     /// The process's own bearer token, as its ready line carried it.
-    pub fn bridge_token(&self) -> Option<String> {
+    pub fn token(&self) -> Option<String> {
         let ready = self.events.iter().find(|e| e.kind == Kind::Ready)?;
         Some(ready.text("token").to_owned())
     }
+}
+
+/// Whether a process with `pid` is still running: a pid that answers a
+/// probe, and is not a zombie waiting on a parent that may never reap it
+/// (a forked child, reparented to a pid 1 that does not).
+#[cfg(test)]
+pub fn alive(pid: u32) -> bool {
+    let Ok(signed) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 probes for existence and delivers nothing.
+    if unsafe { libc::kill(signed, 0) } != 0 {
+        return false;
+    }
+    !zombie(pid)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|stat| proc_state(&stat))
+        == Some('Z')
+}
+
+// Off Linux, what is reparented to pid 1 is reaped as it exits, so there
+// is no zombie to tell apart.
+#[cfg(all(test, not(target_os = "linux")))]
+const fn zombie(_pid: u32) -> bool {
+    false
+}
+
+// The state field of `/proc/<pid>/stat` follows the parenthesised command
+// name, which may itself hold spaces and parentheses: split from the right.
+#[cfg(test)]
+fn proc_state(stat: &str) -> Option<char> {
+    let (_, after_name) = stat.rsplit_once(") ")?;
+    after_name.chars().next()
 }
 
 /// Queries shared by the whole log and one process's slice of it.
@@ -342,7 +384,14 @@ impl History for Process {
 mod tests {
     use serde_json::Value;
 
-    use super::{Event, History as _, Kind, Log, Rpc};
+    use super::{Event, History as _, Kind, Log, Rpc, proc_state};
+
+    #[test]
+    fn command_name_holding_the_separator() {
+        assert_eq!(proc_state("42 (sleep) S 1 42 42 0 -1"), Some('S'));
+        assert_eq!(proc_state("42 (a) b) Z 1 42 42 0 -1"), Some('Z'));
+        assert_eq!(proc_state("42 (no state"), None);
+    }
 
     fn rpc(process: usize, rpc: Rpc, agent: &str) -> Event {
         Event {

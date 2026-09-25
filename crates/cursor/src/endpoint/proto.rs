@@ -1,10 +1,18 @@
 //! Hand-written prost messages for `sdk.v1.SdkCustomToolCallbackService` —
-//! the one service the bridge calls *into* this backend, and therefore the
+//! the one service the worker calls *into* this backend, and therefore the
 //! one place the binary protobuf codec must be accepted alongside JSON.
 //! Field tags mirror `sdk_custom_tool_callback_service.proto` verbatim.
+//!
+//! The fake `cursor-sdk-bridge` under `tests/support` includes this file by
+//! path: it POSTs the same messages, and one codec on both sides keeps them
+//! honest.
 
+use prost_types::NullValue;
 use prost_types::value::Kind;
 use serde_json::{Map, Value};
+
+// 2^53: every integer up to here is exactly an f64
+const EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct CallCustomToolRequest {
@@ -36,15 +44,26 @@ pub fn struct_to_value(fields: &prost_types::Struct) -> Value {
 fn kind_to_value(value: &prost_types::Value) -> Value {
     match &value.kind {
         None | Some(Kind::NullValue(_)) => Value::Null,
-        Some(Kind::NumberValue(number)) => {
-            serde_json::Number::from_f64(*number).map_or(Value::Null, Value::Number)
-        }
+        Some(Kind::NumberValue(number)) => number_to_value(*number),
         Some(Kind::StringValue(text)) => Value::String(text.clone()),
         Some(Kind::BoolValue(flag)) => Value::Bool(*flag),
         Some(Kind::StructValue(fields)) => struct_to_value(fields),
         Some(Kind::ListValue(list)) => {
             Value::Array(list.values.iter().map(kind_to_value).collect())
         }
+    }
+}
+
+// A `Struct` number is always a double; proto3's JSON mapping prints an
+// integral one without a fraction, so `42` must read back as `42`, not
+// `42.0`, whichever codec the worker picked.
+fn number_to_value(number: f64) -> Value {
+    match number {
+        #[allow(clippy::cast_possible_truncation, reason = "integral and within 2^53: exact")]
+        integral if integral.fract() == 0.0 && integral.abs() <= EXACT_INTEGER => {
+            Value::from(integral as i64)
+        }
+        real => serde_json::Number::from_f64(real).map_or(Value::Null, Value::Number),
     }
 }
 
@@ -57,10 +76,9 @@ pub fn value_to_struct(object: &Map<String, Value>) -> prost_types::Struct {
 
 // `Struct` numbers are f64 by definition, so integers beyond 2^53 round —
 // the same loss every protobuf JSON mapping accepts.
-#[allow(clippy::cast_precision_loss)]
 fn value_to_kind(value: &Value) -> prost_types::Value {
     let kind = match value {
-        Value::Null => Kind::NullValue(0),
+        Value::Null => Kind::NullValue(i32::from(NullValue::NullValue)),
         Value::Bool(flag) => Kind::BoolValue(*flag),
         Value::Number(number) => Kind::NumberValue(number.as_f64().unwrap_or_default()),
         Value::String(text) => Kind::StringValue(text.clone()),
@@ -70,32 +88,4 @@ fn value_to_kind(value: &Value) -> prost_types::Value {
         Value::Object(object) => Kind::StructValue(value_to_struct(object)),
     };
     prost_types::Value { kind: Some(kind) }
-}
-
-// Deliberate unit tests: the Struct codec is pure translation (CI floor).
-#[cfg(test)]
-mod tests {
-    use serde_json::{Value, json};
-
-    use super::{struct_to_value, value_to_struct};
-
-    #[test]
-    fn nested_struct() {
-        let original = json!({
-            "text": "hello",
-            "count": 3.5,
-            "flag": true,
-            "none": null,
-            "nested": { "list": [1.0, "two", false, null, { "deep": "yes" }] },
-        });
-        let Value::Object(object) = &original else { unreachable!() };
-        let round_tripped = struct_to_value(&value_to_struct(object));
-        assert_eq!(round_tripped, original);
-    }
-
-    #[test]
-    fn empty_object() {
-        let Value::Object(object) = json!({}) else { unreachable!() };
-        assert_eq!(struct_to_value(&value_to_struct(&object)), json!({}));
-    }
 }

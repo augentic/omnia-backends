@@ -6,49 +6,73 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::{env, fs};
 
 use anyhow::{Context as _, Result};
 use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::Value;
 
-use crate::bridge::{
-    AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig, ModelSelection,
-    ToolList,
+use crate::protocol::{
+    AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
+    ModelSelection, ToolList,
 };
 
-/// Everything one completion derives from the request: the `CreateAgent`
-/// options, the workspace they point into, the opening prompt, the format
-/// steering candidate extraction, and whether the guest checks answers.
+/// Everything one completion derives from the request: the agent to create
+/// and the prompt to send it.
 pub struct Turn {
-    pub options: AgentOptions,
-    pub workspace: Workspace,
-    pub prompt: String,
+    pub agent: AgentSpec,
+    pub prompt: Prompt,
+}
+
+/// The prompt to send the agent: its text, the format steering candidate
+/// extraction, and whether the guest checks the answer.
+pub struct Prompt {
+    pub text: String,
     pub format: Format,
     pub check: bool,
 }
 
+/// The agent one completion creates: the `CreateAgent` options, the pin
+/// every later call on the agent repeats, and the workspace they point into.
+pub struct AgentSpec {
+    pub options: AgentOptions,
+    pub operation: AgentOperationOptions,
+    pub workspace: Workspace,
+}
+
 impl Turn {
-    /// Translate the request against the lent workspace path.
+    /// Translate the request against the lent workspace path, pinning the
+    /// client's default model and API key into the agent options.
     ///
     /// # Errors
     ///
     /// Returns an error when the workspace cannot be prepared or the request
     /// does not map onto agent options.
-    pub fn prepare(request: &Request, lent: Option<&Path>, default_model: &str) -> Result<Self> {
+    pub async fn prepare(
+        request: &Request, lent: Option<&Path>, default_model: &str, api_key: &str,
+    ) -> Result<Self> {
         if request.generation.is_some() {
             tracing::debug!("request.generation is ignored (CreateAgent has no sampling controls)");
         }
 
-        let workspace = Workspace::new(lent)?;
-        let options = AgentOptions::from_request(request, &workspace, default_model)?;
-        let prompt = with_mcp_hint(&request.mcp_servers(), request.to_string());
+        let workspace = Workspace::new(lent).await?;
+        let cwd = workspace.cwd()?;
+        let options = agent_options(request, &cwd, workspace.is_lent(), default_model, api_key)?;
+        let operation = AgentOperationOptions {
+            cwd,
+            api_key: api_key.to_owned(),
+        };
+        let text = with_mcp_hint(&request.mcp_servers(), request.to_string());
         Ok(Self {
-            options,
-            workspace,
-            prompt,
-            format: request.format.clone(),
-            check: request.check,
+            agent: AgentSpec {
+                options,
+                operation,
+                workspace,
+            },
+            prompt: Prompt {
+                text,
+                format: request.format.clone(),
+                check: request.check,
+            },
         })
     }
 }
@@ -61,22 +85,21 @@ pub enum Workspace {
 }
 
 impl Workspace {
-    /// The lent tree, created and canonicalized — or a private empty
-    /// temporary directory when no workspace is lent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the lent path cannot be created or canonicalized,
-    /// or when the private directory cannot be created.
-    pub fn new(lent: Option<&Path>) -> Result<Self> {
+    // Create and canonicalize the lent tree; when none is lent, create a
+    // private empty temporary directory instead.
+    async fn new(lent: Option<&Path>) -> Result<Self> {
         match lent {
             Some(path) => {
-                fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
-                let path = path
-                    .canonicalize()
+                tokio::fs::create_dir_all(path)
+                    .await
+                    .with_context(|| format!("creating {}", path.display()))?;
+                let path = tokio::fs::canonicalize(path)
+                    .await
                     .with_context(|| format!("canonicalizing {}", path.display()))?;
                 Ok(Self::Lent(path))
             }
+            // `tempfile` has no async API; one `mkdir` under the temp root
+            // is not worth a blocking thread
             None => Ok(Self::Private(
                 tempfile::Builder::new()
                     .prefix("omnia-cursor-cwd-")
@@ -93,67 +116,66 @@ impl Workspace {
         }
     }
 
+    // The wire carries the path as a string, so one that is not UTF-8 cannot
+    // name the workspace to the worker.
+    fn cwd(&self) -> Result<String> {
+        let path = self.path();
+        path.to_str()
+            .map(ToOwned::to_owned)
+            .with_context(|| format!("invalid workspace path {}", path.display()))
+    }
+
     const fn is_lent(&self) -> bool {
         matches!(self, Self::Lent(_))
     }
 }
 
-impl AgentOptions {
-    pub fn from_request(
-        request: &Request, workspace: &Workspace, default_model: &str,
-    ) -> Result<Self> {
-        let mut custom_tools = BTreeMap::new();
-        let mut mcp_servers = BTreeMap::new();
+// Translate `request` into the `CreateAgent` options for an agent run in
+// `workspace`.
+fn agent_options(
+    request: &Request, cwd: &str, lent: bool, default_model: &str, api_key: &str,
+) -> Result<AgentOptions> {
+    let mut custom_tools = BTreeMap::new();
+    let mut mcp_servers = BTreeMap::new();
 
-        // translate guest tools into custom tools
-        for tool in &request.tools {
-            match tool {
-                Tool::Function(function) => {
-                    let input_schema: Value = serde_json::from_str(&function.parameters)
-                        .with_context(|| {
-                            format!(
-                                "function tool `{}` parameters is not valid JSON",
-                                function.name
-                            )
-                        })?;
-                    custom_tools.insert(
-                        function.name.clone(),
-                        CustomToolDefinition {
-                            description: (!function.description.is_empty())
-                                .then(|| function.description.clone()),
-                            input_schema,
-                        },
-                    );
-                }
+    // translate guest tools into custom tools
+    for tool in &request.tools {
+        match tool {
+            Tool::Function(function) => {
+                let input_schema: Value =
+                    serde_json::from_str(&function.parameters).with_context(|| {
+                        format!("function tool `{}` parameters is not valid JSON", function.name)
+                    })?;
+                custom_tools.insert(
+                    function.name.clone(),
+                    CustomToolDefinition {
+                        description: (!function.description.is_empty())
+                            .then(|| function.description.clone()),
+                        input_schema,
+                    },
+                );
+            }
 
-                Tool::Mcp(mcp) => {
-                    mcp_servers
-                        .insert(mcp.name.clone(), McpServerConfig::streamable_http(&mcp.url));
-                }
+            Tool::Mcp(mcp) => {
+                mcp_servers.insert(mcp.name.clone(), McpServerConfig::streamable_http(&mcp.url));
             }
         }
-
-        // request.model, else the client's default (CURSOR_MODEL at connect, else auto)
-        let model = request.model.as_deref().unwrap_or(default_model).to_owned();
-        let api_key = env::var("CURSOR_API_KEY").context("missing CURSOR_API_KEY")?;
-        let path = workspace.path();
-        let cwd = path
-            .to_str()
-            .with_context(|| format!("invalid workspace path {}", path.display()))?
-            .to_owned();
-
-        Ok(Self {
-            model: ModelSelection { id: model },
-            api_key,
-            local: LocalAgentOptions {
-                cwd: vec![cwd],
-                source: workspace.is_lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
-                custom_tools,
-            },
-            mcp_servers,
-            tools: if workspace.is_lent() { None } else { Some(ToolList { names: Vec::new() }) },
-        })
     }
+
+    // request.model, else the client's default (CURSOR_MODEL at connect, else auto)
+    let model = request.model.as_deref().unwrap_or(default_model).to_owned();
+
+    Ok(AgentOptions {
+        model: ModelSelection { id: model },
+        api_key: api_key.to_owned(),
+        local: LocalAgentOptions {
+            cwd: vec![cwd.to_owned()],
+            source: lent.then(|| "SETTING_SOURCE_PROJECT".to_owned()),
+            custom_tools,
+        },
+        mcp_servers,
+        tools: if lent { None } else { Some(ToolList { names: Vec::new() }) },
+    })
 }
 
 // Prepend a hint naming the granted MCP servers and tool allowlist, so the
@@ -181,36 +203,22 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
     )
 }
 
-/// Give `AgentOptions::from_request` the `CURSOR_API_KEY` it reads, when the
-/// environment has none.
-#[cfg(test)]
-pub(super) fn with_dummy_key() {
-    static SET: std::sync::Once = std::sync::Once::new();
-    SET.call_once(|| {
-        if env::var_os("CURSOR_API_KEY").is_none() {
-            // SAFETY: dummy value set once and never unset; tests only read it.
-            unsafe { env::set_var("CURSOR_API_KEY", "test-key") }
-        }
-    });
-}
-
 // The lent/private workspace wire distinction (CI floor). Tool/MCP/model
 // mapping is accepted by `tests/live.rs`.
 #[cfg(test)]
 mod tests {
     use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};
 
-    use super::{Workspace, with_dummy_key, with_mcp_hint};
-    use crate::bridge::AgentOptions;
+    use super::{agent_options, with_mcp_hint};
 
     #[test]
     fn workspace_shapes() {
-        with_dummy_key();
-        let options = AgentOptions::from_request(&request(), &lent(), "auto").unwrap();
+        let options = agent_options(&request(), "/workspace", true, "auto", "test-key").unwrap();
         assert!(options.tools.is_none());
         assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
+        assert_eq!(options.api_key, "test-key");
 
-        let options = AgentOptions::from_request(&request(), &private(), "auto").unwrap();
+        let options = agent_options(&request(), "/private", false, "auto", "test-key").unwrap();
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
         assert!(options.local.source.is_none());
     }
@@ -243,14 +251,13 @@ mod tests {
 
     #[test]
     fn private_workspace_keeps() {
-        with_dummy_key();
         let mut request = request();
         request.tools = vec![Tool::Mcp(Mcp {
             name: "docs".to_owned(),
             tools: vec![],
             url: "http://127.0.0.1:9/mcp".to_owned(),
         })];
-        let options = AgentOptions::from_request(&request, &private(), "auto").unwrap();
+        let options = agent_options(&request, "/private", false, "auto", "test-key").unwrap();
         assert!(options.mcp_servers.contains_key("docs"));
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
     }
@@ -269,13 +276,5 @@ mod tests {
             grants: Grants { workspace: None },
             check: false,
         }
-    }
-
-    fn lent() -> Workspace {
-        Workspace::Lent(std::env::temp_dir())
-    }
-
-    fn private() -> Workspace {
-        Workspace::Private(tempfile::tempdir().expect("temp cwd"))
     }
 }

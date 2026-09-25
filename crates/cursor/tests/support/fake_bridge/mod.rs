@@ -4,7 +4,7 @@
 //! directory holding the reply script, the shared log, and a symlink named
 //! `cursor-sdk-bridge` to the `fake-cursor-sdk-bridge` binary (`main.rs`,
 //! this same module), put first on the test process's `PATH` so the client
-//! finds the fake the way a deployment finds the real bridge. The client
+//! finds the fake the way a deployment finds the real one. The client
 //! starts one process per lease, each does the ready-line handshake, and
 //! all of them append to one JSONL log the test folds back into per-process
 //! histories. Faults and the reply script are one [`Config`], written as a
@@ -14,12 +14,20 @@
 //! process records the park in the log and waits for the release count the
 //! test writes beside it to pass its ticket.
 //!
-//! The fake answers `sdk.v1` the way the real bridge does — bearer-checked
+//! The suites' side — [`Spawnable`] and the liveness probe — is `cfg(test)`:
+//! the binary is built against the crate's `[dependencies]` alone, and the
+//! probe's `libc` is a dev-dependency.
+//!
+//! The fake answers `sdk.v1` the way the real one does — bearer-checked
 //! Connect JSON, `agent-<n>` ids counted per process so two processes hand
 //! out the same id, `Send` as an enveloped run stream, `CallCustomTool`
 //! posted back to the client's own endpoint — and nothing else.
 
-pub mod log;
+mod log;
+// the crate's own callback codec, by path: this module is also a binary
+// built against `[dependencies]` alone, and one codec on both sides of the
+// callback is what keeps the fake honest
+#[path = "../../../src/endpoint/proto.rs"]
 mod proto;
 mod server;
 
@@ -32,16 +40,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
+use self::log::Kind;
+#[cfg(test)]
+pub use self::log::alive;
 #[allow(unused_imports, reason = "the suites' side of the module")]
-pub use self::log::{Event, History, Kind, Log, Process, Rpc};
+pub use self::log::{Event, History, Log, Process, Rpc};
 use self::server::{Callback, Server};
-#[allow(unused_imports, reason = "the suites' side of the module")]
-pub use self::server::{EXIT_ON_CREATE, MARKERS};
 
 const SCRIPT_FILE: &str = "script.json";
 const LOG_FILE: &str = "log.jsonl";
 const RELEASES_FILE: &str = "releases.json";
-/// The name the client spawns the bridge by.
+/// The name the client spawns a worker by.
 const BIN_NAME: &str = "cursor-sdk-bridge";
 /// Where a spawned fake finds its home.
 const HOME_VAR: &str = "FAKE_BRIDGE_HOME";
@@ -100,11 +109,13 @@ pub enum Fault {
     /// Hold the run's answer until another spawned process has recorded
     /// this RPC.
     WaitForPeer(Rpc),
+    /// Fork a `sleep` of our own before the ready line, inheriting our
+    /// stderr, and leave it running however we exit; its pid is recorded.
+    Grandchild,
 }
 
-/// A fault and the spawned process it targets: 1-based in start order
-/// (`Client::connect`'s probe is process 0), or every process but the
-/// probe when unset.
+/// A fault and the spawned process it targets: 1-based in start order, or
+/// every process when unset.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Injected {
     pub fault: Fault,
@@ -113,7 +124,7 @@ pub struct Injected {
 
 impl Injected {
     pub fn applies(&self, process: usize) -> bool {
-        self.process.map_or(process != 0, |selected| selected == process)
+        self.process.is_none_or(|selected| selected == process)
     }
 }
 
@@ -202,7 +213,7 @@ impl Config {
         self
     }
 
-    /// A fault for every process but the probe.
+    /// A fault for every spawned process.
     #[must_use]
     pub fn fault(mut self, fault: Fault) -> Self {
         self.faults.push(Injected { fault, process: None });
@@ -236,19 +247,17 @@ pub fn dummy_key() {
 /// The fake as the process the client spawns: a home directory holding the
 /// script, the shared log, the release counts, and the `cursor-sdk-bridge`
 /// link to `fake-cursor-sdk-bridge`, put on `PATH` for this test process.
+#[cfg(test)]
 pub struct Spawnable {
     home: tempfile::TempDir,
 }
 
+#[cfg(test)]
 impl Spawnable {
     /// Lay out `config` for the binary to pick up and put the fake on `PATH`.
     ///
     /// `PATH` and `FAKE_BRIDGE_HOME` are process-wide, so one `Spawnable`
     /// per test process: the suites run under nextest, one test each.
-    #[allow(
-        clippy::option_env_unwrap,
-        reason = "set for the suites; unset in the binary's own build, which never gets here"
-    )]
     pub fn new(config: &Config) -> Self {
         let home =
             tempfile::Builder::new().prefix("fake-bridge-").tempdir().expect("a home directory");
@@ -257,10 +266,11 @@ impl Spawnable {
             serde_json::to_vec_pretty(config).expect("a config serializes"),
         )
         .expect("writing the script");
-        let target = option_env!("CARGO_BIN_EXE_fake-cursor-sdk-bridge")
-            .expect("the fake binary is built alongside the suites (feature `fake-bridge`)");
-        std::os::unix::fs::symlink(target, home.path().join(BIN_NAME))
-            .expect("linking the fake binary");
+        std::os::unix::fs::symlink(
+            env!("CARGO_BIN_EXE_fake-cursor-sdk-bridge"),
+            home.path().join(BIN_NAME),
+        )
+        .expect("linking the fake binary");
 
         let mut path = home.path().as_os_str().to_owned();
         if let Some(rest) = std::env::var_os("PATH") {
@@ -268,7 +278,8 @@ impl Spawnable {
             path.push(rest);
         }
         // SAFETY: set before the test spawns any thread of its own, and
-        // read only by the child processes the client spawns from here on.
+        // read only by the client's spawns, and the child processes they
+        // start, from here on.
         unsafe { std::env::set_var("PATH", path) };
         // SAFETY: as above.
         unsafe { std::env::set_var(HOME_VAR, home.path()) };
@@ -357,7 +368,8 @@ impl Releases {
         *self.0.entry(format!("{point:?}")).or_insert(0) += count;
     }
 
-    // Written whole and renamed into place, so a process never reads half.
+    // Write the file whole and rename it into place, so a process never
+    // reads half.
     fn write(&self, path: &Path) {
         let staged = path.with_extension("json.tmp");
         std::fs::write(&staged, serde_json::to_vec(self).expect("releases serialize"))
@@ -421,6 +433,20 @@ pub async fn run_spawned(args: Vec<String>) {
     // The fake's own bearer token: what the ready line carries, for a test
     // proving it never reaches a log.
     ready_event["token"] = Value::String(server.token().to_owned());
+
+    // As the real `cursor-sdk-bridge` forks an agent process: a child in our
+    // group, holding the stderr pipe the client reads, that nothing of ours
+    // reaps.
+    #[allow(clippy::zombie_processes, reason = "the fault is a child nobody waits for")]
+    if server.has(&Fault::Grandchild) {
+        let child = std::process::Command::new("sleep")
+            .arg("600")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("forking a grandchild");
+        server.recorder().record(Kind::Forked, None, json!({ "pid": child.id() }));
+    }
 
     if let Some(code) = server.find(|fault| match fault {
         Fault::ExitBeforeReady(code) => Some(*code),

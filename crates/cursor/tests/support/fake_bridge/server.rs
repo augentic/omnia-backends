@@ -57,7 +57,7 @@ pub struct Callback {
 
 pub struct Server {
     config: Config,
-    /// The process number claimed through the log (the probe is 0).
+    /// The process number claimed through the log (1-based, in start order).
     process: usize,
     token: String,
     callback: Option<Callback>,
@@ -79,8 +79,8 @@ struct State {
     runs: HashMap<String, oneshot::Sender<()>>,
 }
 
-#[derive(Default)]
 struct AgentState {
+    api_key: String,
     rounds: usize,
     closed: bool,
 }
@@ -164,7 +164,8 @@ impl Server {
         }
     }
 
-    // Whether the nth call of some RPC is the one a counted fault targets.
+    // The nth call of some RPC is the one a counted fault targets when a
+    // scripted fault, read through `pick`, names that ordinal.
     fn targets(&self, ordinal: usize, pick: impl Fn(&Fault) -> Option<usize>) -> bool {
         self.faults().any(|f| pick(f) == Some(ordinal))
     }
@@ -270,9 +271,10 @@ impl Server {
     async fn create_agent(&self, body: &[u8]) -> Response<Body> {
         let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
         let options = &request["options"];
+        let api_key = options["apiKey"].as_str().unwrap_or_default();
         let arg = json!({
             "cwd": options["local"]["cwd"][0],
-            "apiKey": options["apiKey"],
+            "apiKeyPresent": !api_key.is_empty(),
             "model": options["model"]["id"],
             "customTools": keys(&options["local"]["customTools"]),
             "mcpServers": keys(&options["mcpServers"]),
@@ -286,7 +288,14 @@ impl Server {
             } else {
                 state.next_agent += 1;
                 let id = format!("agent-{}", state.next_agent);
-                state.agents.insert(id.clone(), AgentState::default());
+                state.agents.insert(
+                    id.clone(),
+                    AgentState {
+                        api_key: api_key.to_owned(),
+                        rounds: 0,
+                        closed: false,
+                    },
+                );
                 Some(id)
             };
             (state.creates, id)
@@ -347,8 +356,7 @@ impl Server {
             _ => None,
         }) {
             write_markers();
-            // SAFETY: delivering SIGKILL to ourselves involves no memory.
-            unsafe { libc::raise(libc::SIGKILL) };
+            kill_self();
         }
         self.checkpoint(Point::Send).await;
 
@@ -367,8 +375,8 @@ impl Server {
         reply(StatusCode::OK, "application/connect+json", stream.boxed())
     }
 
-    // The run stream: the run id first, then whatever the script says, then
-    // the terminal result and the end-of-stream frame.
+    // Produce the run stream: the run id first, then whatever the script
+    // says, then the terminal result and the end-of-stream frame.
     async fn produce(self: Arc<Self>, run: Run, mut tx: Sender<Bytes, BoxError>) {
         let init = json!({
             "sdkMessage": { "type": "system", "message": { "subtype": "init", "run_id": run.id } }
@@ -572,13 +580,20 @@ impl Server {
     async fn delete_agent(&self, body: &[u8]) -> Response<Body> {
         let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
         let agent = request["agentId"].as_str().unwrap_or_default().to_owned();
-        if !self.state().agents.contains_key(&agent) {
+        let api_key = request["options"]["apiKey"].as_str().unwrap_or_default();
+        let Some(api_key_matches_create) =
+            self.state().agents.get(&agent).map(|state| state.api_key == api_key)
+        else {
             return not_found(&agent);
-        }
+        };
         self.record(
             Rpc::DeleteAgent,
             Some(&agent),
-            json!({ "cwd": request["options"]["cwd"], "apiKey": request["options"]["apiKey"] }),
+            json!({
+                "cwd": request["options"]["cwd"],
+                "apiKeyPresent": !api_key.is_empty(),
+                "apiKeyMatchesCreate": api_key_matches_create,
+            }),
         );
         self.checkpoint(Point::DeleteAgent).await;
         self.state().agents.remove(&agent);
@@ -596,9 +611,9 @@ pub fn echo_of(prompt: &str) -> String {
     }
 }
 
-// The answer text for a `CallCustomTool` result: a repairable `error` is
-// the model's `tool failed:` line; the endpoint's `{ "value": v }` wrapping
-// of a non-object output is unwrapped back to the output.
+// Spell a `CallCustomTool` result as the answer text: a repairable `error`
+// becomes the model's `tool failed:` line, and the endpoint's `{ "value": v }`
+// wrapping of a non-object output is unwrapped back to the output.
 fn answer_from(result: &Value) -> String {
     if let Some(error) = result.get("error").and_then(Value::as_str) {
         return format!("tool failed: {error}");
@@ -614,6 +629,15 @@ pub fn write_markers() {
     for marker in MARKERS {
         eprintln!("{marker}");
     }
+}
+
+// `SIGKILL` ourselves as an OOM killer would: no handler runs, and the
+// client sees `signal: 9 (SIGKILL)`. Delivered by a child, since std has no
+// `raise`; the signal lands before `kill` has even exited.
+fn kill_self() -> ! {
+    let pid = std::process::id().to_string();
+    let status = std::process::Command::new("kill").args(["-KILL", &pid]).status();
+    panic!("kill -KILL {pid} left us running: {status:?}");
 }
 
 fn keys(object: &Value) -> Vec<String> {
@@ -644,8 +668,8 @@ fn full(bytes: impl Into<Bytes>) -> Body {
     Full::new(bytes.into()).map_err(|never: Infallible| match never {}).boxed()
 }
 
-// The same bytes as a chunked body, split ten bytes at a time, the way a
-// streaming callback client may frame it.
+// Frame the same bytes as a chunked body, split ten bytes at a time, the way
+// a streaming callback client may.
 fn chunked(payload: String) -> Body {
     let payload = payload.into_bytes();
     let (mut tx, body) = Channel::<Bytes, BoxError>::new(payload.len() / 10 + 2);

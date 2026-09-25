@@ -34,7 +34,7 @@ pub struct Conversation {
 
 impl Conversation {
     pub fn new(client: &Client, turn: Turn, tool_host: Arc<dyn ToolHost>) -> Self {
-        let completion = Completion::start(&turn);
+        let completion = Completion::from(&turn);
 
         Self {
             client: client.inner.clone(),
@@ -86,7 +86,7 @@ impl Conversation {
             };
 
             if let Some(completion) = &mut self.completion {
-                completion.new_attempt();
+                completion.attempt();
                 completion.record(text.len(), self.transcript.turns.len(), usage.as_ref());
             }
 

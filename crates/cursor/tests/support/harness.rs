@@ -1,4 +1,4 @@
-//! The guest-driven harness the `model` and `bridge` suites share: a client
+//! The guest-driven harness the `model` and `worker` suites share: a client
 //! over the fake on `PATH`, a guest run through `omnia_test::host`, and the
 //! wait for every spawned process to be gone that every row ends on.
 
@@ -26,7 +26,7 @@ pub const GONE: Duration = Duration::from_secs(8);
 /// the machine.
 pub const STARTUP: Duration = Duration::from_secs(120);
 /// A bound that pins "at once": well under every 5s timeout the client
-/// pays when a bridge will not answer.
+/// pays when a worker will not answer.
 pub const AT_ONCE: Duration = Duration::from_secs(4);
 
 pub fn options(max_agents: usize) -> ConnectOptions {
@@ -40,10 +40,10 @@ pub fn options(max_agents: usize) -> ConnectOptions {
 
 /// A client spawning one process of `fake` per lease: the fake is on
 /// `PATH` from the moment it is laid out, so this is `connect` with the
-/// dependency spelled out.
+/// dependency spelled out — nothing spawned until the first lease.
 pub async fn spawning(fake: &Spawnable, max_agents: usize) -> Client {
     let client = connect(options(max_agents)).await;
-    assert!(fake.log().process(0).is_some(), "the probe spawned the fake");
+    assert!(fake.log().processes().is_empty(), "connect spawns nothing: {}", fake.log().summary());
     client
 }
 
@@ -107,6 +107,18 @@ pub async fn await_process_gone(process: &Process) {
     .await;
 }
 
+/// Wait for every child a spawned process forked to be gone with it.
+pub async fn await_forked_gone(process: &Process) {
+    let forked = process.forked();
+    assert!(!forked.is_empty(), "process {} forked a child", process.number);
+    fake_bridge::poll(
+        || forked.iter().all(|pid| !fake_bridge::alive(*pid)),
+        GONE,
+        &format!("process {}'s forked children {forked:?} gone", process.number),
+    )
+    .await;
+}
+
 /// The one agent a single-completion scenario created, with its RPCs.
 pub fn sole_agent(history: &impl History) -> (String, Vec<Rpc>) {
     let agents = history.agents();
@@ -115,7 +127,7 @@ pub fn sole_agent(history: &impl History) -> (String, Vec<Rpc>) {
     (agents[0].clone(), sequence)
 }
 
-/// One request to the client's callback endpoint, as a bridge would make
+/// One request to the client's callback endpoint, as a worker would make
 /// it: the status and the JSON reply.
 pub async fn callback(
     method: Method, url: &str, token: Option<&str>, body: &Value,

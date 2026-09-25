@@ -89,13 +89,13 @@ async fn ranged_reads() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
 async fn plugin_store() -> Result<()> {
-    use omnia_core::sha256_digest;
+    use omnia_core::Digest;
     use omnia_plugin::{ContentStore, ReleaseStore};
 
     let client = <Client as Backend>::connect().await?;
 
     let bytes = format!("component-{}", std::process::id()).into_bytes();
-    let digest = sha256_digest(&bytes);
+    let digest = Digest::of(&bytes).to_string();
 
     // Content round-trips by digest.
     client.put_content(&digest, &bytes).await?;

@@ -15,6 +15,24 @@ Unreleased
   `cursor-sdk-bridge` and spawned per lease. A lease fully released is
   observed as its process gone; `Client::idle_slots` and `upstream_tripwire`
   are gone.
+- `omnia-cursor` spawns each bridge as the leader of its own process group
+  (via `process-wrap`), so the kill after an unanswered `Shutdown` reaches
+  the agent processes the bridge forks, and whatever a bridge left in its
+  group when it exited is swept as the exit is seen. A graceful exit is
+  bounded once — 5s for the `Shutdown` RPC and the exit together — rather
+  than once each.
+- `omnia-cursor` has no `fake-bridge` feature. The fake bridge binary and
+  the `model` and `bridge` suites build on every `cargo nextest run -p
+  omnia-cursor`; `libc` is a dev-dependency, and `http-body-util`'s `channel`
+  (the fake's run stream, no crate of its own) is always on.
+- `omnia-cursor` decodes an integral `google.protobuf.Struct` number (proto3
+  JSON prints `3.0` as `3`) as a JSON integer, so a guest tool's arguments
+  arrive as the tool declared them rather than as `3.0`. The fake bridge
+  shares the crate's callback codec instead of carrying a copy.
+- The `omnia-cursor` bridge-exit WARN carries `pid`, `uptime_ms`, and
+  `status`; `run_in_flight` and `silent_ms` are gone from it. The completion
+  that lost its run logs `run lost with its process` at INFO with the `pid`
+  and its own `silent_ms`.
 
 ---
 

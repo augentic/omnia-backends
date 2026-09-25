@@ -27,12 +27,6 @@ as published crates.io dependencies (currently 0.36.0), declared once under
 | Supply chain | `cargo make vet` after any dependency change |
 | Task runner | `cargo make <task>` (see `Makefile.toml`; `cargo make ci` is the full gate) |
 
-`--all-features` is not optional for the model backends: `omnia-cursor`'s
-`model` and `bridge` suites and its fake bridge binary sit behind the
-`fake-bridge` feature (`required-features` on the `[[test]]` and `[[bin]]`
-targets), so a plain `cargo nextest run -p omnia-cursor` skips them without
-a word.
-
 ## Verifying a change
 
 - Run the suite of the crate you changed, `cargo clippy --workspace
@@ -69,11 +63,11 @@ so the policy splits into three tiers:
   probes, no options the fake alone needs; the fake is reached the way the
   real service is. One
   flat file per boundary in the crate's `tests/`: `tests/model.rs` is the
-  `omnia:model` contract, `tests/bridge.rs` / `tests/provider.rs` the
+  `omnia:model` contract, `tests/worker.rs` / `tests/provider.rs` the
   lifecycle and fault matrix (hung or parked RPCs, process death before and
   after the ready line, a completion dropped at every point it can be
   waiting, a `429`/`503`/truncated body). Exemplars:
-  [crates/cursor/tests/bridge.rs](crates/cursor/tests/bridge.rs) and
+  [crates/cursor/tests/worker.rs](crates/cursor/tests/worker.rs) and
   [crates/genai/tests/model.rs](crates/genai/tests/model.rs).
   - **Every guest program pairs with a row in every model backend's
     `tests/model.rs`.** Each suite invokes `test_programs::foreach_model!()`,
@@ -101,7 +95,7 @@ so the policy splits into three tiers:
 - **Unit tests for deterministic, service-free logic, wherever it lives**:
   OData filter building (`azure-table/store/filter.rs`), Postgres type
   mapping, the Kafka partitioner, cursor's ready-line and Connect-frame
-  parsing (`cursor/src/bridge/discovery.rs`, `bridge/rpc.rs`), genai's
+  parsing (`cursor/src/worker/discovery.rs`, `protocol.rs`), genai's
   request translation (`genai/src/model/options.rs`). A behaviour a guest
   boundary reaches is an e2e row, not a unit test: the scripted-server unit
   tests the model backends once carried inside `src/` were retired for
@@ -139,6 +133,10 @@ so the policy splits into three tiers:
   log the test folds back into per-process histories; faults can target one
   spawned process by ordinal, so one guest run can see a healthy process and
   a faulted one side by side.
+- The fake bridge is a `[[bin]]` of `omnia-cursor`, so it compiles against
+  the crate's `[dependencies]` alone — never a dev-dependency. The suites'
+  side of its module (`Spawnable`, the liveness probe and its `libc`) is
+  `cfg(test)`, which the binary never is (`test = false`, `bench = false`).
 - The omnia crates come from crates.io, pinned by the single
   `[workspace.dependencies]` declarations (`omnia = "0.36.0"` and friends);
   every `omnia-*` must stay on the same line, so bump them all together and

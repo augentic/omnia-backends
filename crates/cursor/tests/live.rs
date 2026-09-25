@@ -1,5 +1,5 @@
 //! Key/PATH-gated live integration tests for the cursor backend — wasi-model
-//! "run 3" (the bridge-managed agent acceptance gate).
+//! "run 3" (the `cursor-sdk-bridge` agent acceptance gate).
 //!
 //! Mirrors the genai backend's `live.rs`: each test spawns a real
 //! `cursor-sdk-bridge`, drives a completion through the
@@ -59,15 +59,6 @@ fn temp_workspace(label: &str) -> Result<std::path::PathBuf> {
         std::env::temp_dir().join(format!("omnia-cursor-live-{label}-{}", std::process::id()));
     std::fs::create_dir_all(&workspace)?;
     Ok(workspace)
-}
-
-// Spawn-and-handshake only
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn live_bridge_handshake() -> Result<()> {
-    let client = connect().await?;
-    drop(client);
-    Ok(())
 }
 
 fn verdict_request() -> Request {
@@ -148,7 +139,7 @@ async fn fanout(client: &Client, agents: usize, pids: &SpawnedPids) -> Result<()
 }
 
 /// Four completions pending together, the way `emery_sdk::extract` puts its
-/// seams up: one bridge process per agent on the pooled client, none held
+/// seams up: one worker per agent on the pooled client, none held
 /// two, every answer arrives, and every process is gone once they have.
 /// `connect()` leaves `max_agents` at four, so nothing here queues.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -159,7 +150,7 @@ async fn live_fanout() -> Result<()> {
     fanout(&client, 4, &pids).await
 }
 
-/// `live_fanout` twenty times over on one client: a bridge that exits
+/// `live_fanout` twenty times over on one client: a worker that exits
 /// under the fan-out fails its completion with `cursor-sdk-bridge exited`,
 /// and a lease that does not release leaves its process up, and a slot
 /// closed, for the next round.
@@ -191,28 +182,31 @@ impl SpawnedPids {
         self.0.lock().expect("pids lock").clone()
     }
 
-    /// Wait for every process spawned so far to be gone — the pool whole
-    /// again, since a slot reopens only once its process is.
+    /// Wait for every process spawned so far to be gone, and with it every
+    /// agent process it forked — the pool whole again, since a slot reopens
+    /// only once its process is.
     async fn await_gone(&self) -> Result<()> {
         let deadline = tokio::time::Instant::now() + GONE;
         loop {
-            let up: Vec<u32> = self.pids().into_iter().filter(|pid| alive(*pid)).collect();
+            let up: Vec<u32> = self.pids().into_iter().filter(|pid| group_alive(*pid)).collect();
             if up.is_empty() {
                 return Ok(());
             }
             anyhow::ensure!(
                 tokio::time::Instant::now() < deadline,
-                "bridge processes {up:?} still up after {GONE:?}: a lease did not release"
+                "worker process groups {up:?} still up after {GONE:?}: a lease did not release, \
+                 or a worker left an agent process behind"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
 
-/// Whether a process with this pid still exists (`kill -0`).
-fn alive(pid: u32) -> bool {
+/// Whether anything is left of the process group a worker led (`kill -0`
+/// on the group): the worker itself, or an agent process it forked.
+fn group_alive(pgid: u32) -> bool {
     std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
+        .args(["-0", "--", &format!("-{pgid}")])
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -251,12 +245,12 @@ impl tracing::field::Visit for Spawn {
     }
 }
 
-/// A real bridge `kill -9`ed under its opening run: the completion restarts
-/// on a fresh process and still answers. The probe is the first spawn, the
-/// completion's own process the second, the restart the third.
+/// A real worker `kill -9`ed under its opening run: the completion restarts
+/// on a fresh process and still answers. The completion's own process is the
+/// first spawn, the restart the second.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn bridge_killed_mid_run_recovers() -> Result<()> {
+async fn worker_killed_mid_run_recovers() -> Result<()> {
     let pids = SpawnedPids::install();
 
     // One slot, so the restart also proves the dead lease is reaped first.
@@ -273,11 +267,11 @@ async fn bridge_killed_mid_run_recovers() -> Result<()> {
     };
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while pids.pids().len() < 2 {
-        anyhow::ensure!(tokio::time::Instant::now() < deadline, "no second bridge spawned");
+    while pids.pids().is_empty() {
+        anyhow::ensure!(tokio::time::Instant::now() < deadline, "no worker spawned");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let victim = pids.pids()[1];
+    let victim = pids.pids()[0];
     // A moment for `CreateAgent` and `Send` to go out, well short of a
     // real answer.
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -294,9 +288,9 @@ async fn bridge_killed_mid_run_recovers() -> Result<()> {
     );
     let spawned = pids.pids();
     anyhow::ensure!(
-        spawned.len() == 3,
-        "expected the probe, the killed process, and the restart; saw {spawned:?} (did the kill \
-         land after the answer?)"
+        spawned.len() == 2,
+        "expected the killed process and the restart; saw {spawned:?} (did the kill land after \
+         the answer?)"
     );
     pids.await_gone().await
 }

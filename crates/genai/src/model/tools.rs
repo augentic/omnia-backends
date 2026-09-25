@@ -29,7 +29,6 @@ pub struct ListArgs {
 pub async fn dispatch_tool(
     tool_host: &Arc<dyn ToolHost>, call: &ToolCall, max_result_bytes: usize,
 ) -> Result<String> {
-    tracing::info!(monotonic_counter.genai_tool_calls = 1_u64, "tool call");
     tracing::debug!(tool = %call.fn_name, "tool call");
 
     match call.fn_name.as_str() {

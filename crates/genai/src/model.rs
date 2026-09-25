@@ -25,13 +25,15 @@ use crate::Client;
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let client = self.clone();
+        let model = request.model.as_deref().unwrap_or(&self.model);
+        let span = info_span!("complete", model, format = %request.format);
 
         Box::pin(
             async move {
                 let turn = Turn::prepare(&request, tool_host.local_path(), &client.model)?;
                 Conversation::new(&client, turn, tool_host).complete().await
             }
-            .instrument(info_span!("complete")),
+            .instrument(span),
         )
     }
 }

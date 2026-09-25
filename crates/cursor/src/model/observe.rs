@@ -3,77 +3,67 @@
 //! [`EventLog`] follows a run's `sdk_message` events to rebuild the tool
 //! transcript and capture the run id and last status text. Payload shapes
 //! mirror the public SDK — every field access is nullable and a malformed
-//! event is skipped, never fatal. [`Completion`] emits the start/finish INFO
-//! lines and tracing-opentelemetry metric fields.
+//! event is skipped, never fatal. The result's token counts become the
+//! guest's [`Usage`] here too. [`Completion`] emits the start (DEBUG) and
+//! finish (INFO) events.
 
 use std::collections::HashMap;
-use std::time::Instant;
 
 use omnia_wasi_model::{ToolTurn, Transcript, Usage};
 use serde_json::Value;
+use tokio::time::Instant;
 
-use crate::bridge::{Exit, SdkMessage, TransportError, status_text};
-use crate::model::options::Turn;
+use super::options::Turn;
+use crate::elapsed_ms;
+use crate::failure::Outcome;
+use crate::protocol::{RunStreamMessage, SdkMessage, TokenUsage};
 
-/// One completion's metric-bearing start/finish. Drop without [`Self::finish`]
-/// records `outcome=abort` (a cancelled future).
+/// One completion's start/finish events: the outcome and what it cost, on
+/// the `complete` span that names the model and format. Drop without
+/// [`Self::finish`] records [`Outcome::Abort`] (a cancelled future).
 pub struct Completion {
-    model: String,
-    format: String,
-    prompt_bytes: u64,
     started: Instant,
     attempts: u32,
-    result_bytes: u64,
-    tool_turns: u64,
     input_tokens: u64,
     output_tokens: u64,
     reasoning_tokens: u64,
     emitted: bool,
 }
 
-impl Completion {
-    // INFO that a completion is in flight (no metric prefixes — live tail).
-    pub fn start(turn: &Turn) -> Self {
-        let format = turn.format.to_string();
-        let prompt_bytes = u64::try_from(turn.prompt.len()).unwrap_or(u64::MAX);
-
-        tracing::info!(
-            model = %turn.options.model.id,
-            format = %format,
-            prompt_bytes,
-            mcp = turn.options.mcp_servers.len(),
+impl From<&Turn> for Completion {
+    // The start event: the clock runs from here.
+    fn from(turn: &Turn) -> Self {
+        tracing::debug!(
+            prompt_bytes = turn.prompt.text.len(),
+            mcp = turn.agent.options.mcp_servers.len(),
             "completion started"
         );
 
         Self {
-            model: turn.options.model.id.clone(),
-            format,
-            prompt_bytes,
             started: Instant::now(),
             attempts: 0,
-            result_bytes: 0,
-            tool_turns: 0,
             input_tokens: 0,
             output_tokens: 0,
             reasoning_tokens: 0,
             emitted: false,
         }
     }
+}
 
+impl Completion {
     // Count an attempt as started, including ones that later time out.
-    pub const fn new_attempt(&mut self) {
+    pub const fn attempt(&mut self) {
         self.attempts = self.attempts.saturating_add(1);
     }
 
-    /// Snapshot the last successful send (result size, tools, tokens).
+    /// Note one answered send and add its tokens to the completion's bill.
     pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
-        self.result_bytes = u64::try_from(result_len).unwrap_or(u64::MAX);
-        self.tool_turns = u64::try_from(tool_turns).unwrap_or(u64::MAX);
+        tracing::debug!(result_bytes = result_len, tool_turns, ?usage, "send answered");
 
         if let Some(usage) = usage {
-            self.input_tokens = u64::from(usage.input_tokens);
-            self.output_tokens = u64::from(usage.output_tokens);
-            self.reasoning_tokens = u64::from(usage.reasoning_tokens.unwrap_or(0));
+            self.input_tokens += u64::from(usage.input_tokens);
+            self.output_tokens += u64::from(usage.output_tokens);
+            self.reasoning_tokens += u64::from(usage.reasoning_tokens.unwrap_or(0));
         }
     }
 
@@ -81,32 +71,21 @@ impl Completion {
         self.attempts
     }
 
-    // INFO + OTEL metric fields for this completion. Consumes self so Drop
-    // does not emit a second time.
-    pub fn finish(mut self, outcome: &'static str) {
-        self.emit(outcome);
-    }
-
-    fn emit(&mut self, outcome: &'static str) {
+    // The one INFO line per completion. It is emitted once, so a later
+    // `Drop` says nothing.
+    pub fn finish(&mut self, outcome: Outcome) {
         if self.emitted {
             return;
         }
         self.emitted = true;
-        let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
         tracing::info!(
-            model = %self.model,
-            format = %self.format,
-            outcome,
+            outcome = outcome.as_str(),
             attempts = self.attempts,
-            histogram.cursor_completion_duration_ms = duration_ms,
-            histogram.cursor_prompt_bytes = self.prompt_bytes,
-            histogram.cursor_result_bytes = self.result_bytes,
-            histogram.cursor_tool_turns = self.tool_turns,
-            histogram.cursor_input_tokens = self.input_tokens,
-            histogram.cursor_output_tokens = self.output_tokens,
-            histogram.cursor_reasoning_tokens = self.reasoning_tokens,
-            monotonic_counter.cursor_completions = 1_u64,
-            monotonic_counter.cursor_corrections = u64::from(outcome == "corrected"),
+            duration_ms = elapsed_ms(self.started),
+            input_tokens = self.input_tokens,
+            output_tokens = self.output_tokens,
+            reasoning_tokens = self.reasoning_tokens,
             "completion"
         );
     }
@@ -114,106 +93,8 @@ impl Completion {
 
 impl Drop for Completion {
     fn drop(&mut self) {
-        if !self.emitted {
-            self.emit("abort");
-        }
+        self.finish(Outcome::Abort);
     }
-}
-
-/// How a completion this backend ran came to fail, by variant rather than
-/// by message.
-///
-/// `complete`'s error downcasts to one of these — or to a
-/// [`TransportError`], or to the typed `budget-exhausted` a rejected check
-/// ends on.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum Failure {
-    /// Absolute wall-clock cap exceeded while the stream was still active.
-    Timeout {
-        /// The cap in seconds, from connect options.
-        cap_secs: u64,
-    },
-    /// No stream events within the inactivity window.
-    Inactive {
-        /// Observed idle span in seconds.
-        idle_secs: u64,
-        /// Configured inactivity limit in seconds.
-        inactivity_secs: u64,
-        /// Configured absolute cap in seconds.
-        cap_secs: u64,
-    },
-    /// Hard tool-host failure (or a closed abort channel).
-    Aborted(String),
-    /// The spawned bridge process exited while the completion was running
-    /// on it.
-    BridgeExited(Exit),
-}
-
-impl Failure {
-    /// The `outcome` label the `cursor_completions` counter carries for
-    /// this failure.
-    #[must_use]
-    pub const fn outcome(&self) -> &'static str {
-        match self {
-            Self::Timeout { .. } => "timeout",
-            Self::Inactive { .. } => "inactive",
-            Self::Aborted(_) => "abort",
-            Self::BridgeExited(_) => "bridge_exit",
-        }
-    }
-}
-
-impl std::fmt::Display for Failure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout { cap_secs } => write!(
-                f,
-                "cursor run timed out after {cap_secs}s (absolute cap exceeded while still active)"
-            ),
-            Self::Inactive {
-                idle_secs,
-                inactivity_secs,
-                cap_secs,
-            } => write!(
-                f,
-                "cursor run inactive for {idle_secs}s (no stream events; inactivity limit \
-                 {inactivity_secs}s, absolute cap {cap_secs}s)"
-            ),
-            Self::Aborted(reason) => write!(f, "completion aborted: {reason}"),
-            Self::BridgeExited(exit) => {
-                write!(f, "cursor-sdk-bridge exited ({}) during the run", status_text(exit.status))
-            }
-        }
-    }
-}
-
-impl std::error::Error for Failure {}
-
-/// Classify a failed `complete`: a [`Failure`] by variant, a
-/// [`TransportError`] as `transport`, the typed `budget-exhausted` a
-/// rejected check ends on, anything else `error`.
-pub fn outcome_of(error: &anyhow::Error) -> &'static str {
-    if let Some(failure) = error.downcast_ref::<Failure>() {
-        return failure.outcome();
-    }
-    if error.downcast_ref::<TransportError>().is_some() {
-        return "transport";
-    }
-    match error.downcast_ref::<omnia_wasi_model::Error>() {
-        Some(omnia_wasi_model::Error::BudgetExhausted(_)) => "exhausted",
-        _ => "error",
-    }
-}
-
-/// Whether the bridge, or the socket to it, was lost under the completion:
-/// the process exited, or an RPC failed below Connect. Neither says anything
-/// about the prompt, so a fresh bridge may be given it again; a Connect
-/// error, an end-stream error, or a run that ended in a failing status is
-/// the bridge answering, and is not.
-pub fn lost_bridge(error: &anyhow::Error) -> bool {
-    matches!(error.downcast_ref::<Failure>(), Some(Failure::BridgeExited(_)))
-        || error.downcast_ref::<TransportError>().is_some()
 }
 
 /// Reconstructs the tool transcript and run metadata from the SDK stream.
@@ -226,7 +107,20 @@ pub struct EventLog {
 }
 
 impl EventLog {
-    pub fn observe(&mut self, event: &SdkMessage) {
+    /// Absorb one stream message: its event, and the run id its result names.
+    pub fn observe_message(&mut self, message: &RunStreamMessage) {
+        if let Some(event) = &message.sdk_message {
+            self.observe(event);
+        }
+        if self.run_id.is_none()
+            && let Some(result) = &message.result
+            && !result.run_id.is_empty()
+        {
+            self.run_id = Some(result.run_id.clone());
+        }
+    }
+
+    fn observe(&mut self, event: &SdkMessage) {
         let payload = &event.message;
         if self.run_id.is_none() {
             self.run_id = first_match(payload, &["run_id", "runId"]).map(ToOwned::to_owned);
@@ -235,7 +129,7 @@ impl EventLog {
         match event.kind.as_str() {
             "tool_call" => self.tool_call(payload),
             "system" | "status" => {
-                if let Some(message) = first_match(payload, &["message"]) {
+                if let Some(message) = payload.get("message").and_then(Value::as_str) {
                     self.status_message = Some(message.to_owned());
                 }
             }
@@ -302,12 +196,6 @@ impl EventLog {
     }
 }
 
-// The first string found under any of `keys`, tolerating both `snake_case`
-// and `camelCase` spellings across bridge versions.
-fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
-}
-
 /// A started tool call awaiting its completion event.
 struct PendingCall {
     tool: String,
@@ -327,12 +215,65 @@ impl PendingCall {
     }
 }
 
+impl From<TokenUsage> for Usage {
+    fn from(usage: TokenUsage) -> Self {
+        Self {
+            input_tokens: clamp_u32(usage.input_tokens),
+            output_tokens: clamp_u32(usage.output_tokens),
+            reasoning_tokens: usage.reasoning_tokens.map(clamp_u32),
+        }
+    }
+}
+
+// Wire counts are `i64`; negatives become 0, values above `u32::MAX` saturate.
+fn clamp_u32(count: i64) -> u32 {
+    if count.is_negative() { 0 } else { u32::try_from(count).unwrap_or(u32::MAX) }
+}
+
+// Find the first string under any of `keys`, tolerating both `snake_case`
+// and `camelCase` spellings across `cursor-sdk-bridge` versions.
+fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
+}
 #[cfg(test)]
 mod tests {
+    use omnia_wasi_model::Usage;
     use serde_json::{Value, json};
 
     use super::EventLog;
-    use crate::bridge::{SdkMessage, TransportError};
+    use crate::protocol::{SdkMessage, TokenUsage};
+
+    fn usage(input: i64, output: i64, reasoning: Option<i64>) -> Usage {
+        Usage::from(TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            reasoning_tokens: reasoning,
+        })
+    }
+
+    #[test]
+    fn token_counts() {
+        assert_eq!(
+            usage(-1, -1, Some(-1)),
+            Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                reasoning_tokens: Some(0),
+            }
+        );
+        let saturated = usage(i64::MAX, i64::MAX, Some(i64::MAX));
+        assert_eq!(saturated.input_tokens, u32::MAX);
+        assert_eq!(saturated.output_tokens, u32::MAX);
+        assert_eq!(saturated.reasoning_tokens, Some(u32::MAX));
+        assert_eq!(
+            usage(7, 3, None),
+            Usage {
+                input_tokens: 7,
+                output_tokens: 3,
+                reasoning_tokens: None,
+            }
+        );
+    }
 
     fn observe_all(events: &[Value]) -> EventLog {
         let mut log = EventLog::default();
@@ -401,73 +342,5 @@ mod tests {
             json!({ "type": "tool_call", "message": { "subtype": "completed" } }),
         ]);
         assert!(log.finish().is_none(), "nothing usable, nothing recorded");
-    }
-
-    #[test]
-    fn classify_crate_errors() {
-        use super::Failure;
-        use crate::bridge::Exit;
-
-        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
-        assert_eq!(super::outcome_of(&timeout), "timeout");
-
-        let inactive: anyhow::Error = Failure::Inactive {
-            idle_secs: 120,
-            inactivity_secs: 120,
-            cap_secs: 600,
-        }
-        .into();
-        assert_eq!(super::outcome_of(&inactive), "inactive");
-
-        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
-        assert_eq!(super::outcome_of(&aborted), "abort");
-
-        let exited: anyhow::Error = Failure::BridgeExited(Exit::default()).into();
-        assert_eq!(super::outcome_of(&exited), "bridge_exit");
-        assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown) during the run");
-
-        let transport: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
-        assert_eq!(super::outcome_of(&transport), "transport");
-
-        let rejected: anyhow::Error =
-            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
-        assert_eq!(super::outcome_of(&rejected), "exhausted");
-
-        assert_eq!(super::outcome_of(&anyhow::anyhow!("bridge RPC failed")), "error");
-    }
-
-    #[test]
-    fn lost_bridge_classes() {
-        use super::Failure;
-        use crate::bridge::Exit;
-
-        let exited: anyhow::Error = Failure::BridgeExited(Exit::default()).into();
-        assert!(super::lost_bridge(&exited));
-        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
-        let socket: anyhow::Error =
-            TransportError::io("SdkAgentService/Send", "reading the stream", reset).into();
-        assert!(super::lost_bridge(&socket));
-        let torn: anyhow::Error = TransportError::truncated("SdkAgentService/Send", 3).into();
-        assert!(super::lost_bridge(&torn));
-
-        // The bridge answered, in one way or another.
-        let inactive: anyhow::Error = Failure::Inactive {
-            idle_secs: 120,
-            inactivity_secs: 120,
-            cap_secs: 600,
-        }
-        .into();
-        assert!(!super::lost_bridge(&inactive));
-        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
-        assert!(!super::lost_bridge(&timeout));
-        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
-        assert!(!super::lost_bridge(&aborted));
-        let rejected: anyhow::Error =
-            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
-        assert!(!super::lost_bridge(&rejected));
-        assert!(!super::lost_bridge(&anyhow::anyhow!(
-            "bridge RPC `SdkAgentService/Send` failed (500 Internal Server Error, internal): boom"
-        )));
-        assert!(!super::lost_bridge(&anyhow::anyhow!("cursor run error: model overloaded")));
     }
 }

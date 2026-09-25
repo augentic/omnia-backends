@@ -1,26 +1,27 @@
-//! Loopback `CallCustomTool` server: the bridge calls back here to execute a
+//! Loopback `CallCustomTool` server: the worker calls back here to execute a
 //! guest-declared function tool, and the call routes into the completion's
 //! session through [`ToolHost::call_tool`].
 //!
 //! The server binds `127.0.0.1:0` and accepts both Connect unary codecs (the
-//! bridge picks the content type). Each bridge process is registered under
+//! worker picks the content type). Each worker is registered under
 //! its own bearer token, and that token selects the process's own agent
-//! table: agent ids are the bridge's to choose, so two live processes may
+//! table: agent ids are the worker's to choose, so two live processes may
 //! pick the same one, and a callback routes by the token it carries as well
 //! as the id it names. Budgets, per-call timeouts, oversize checks, and id
-//! correlation are enforced host-side inside `call_tool`.
+//! correlation are enforced host-side inside [`ToolHost::call_tool`].
 
 mod proto;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::fmt::{self, Formatter, Write as _};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, CONTENT_TYPE};
-use http::{HeaderMap, Method, StatusCode};
+use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt as _, Full, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -31,13 +32,13 @@ use prost::Message as _;
 use proto::{CallCustomToolRequest, CallCustomToolResponse, struct_to_value, value_to_struct};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+
+use crate::lock;
 
 const PATH: &str = "/sdk.v1.SdkCustomToolCallbackService/CallCustomTool";
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
-
-type Reply = http::Response<Full<Bytes>>;
 
 /// The bound loopback endpoint; dropping it stops serving.
 #[derive(Debug)]
@@ -60,38 +61,7 @@ impl Endpoint {
         let addr = listener.local_addr().context("reading the tool-callback address")?;
 
         let handler = Arc::new(Handler::default());
-
-        let server = {
-            let handler = Arc::clone(&handler);
-            tokio::spawn(async move {
-                loop {
-                    let (stream, _) = match listener.accept().await {
-                        Ok(conn) => conn,
-                        Err(error) => {
-                            tracing::warn!(%error, "tool-callback accept error");
-                            // don't spin on persistent failure (e.g. fd exhaustion)
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            continue;
-                        }
-                    };
-                    let handler = Arc::clone(&handler);
-                    tokio::spawn(async move {
-                        if let Err(error) = http1::Builder::new()
-                            .serve_connection(
-                                TokioIo::new(stream),
-                                service_fn(move |request| {
-                                    let handler = Arc::clone(&handler);
-                                    async move { Ok::<_, Infallible>(handler.handle(request).await) }
-                                }),
-                            )
-                            .await
-                        {
-                            tracing::warn!(%error, "tool-callback connection error");
-                        }
-                    });
-                }
-            })
-        };
+        let server = tokio::spawn(serve(listener, Arc::clone(&handler)));
 
         Ok(Self {
             url: format!("http://{addr}"),
@@ -100,7 +70,7 @@ impl Endpoint {
         })
     }
 
-    /// Register one bridge process: a fresh bearer token for it to call
+    /// Register one worker: a fresh bearer token for it to call
     /// back with, and its own agent table behind that token. Dropping the
     /// registration revokes the token.
     ///
@@ -110,7 +80,7 @@ impl Endpoint {
     pub fn register(&self) -> Result<Registration> {
         let token = gen_token()?;
         let sessions = Arc::new(Sessions::default());
-        self.handler.bridges().insert(token.clone(), Arc::clone(&sessions));
+        lock(&self.handler.workers).insert(token.clone(), Arc::clone(&sessions));
         Ok(Registration {
             handler: Arc::clone(&self.handler),
             url: self.url.clone(),
@@ -126,7 +96,36 @@ impl Drop for Endpoint {
     }
 }
 
-/// One bridge process's callback identity: the URL and bearer token it is
+// Accept until the `Endpoint` drops, one connection task per worker socket.
+async fn serve(listener: TcpListener, handler: Arc<Handler>) {
+    loop {
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(error) => {
+                tracing::warn!(%error, "tool-callback accept error");
+                // don't spin on persistent failure (e.g. fd exhaustion)
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        let handler = Arc::clone(&handler);
+        tokio::spawn(async move {
+            let service = service_fn(move |request| {
+                let handler = Arc::clone(&handler);
+                async move { Ok::<_, Infallible>(handler.handle(request).await) }
+            });
+
+            if let Err(error) =
+                http1::Builder::new().serve_connection(TokioIo::new(stream), service).await
+            {
+                tracing::warn!(%error, "tool-callback connection error");
+            }
+        });
+    }
+}
+
+/// One worker's callback identity: the URL and bearer token it is
 /// started with, and the agents routed under that token.
 #[must_use]
 pub struct Registration {
@@ -137,25 +136,32 @@ pub struct Registration {
 }
 
 impl Registration {
-    /// The full callback URL handed to the bridge (`--tool-callback-url`).
+    /// The full callback URL handed to the worker (`--tool-callback-url`).
     pub fn url(&self) -> &str {
         &self.url
     }
 
-    /// The bearer token handed to the bridge (`--tool-callback-auth-token`).
+    /// The bearer token handed to the worker (`--tool-callback-auth-token`).
     pub fn token(&self) -> &str {
         &self.token
     }
 
-    /// Route this bridge's callbacks for `agent_id` into `tool_host` until
-    /// the returned guard drops.
-    pub fn attach(
-        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, abort: mpsc::UnboundedSender<String>,
-    ) -> Attached {
-        self.sessions.insert(agent_id.clone(), Session { tool_host, abort });
+    /// Route this worker's callbacks for `agent_id` into `tool_host` until
+    /// the returned guard drops; the guard also carries the abort the first
+    /// hard tool failure ends the completion with.
+    pub fn attach(&self, agent_id: String, tool_host: Arc<dyn ToolHost>) -> Attached {
+        let (abort, aborted) = oneshot::channel();
+        self.sessions.insert(
+            agent_id.clone(),
+            Session {
+                tool_host,
+                abort: Some(abort),
+            },
+        );
         Attached {
             sessions: Arc::clone(&self.sessions),
             agent_id,
+            aborted,
         }
     }
 }
@@ -171,48 +177,28 @@ impl std::fmt::Debug for Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.handler.bridges().remove(&self.token);
+        lock(&self.handler.workers).remove(&self.token);
     }
 }
 
-/// One bridge's live completions by `agent_id`.
-#[derive(Debug, Default)]
-struct Sessions {
-    entries: Mutex<HashMap<String, Session>>,
-}
-
-impl Sessions {
-    fn insert(&self, agent_id: String, session: Session) {
-        self.lock().insert(agent_id, session);
-    }
-
-    fn remove(&self, agent_id: &str) {
-        self.lock().remove(agent_id);
-    }
-
-    fn lookup(&self, agent_id: &str) -> Option<Session> {
-        self.lock().get(agent_id).cloned()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, Session>> {
-        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-/// One live completion's callback route: the session's tool host plus the
-/// abort signal that ends the completion on a hard (non-repairable) tool
-/// failure.
-#[derive(Clone, Debug)]
-struct Session {
-    tool_host: Arc<dyn ToolHost>,
-    abort: mpsc::UnboundedSender<String>,
-}
-
-/// Detaches its agent on drop.
+/// One agent's callback route, detached on drop.
 #[must_use]
 pub struct Attached {
     sessions: Arc<Sessions>,
     agent_id: String,
+    aborted: oneshot::Receiver<String>,
+}
+
+impl Attached {
+    /// The reason the first hard tool failure aborted the completion with;
+    /// resolves once at most.
+    pub async fn aborted(&mut self) -> String {
+        // the sender lives in the session until this guard drops, so the
+        // channel never closes unsent under a live guard
+        (&mut self.aborted)
+            .await
+            .unwrap_or_else(|_closed| unreachable!("session gone under its guard"))
+    }
 }
 
 impl Drop for Attached {
@@ -223,28 +209,12 @@ impl Drop for Attached {
 
 #[derive(Default)]
 struct Handler {
-    /// Registered bridge processes' agent tables, by bearer token.
-    bridges: Mutex<HashMap<String, Arc<Sessions>>>,
-}
-
-impl std::fmt::Debug for Handler {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Handler").field("bridges", &self.bridges().len()).finish()
-    }
+    /// Registered workers' agent tables, by bearer token.
+    workers: Mutex<HashMap<String, Arc<Sessions>>>,
 }
 
 impl Handler {
-    fn bridges(&self) -> MutexGuard<'_, HashMap<String, Arc<Sessions>>> {
-        self.bridges.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// The agent table of the bridge whose bearer token the request carries.
-    fn authorize(&self, headers: &HeaderMap) -> Option<Arc<Sessions>> {
-        let token = headers.get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?;
-        self.bridges().get(token).cloned()
-    }
-
-    async fn handle(&self, request: http::Request<Incoming>) -> Reply {
+    async fn handle(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
         let (parts, body) = request.into_parts();
 
         // Reject on the head alone — no body byte of an unauthenticated
@@ -286,57 +256,146 @@ impl Handler {
             }
         };
 
-        call_tool(&sessions, &parts.headers, body).await
+        sessions.call_tool(&parts.headers, body).await
+    }
+
+    /// The agent table of the worker whose bearer token the request carries.
+    fn authorize(&self, headers: &HeaderMap) -> Option<Arc<Sessions>> {
+        let token = headers.get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?;
+        lock(&self.workers).get(token).cloned()
     }
 }
 
-// Execute one decoded callback against the calling bridge's agent table.
-async fn call_tool(sessions: &Sessions, headers: &HeaderMap, body: Bytes) -> Reply {
-    let content_type =
-        headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
-    let codec = if content_type.contains("json") {
-        Codec::Json
-    } else if content_type.contains("proto") {
-        Codec::Proto
-    } else {
-        return connect_error(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "unknown",
-            &format!("unsupported content type `{content_type}`"),
-        );
-    };
+impl fmt::Debug for Handler {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Handler").field("workers", &lock(&self.workers).len()).finish()
+    }
+}
 
-    let call = match ToolCall::decode(codec, &body) {
-        Ok(call) => call,
-        Err(error) => {
+/// One worker's live completions by `agent_id`.
+#[derive(Debug, Default)]
+struct Sessions {
+    entries: Mutex<HashMap<String, Session>>,
+}
+
+impl Sessions {
+    fn insert(&self, agent_id: String, session: Session) {
+        lock(&self.entries).insert(agent_id, session);
+    }
+
+    fn remove(&self, agent_id: &str) {
+        lock(&self.entries).remove(agent_id);
+    }
+
+    // Decode one callback and run it against this worker's agent table.
+    async fn call_tool(&self, headers: &HeaderMap, body: Bytes) -> Response<Full<Bytes>> {
+        let content_type =
+            headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
+        let codec = if content_type.contains("json") {
+            Codec::Json
+        } else if content_type.contains("proto") {
+            Codec::Proto
+        } else {
             return connect_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_argument",
-                &format!("{error:#}"),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unknown",
+                &format!("unsupported content type `{content_type}`"),
             );
+        };
+
+        let call = match ToolCall::decode(codec, &body) {
+            Ok(call) => call,
+            Err(error) => {
+                return connect_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_argument",
+                    &format!("{error:#}"),
+                );
+            }
+        };
+
+        let Some(tool_host) = self.tool_host(&call.agent_id) else {
+            return connect_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                &format!("no live completion for agent `{}`", call.agent_id),
+            );
+        };
+
+        let arguments = call.args.to_string();
+        tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
+
+        match tool_host.call_tool(call.tool_name.clone(), arguments).await {
+            Ok(Ok(output)) => respond(codec, &wrap_output(&output)),
+            Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
+            Err(error) => {
+                let message = format!("tool `{}` failed: {error:#}", call.tool_name);
+                self.abort(&call.agent_id, message.clone());
+                connect_error(StatusCode::CONFLICT, "aborted", &message)
+            }
         }
-    };
+    }
 
-    let Some(session) = sessions.lookup(&call.agent_id) else {
-        return connect_error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            &format!("no live completion for agent `{}`", call.agent_id),
-        );
-    };
+    fn tool_host(&self, agent_id: &str) -> Option<Arc<dyn ToolHost>> {
+        lock(&self.entries).get(agent_id).map(|session| Arc::clone(&session.tool_host))
+    }
 
-    let arguments = call.args.to_string();
-    tracing::info!(monotonic_counter.cursor_custom_tool_calls = 1_u64, "custom tool callback");
-    tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
-
-    match session.tool_host.call_tool(call.tool_name.clone(), arguments).await {
-        Ok(Ok(output)) => respond(codec, &to_json(&output)),
-        Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
-        Err(error) => {
-            let message = format!("tool `{}` failed: {error:#}", call.tool_name);
-            let _ = session.abort.send(message.clone());
-            connect_error(StatusCode::CONFLICT, "aborted", &message)
+    // End the completion live under `agent_id`, unless it is gone or an
+    // earlier failure already has.
+    fn abort(&self, agent_id: &str, reason: String) {
+        let abort = lock(&self.entries).get_mut(agent_id).and_then(|session| session.abort.take());
+        if let Some(abort) = abort {
+            // nobody listening: the completion ended on its own
+            let _ = abort.send(reason);
         }
+    }
+}
+
+/// One live completion's callback route: the session's tool host plus the
+/// abort that ends the completion on a hard (non-repairable) tool failure,
+/// taken by the first such failure.
+#[derive(Debug)]
+struct Session {
+    tool_host: Arc<dyn ToolHost>,
+    abort: Option<oneshot::Sender<String>>,
+}
+
+#[derive(Clone, Copy)]
+enum Codec {
+    Json,
+    Proto,
+}
+
+/// One `CallCustomTool` request, as the JSON codec spells it.
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ToolCall {
+    tool_name: String,
+    args: Value,
+    agent_id: String,
+}
+
+impl ToolCall {
+    fn decode(codec: Codec, body: &[u8]) -> Result<Self> {
+        let mut call = match codec {
+            Codec::Json => {
+                serde_json::from_slice(body).context("decoding the JSON callback body")?
+            }
+            Codec::Proto => {
+                let call = CallCustomToolRequest::decode(body)
+                    .context("decoding the protobuf callback body")?;
+                Self {
+                    tool_name: call.tool_name,
+                    args: call.args.as_ref().map_or(Value::Null, struct_to_value),
+                    agent_id: call.agent_id,
+                }
+            }
+        };
+        // a tool takes a JSON object; absent arguments are an empty one
+        if call.args.is_null() {
+            call.args = json!({});
+        }
+        Ok(call)
     }
 }
 
@@ -354,62 +413,21 @@ async fn drain(mut body: Incoming, limit: usize) {
     }
 }
 
+// Draw 256 bits of entropy and spell them as lowercase hex.
 fn gen_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|error| anyhow::anyhow!("gathering entropy: {error}"))?;
-
-    Ok(bytes.iter().fold(String::with_capacity(64), |mut hex, byte| {
-        use std::fmt::Write as _;
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // writing to a `String` cannot fail
         let _ = write!(hex, "{byte:02x}");
-        hex
-    }))
-}
-
-#[derive(Clone, Copy)]
-enum Codec {
-    Json,
-    Proto,
-}
-
-struct ToolCall {
-    tool_name: String,
-    args: Value,
-    agent_id: String,
-}
-
-impl ToolCall {
-    fn decode(codec: Codec, body: &[u8]) -> Result<Self> {
-        match codec {
-            Codec::Json => {
-                #[derive(Default, serde::Deserialize)]
-                #[serde(rename_all = "camelCase", default)]
-                struct JsonCall {
-                    tool_name: String,
-                    args: Value,
-                    agent_id: String,
-                }
-                let call: JsonCall =
-                    serde_json::from_slice(body).context("decoding the JSON callback body")?;
-                Ok(Self {
-                    tool_name: call.tool_name,
-                    args: if call.args.is_null() { json!({}) } else { call.args },
-                    agent_id: call.agent_id,
-                })
-            }
-            Codec::Proto => {
-                let call = CallCustomToolRequest::decode(body)
-                    .context("decoding the protobuf callback body")?;
-                Ok(Self {
-                    tool_name: call.tool_name,
-                    args: call.args.as_ref().map_or_else(|| json!({}), struct_to_value),
-                    agent_id: call.agent_id,
-                })
-            }
-        }
     }
+    Ok(hex)
 }
 
-fn to_json(output: &str) -> Value {
+// The SDK wants a JSON object for a tool result; anything else the tool
+// returned rides under `value`.
+fn wrap_output(output: &str) -> Value {
     match serde_json::from_str::<Value>(output) {
         Ok(value @ Value::Object(_)) => value,
         Ok(value) => json!({ "value": value }),
@@ -417,46 +435,77 @@ fn to_json(output: &str) -> Value {
     }
 }
 
-fn respond(codec: Codec, result: &Value) -> Reply {
+fn respond(codec: Codec, result: &Value) -> Response<Full<Bytes>> {
     match codec {
         Codec::Json => {
             reply(StatusCode::OK, "application/json", json!({ "result": result }).to_string())
         }
         Codec::Proto => {
-            let object = result.as_object().cloned().unwrap_or_default();
             let response = CallCustomToolResponse {
-                result: Some(value_to_struct(&object)),
+                result: Some(result.as_object().map(value_to_struct).unwrap_or_default()),
             };
             reply(StatusCode::OK, "application/proto", response.encode_to_vec())
         }
     }
 }
 
-fn connect_error(status: StatusCode, code: &str, message: &str) -> Reply {
+fn connect_error(status: StatusCode, code: &str, message: &str) -> Response<Full<Bytes>> {
     reply(status, "application/json", json!({ "code": code, "message": message }).to_string())
 }
 
-fn reply(status: StatusCode, content_type: &'static str, body: impl Into<Bytes>) -> Reply {
-    let mut response = http::Response::new(Full::new(body.into()));
+fn reply(
+    status: StatusCode, content_type: &'static str, body: impl Into<Bytes>,
+) -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(body.into()));
     *response.status_mut() = status;
     response.headers_mut().insert(CONTENT_TYPE, http::HeaderValue::from_static(content_type));
     response
 }
 
-// The output-wrapping policy alone is unit-tested here; the server itself
-// is exercised by a bridge calling back in `tests/model.rs` and
-// `tests/bridge.rs`.
+// The output-wrapping policy and the `Struct` codec — pure translation —
+// are unit-tested here; the server itself is exercised by a worker calling
+// back in `tests/model.rs` and `tests/worker.rs`.
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Map, Value, json};
 
-    use super::to_json;
+    use super::proto::{struct_to_value, value_to_struct};
+    use super::wrap_output;
 
     #[test]
-    fn to_json_policy() {
-        assert_eq!(to_json(r#"{"answer":42}"#), json!({ "answer": 42 }));
-        assert_eq!(to_json("[1,2]"), json!({ "value": [1, 2] }));
-        assert_eq!(to_json(r#""text""#), json!({ "value": "text" }));
-        assert_eq!(to_json("not json"), json!({ "value": "not json" }));
+    fn output_wrapping() {
+        assert_eq!(wrap_output(r#"{"answer":42}"#), json!({ "answer": 42 }));
+        assert_eq!(wrap_output("[1,2]"), json!({ "value": [1, 2] }));
+        assert_eq!(wrap_output(r#""text""#), json!({ "value": "text" }));
+        assert_eq!(wrap_output("not json"), json!({ "value": "not json" }));
+    }
+
+    fn object(value: Value) -> Map<String, Value> {
+        let Value::Object(object) = value else { panic!("an object: {value}") };
+        object
+    }
+
+    #[test]
+    fn struct_roundtrip() {
+        let original = json!({
+            "text": "hello",
+            "count": 3,
+            "ratio": 3.5,
+            "flag": true,
+            "none": null,
+            "nested": { "list": [1, -2.5, "two", false, null, { "deep": "yes" }] },
+        });
+        assert_eq!(struct_to_value(&value_to_struct(&object(original.clone()))), original);
+        assert_eq!(struct_to_value(&value_to_struct(&Map::new())), json!({}));
+    }
+
+    #[test]
+    fn integral_doubles() {
+        let read = |number: f64| struct_to_value(&value_to_struct(&object(json!({ "n": number }))));
+        assert_eq!(read(42.0), json!({ "n": 42 }));
+        assert_eq!(read(-7.0), json!({ "n": -7 }));
+        assert_eq!(read(2.5), json!({ "n": 2.5 }));
+        // past 2^53 an f64 no longer holds every integer, so the double stands
+        assert_eq!(read(9_007_199_254_740_994.0), json!({ "n": 9_007_199_254_740_994.0 }));
     }
 }

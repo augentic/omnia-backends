@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use futures::future::BoxFuture;
-use omnia_core::sha256_digest;
+use omnia_core::Digest;
 use omnia_plugin::{ContentStore, ReleaseStore};
 
 use crate::{Client, blocking};
@@ -35,8 +35,8 @@ impl ContentStore for Client {
         blocking(move || {
             // Verify before persist: a mismatched write must never become a
             // digest-keyed entry, even torn.
-            let resolved = sha256_digest(&bytes);
-            if resolved != digest {
+            let resolved = Digest::of(&bytes);
+            if resolved.to_string() != digest {
                 bail!("refusing to persist content keyed {digest}: the bytes hash to {resolved}");
             }
             write_atomic(&path, &bytes)

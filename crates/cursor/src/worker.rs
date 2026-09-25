@@ -28,12 +28,8 @@ use crate::endpoint::Registration;
 use crate::protocol::Rpc;
 use crate::{Failure, elapsed_ms, lock};
 
-// The handshake's two bounds: the ready line on stderr, then `sdk.v1`
-// bound over it (token read, `Ping`, `GetVersion`).
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-// The grace `Shutdown` asks the worker for, and the bound on the whole ask —
-// grace, reply and exit — before the kill; the grace must sit well inside.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_millis(250);

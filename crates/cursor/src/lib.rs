@@ -27,7 +27,6 @@ use crate::pool::Pool;
 pub struct Client {
     deadlines: Deadlines,
     model: String,
-    // read once at connect; every `CreateAgent` and `DeleteAgent` carries it
     api_key: String,
     pool: Arc<Pool>,
 }
@@ -66,48 +65,34 @@ impl Backend for Client {
     }
 }
 
-// Every mutex in this crate guards data no panic can leave half-written, so
-// a poisoned lock is still worth reading.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Milliseconds since `since`, saturating.
 fn elapsed_ms(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-// A named module solely to scope the allow: the `FromEnv` derive expands to
-// an undocumented public builder that `missing_docs` would otherwise flag.
+
 #[allow(missing_docs)]
 mod config {
     use fromenv::FromEnv;
 
     /// Connection options for the cursor backend.
-    ///
-    /// The working tree is lent per completion through the guest's
-    /// `grants.workspace`, which the host resolves to a node-local path on
-    /// the tool host; without one, a completion runs tool-only in a private
-    /// empty directory.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
         /// Default model id when a request leaves `model` unset; omitted
         /// means Cursor's server-side selection (`auto`).
         #[env(from = "CURSOR_MODEL", default = "auto")]
         pub model: String,
-        /// Absolute wall-clock cap in seconds on one agent run (the opening
-        /// prompt, or a check's correction); timed-out runs are cancelled. A
-        /// completion that is corrected gets a fresh cap on the second send.
+        /// Absolute cap in seconds on one agent run. A completion that is
+        /// corrected gets a fresh cap on the second send.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
         pub timeout_secs: u64,
-        /// Inactivity bound in seconds: a run is cancelled after this long
-        /// with no stream events, so a stalled agent dies fast while one
-        /// that is still streaming survives up to the absolute cap.
+        /// The period of time without events after which a run is cancelled.
         #[env(from = "CURSOR_INACTIVITY_SECS", default = "120")]
         pub inactivity_secs: u64,
-        /// Agents live at once; a further completion waits for a slot. Each
-        /// live agent runs in its own `cursor-sdk-bridge` process, resolved
-        /// on `PATH`.
+        /// The maximum number of agents that can be live at once.
         #[env(from = "CURSOR_MAX_AGENTS", default = "4")]
         pub max_agents: usize,
     }

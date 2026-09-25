@@ -40,9 +40,7 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-/// Envelope flag bit marking the end-of-stream frame.
 const END_STREAM: u8 = 0x02;
-/// Envelope flag bit marking a compressed frame (never negotiated here).
 const COMPRESSED: u8 = 0x01;
 
 /// A cloneable `sdk.v1` client bound to one process's loopback endpoint and
@@ -58,9 +56,7 @@ impl Rpc {
     /// Bind to `base` and prove the process answers `sdk.v1` (`Ping`, then
     /// `GetVersion`). Unbounded: the caller holds the handshake's bound.
     pub async fn connect(base: &str, token: &str) -> Result<Self> {
-        // The client is HTTP-only: refuse anything that is not loopback
-        // before the bearer token or `DeleteAgent`'s API key go on the wire.
-        require_loopback_http(base)?;
+        ensure_loopback(base)?;
         let rpc = Self {
             hyper: HyperClient::builder(TokioExecutor::new()).build_http(),
             base: base.to_owned(),
@@ -131,12 +127,10 @@ impl Rpc {
         Ok(RunStream(self.server_stream("SdkAgentService/Send", &request).await?))
     }
 
-    /// One unary RPC whose response carries nothing.
     async fn unary_empty<Req: Serialize + Sync>(&self, method: &str, request: &Req) -> Result<()> {
         self.unary::<_, Empty>(method, request).await.map(drop)
     }
 
-    /// One unary RPC in the plain JSON codec.
     async fn unary<Req: Serialize + Sync, Resp: DeserializeOwned>(
         &self, method: &str, request: &Req,
     ) -> Result<Resp> {
@@ -146,8 +140,6 @@ impl Rpc {
         serde_json::from_slice(&bytes).with_context(|| format!("decoding `{method}` response"))
     }
 
-    /// One server-streaming RPC: the request rides as a single enveloped JSON
-    /// message; the returned stream yields response envelopes.
     async fn server_stream<Req: Serialize + Sync>(
         &self, method: &str, request: &Req,
     ) -> Result<FrameStream> {
@@ -163,8 +155,6 @@ impl Rpc {
         })
     }
 
-    /// POST the body and map a non-success status onto an
-    /// [`RpcError::Connect`].
     async fn call(
         &self, method: &str, content_type: &str, body: Vec<u8>,
     ) -> Result<http::Response<Incoming>> {
@@ -225,8 +215,6 @@ impl RunStream {
                     continue;
                 }
             };
-            // Keepalives (and unknown envelope cases) are dropped here so the
-            // caller's inactivity deadline only rearms on real progress.
             if message.is_keepalive() {
                 continue;
             }
@@ -239,7 +227,6 @@ impl RunStream {
 /// One `sdk.v1` RPC failed: the process answered with an error, or the call
 /// never got an answer at all.
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
 pub enum RpcError {
     /// The process answered: a non-success status on a unary call, or an
     /// `EndStreamResponse` carrying an error on a stream.
@@ -270,8 +257,7 @@ pub enum RpcError {
 }
 
 impl RpcError {
-    /// A non-200 unary response: Connect's error object, or a body that is
-    /// not one (a crash's, a proxy's) as the message itself.
+    // A body that is not Connect's error object (a crash's, a proxy's) is the message itself.
     fn unary(method: &str, status: StatusCode, body: &[u8]) -> Self {
         let answer: ConnectStatus = serde_json::from_slice(body).unwrap_or_default();
         let answer = if answer.message.is_empty() {
@@ -285,8 +271,7 @@ impl RpcError {
         Self::answered(method, Some(status), answer)
     }
 
-    /// The error an `EndStreamResponse` carries, if any: a clean end frame,
-    /// or one this backend cannot parse, is not an error.
+    // An unparsable end frame is a clean end, not an error.
     fn end_stream(method: &str, payload: &[u8]) -> Option<Self> {
         let end: EndStreamResponse = serde_json::from_slice(payload).unwrap_or_default();
         Some(Self::answered(method, None, end.error?))
@@ -332,8 +317,7 @@ impl RpcError {
         Self::io(method, "reading the stream", eof)
     }
 
-    /// Whether the agent the call named is already gone. Cursor still
-    /// mis-tags some of those as 500 `internal` with "Agent … not found".
+    // Cursor still mis-tags some of these as 500 `internal` "Agent … not found".
     fn is_agent_gone(&self) -> bool {
         let Self::Connect { code, message, .. } = self else {
             return false;
@@ -358,7 +342,7 @@ fn connect_fmt(
     }
 }
 
-/// Incrementally decodes Connect envelopes from a streaming response body.
+// Connect envelope decoder over a streaming response body.
 struct FrameStream {
     method: String,
     body: Incoming,
@@ -366,10 +350,7 @@ struct FrameStream {
 }
 
 impl FrameStream {
-    /// The next envelope, or `None` when the body ends cleanly at a frame
-    /// boundary. Fails with an [`RpcError::Transport`] on a socket failure
-    /// or a truncated frame, and plainly on a compressed frame (compression
-    /// is never negotiated).
+    // `None` only at a clean frame boundary; a body ending mid-frame is a transport error.
     async fn next(&mut self) -> Result<Option<Frame>> {
         loop {
             if let Some(frame) = decode_frame(&mut self.buffer)? {
@@ -390,7 +371,6 @@ impl FrameStream {
     }
 }
 
-/// A decoded response envelope: the flag byte and the message payload.
 #[derive(Debug)]
 struct Frame {
     flags: u8,
@@ -403,48 +383,45 @@ impl Frame {
     }
 }
 
-/// `http://` to a loopback host: IP literal in `127.0.0.0/8` or `::1`, or
-/// the name `localhost`. Anything else would send credentials in the clear.
-fn require_loopback_http(base: &str) -> Result<()> {
+use http::uri::Scheme;
+
+// The client has no TLS, so credentials travel in the clear: loopback only.
+fn ensure_loopback(base: &str) -> Result<()> {
     let uri: Uri = base.parse().context("parsing sdk.v1 URL")?;
     ensure!(
-        uri.scheme() == Some(&http::uri::Scheme::HTTP),
+        uri.scheme() == Some(&Scheme::HTTP),
         "sdk.v1 URL must use the http scheme (the client has no TLS)"
     );
+
     if let Some(authority) = uri.authority() {
         ensure!(!authority.as_str().contains('@'), "sdk.v1 URL must not include userinfo");
     }
+
+    // check host is a loopback address
     let host = uri.host().context("sdk.v1 URL must include a host")?;
-    ensure!(is_loopback_host(host), "sdk.v1 URL must target a loopback host");
+    if !host.eq_ignore_ascii_case("localhost") {
+        let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+        if !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
+            return Err(anyhow!("sdk.v1 URL must target a loopback host"));
+        }
+    }
+
     Ok(())
 }
 
-fn is_loopback_host(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    let host = host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host);
-    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
-}
-
-/// Wrap one message in the Connect streaming envelope.
-///
-/// # Errors
-///
-/// Returns an error when the payload does not fit the envelope's 4-byte
-/// length prefix.
 fn envelope(payload: &[u8]) -> Result<Vec<u8>> {
     let length = u32::try_from(payload.len()).map_err(|_overflow| {
         anyhow!("a {}-byte message exceeds the Connect frame limit", payload.len())
     })?;
+    
     let mut body = Vec::with_capacity(payload.len() + 5);
     body.push(0);
     body.extend_from_slice(&length.to_be_bytes());
     body.extend_from_slice(payload);
+
     Ok(body)
 }
 
-/// Split one complete envelope off the front of `buffer`, if present.
 fn decode_frame(buffer: &mut BytesMut) -> Result<Option<Frame>> {
     if buffer.len() < 5 {
         return Ok(None);
@@ -463,14 +440,12 @@ fn decode_frame(buffer: &mut BytesMut) -> Result<Option<Frame>> {
     Ok(Some(Frame { flags, payload }))
 }
 
-/// Collect a response body whole; a failure below Connect while `doing` is
-/// an [`RpcError::Transport`].
 async fn read_body(method: &str, doing: &'static str, body: Incoming) -> Result<Bytes> {
     let collected = body.collect().await.map_err(|error| RpcError::io(method, doing, error))?;
     Ok(collected.to_bytes())
 }
 
-/// Close/delete of a missing agent is the desired end state.
+// A missing agent is the desired end state of close/delete.
 fn gone_ok(result: Result<()>) -> Result<()> {
     match result {
         Err(error) if error.downcast_ref::<RpcError>().is_some_and(RpcError::is_agent_gone) => {
@@ -627,8 +602,7 @@ struct UserMessage {
 
 // --- Connect errors ---
 
-/// Connect's error object: the body of a failed unary call, and the `error`
-/// of an `EndStreamResponse`. A code the body does not carry is `unknown`.
+// Connect's error object; a missing code is `unknown`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct ConnectStatus {
@@ -647,7 +621,6 @@ impl Default for ConnectStatus {
     }
 }
 
-/// The payload of the frame that closes a server stream.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct EndStreamResponse {
@@ -656,16 +629,14 @@ struct EndStreamResponse {
 
 // --- Run streaming ---
 
-/// One frame of a `Send` stream. A frame with no envelope case and no offset
-/// is a keepalive; unknown envelope cases deserialize to the same shape and
-/// are skipped the same way.
+/// One frame of a `Send` stream; an empty frame (no envelope case, no
+/// offset) is a keepalive, and so is any case this backend does not know.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunStreamMessage {
     pub sdk_message: Option<SdkMessage>,
     pub result: Option<RunStreamResult>,
-    /// Present on the closing frame; its payload carries nothing this
-    /// backend reads.
+    /// Present on the closing frame.
     pub done: Option<IgnoredAny>,
     offset: Option<String>,
 }
@@ -758,8 +729,7 @@ impl fmt::Display for RunStatus {
     }
 }
 
-// The proto3 JSON mapping writes an enum by name, but a `cursor-sdk-bridge`
-// release may write the number; any other shape is `Unknown`.
+// Proto3 JSON writes the name, but a bridge release may write the number.
 fn run_status<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RunStatus, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -786,10 +756,8 @@ pub struct RunResult {
     pub usage: Option<TokenUsage>,
 }
 
-/// Billed token counts; proto3 JSON writes `int64` as strings, so every field
-/// tolerates both encodings.
-// Field names mirror the wire message; the shared postfix is the protocol's.
-#[allow(clippy::struct_field_names)]
+/// Billed token counts; `int64` arrives as a string or a number.
+#[allow(clippy::struct_field_names)] // names mirror the wire message
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TokenUsage {
@@ -814,10 +782,8 @@ fn flexible_i64_opt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option
     }))
 }
 
-// Deliberate unit tests: message decoding, the loopback ready-line URL,
-// envelope framing, and error decoding (CI floor); `tests/worker.rs` proves
-// the client against the fake `cursor-sdk-bridge` and `tests/live.rs`
-// against a real one.
+// Service-free floor: codecs, framing, the URL guard, error decoding. The
+// client itself is proven in `tests/worker.rs` (fake bridge) and `tests/live.rs`.
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
@@ -826,7 +792,7 @@ mod tests {
 
     use super::{
         ConnectStatus, END_STREAM, EndStreamResponse, RpcError, RunStatus, RunStreamResult,
-        TokenUsage, decode_frame, require_loopback_http,
+        TokenUsage, decode_frame, ensure_loopback,
     };
 
     fn envelope(payload: &[u8]) -> Vec<u8> {
@@ -891,7 +857,7 @@ mod tests {
             "http://localhost:9",
             "http://LOCALHOST:9",
         ] {
-            require_loopback_http(url).unwrap_or_else(|error| panic!("{url}: {error}"));
+            ensure_loopback(url).unwrap_or_else(|error| panic!("{url}: {error}"));
         }
     }
 
@@ -909,7 +875,7 @@ mod tests {
             ("http://user:token@127.0.0.1:9", "userinfo"),
             ("not a url", "parsing"),
         ] {
-            let error = require_loopback_http(url).expect_err(url);
+            let error = ensure_loopback(url).expect_err(url);
             assert!(error.to_string().contains(needle), "{url}: expected {needle:?} in {error}");
         }
     }

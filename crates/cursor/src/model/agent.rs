@@ -37,7 +37,7 @@ const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// One attempt at a completion: the turn to run as an agent on a leased
 /// worker, with the agent's callbacks routed into the tool host.
 pub struct Attempt {
-    pub lease: Arc<Lease>,
+    pub lease: Lease,
     pub turn: Turn,
     pub tool_host: Arc<dyn ToolHost>,
     pub deadlines: Deadlines,
@@ -293,7 +293,7 @@ impl Agent {
 /// the lease that keeps that worker, the pin and workspace the delete names,
 /// and the run still open on it.
 struct Handle {
-    lease: Arc<Lease>,
+    lease: Lease,
     id: String,
     operation: AgentOperationOptions,
     workspace: Workspace,
@@ -301,7 +301,7 @@ struct Handle {
 }
 
 impl Handle {
-    fn worker(&self) -> &Worker {
+    const fn worker(&self) -> &Worker {
         self.lease.worker()
     }
 

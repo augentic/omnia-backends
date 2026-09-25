@@ -23,7 +23,7 @@
 //! out the same id, `Send` as an enveloped run stream, `CallCustomTool`
 //! posted back to the client's own endpoint — and nothing else.
 
-pub mod log;
+mod log;
 // the crate's own callback codec, by path: this module is also a binary
 // built against `[dependencies]` alone, and one codec on both sides of the
 // callback is what keeps the fake honest
@@ -40,13 +40,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
+use self::log::Kind;
 #[cfg(test)]
 pub use self::log::alive;
 #[allow(unused_imports, reason = "the suites' side of the module")]
-pub use self::log::{Event, History, Kind, Log, Process, Rpc};
+pub use self::log::{Event, History, Log, Process, Rpc};
 use self::server::{Callback, Server};
-#[allow(unused_imports, reason = "the suites' side of the module")]
-pub use self::server::{EXIT_ON_CREATE, MARKERS};
 
 const SCRIPT_FILE: &str = "script.json";
 const LOG_FILE: &str = "log.jsonl";

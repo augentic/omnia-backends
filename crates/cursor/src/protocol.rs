@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use bytes::{Bytes, BytesMut};
+use http::uri::Scheme;
 use http::{StatusCode, Uri};
 use http_body_util::{BodyExt as _, Full};
 use hyper::body::Incoming;
@@ -296,7 +297,7 @@ impl RpcError {
     }
 
     /// A socket failure while `doing`.
-    pub fn io(
+    pub(crate) fn io(
         method: &str, doing: &'static str, source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
         Self::Transport {
@@ -309,7 +310,7 @@ impl RpcError {
     /// The body ended with a partial envelope still buffered: an unexpected
     /// EOF while reading the stream.
     #[must_use]
-    pub fn truncated(method: &str, buffered: usize) -> Self {
+    pub(crate) fn truncated(method: &str, buffered: usize) -> Self {
         let eof = std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             format!("stream ended mid-frame ({buffered} bytes buffered)"),
@@ -383,8 +384,6 @@ impl Frame {
     }
 }
 
-use http::uri::Scheme;
-
 // The client has no TLS, so credentials travel in the clear: loopback only.
 fn ensure_loopback(base: &str) -> Result<()> {
     let uri: Uri = base.parse().context("parsing sdk.v1 URL")?;
@@ -397,14 +396,13 @@ fn ensure_loopback(base: &str) -> Result<()> {
         ensure!(!authority.as_str().contains('@'), "sdk.v1 URL must not include userinfo");
     }
 
-    // check host is a loopback address
     let host = uri.host().context("sdk.v1 URL must include a host")?;
-    if !host.eq_ignore_ascii_case("localhost") {
-        let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
-        if !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
-            return Err(anyhow!("sdk.v1 URL must target a loopback host"));
-        }
-    }
+    let host = host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host);
+    ensure!(
+        host.eq_ignore_ascii_case("localhost")
+            || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()),
+        "sdk.v1 URL must target a loopback host"
+    );
 
     Ok(())
 }
@@ -413,7 +411,7 @@ fn envelope(payload: &[u8]) -> Result<Vec<u8>> {
     let length = u32::try_from(payload.len()).map_err(|_overflow| {
         anyhow!("a {}-byte message exceeds the Connect frame limit", payload.len())
     })?;
-    
+
     let mut body = Vec::with_capacity(payload.len() + 5);
     body.push(0);
     body.extend_from_slice(&length.to_be_bytes());
@@ -750,7 +748,6 @@ fn run_status<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RunStatus, D
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunResult {
-    pub run_id: String,
     /// Final assistant text for a completed run.
     pub result: String,
     pub usage: Option<TokenUsage>,

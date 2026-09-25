@@ -248,7 +248,8 @@ async fn abandon_during_create() {
         created.text("cwd"),
         "the late id is deleted where it was made"
     );
-    assert!(!deleted.text("apiKey").is_empty());
+    assert_eq!(deleted.arg["apiKeyPresent"], true);
+    assert_eq!(deleted.arg["apiKeyMatchesCreate"], true);
     assert!(loser.ended_with(Rpc::Shutdown));
 
     // Both slots are back: a fresh run gets one and completes.

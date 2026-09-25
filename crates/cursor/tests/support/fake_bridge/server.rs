@@ -79,8 +79,8 @@ struct State {
     runs: HashMap<String, oneshot::Sender<()>>,
 }
 
-#[derive(Default)]
 struct AgentState {
+    api_key: String,
     rounds: usize,
     closed: bool,
 }
@@ -271,9 +271,10 @@ impl Server {
     async fn create_agent(&self, body: &[u8]) -> Response<Body> {
         let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
         let options = &request["options"];
+        let api_key = options["apiKey"].as_str().unwrap_or_default();
         let arg = json!({
             "cwd": options["local"]["cwd"][0],
-            "apiKey": options["apiKey"],
+            "apiKeyPresent": !api_key.is_empty(),
             "model": options["model"]["id"],
             "customTools": keys(&options["local"]["customTools"]),
             "mcpServers": keys(&options["mcpServers"]),
@@ -287,7 +288,14 @@ impl Server {
             } else {
                 state.next_agent += 1;
                 let id = format!("agent-{}", state.next_agent);
-                state.agents.insert(id.clone(), AgentState::default());
+                state.agents.insert(
+                    id.clone(),
+                    AgentState {
+                        api_key: api_key.to_owned(),
+                        rounds: 0,
+                        closed: false,
+                    },
+                );
                 Some(id)
             };
             (state.creates, id)
@@ -572,13 +580,20 @@ impl Server {
     async fn delete_agent(&self, body: &[u8]) -> Response<Body> {
         let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
         let agent = request["agentId"].as_str().unwrap_or_default().to_owned();
-        if !self.state().agents.contains_key(&agent) {
+        let api_key = request["options"]["apiKey"].as_str().unwrap_or_default();
+        let Some(api_key_matches_create) =
+            self.state().agents.get(&agent).map(|state| state.api_key == api_key)
+        else {
             return not_found(&agent);
-        }
+        };
         self.record(
             Rpc::DeleteAgent,
             Some(&agent),
-            json!({ "cwd": request["options"]["cwd"], "apiKey": request["options"]["apiKey"] }),
+            json!({
+                "cwd": request["options"]["cwd"],
+                "apiKeyPresent": !api_key.is_empty(),
+                "apiKeyMatchesCreate": api_key_matches_create,
+            }),
         );
         self.checkpoint(Point::DeleteAgent).await;
         self.state().agents.remove(&agent);

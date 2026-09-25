@@ -73,7 +73,6 @@ fn elapsed_ms(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-
 #[allow(missing_docs)]
 mod config {
     use fromenv::FromEnv;
@@ -81,8 +80,7 @@ mod config {
     /// Connection options for the cursor backend.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
-        /// Default model id when a request leaves `model` unset; omitted
-        /// means Cursor's server-side selection (`auto`).
+        /// Default model id.
         #[env(from = "CURSOR_MODEL", default = "auto")]
         pub model: String,
         /// Absolute cap in seconds on one agent run. A completion that is

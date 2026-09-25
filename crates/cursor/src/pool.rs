@@ -38,7 +38,7 @@ impl Pool {
     }
 
     /// Wait for a slot, in arrival order, then for the worker to run on.
-    pub async fn lease(&self) -> Result<Arc<Lease>> {
+    pub async fn lease(&self) -> Result<Lease> {
         let queued = Instant::now();
         let permit =
             Arc::clone(&self.permits).acquire_owned().await.context("the agent pool is closed")?;
@@ -58,7 +58,7 @@ impl Pool {
         });
 
         let worker = spawned.handshake().await?;
-        Ok(Arc::new(Lease { worker, registration }))
+        Ok(Lease { worker, registration })
     }
 
     pub const fn max_agents(&self) -> usize {

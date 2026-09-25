@@ -55,9 +55,10 @@ impl Turn {
         }
 
         let workspace = Workspace::new(lent).await?;
-        let options = agent_options(request, &workspace, default_model, api_key)?;
+        let cwd = workspace.cwd()?;
+        let options = agent_options(request, &cwd, workspace.is_lent(), default_model, api_key)?;
         let operation = AgentOperationOptions {
-            cwd: workspace.cwd()?,
+            cwd,
             api_key: api_key.to_owned(),
         };
         let text = with_mcp_hint(&request.mcp_servers(), request.to_string());
@@ -132,7 +133,7 @@ impl Workspace {
 // Translate `request` into the `CreateAgent` options for an agent run in
 // `workspace`.
 fn agent_options(
-    request: &Request, workspace: &Workspace, default_model: &str, api_key: &str,
+    request: &Request, cwd: &str, lent: bool, default_model: &str, api_key: &str,
 ) -> Result<AgentOptions> {
     let mut custom_tools = BTreeMap::new();
     let mut mcp_servers = BTreeMap::new();
@@ -168,12 +169,12 @@ fn agent_options(
         model: ModelSelection { id: model },
         api_key: api_key.to_owned(),
         local: LocalAgentOptions {
-            cwd: vec![workspace.cwd()?],
-            source: workspace.is_lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
+            cwd: vec![cwd.to_owned()],
+            source: lent.then(|| "SETTING_SOURCE_PROJECT".to_owned()),
             custom_tools,
         },
         mcp_servers,
-        tools: if workspace.is_lent() { None } else { Some(ToolList { names: Vec::new() }) },
+        tools: if lent { None } else { Some(ToolList { names: Vec::new() }) },
     })
 }
 
@@ -208,16 +209,16 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
 mod tests {
     use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};
 
-    use super::{Workspace, agent_options, with_mcp_hint};
+    use super::{agent_options, with_mcp_hint};
 
     #[test]
     fn workspace_shapes() {
-        let options = agent_options(&request(), &lent(), "auto", "test-key").unwrap();
+        let options = agent_options(&request(), "/workspace", true, "auto", "test-key").unwrap();
         assert!(options.tools.is_none());
         assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
         assert_eq!(options.api_key, "test-key");
 
-        let options = agent_options(&request(), &private(), "auto", "test-key").unwrap();
+        let options = agent_options(&request(), "/private", false, "auto", "test-key").unwrap();
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
         assert!(options.local.source.is_none());
     }
@@ -256,7 +257,7 @@ mod tests {
             tools: vec![],
             url: "http://127.0.0.1:9/mcp".to_owned(),
         })];
-        let options = agent_options(&request, &private(), "auto", "test-key").unwrap();
+        let options = agent_options(&request, "/private", false, "auto", "test-key").unwrap();
         assert!(options.mcp_servers.contains_key("docs"));
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
     }
@@ -275,13 +276,5 @@ mod tests {
             grants: Grants { workspace: None },
             check: false,
         }
-    }
-
-    fn lent() -> Workspace {
-        Workspace::Lent(std::env::temp_dir())
-    }
-
-    fn private() -> Workspace {
-        Workspace::Private(tempfile::tempdir().expect("temp cwd"))
     }
 }

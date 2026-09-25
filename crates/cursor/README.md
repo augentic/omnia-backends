@@ -42,9 +42,10 @@ MSRV: Rust 1.97
 The [`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge) executable
 must be on `PATH`, and `CURSOR_API_KEY`
 must be set — `sdk.v1` authenticates every agent with an explicit
-key, so a prior `cursor-agent login` no longer suffices. The key is read from
-the environment per completion; it is never stored on `Client` /
-`ConnectOptions`, logged, or recorded into fixtures.
+key, so a prior `cursor-agent login` no longer suffices. The key is read when
+the client connects and retained privately for its agents; it is never stored
+on `ConnectOptions`, exposed by `Client`'s `Debug`, logged, or recorded into
+fixtures.
 
 Each live agent runs on its own worker, spawned for the completion
 as the leader of its own process group and shut down after it: a graceful

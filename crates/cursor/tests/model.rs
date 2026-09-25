@@ -10,6 +10,7 @@ mod support;
 use std::time::SystemTime;
 
 use omnia_cursor::ConnectOptions;
+use serde_json::json;
 use support::fake_bridge::{Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
 use support::harness::{await_gone, connect, options, run_guest, sole_agent, spawning};
 
@@ -52,8 +53,9 @@ async fn model_echo_text() {
     assert_eq!(created.agent.as_deref(), Some(agent.as_str()));
     assert!(!created.text("cwd").is_empty(), "CreateAgent names a cwd: {}", created.arg);
     assert_eq!(deleted.text("cwd"), created.text("cwd"));
-    assert_eq!(deleted.text("apiKey"), created.text("apiKey"));
-    assert!(!deleted.text("apiKey").is_empty());
+    assert_eq!(created.arg["apiKeyPresent"], true);
+    assert_eq!(deleted.arg["apiKeyPresent"], true);
+    assert_eq!(deleted.arg["apiKeyMatchesCreate"], true);
 }
 
 #[tokio::test]
@@ -120,6 +122,11 @@ async fn tool_roundtrip(codec: Codec) {
     let log = fake.log();
     let workers = log.workers();
     assert_eq!(workers.len(), 1);
+    assert_eq!(
+        workers[0].saw(Rpc::CreateAgent)[0].arg["customTools"],
+        json!(["lookup"]),
+        "CreateAgent advertised the guest's function tool"
+    );
     let callbacks = workers[0].callbacks();
     assert_eq!(callbacks.len(), 1, "one CallCustomTool POST: {}", log.summary());
     assert_eq!(callbacks[0].arg["status"], 200, "{}", callbacks[0].arg);

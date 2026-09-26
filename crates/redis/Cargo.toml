@@ -24,10 +24,8 @@ fromenv.workspace = true
 futures.workspace = true
 omnia.workspace = true
 omnia-wasi-keyvalue.workspace = true
-redis = { version = "1.7.0", features = ["connection-manager", "tokio-rustls-comp"] }
+redis = { version = "1.7.1", features = ["connection-manager", "tokio-rustls-comp"] }
 tracing.workspace = true
 
-# The live test (`tests/live.rs`) is a separate crate; it needs tokio's test
-# runtime, which the library dependency does not enable.
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

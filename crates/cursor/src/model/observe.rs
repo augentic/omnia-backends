@@ -5,9 +5,10 @@
 //! mirror the public SDK — every field access is nullable and a malformed
 //! event is skipped, never fatal. The result's token counts become the
 //! guest's [`Usage`] here too. [`Completion`] emits the start (DEBUG) and
-//! finish (INFO) events.
+//! finish events — the finish at INFO for an answer, WARN for anything else.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use omnia_wasi_model::{ToolTurn, Transcript, Usage};
 use serde_json::Value;
@@ -58,7 +59,14 @@ impl Completion {
 
     // Note one answered send and add its tokens to the completion's bill.
     pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
-        tracing::debug!(result_bytes = result_len, tool_turns, ?usage, "send answered");
+        tracing::debug!(
+            result_bytes = result_len,
+            tool_turns,
+            input_tokens = usage.map(|u| u.input_tokens),
+            output_tokens = usage.map(|u| u.output_tokens),
+            reasoning_tokens = usage.and_then(|u| u.reasoning_tokens),
+            "send answered"
+        );
 
         if let Some(usage) = usage {
             self.input_tokens += u64::from(usage.input_tokens);
@@ -71,23 +79,35 @@ impl Completion {
         self.attempts
     }
 
-    // The one INFO line per completion. It is emitted once, so a later
-    // `Drop` says nothing.
+    // How long the completion has run, across its attempts.
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    // The one line per completion: INFO for an answer, WARN for anything
+    // else, so a bare `info` run sees where its time went either way. It is
+    // emitted once, so a later `Drop` says nothing.
     pub fn finish(&mut self, outcome: Outcome) {
         if self.emitted {
             return;
         }
         self.emitted = true;
 
-        tracing::info!(
-            outcome = outcome.as_str(),
-            attempts = self.attempts,
-            duration_ms = elapsed_ms(self.started),
-            input_tokens = self.input_tokens,
-            output_tokens = self.output_tokens,
-            reasoning_tokens = self.reasoning_tokens,
-            "completion"
-        );
+        // an event's level is fixed at its callsite, so each level is its own
+        macro_rules! completion {
+            ($level:ident) => {
+                tracing::$level!(
+                    outcome = outcome.as_str(),
+                    attempts = self.attempts,
+                    duration_ms = elapsed_ms(self.started),
+                    input_tokens = self.input_tokens,
+                    output_tokens = self.output_tokens,
+                    reasoning_tokens = self.reasoning_tokens,
+                    "completion"
+                )
+            };
+        }
+        if outcome.answered() { completion!(info) } else { completion!(warn) }
     }
 }
 
@@ -97,11 +117,13 @@ impl Drop for Completion {
     }
 }
 
-// Reconstructs the tool transcript and run metadata from the SDK stream.
+// Reconstructs the tool transcript and run metadata from the SDK stream,
+// and reports each tool call as the agent starts it.
 #[derive(Default)]
 pub struct EventLog {
     run_id: Option<String>,
     status_message: Option<String>,
+    started: usize,
     pending_tools: HashMap<String, PendingCall>,
     turns: Vec<ToolTurn>,
 }
@@ -148,6 +170,11 @@ impl EventLog {
         self.status_message.as_deref()
     }
 
+    // How many tool calls the agent has started, completed or not.
+    pub const fn tool_calls(&self) -> usize {
+        self.started
+    }
+
     // The CLI stream spells the phase `subtype` (started/completed); the
     // SDK message type spells it `status` (running/completed/error).
     fn tool_call(&mut self, payload: &Value) {
@@ -160,6 +187,8 @@ impl EventLog {
                 if let (Some(call_id), Some(pending)) =
                     (call_id, tool_call.and_then(PendingCall::from_value))
                 {
+                    self.started += 1;
+                    tracing::debug!(tool = %pending.tool, args = %pending.args, "tool call");
                     self.pending_tools.insert(call_id.to_owned(), pending);
                 }
             }
@@ -302,6 +331,7 @@ mod tests {
             }}),
         ]);
         assert_eq!(log.run_id(), Some("r-1"));
+        assert_eq!(log.tool_calls(), 1);
         let transcript = log.finish().expect("one completed tool turn");
         assert_eq!(transcript.turns.len(), 1);
         assert_eq!(transcript.turns[0].tool, "read");

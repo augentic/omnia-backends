@@ -63,10 +63,12 @@ impl Rpc {
             base: base.to_owned(),
             bearer: format!("Bearer {token}"),
         };
+        
         rpc.ping().await?;
         let version = rpc.get_version().await?;
         ensure!(version.protocol_version == "sdk.v1", "unsupported protocol version");
-        tracing::debug!(?version.capabilities, "ready");
+        tracing::trace!(?version.capabilities, "ready");
+
         Ok(rpc)
     }
 

@@ -33,6 +33,7 @@ use proto::{CallCustomToolRequest, CallCustomToolResponse, struct_to_value, valu
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tracing::instrument;
 
 use crate::lock;
 
@@ -295,17 +296,20 @@ impl Sessions {
             );
         };
 
-        let call = match ToolCall::decode(codec, &body) {
-            Ok(call) => call,
+        match ToolCall::decode(codec, &body) {
+            Ok(call) => self.dispatch(codec, call).await,
             Err(error) => {
-                return connect_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_argument",
-                    &format!("{error:#}"),
-                );
+                connect_error(StatusCode::BAD_REQUEST, "invalid_argument", &format!("{error:#}"))
             }
-        };
+        }
+    }
 
+    // Run one decoded callback into its completion's tool host. The call
+    // arrives from the worker over HTTP, on no completion's task, so its
+    // span is a root naming the tool alone; the guest's own line is the
+    // console's report of the call.
+    #[instrument(name = "callback", level = "trace", skip_all, fields(tool = %call.tool_name))]
+    async fn dispatch(&self, codec: Codec, call: ToolCall) -> Response<Full<Bytes>> {
         let Some(tool_host) = self.tool_host(&call.agent_id) else {
             return connect_error(
                 StatusCode::NOT_FOUND,
@@ -314,10 +318,7 @@ impl Sessions {
             );
         };
 
-        let arguments = call.args.to_string();
-        tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
-
-        match tool_host.call_tool(call.tool_name.clone(), arguments).await {
+        match tool_host.call_tool(call.tool_name.clone(), call.args.to_string()).await {
             Ok(Ok(output)) => respond(codec, &wrap_output(&output)),
             Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
             Err(error) => {

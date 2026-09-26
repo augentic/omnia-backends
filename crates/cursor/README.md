@@ -80,9 +80,9 @@ cap deadline, a guest abort, `budget-exhausted`, a Connect or end-stream
 error (the worker answered), a lease that could not be taken, or a request
 that could not be shaped all stand as they are. Each attempt is its own
 agent on its own worker, so the `completion started` (DEBUG) / `completion`
-(INFO) lines are per attempt: a restarted
-call produces two pairs inside one `complete` span, the first ending
-`worker_exit` or `transport`, with the restart WARN between them, and
+(INFO for an answer, WARN for every other outcome) lines are per attempt: a
+restarted call produces two pairs inside one `complete` span, the first
+ending `worker_exit` or `transport`, with the restart WARN between them, and
 `attempts` on those lines still counts the sends on that one agent. A
 follow-up worth doing when `cursor-sdk-bridge` exposes it: resuming a run in
 flight (`ObserveRun` / `WaitLiveRun`) on the new process instead of re-sending
@@ -97,6 +97,22 @@ future, so a completion the guest drops at any point ends its run
 deletes its agent, the id of a create still in flight included; an
 unanswered `CreateAgent` fails the completion after one window, and its
 worker is asked to go with nothing to tear down.
+
+Everything a completion logs sits under its `complete` span, which carries
+a process-wide sequence `n` beside the `model` and `format`, so the lines of
+completions live at once read apart without an agent id; each `Send` opens
+a `send` span (DEBUG) naming its `round`, and what the worker writes to
+stderr and how it exits are logged under the completion that spawned it. A
+run still streaming reports `in progress` at INFO every 30s — how long the
+completion has run (`elapsed_s`), the stream `frames` and `tool_calls` seen
+on that send, and how long its stream has been silent (`silent_s`) — so a
+bare `info` run tells a long completion from a hung one. Each tool call the
+agent starts is logged at DEBUG (`tool call`, with its `tool` and `args`),
+as is the teardown once it is done (`agent deleted`, with `teardown_ms`). A
+custom-tool callback arrives from the worker over HTTP on no completion's
+task, so it runs as a root `callback` span at TRACE naming the `tool` alone;
+the guest's own line for the tool is the console's report of the call.
+
 `Client::connect()` binds the loopback callback endpoint and spawns nothing
 until the first lease, so a missing or broken `cursor-sdk-bridge` surfaces
 as that lease's spawn or handshake failure. Every spawn passes a private
@@ -133,9 +149,9 @@ a fresh cap on the second send. The two errors are distinct
 
 Concurrency is bounded by `CURSOR_MAX_AGENTS` (default 4): that many agents
 live at once, each on its own worker, and a further completion
-waits its turn (first come, first served; the wait is logged at DEBUG as
-`agent slot acquired` with `wait_ms`, apart from the completion's own
-`duration_ms`, which
+waits its turn (first come, first served; a wait is logged at DEBUG as
+`agent slot acquired` with `wait_ms` — a slot taken at once logs nothing —
+apart from the completion's own `duration_ms`, which
 starts once the slot is held). The worker executable is `cursor-sdk-bridge`,
 resolved on `PATH`.
 

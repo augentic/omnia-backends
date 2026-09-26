@@ -23,6 +23,7 @@ use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
+use tracing::{Instrument as _, Span};
 
 use crate::endpoint::Registration;
 use crate::protocol::Rpc;
@@ -120,7 +121,9 @@ struct Supervisor {
 
 impl Supervisor {
     // Take the process under supervision: wire its pipes, spawn the
-    // supervisor as a task, and hand back the client's end of it.
+    // supervisor as a task, and hand back the client's end of it. The
+    // tasks run under the caller's span, so what the process says and how
+    // it exits are reported under the completion that spawned it.
     fn spawn(mut child: Box<dyn ChildWrapper>, state_root: TempDir) -> Result<Spawned> {
         let started_at = Instant::now();
 
@@ -149,7 +152,8 @@ impl Supervisor {
                 stop,
                 exit: exit_tx,
             }
-            .run(),
+            .run()
+            .instrument(Span::current()),
         );
 
         Ok(Spawned {
@@ -400,34 +404,40 @@ fn read_stderr(
     stderr: ChildStderr, state: Arc<State>,
 ) -> (oneshot::Receiver<Result<Discovery>>, JoinHandle<()>) {
     let (discovery_tx, discovery_rx) = oneshot::channel();
-    let reader = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        let mut ready = Some(discovery_tx);
-        while let Ok(Some(line)) = lines.next_line().await {
-            // The ready line is the handshake's alone: it may carry the
-            // bearer token, so it is neither logged nor kept. A dropped
-            // receiver is an abandoned handshake; keep draining.
-            if let Some(payload) = line.strip_prefix(READY_PREFIX) {
-                if let Some(tx) = ready.take() {
-                    let _ = tx.send(payload.parse());
+
+    let reader = tokio::spawn(
+        async move {
+            let mut lines = BufReader::new(stderr).lines();
+            let mut ready = Some(discovery_tx);
+            while let Ok(Some(line)) = lines.next_line().await {
+                // ready line may carry bearer token
+                if let Some(payload) = line.strip_prefix(READY_PREFIX) {
+                    if let Some(tx) = ready.take() {
+                        let _ = tx.send(payload.parse());
+                    }
+                } else {
+                    tracing::debug!(%line, stream = "stderr", "cursor-sdk-bridge output");
+                    state.tail.push(line);
                 }
-            } else {
-                tracing::debug!(%line, stream = "stderr", "cursor-sdk-bridge output");
-                state.tail.push(line);
             }
         }
-    });
+        .instrument(Span::current()),
+    );
+
     (discovery_rx, reader)
 }
 
 // Drain stdout so a full pipe never blocks the process.
 fn drain_stdout(stdout: ChildStdout) {
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(%line, stream = "stdout", "cursor-sdk-bridge output");
+    tokio::spawn(
+        async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(%line, stream = "stdout", "cursor-sdk-bridge output");
+            }
         }
-    });
+        .instrument(Span::current()),
+    );
 }
 
 #[cfg(test)]

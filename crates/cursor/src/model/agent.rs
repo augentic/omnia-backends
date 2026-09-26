@@ -18,9 +18,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use omnia_wasi_model::{Answer, Error, ToolHost, Transcript, Usage};
 use tokio::sync::watch;
-use tokio::time::{Instant, sleep_until, timeout};
+use tokio::time::{Instant, interval_at, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument as _, Span};
+use tracing::{Instrument as _, Span, instrument};
 
 use super::observe::{Completion, EventLog};
 use super::options::{AgentSpec, Prompt, Turn, Workspace};
@@ -32,10 +32,10 @@ use crate::worker::Worker;
 use crate::{Failure, elapsed_ms};
 
 const MAX_ROUNDS: u32 = 2;
-const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const TEARDOWN: Duration = Duration::from_secs(5);
+const PROGRESS: Duration = Duration::from_secs(30);
 
-// One attempt at a completion: the turn to run as an agent on a leased
-// worker, with the agent's callbacks routed into the tool host.
+// One completion attempt: its turn on a leased worker, callbacks into the tool host
 pub struct Attempt {
     pub lease: Lease,
     pub turn: Turn,
@@ -44,12 +44,10 @@ pub struct Attempt {
 }
 
 impl Attempt {
-    // `CreateAgent`, the prompt to an answer, then `DeleteAgent`, on a task
-    // of its own: dropping this future ends the run, never the delete. A
-    // failure is marked as before any candidate when it struck in
-    // `CreateAgent` or the opening `Send`.
+    // `CreateAgent`, prompt to answer, then `DeleteAgent` on its own task
+    // Drop ends the run, never the delete; opening failures are `before_candidate`
     pub async fn complete(self) -> Result<Answer, Unanswered> {
-        // the guard's cancel is how the task learns nobody is waiting any more
+        // drop cancels the run
         let cancel = CancellationToken::new();
         let _cancel_on_drop = cancel.clone().drop_guard();
 
@@ -61,8 +59,7 @@ impl Attempt {
         })
     }
 
-    // The whole life of one agent, in order. The answer waits on the
-    // delete, so the lease — and the worker — go only after.
+    // Whole life in order: answer waits on delete, so lease goes last
     async fn run(self, cancel: CancellationToken) -> Result<Answer, Unanswered> {
         let mut agent = Agent::create(self, cancel).await.map_err(Unanswered::before_candidate)?;
         let result = agent.rounds().await;
@@ -72,8 +69,7 @@ impl Attempt {
     }
 }
 
-// One completion's agent on a leased worker, from `CreateAgent` to
-// `DeleteAgent`.
+// One completion's agent on a leased worker, `CreateAgent` to `DeleteAgent`
 struct Agent {
     handle: Handle,
     prompt: Prompt,
@@ -85,8 +81,7 @@ struct Agent {
 }
 
 impl Agent {
-    // `CreateAgent`, bounded by one inactivity window and the worker's exit.
-    // A failure here is one the guest has seen nothing of.
+    // `CreateAgent`, bounded by inactivity window and worker exit
     async fn create(attempt: Attempt, cancel: CancellationToken) -> Result<Self> {
         let Attempt {
             lease,
@@ -138,23 +133,17 @@ impl Agent {
         })
     }
 
-    // Send the prompt, then each correction the guest's check returns on
-    // the same session, until a candidate passes or the rounds run out.
+    // Prompt then corrections on the same session until a candidate passes or rounds run out
     async fn rounds(&mut self) -> Result<Answer, Unanswered> {
         let mut prompt = mem::take(&mut self.prompt.text);
         let mut round = 1;
         loop {
-            self.completion.attempt();
-
-            // a candidate is only offered once a `Send` succeeds, so the
-            // opening round's failure is one the guest has seen nothing of
-            let response = match self.send(&prompt).await {
+            // round 1 fails before any candidate, so the guest has seen nothing
+            let response = match self.send(round, &prompt).await {
                 Ok(response) => response,
                 Err(error) if round == 1 => return Err(Unanswered::before_candidate(error)),
                 Err(error) => return Err(Unanswered::settled(error)),
             };
-            let tools = response.transcript.as_ref().map_or(0, |t| t.turns.len());
-            self.completion.record(response.result.len(), tools, response.usage.as_ref());
 
             let candidate = self.prompt.format.candidate(&response.result);
             if !self.prompt.check {
@@ -165,7 +154,7 @@ impl Agent {
                 Ok(()) => return Ok(response.answer(candidate)),
                 Err(correction) if round < MAX_ROUNDS => {
                     tracing::debug!(%correction, "check rejected the candidate");
-                    // agents keep their session, so the correction is the prompt
+                    // session persists, so correction becomes the prompt
                     prompt = correction;
                 }
                 Err(correction) => {
@@ -177,9 +166,12 @@ impl Agent {
         }
     }
 
-    async fn send(&mut self, text: &str) -> Result<Response> {
-        // both bounds run from the `Send` call itself, so a worker that takes
-        // the request and never opens the stream is an inactivity failure
+    // One `Send` to its answer, booked on the completion either way
+    #[instrument(level = "debug", skip(self, text))]
+    async fn send(&mut self, round: u32, text: &str) -> Result<Response> {
+        self.completion.attempt();
+
+        // bounds run from `Send`, so an unopened stream is an inactivity failure
         let activity = watch::Sender::new(Instant::now());
         let deadline = self.deadlines.watch(&activity);
         tokio::pin!(deadline);
@@ -191,38 +183,46 @@ impl Agent {
             stream = self.handle.worker().fail_on_exit(self.handle.send(text)) => stream,
             failure = &mut deadline => Err(failure.into()),
         };
+
         let outcome = match opened {
             Ok(stream) => self.follow(stream, &activity, deadline.as_mut()).await,
             Err(error) => Err(error),
         };
 
-        // The run went with its process: how long its stream had been silent
-        // tells a hang the kill ended from a crash mid-stream.
-        if let Err(error) = &outcome
-            && let Some(Failure::WorkerExited(exit)) = error.downcast_ref::<Failure>()
-        {
-            tracing::debug!(
-                pid = exit.pid,
-                silent_ms = elapsed_ms(*activity.borrow()),
-                "run lost with its process"
-            );
+        match &outcome {
+            Ok(response) => {
+                let tools = response.transcript.as_ref().map_or(0, |t| t.turns.len());
+                self.completion.record(response.result.len(), tools, response.usage.as_ref());
+            }
+            // run lost with its process: silence tells a hang killed from a mid-stream crash
+            Err(error) => {
+                if let Some(Failure::WorkerExited(exit)) = error.downcast_ref::<Failure>() {
+                    tracing::debug!(
+                        pid = exit.pid,
+                        silent_ms = elapsed_ms(*activity.borrow()),
+                        "run lost with its process"
+                    );
+                }
+            }
         }
         outcome
     }
 
-    // Follow the run to its terminal result, noting the run id as the
-    // stream names it so a run ended early can be cancelled.
+    // Follow run to terminal result, noting run id for cancel and reporting every `PROGRESS`
     async fn follow(
         &mut self, mut stream: RunStream, activity: &watch::Sender<Instant>,
         mut deadline: Pin<&mut impl Future<Output = Failure>>,
     ) -> Result<Response> {
         let mut log = EventLog::default();
         let mut outcome: Option<RunStreamResult> = None;
+        let mut frames: u64 = 0;
+        let mut progress = interval_at(Instant::now() + PROGRESS, PROGRESS);
 
         loop {
             tokio::select! {
                 message = self.handle.worker().fail_on_exit(stream.next()) => {
                     let Some(message) = message? else { break };
+                    frames += 1;
                     activity.send_replace(Instant::now());
                     log.observe_message(&message);
                     if self.handle.run_id.is_none() {
@@ -235,17 +235,25 @@ impl Agent {
                         break;
                     }
                 }
+                _ = progress.tick() => {
+                    tracing::info!(
+                        elapsed_s = self.completion.elapsed().as_secs(),
+                        frames,
+                        tool_calls = log.tool_calls(),
+                        silent_s = activity.borrow().elapsed().as_secs(),
+                        "in progress"
+                    );
+                }
                 failure = &mut deadline => return Err(failure.into()),
                 reason = self.session.aborted() => return Err(Failure::Aborted(reason).into()),
-                // an abandoned run is cancelled by the id its opening frame
-                // names, so the stream is followed as far as that frame
+                // abandoned run cancels by id, so follow to the opening frame
                 () = self.cancel.cancelled(), if self.handle.run_id.is_some() => {
                     return Err(abandoned());
                 }
             }
         }
 
-        // the run reached a terminal state; nothing is left to cancel
+        // terminal state: nothing left to cancel
         self.handle.run_id = None;
         let outcome = outcome.context("the run stream ended without a result")?;
         if outcome.status != RunStatus::Finished {
@@ -268,8 +276,7 @@ impl Agent {
         })
     }
 
-    // The one `completion` line, emitted before the delete so its
-    // `duration_ms` ends with the run.
+    // `Completion` line before delete, so `duration_ms` covers the run
     fn finish(&mut self, result: &Result<Answer, Unanswered>) {
         let outcome = match result {
             Ok(_) if self.completion.attempts() > 1 => Outcome::Corrected,
@@ -279,16 +286,13 @@ impl Agent {
         self.completion.finish(outcome);
     }
 
-    // Delete the agent on the worker; its callback route goes after, with
-    // the rest of `self`.
+    // Delete agent on worker; callback route goes with `self`
     async fn delete(self) {
         self.handle.delete().await;
     }
 }
 
-// One agent on the worker it was created on, with what deleting it needs:
-// the lease that keeps that worker, the pin and workspace the delete names,
-// and the run still open on it.
+// Agent on its worker, with what delete needs: lease, pin/workspace, open run
 struct Handle {
     lease: Lease,
     id: String,
@@ -306,9 +310,7 @@ impl Handle {
         self.worker().rpc().send(self.id.clone(), text.to_owned()).await
     }
 
-    // Cancel the run still open, close, then delete — each call bounded,
-    // all of them skipped once the worker is gone — then let the workspace
-    // go, and the lease last.
+    // Cancel, close, delete — each bounded, skipped if worker gone — then workspace, lease last
     async fn delete(self) {
         let Self {
             lease,
@@ -319,31 +321,32 @@ impl Handle {
         } = self;
 
         if let Some(rpc) = lease.worker().live_rpc() {
+            let started = Instant::now();
             if let Some(run_id) = run_id {
                 call("CancelRun", rpc.cancel_run(run_id, id.clone())).await;
             }
             call("CloseAgent", rpc.close_agent(id.clone())).await;
             call("DeleteAgent", rpc.delete_agent(id, operation)).await;
+            tracing::debug!(teardown_ms = elapsed_ms(started), "agent deleted");
         } else {
-            tracing::debug!(agent = %id, "worker exited; skipping agent teardown");
+            tracing::debug!("worker exited; skipping agent teardown");
         }
         drop(workspace);
         drop(lease);
     }
 }
 
-// Inactivity and absolute bounds on one run, from the connect options.
+// Inactivity and absolute bounds on one run, from connect options
 #[derive(Clone, Copy, Debug)]
 pub struct Deadlines {
-    // Kill a run after this long with no stream events.
+    // Kill run after this long with no stream events
     pub inactivity: Duration,
-    // Kill a run after this long, streaming or not.
+    // Kill run after this long, streaming or not
     pub cap: Duration,
 }
 
 impl Deadlines {
-    // Resolve when a run breaches its inactivity or absolute bound; every
-    // value sent on `activity` rearms the inactivity bound.
+    // Resolve on inactivity or cap; `activity` rearms inactivity
     async fn watch(self, activity: &watch::Sender<Instant>) -> Failure {
         let mut activity = activity.subscribe();
         let cap = sleep_until(Instant::now() + self.cap);
@@ -365,15 +368,14 @@ impl Deadlines {
                         cap_secs: self.cap.as_secs(),
                     };
                 }
-                // the sender is borrowed for as long as this is polled, so
-                // the channel never closes under it
+                // sender borrowed while polled, so channel never closes
                 _ = activity.changed() => {}
             }
         }
     }
 }
 
-// One completed turn: the final text plus the observed transcript and usage.
+// Completed turn: final text plus transcript and usage
 #[derive(Debug)]
 struct Response {
     result: String,
@@ -391,17 +393,14 @@ impl Response {
     }
 }
 
-// A completion that produced no answer: the failure, and whether it struck
-// before any candidate had been offered to the guest — in `CreateAgent` or
-// the opening `Send`.
+// No answer: the failure, and whether it struck before any candidate — in `CreateAgent` or opening `Send`
 pub struct Unanswered {
     error: anyhow::Error,
     before_candidate: bool,
 }
 
 impl Unanswered {
-    // A failure in `CreateAgent` or the opening `Send`: the guest has seen
-    // nothing of this agent.
+    // Failure before guest saw the agent
     const fn before_candidate(error: anyhow::Error) -> Self {
         Self {
             error,
@@ -409,7 +408,7 @@ impl Unanswered {
         }
     }
 
-    // A failure to report as it stands.
+    // Failure as-is
     pub const fn settled(error: anyhow::Error) -> Self {
         Self {
             error,
@@ -425,15 +424,12 @@ impl Unanswered {
         self.error
     }
 
-    // Whether a fresh agent may be given the prompt once more: the worker
-    // or its socket was lost before any candidate reached the guest, so
-    // nothing has been said about the prompt and no candidate would be
-    // offered twice.
+    // Retryable if worker lost before any candidate: nothing said twice
     pub fn restartable(&self) -> bool {
         self.before_candidate && Outcome::of(&self.error).lost_worker()
     }
 
-    // The process that exited under the completion, when that is the failure.
+    // Exiting process, when that is the failure
     pub fn pid(&self) -> Option<u32> {
         match self.error.downcast_ref::<Failure>() {
             Some(Failure::WorkerExited(exit)) => Some(exit.pid),
@@ -442,16 +438,14 @@ impl Unanswered {
     }
 }
 
-// The failure a run ends with once the guest has dropped the completion: it
-// reaches no one, and the `completion` line reads `abort`.
+// Guest dropped completion: reaches no one, `completion` reads `abort`
 fn abandoned() -> anyhow::Error {
     Failure::Aborted("the guest dropped the completion".to_owned()).into()
 }
 
-// One best-effort teardown call: a failure is logged and a silence is
-// bounded.
+// Best-effort teardown: failures logged, silence bounded
 async fn call(method: &'static str, rpc: impl Future<Output = Result<()>>) {
-    match timeout(TEARDOWN_TIMEOUT, rpc).await {
+    match timeout(TEARDOWN, rpc).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::debug!(%error, method, "agent teardown call failed"),
         Err(_elapsed) => tracing::warn!(method, "agent teardown call unanswered"),
@@ -477,7 +471,7 @@ mod tests {
     const FRAME_GAP: Duration = Duration::from_millis(800);
     const EXITED: Exit = Exit { status: None, pid: 7 };
 
-    // The clock is paused, so every instant below is exact.
+    // Clock paused, so every instant below is exact
 
     #[tokio::test(start_paused = true)]
     async fn silent() {

@@ -115,6 +115,11 @@ impl Outcome {
         matches!(self, Self::WorkerExit | Self::Transport)
     }
 
+    // Whether the guest got an answer, on the opening prompt or corrected.
+    pub const fn answered(self) -> bool {
+        matches!(self, Self::Ok | Self::Corrected)
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",

@@ -42,7 +42,11 @@ impl Pool {
         let queued = Instant::now();
         let permit =
             Arc::clone(&self.permits).acquire_owned().await.context("the agent pool is closed")?;
-        tracing::debug!(wait_ms = elapsed_ms(queued), "agent slot acquired");
+        
+        let wait_ms = elapsed_ms(queued);
+        if wait_ms > 0 {
+            tracing::debug!(wait_ms, "agent slot acquired");
+        }
 
         let registration = Arc::new(self.endpoint.register()?);
         let spawned = Worker::spawn(&registration)?;

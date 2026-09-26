@@ -31,12 +31,12 @@ use support::{
 use tokio::net::TcpListener;
 use tracing_subscriber::layer::SubscriberExt as _;
 
-/// How long the pool may take to be rid of every process once the answers
-/// are in: each lease's process is shut down and waited for first, and a
-/// slot reopens only then.
+// How long the pool may take to be rid of every process once the answers
+// are in: each lease's process is shut down and waited for first, and a
+// slot reopens only then.
 const GONE: Duration = Duration::from_secs(15);
 
-/// The answer text as the JSON object the prompts ask for.
+// The answer text as the JSON object the prompts ask for.
 fn object(answer: &Answer) -> Value {
     let value: Value = serde_json::from_str(&answer.answer)
         .unwrap_or_else(|e| panic!("the answer must be JSON ({e}): {}", answer.answer));
@@ -115,8 +115,8 @@ async fn live_cursor_completes() -> Result<()> {
     Ok(())
 }
 
-/// `agents` completions pending together on `client`: every answer arrives
-/// and carries a verdict, then every process spawned so far is gone.
+// `agents` completions pending together on `client`: every answer arrives
+// and carries a verdict, then every process spawned so far is gone.
 async fn fanout(client: &Client, agents: usize, pids: &SpawnedPids) -> Result<()> {
     let pending: Vec<_> = (0..agents)
         .map(|_| {
@@ -138,10 +138,10 @@ async fn fanout(client: &Client, agents: usize, pids: &SpawnedPids) -> Result<()
     pids.await_gone().await
 }
 
-/// Four completions pending together, the way `emery_sdk::extract` puts its
-/// seams up: one worker per agent on the pooled client, none held
-/// two, every answer arrives, and every process is gone once they have.
-/// `connect()` leaves `max_agents` at four, so nothing here queues.
+// Four completions pending together, the way `emery_sdk::extract` puts its
+// seams up: one worker per agent on the pooled client, none held
+// two, every answer arrives, and every process is gone once they have.
+// `connect()` leaves `max_agents` at four, so nothing here queues.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
 async fn live_fanout() -> Result<()> {
@@ -150,10 +150,10 @@ async fn live_fanout() -> Result<()> {
     fanout(&client, 4, &pids).await
 }
 
-/// `live_fanout` twenty times over on one client: a worker that exits
-/// under the fan-out fails its completion with `cursor-sdk-bridge exited`,
-/// and a lease that does not release leaves its process up, and a slot
-/// closed, for the next round.
+// `live_fanout` twenty times over on one client: a worker that exits
+// under the fan-out fails its completion with `cursor-sdk-bridge exited`,
+// and a lease that does not release leaves its process up, and a slot
+// closed, for the next round.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; slow (20 fan-outs); run with --run-ignored"]
 async fn stress_fanout() -> Result<()> {
@@ -165,12 +165,12 @@ async fn stress_fanout() -> Result<()> {
     Ok(())
 }
 
-/// The pids of every `cursor-sdk-bridge spawned` event, in order.
+// The pids of every `cursor-sdk-bridge spawned` event, in order.
 #[derive(Clone, Default)]
 struct SpawnedPids(Arc<Mutex<Vec<u32>>>);
 
 impl SpawnedPids {
-    /// Capture from the process's subscriber; one row per process.
+    // Capture from the process's subscriber; one row per process.
     fn install() -> Self {
         let pids = Self::default();
         tracing::subscriber::set_global_default(tracing_subscriber::registry().with(pids.clone()))
@@ -182,9 +182,9 @@ impl SpawnedPids {
         self.0.lock().expect("pids lock").clone()
     }
 
-    /// Wait for every process spawned so far to be gone, and with it every
-    /// agent process it forked — the pool whole again, since a slot reopens
-    /// only once its process is.
+    // Wait for every process spawned so far to be gone, and with it every
+    // agent process it forked — the pool whole again, since a slot reopens
+    // only once its process is.
     async fn await_gone(&self) -> Result<()> {
         let deadline = tokio::time::Instant::now() + GONE;
         loop {
@@ -202,8 +202,8 @@ impl SpawnedPids {
     }
 }
 
-/// Whether anything is left of the process group a worker led (`kill -0`
-/// on the group): the worker itself, or an agent process it forked.
+// Whether anything is left of the process group a worker led (`kill -0`
+// on the group): the worker itself, or an agent process it forked.
 fn group_alive(pgid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", "--", &format!("-{pgid}")])
@@ -245,9 +245,9 @@ impl tracing::field::Visit for Spawn {
     }
 }
 
-/// A real worker `kill -9`ed under its opening run: the completion restarts
-/// on a fresh process and still answers. The completion's own process is the
-/// first spawn, the restart the second.
+// A real worker `kill -9`ed under its opening run: the completion restarts
+// on a fresh process and still answers. The completion's own process is the
+// first spawn, the restart the second.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
 async fn worker_killed_mid_run_recovers() -> Result<()> {
@@ -295,8 +295,8 @@ async fn worker_killed_mid_run_recovers() -> Result<()> {
     pids.await_gone().await
 }
 
-/// A request whose only path to the answer is the `lookup` function tool the
-/// stub session answers with [`TOOL_SENTINEL`].
+// A request whose only path to the answer is the `lookup` function tool the
+// stub session answers with `TOOL_SENTINEL`.
 fn tool_request() -> Request {
     Request {
         model: None,
@@ -345,8 +345,8 @@ async fn live_cursor_function_tool() -> Result<()> {
     Ok(())
 }
 
-/// The references-only shape: no lent workspace, built-in tools disabled, the
-/// function tool as the only capability.
+// The references-only shape: no lent workspace, built-in tools disabled, the
+// function tool as the only capability.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
 async fn no_workspace() -> Result<()> {
@@ -419,8 +419,8 @@ async fn uses_mcp() -> Result<()> {
     Ok(())
 }
 
-/// A prompt whose first answer cannot contain the check's word — the agent
-/// only learns it from the correction sent on its session.
+// A prompt whose first answer cannot contain the check's word — the agent
+// only learns it from the correction sent on its session.
 fn check_request() -> Request {
     Request {
         model: None,

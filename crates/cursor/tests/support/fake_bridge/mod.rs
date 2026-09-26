@@ -50,9 +50,9 @@ use self::server::{Callback, Server};
 const SCRIPT_FILE: &str = "script.json";
 const LOG_FILE: &str = "log.jsonl";
 const RELEASES_FILE: &str = "releases.json";
-/// The name the client spawns a worker by.
+// The name the client spawns a worker by.
 const BIN_NAME: &str = "cursor-sdk-bridge";
-/// Where a spawned fake finds its home.
+// Where a spawned fake finds its home.
 const HOME_VAR: &str = "FAKE_BRIDGE_HOME";
 
 /// Where in an agent's lifecycle a [`Fault::Park`] or [`Fault::Hang`]

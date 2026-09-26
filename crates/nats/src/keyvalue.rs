@@ -10,7 +10,6 @@ use omnia_wasi_keyvalue::{Bucket, Cas, FutureResult, WasiKeyValueCtx};
 
 use crate::Client;
 
-/// `wasi-keyvalue` implementation backed by NATS JetStream KV store.
 impl WasiKeyValueCtx for Client {
     fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
         tracing::trace!("opening bucket: {identifier}");
@@ -26,7 +25,7 @@ impl WasiKeyValueCtx for Client {
                         bucket: identifier,
                         history: 1,
                         max_age: Duration::from_mins(10),
-                        max_bytes: 100 * 1024 * 1024, // 100 MiB
+                        max_bytes: 100 * 1024 * 1024,
                         ..Config::default()
                     })
                     .await;
@@ -40,7 +39,6 @@ impl WasiKeyValueCtx for Client {
     }
 }
 
-/// A key-value bucket backed by a NATS JetStream KV store.
 #[derive(Debug)]
 pub struct KvBucket(pub kv::Store);
 
@@ -190,13 +188,13 @@ impl Bucket for KvBucket {
     }
 }
 
-/// The live entry for `key`: delete and purge tombstones read as absent.
+// The live entry for `key`: delete and purge tombstones read as absent.
 async fn live_entry(store: &kv::Store, key: &str) -> Result<Option<kv::Entry>> {
     let entry = store.entry(key).await.with_context(|| format!("reading `{key}`"))?;
     Ok(entry.filter(|entry| entry.operation == kv::Operation::Put))
 }
 
-/// Counter values are 8-byte big-endian `i64`, matching the other backends.
+// Counter values are 8-byte big-endian `i64`, matching the other backends.
 fn decode_counter(key: &str, value: &[u8]) -> Result<i64> {
     let bytes: [u8; 8] = value.try_into().map_err(|_len_mismatch| {
         anyhow!("value at `{key}` is {} bytes, not an 8-byte big-endian integer", value.len())

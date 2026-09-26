@@ -34,8 +34,8 @@ use crate::{Failure, elapsed_ms};
 const MAX_ROUNDS: u32 = 2;
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// One attempt at a completion: the turn to run as an agent on a leased
-/// worker, with the agent's callbacks routed into the tool host.
+// One attempt at a completion: the turn to run as an agent on a leased
+// worker, with the agent's callbacks routed into the tool host.
 pub struct Attempt {
     pub lease: Lease,
     pub turn: Turn,
@@ -44,13 +44,10 @@ pub struct Attempt {
 }
 
 impl Attempt {
-    /// `CreateAgent`, the prompt to an answer, then `DeleteAgent`, on a task
-    /// of its own: dropping this future ends the run, never the delete.
-    ///
-    /// # Errors
-    ///
-    /// Returns the failure, marked as before any candidate when it struck
-    /// in `CreateAgent` or the opening `Send`.
+    // `CreateAgent`, the prompt to an answer, then `DeleteAgent`, on a task
+    // of its own: dropping this future ends the run, never the delete. A
+    // failure is marked as before any candidate when it struck in
+    // `CreateAgent` or the opening `Send`.
     pub async fn complete(self) -> Result<Answer, Unanswered> {
         // the guard's cancel is how the task learns nobody is waiting any more
         let cancel = CancellationToken::new();
@@ -75,8 +72,8 @@ impl Attempt {
     }
 }
 
-/// One completion's agent on a leased worker, from `CreateAgent` to
-/// `DeleteAgent`.
+// One completion's agent on a leased worker, from `CreateAgent` to
+// `DeleteAgent`.
 struct Agent {
     handle: Handle,
     prompt: Prompt,
@@ -289,9 +286,9 @@ impl Agent {
     }
 }
 
-/// One agent on the worker it was created on, with what deleting it needs:
-/// the lease that keeps that worker, the pin and workspace the delete names,
-/// and the run still open on it.
+// One agent on the worker it was created on, with what deleting it needs:
+// the lease that keeps that worker, the pin and workspace the delete names,
+// and the run still open on it.
 struct Handle {
     lease: Lease,
     id: String,
@@ -335,18 +332,18 @@ impl Handle {
     }
 }
 
-/// Inactivity and absolute bounds on one run, from the connect options.
+// Inactivity and absolute bounds on one run, from the connect options.
 #[derive(Clone, Copy, Debug)]
 pub struct Deadlines {
-    /// Kill a run after this long with no stream events.
+    // Kill a run after this long with no stream events.
     pub inactivity: Duration,
-    /// Kill a run after this long, streaming or not.
+    // Kill a run after this long, streaming or not.
     pub cap: Duration,
 }
 
 impl Deadlines {
-    /// Resolve when a run breaches its inactivity or absolute bound; every
-    /// value sent on `activity` rearms the inactivity bound.
+    // Resolve when a run breaches its inactivity or absolute bound; every
+    // value sent on `activity` rearms the inactivity bound.
     async fn watch(self, activity: &watch::Sender<Instant>) -> Failure {
         let mut activity = activity.subscribe();
         let cap = sleep_until(Instant::now() + self.cap);
@@ -394,9 +391,9 @@ impl Response {
     }
 }
 
-/// A completion that produced no answer: the failure, and whether it struck
-/// before any candidate had been offered to the guest — in `CreateAgent` or
-/// the opening `Send`.
+// A completion that produced no answer: the failure, and whether it struck
+// before any candidate had been offered to the guest — in `CreateAgent` or
+// the opening `Send`.
 pub struct Unanswered {
     error: anyhow::Error,
     before_candidate: bool,
@@ -412,7 +409,7 @@ impl Unanswered {
         }
     }
 
-    /// A failure to report as it stands.
+    // A failure to report as it stands.
     pub const fn settled(error: anyhow::Error) -> Self {
         Self {
             error,
@@ -428,15 +425,15 @@ impl Unanswered {
         self.error
     }
 
-    /// Whether a fresh agent may be given the prompt once more: the worker
-    /// or its socket was lost before any candidate reached the guest, so
-    /// nothing has been said about the prompt and no candidate would be
-    /// offered twice.
+    // Whether a fresh agent may be given the prompt once more: the worker
+    // or its socket was lost before any candidate reached the guest, so
+    // nothing has been said about the prompt and no candidate would be
+    // offered twice.
     pub fn restartable(&self) -> bool {
         self.before_candidate && Outcome::of(&self.error).lost_worker()
     }
 
-    /// The process that exited under the completion, when that is the failure.
+    // The process that exited under the completion, when that is the failure.
     pub fn pid(&self) -> Option<u32> {
         match self.error.downcast_ref::<Failure>() {
             Some(Failure::WorkerExited(exit)) => Some(exit.pid),

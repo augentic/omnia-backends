@@ -32,15 +32,15 @@ use support::harness::{
 use tokio::task::JoinHandle;
 use tracing_subscriber::layer::SubscriberExt as _;
 
-/// The inactivity window the deadline rows run with.
+// The inactivity window the deadline rows run with.
 const WINDOW: Duration = Duration::from_secs(1);
-/// `agent.rs`'s bound on one teardown call.
+// `agent.rs`'s bound on one teardown call.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// `worker.rs`'s bound on a graceful exit: the `Shutdown` RPC and the exit
-/// it asks for, together.
+// `worker.rs`'s bound on a graceful exit: the `Shutdown` RPC and the exit
+// it asks for, together.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// `worker.rs`'s bound on binding `sdk.v1` over the ready line (token read,
-/// `Ping`, `GetVersion`).
+// `worker.rs`'s bound on binding `sdk.v1` over the ready line (token read,
+// `Ping`, `GetVersion`).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn with_window(window: Duration, max_agents: usize) -> ConnectOptions {
@@ -50,8 +50,8 @@ fn with_window(window: Duration, max_agents: usize) -> ConnectOptions {
     }
 }
 
-/// The `fanout_abandon` guest on its own task, so the test can steer the
-/// fake while it runs.
+// The `fanout_abandon` guest on its own task, so the test can steer the
+// fake while it runs.
 fn abandon_guest(client: &Client, width: usize) -> JoinHandle<()> {
     let client = client.clone();
     tokio::spawn(async move {
@@ -64,7 +64,7 @@ fn echo_guest(client: &Client) -> JoinHandle<()> {
     tokio::spawn(async move { run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await })
 }
 
-/// Wait until the fake has recorded `count` `rpc`s.
+// Wait until the fake has recorded `count` `rpc`s.
 async fn await_rpcs(log: impl Fn() -> Log + Sync, rpc: Rpc, count: usize, within: Duration) {
     fake_bridge::poll(|| log().count(rpc) >= count, within, &format!("{count} {rpc:?}(s)")).await;
 }
@@ -74,18 +74,18 @@ fn killed(process: &Process) {
     assert_eq!(process.count(Rpc::Shutdown), 0, "process {} was killed, not asked", process.number);
 }
 
-/// The `Failure::WorkerExited` detail a `SIGKILL`ed worker fails with.
+// The `Failure::WorkerExited` detail a `SIGKILL`ed worker fails with.
 const KILLED: &str = "cursor-sdk-bridge exited (signal: 9 (SIGKILL))";
-/// The full sequence of a completion that answered.
+// The full sequence of a completion that answered.
 const ANSWERED: [Rpc; 4] = [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent];
-/// The full sequence of a completion whose run was still open when it ended
-/// — at a deadline, dropped, or with its stream lost — and was cancelled
-/// before its agent was torn down.
+// The full sequence of a completion whose run was still open when it ended
+// — at a deadline, dropped, or with its stream lost — and was cancelled
+// before its agent was torn down.
 const CANCELLED: [Rpc; 5] =
     [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::CloseAgent, Rpc::DeleteAgent];
 
-/// The two workers of a two-way abandon: the one that recorded `rpc`, and
-/// the one that did not.
+// The two workers of a two-way abandon: the one that recorded `rpc`, and
+// the one that did not.
 fn split_by(log: &Log, rpc: Rpc) -> (Process, Process) {
     let mut workers = log.workers().into_iter();
     let (Some(first), Some(second), None) = (workers.next(), workers.next(), workers.next()) else {
@@ -97,7 +97,7 @@ fn split_by(log: &Log, rpc: Rpc) -> (Process, Process) {
     (with, without)
 }
 
-/// The two workers a restarted completion leaves behind, in start order.
+// The two workers a restarted completion leaves behind, in start order.
 fn restarted(log: &Log) -> (Process, Process) {
     let mut workers = log.workers().into_iter();
     let (first, second) = (workers.next(), workers.next());
@@ -107,8 +107,8 @@ fn restarted(log: &Log) -> (Process, Process) {
     (first, second)
 }
 
-/// The second attempt began only once the first attempt's process was
-/// gone: with one slot, the restart waits for the dead lease to be reaped.
+// The second attempt began only once the first attempt's process was
+// gone: with one slot, the restart waits for the dead lease to be reaped.
 fn restarted_after(first: &Process, second: &Process) {
     let first_last = first.events.last().map(Event::at).expect("the first attempt recorded");
     let second_first = second.events.first().map(Event::at).expect("the second attempt recorded");
@@ -379,10 +379,10 @@ async fn lease_waits() {
     }
 }
 
-/// `CreateAgent` never answered, one slot: the completion gives up after
-/// one window and its worker is asked to go with nothing to tear down; the
-/// next completion gets a worker of its own and reaches its own
-/// `CreateAgent`.
+// `CreateAgent` never answered, one slot: the completion gives up after
+// one window and its worker is asked to go with nothing to tear down; the
+// next completion gets a worker of its own and reaches its own
+// `CreateAgent`.
 #[tokio::test]
 async fn hang_on_create() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::CreateAgent)));
@@ -856,7 +856,7 @@ async fn callback_token_revoked_after_exit() {
 // Logging
 // ------------------------------------------------------------------------
 
-/// Every event's fields, flattened to text.
+// Every event's fields, flattened to text.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<String>>>);
 

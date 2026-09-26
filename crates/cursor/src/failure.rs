@@ -56,31 +56,31 @@ impl Failure {
     }
 }
 
-/// How one completion came out: the closed set of `outcome` values the
-/// `completion` event carries.
+// How one completion came out: the closed set of `outcome` values the
+// `completion` event carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// Answered on the opening prompt.
+    // Answered on the opening prompt.
     Ok,
-    /// Answered after the guest's check rejected a candidate.
+    // Answered after the guest's check rejected a candidate.
     Corrected,
     Timeout,
     Inactive,
-    /// [`Failure::Aborted`], or a completion dropped before it finished.
+    // `Failure::Aborted`, or a completion dropped before it finished.
     Abort,
     WorkerExit,
-    /// An [`RpcError::Transport`]: the socket to the worker failed below
-    /// Connect.
+    // An `RpcError::Transport`: the socket to the worker failed below
+    // Connect.
     Transport,
-    /// The guest's check rejected every candidate.
+    // The guest's check rejected every candidate.
     Exhausted,
-    /// The worker or the provider answered with an error: a
-    /// [`Failure::Run`], an [`RpcError::Connect`], or anything else.
+    // The worker or the provider answered with an error: a
+    // `Failure::Run`, an `RpcError::Connect`, or anything else.
     Error,
 }
 
 impl Outcome {
-    /// Classify a failed `complete`.
+    // Classify a failed `complete`.
     pub fn of(error: &anyhow::Error) -> Self {
         if let Some(failure) = error.downcast_ref::<Failure>() {
             return Self::of_failure(failure);
@@ -106,16 +106,15 @@ impl Outcome {
         }
     }
 
-    /// Whether the worker, or the socket to it, was lost under the
-    /// completion. Neither says anything about the prompt, so a fresh
-    /// worker may be given it again; every other outcome is the worker
-    /// answering — a Connect error, an end-stream error, a run that ended
-    /// in a failing status — and is not.
+    // Whether the worker, or the socket to it, was lost under the
+    // completion. Neither says anything about the prompt, so a fresh
+    // worker may be given it again; every other outcome is the worker
+    // answering — a Connect error, an end-stream error, a run that ended
+    // in a failing status — and is not.
     pub const fn lost_worker(self) -> bool {
         matches!(self, Self::WorkerExit | Self::Transport)
     }
 
-    /// The `outcome` field value.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "ok",

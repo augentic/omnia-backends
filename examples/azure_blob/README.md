@@ -72,5 +72,5 @@ cargo run --example azure_blob
 For debug-level tracing output:
 
 ```bash
-RUST_LOG=debug,opentelemetry_sdk=off cargo run --example azure_blob
+RUST_LOG=debug cargo run --example azure_blob
 ```

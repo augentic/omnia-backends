@@ -15,8 +15,7 @@ use std::fmt::Write;
 use anyhow::bail;
 use omnia_wasi_docstore::{ComparisonOp, FilterTree, ScalarValue};
 
-/// Validates that a field name is a safe `OData` property identifier
-/// (letters, digits, and underscores, starting with a letter or underscore).
+// A property name is emitted unquoted, so it must be a bare identifier.
 fn validate_field(field: &str) -> anyhow::Result<()> {
     if field.is_empty()
         || !field.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')

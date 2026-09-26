@@ -1,9 +1,4 @@
-//! A multi-provider generative-AI model backend.
-//!
-//! The genai SDK's dependency tree pulls duplicate transitive crates (e.g.
-//! `schemars`, `indexmap`); these are outside this crate's control and cannot
-//! be unified without patching upstream, so silence the workspace `cargo` lint
-//! here.
+#![doc = include_str!("../README.md")]
 
 mod model;
 
@@ -46,9 +41,9 @@ impl Backend for Client {
     }
 }
 
-/// A resolver sending every request to `endpoint` in place of the provider's
-/// own base URL. Auth is untouched: the SDK still reads the key the model
-/// id's provider expects from the environment.
+// A resolver sending every request to `endpoint` in place of the provider's
+// own base URL. Auth is untouched: the SDK still reads the key the model
+// id's provider expects from the environment.
 fn endpoint_resolver(endpoint: &str) -> Result<ServiceTargetResolver> {
     ensure!(
         endpoint.starts_with("http://") || endpoint.starts_with("https://"),

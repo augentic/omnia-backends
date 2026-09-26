@@ -39,8 +39,8 @@ async fn write_read_delete() -> Result<()> {
     Ok(())
 }
 
-/// Live counterpart of the `range_options` unit cases: the service must honor
-/// the HTTP `Range` each (start, end) pair translates to.
+// Live counterpart of the `range_options` unit cases: the service must honor
+// the HTTP `Range` each (start, end) pair translates to.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
 async fn ranged_reads() -> Result<()> {
@@ -83,9 +83,9 @@ async fn ranged_reads() -> Result<()> {
     Ok(())
 }
 
-/// Plugin-store round-trip over the dedicated `omnia-plugins` container:
-/// content by digest, release records per registry, and disjointness from a
-/// guest container named `plugins`.
+// Plugin-store round-trip over the dedicated `omnia-plugins` container:
+// content by digest, release records per registry, and disjointness from a
+// guest container named `plugins`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
 async fn plugin_store() -> Result<()> {

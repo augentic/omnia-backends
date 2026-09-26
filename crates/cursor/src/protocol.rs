@@ -44,8 +44,8 @@ use serde_json::Value;
 const END_STREAM: u8 = 0x02;
 const COMPRESSED: u8 = 0x01;
 
-/// A cloneable `sdk.v1` client bound to one process's loopback endpoint and
-/// bearer token.
+// A cloneable `sdk.v1` client bound to one process's loopback endpoint and
+// bearer token.
 #[derive(Clone)]
 pub struct Rpc {
     hyper: HyperClient<HttpConnector, Full<Bytes>>,
@@ -54,8 +54,8 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    /// Bind to `base` and prove the process answers `sdk.v1` (`Ping`, then
-    /// `GetVersion`). Unbounded: the caller holds the handshake's bound.
+    // Bind to `base` and prove the process answers `sdk.v1` (`Ping`, then
+    // `GetVersion`). Unbounded: the caller holds the handshake's bound.
     pub async fn connect(base: &str, token: &str) -> Result<Self> {
         ensure_loopback(base)?;
         let rpc = Self {
@@ -70,18 +70,16 @@ impl Rpc {
         Ok(rpc)
     }
 
-    /// `Ping`: verify the control endpoint answers.
     pub async fn ping(&self) -> Result<()> {
         self.unary_empty("SdkBridgeControlService/Ping", &Empty {}).await
     }
 
-    /// `GetVersion`: the process's protocol and capabilities.
     pub async fn get_version(&self) -> Result<GetVersionResponse> {
         self.unary("SdkBridgeControlService/GetVersion", &Empty {}).await
     }
 
-    /// `Shutdown`: ask the process to exit, giving its agents `grace` to
-    /// finish (whole seconds, saturating).
+    // Ask the process to exit, giving its agents `grace` to finish (whole
+    // seconds, saturating).
     pub async fn shutdown(&self, grace: Duration) -> Result<()> {
         let request = ShutdownRequest {
             grace_seconds: u32::try_from(grace.as_secs()).unwrap_or(u32::MAX),
@@ -89,12 +87,11 @@ impl Rpc {
         self.unary_empty("SdkBridgeControlService/Shutdown", &request).await
     }
 
-    /// `CreateAgent`: one fresh agent from the completion's options.
     pub async fn create_agent(&self, options: AgentOptions) -> Result<CreateAgentResponse> {
         self.unary("SdkAgentService/CreateAgent", &CreateAgentRequest { options }).await
     }
 
-    /// `CancelRun`: best-effort cancel of an abandoned run.
+    // Best-effort cancel of an abandoned run.
     pub async fn cancel_run(&self, run_id: String, agent_id: String) -> Result<()> {
         let request = CancelRunRequest {
             run_id,
@@ -103,15 +100,15 @@ impl Rpc {
         self.unary_empty("SdkAgentService/CancelRun", &request).await
     }
 
-    /// `CloseAgent`: release the live handle. Durable rows stay until delete.
+    // Release the live handle; durable rows stay until delete.
     pub async fn close_agent(&self, agent_id: String) -> Result<()> {
         gone_ok(
             self.unary_empty("SdkAgentService/CloseAgent", &CloseAgentRequest { agent_id }).await,
         )
     }
 
-    /// `DeleteAgent`: discard durable session state. Local lookup is
-    /// cwd-scoped, so the options must name the create-time workspace.
+    // Discard durable session state. Local lookup is cwd-scoped, so the
+    // options must name the create-time workspace.
     pub async fn delete_agent(
         &self, agent_id: String, options: AgentOperationOptions,
     ) -> Result<()> {
@@ -119,7 +116,7 @@ impl Rpc {
         gone_ok(self.unary_empty("SdkAgentService/DeleteAgent", &request).await)
     }
 
-    /// `Send`: one agent turn; the stream yields the run's messages.
+    // One agent turn; the stream yields the run's messages.
     pub async fn send(&self, agent_id: String, text: String) -> Result<RunStream> {
         let request = SendRequest {
             agent_id,
@@ -191,18 +188,14 @@ impl fmt::Debug for Rpc {
     }
 }
 
-/// The typed message stream of one `Send` call: envelope framing, end-stream
-/// errors, keepalives, and unparsable frames are all absorbed here, so a
-/// yielded message is always real progress.
+// The typed message stream of one `Send` call: envelope framing, end-stream
+// errors, keepalives, and unparsable frames are all absorbed here, so a
+// yielded message is always real progress.
 pub struct RunStream(FrameStream);
 
 impl RunStream {
-    /// The next run message, or `None` once the run stream ends.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error on transport failures or when the stream ends with a
-    /// Connect error.
+    // The next run message, or `None` once the run stream ends; a stream
+    // that ends with a Connect error is that error.
     pub async fn next(&mut self) -> Result<Option<RunStreamMessage>> {
         while let Some(frame) = self.0.next().await? {
             if frame.is_end_stream() {
@@ -296,7 +289,6 @@ impl RpcError {
         }
     }
 
-    /// A socket failure while `doing`.
     pub(crate) fn io(
         method: &str, doing: &'static str, source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
@@ -307,8 +299,8 @@ impl RpcError {
         }
     }
 
-    /// The body ended with a partial envelope still buffered: an unexpected
-    /// EOF while reading the stream.
+    // The body ended with a partial envelope still buffered: an unexpected
+    // EOF while reading the stream.
     #[must_use]
     pub(crate) fn truncated(method: &str, buffered: usize) -> Self {
         let eof = std::io::Error::new(
@@ -523,9 +515,9 @@ pub struct ToolList {
     pub names: Vec<String>,
 }
 
-/// Local delete/get/archive are cwd-scoped; the key is the same pin
-/// `CreateAgent` sent so a later call does not depend on the process's env
-/// fallback.
+// Local delete/get/archive are cwd-scoped; the key is the same pin
+// `CreateAgent` sent so a later call does not depend on the process's env
+// fallback.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentOperationOptions {
@@ -627,14 +619,14 @@ struct EndStreamResponse {
 
 // --- Run streaming ---
 
-/// One frame of a `Send` stream; an empty frame (no envelope case, no
-/// offset) is a keepalive, and so is any case this backend does not know.
+// One frame of a `Send` stream; an empty frame (no envelope case, no
+// offset) is a keepalive, and so is any case this backend does not know.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunStreamMessage {
     pub sdk_message: Option<SdkMessage>,
     pub result: Option<RunStreamResult>,
-    /// Present on the closing frame.
+    // Present on the closing frame.
     pub done: Option<IgnoredAny>,
     offset: Option<String>,
 }
@@ -648,8 +640,8 @@ impl RunStreamMessage {
     }
 }
 
-/// A typed conversation event; `kind` mirrors the public SDK's message types
-/// (`system`, `assistant`, `tool_call`, `status`, ...).
+// A typed conversation event; `kind` mirrors the public SDK's message types
+// (`system`, `assistant`, `tool_call`, `status`, ...).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SdkMessage {
@@ -748,12 +740,12 @@ fn run_status<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RunStatus, D
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunResult {
-    /// Final assistant text for a completed run.
+    // Final assistant text for a completed run.
     pub result: String,
     pub usage: Option<TokenUsage>,
 }
 
-/// Billed token counts; `int64` arrives as a string or a number.
+// Billed token counts; `int64` arrives as a string or a number.
 #[allow(clippy::struct_field_names)] // names mirror the wire message
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

@@ -10,7 +10,6 @@ use anyhow::Context;
 use base64ct::{Base64, Encoding};
 use omnia::Backend;
 
-/// Default HTTP request timeout for Azure Table operations.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Backend client for Azure Table storage.
@@ -19,7 +18,6 @@ pub struct Client {
     options: Arc<ConnectOptions>,
     http: reqwest::Client,
     base_url: Arc<str>,
-    /// Pre-decoded HMAC signing key (from base64 account key).
     hmac_key: Arc<[u8]>,
 }
 

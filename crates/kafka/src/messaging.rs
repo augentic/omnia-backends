@@ -17,7 +17,6 @@ use tokio::sync::mpsc;
 
 const CAPACITY: usize = 1024;
 
-/// `wasi-messaging` implementation backed by Kafka via `rdkafka`.
 impl WasiMessagingCtx for crate::Client {
     fn connect(&self) -> FutureResult<Arc<dyn Client>> {
         let client = self.clone();
@@ -25,7 +24,6 @@ impl WasiMessagingCtx for crate::Client {
     }
 }
 
-/// Translate an incoming Kafka message into the host's [`Message`].
 fn from_kafka(msg: &OwnedMessage, payload: Vec<u8>) -> Message {
     let metadata = msg.headers().map(|headers| {
         let mut md = HashMap::new();
@@ -52,7 +50,7 @@ impl Client for crate::Client {
             };
             let registry = client.registry;
 
-            // spawn a task to read messages and forward subscriber
+            // forward the consumer stream to the subscriber
             let (sender, receiver) = mpsc::channel::<Message>(CAPACITY);
             tokio::spawn(async move {
                 consumer
@@ -93,8 +91,6 @@ impl Client for crate::Client {
     fn send(&self, topic: String, message: Message) -> FutureResult<()> {
         let client = self.clone();
 
-        // TODO: add offset to header??
-
         async move {
             // schema registry validation when available
             let payload = if let Some(sr) = &client.registry {
@@ -110,7 +106,7 @@ impl Client for crate::Client {
             let mut record =
                 BaseRecord::to(&topic).payload(&payload).key(key.as_bytes()).timestamp(now);
 
-            // partitioning
+            // an explicit partition, else the key's KafkaJS partition
             let partition = metadata.get("partition").cloned().unwrap_or_default();
             let partition = partition.parse().unwrap_or(-1);
             if partition >= 0 {
@@ -136,7 +132,6 @@ impl Client for crate::Client {
     }
 }
 
-/// Async stream of Kafka messages forwarded from a background consumer task.
 #[derive(Debug)]
 pub struct Subscriber {
     receiver: mpsc::Receiver<Message>,

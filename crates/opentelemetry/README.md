@@ -13,7 +13,7 @@ MSRV: Rust 1.97
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `OTEL_GRPC_URL` | no | `http://localhost:4317` | Collector gRPC endpoint |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | `http://localhost:4317` | Collector gRPC endpoint — the same variable the omnia host exports its own spans to |
 
 ## Usage
 
@@ -49,7 +49,7 @@ OTLP/gRPC collector. It is `#[ignore]`d so it never runs in CI; run it explicitl
 ```bash
 docker run -d --name otelcol -p 4317:4317 otel/opentelemetry-collector:latest
 
-OTEL_GRPC_URL=http://localhost:4317 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
   cargo nextest run -p omnia-opentelemetry --run-ignored all
 ```
 

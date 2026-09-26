@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::Client;
 
-/// A stored blob document in MongoDB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Blob {
     name: String,
@@ -22,7 +21,6 @@ pub struct Blob {
     created_at: u64,
 }
 
-/// `wasi-blobstore` implementation backed by MongoDB collections.
 impl WasiBlobstoreCtx for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("creating container: {name}");
@@ -65,7 +63,6 @@ impl WasiBlobstoreCtx for Client {
     }
 }
 
-/// A blobstore container backed by a MongoDB collection.
 #[derive(Debug)]
 pub struct MongoDbContainer {
     name: String,
@@ -86,7 +83,6 @@ impl Container for MongoDbContainer {
         })
     }
 
-    /// Get the value associated with the key.
     fn get_data(&self, name: String, _start: u64, _end: u64) -> FutureResult<Option<Bytes>> {
         tracing::trace!("getting object data: {name}");
         let collection = self.collection.clone();
@@ -108,7 +104,6 @@ impl Container for MongoDbContainer {
         .boxed()
     }
 
-    /// Set the value associated with the key.
     fn write_data(&self, name: String, data: Bytes) -> FutureResult<()> {
         tracing::trace!("writing object data: {name}");
         let collection = self.collection.clone();
@@ -144,7 +139,6 @@ impl Container for MongoDbContainer {
         .boxed()
     }
 
-    /// List all objects in the container.
     fn list_objects(&self) -> FutureResult<Vec<String>> {
         tracing::trace!("listing objects");
         let collection = self.collection.clone();
@@ -165,7 +159,6 @@ impl Container for MongoDbContainer {
         .boxed()
     }
 
-    /// Delete the value associated with the key.
     fn delete_object(&self, name: String) -> FutureResult<()> {
         let collection = self.collection.clone();
 
@@ -176,7 +169,6 @@ impl Container for MongoDbContainer {
         .boxed()
     }
 
-    /// Check if the object exists.
     fn has_object(&self, name: String) -> FutureResult<bool> {
         tracing::trace!("checking existence of object: {name}");
         let collection = self.collection.clone();

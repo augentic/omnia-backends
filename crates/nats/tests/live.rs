@@ -61,7 +61,7 @@ async fn keyvalue_atomics() -> Result<()> {
     Ok(())
 }
 
-/// A collision-resistant suffix so parallel runs never share a live key.
+// A collision-resistant suffix so parallel runs never share a live key.
 fn unique(prefix: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

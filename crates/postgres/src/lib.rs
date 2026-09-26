@@ -19,11 +19,9 @@ use webpki_roots::TLS_SERVER_ROOTS;
 #[derive(Clone, Debug)]
 pub struct Client(HashMap<String, Pool>);
 
-/// Postgres resource builder
 impl Backend for Client {
     type ConnectOptions = ConnectOptions;
 
-    /// Connect to `PostgreSQL` with provided options and return a connection pool
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
         let mut pools = HashMap::new();
@@ -77,7 +75,7 @@ impl Backend for Client {
                     .context(format!("failed to create postgres pool: '{}'", entry.name))?
             };
 
-            // Check pool is usable
+            // check the pool is usable
             let cnn = pool.get().await;
             if cnn.is_err() {
                 return Err(anyhow!("failed to get connection from pool: {:?}", cnn.err()));
@@ -163,6 +161,5 @@ impl omnia::FromEnv for ConnectOptions {
             default_pool: default,
             additional_pools: extras,
         })
-        // Self::from_env().finalize().context("issue loading connection options")
     }
 }

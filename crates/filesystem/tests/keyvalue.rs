@@ -1,4 +1,8 @@
-//! Filesystem keyvalue contract tests.
+//! The filesystem backend at the `omnia:keyvalue` host boundary
+//! (`WasiKeyValueCtx`): round trips, CAS under contention, counters and
+//! their encoding, and a bucket's tree kept apart from a same-named
+//! container's, against a temporary directory. No service, so it runs in
+//! CI.
 
 use std::sync::Arc;
 

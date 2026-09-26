@@ -40,7 +40,7 @@ const PATH: &str = "/sdk.v1.SdkCustomToolCallbackService/CallCustomTool";
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// The bound loopback endpoint; dropping it stops serving.
+// The bound loopback endpoint; dropping it stops serving.
 #[derive(Debug)]
 pub struct Endpoint {
     url: String,
@@ -49,11 +49,7 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Bind `127.0.0.1:0` and start serving.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the loopback bind fails.
+    // Bind `127.0.0.1:0` and start serving.
     pub async fn bind() -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -70,13 +66,9 @@ impl Endpoint {
         })
     }
 
-    /// Register one worker: a fresh bearer token for it to call
-    /// back with, and its own agent table behind that token. Dropping the
-    /// registration revokes the token.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the system random source is unavailable.
+    // Register one worker: a fresh bearer token for it to call back with,
+    // and its own agent table behind that token. Dropping the registration
+    // revokes the token.
     pub fn register(&self) -> Result<Registration> {
         let token = gen_token()?;
         let sessions = Arc::new(Sessions::default());
@@ -125,8 +117,8 @@ async fn serve(listener: TcpListener, handler: Arc<Handler>) {
     }
 }
 
-/// One worker's callback identity: the URL and bearer token it is
-/// started with, and the agents routed under that token.
+// One worker's callback identity: the URL and bearer token it is
+// started with, and the agents routed under that token.
 #[must_use]
 pub struct Registration {
     handler: Arc<Handler>,
@@ -136,19 +128,19 @@ pub struct Registration {
 }
 
 impl Registration {
-    /// The full callback URL handed to the worker (`--tool-callback-url`).
+    // The full callback URL handed to the worker (`--tool-callback-url`).
     pub fn url(&self) -> &str {
         &self.url
     }
 
-    /// The bearer token handed to the worker (`--tool-callback-auth-token`).
+    // The bearer token handed to the worker (`--tool-callback-auth-token`).
     pub fn token(&self) -> &str {
         &self.token
     }
 
-    /// Route this worker's callbacks for `agent_id` into `tool_host` until
-    /// the returned guard drops; the guard also carries the abort the first
-    /// hard tool failure ends the completion with.
+    // Route this worker's callbacks for `agent_id` into `tool_host` until
+    // the returned guard drops; the guard also carries the abort the first
+    // hard tool failure ends the completion with.
     pub fn attach(&self, agent_id: String, tool_host: Arc<dyn ToolHost>) -> Attached {
         let (abort, aborted) = oneshot::channel();
         self.sessions.insert(
@@ -181,7 +173,7 @@ impl Drop for Registration {
     }
 }
 
-/// One agent's callback route, detached on drop.
+// One agent's callback route, detached on drop.
 #[must_use]
 pub struct Attached {
     sessions: Arc<Sessions>,
@@ -190,8 +182,8 @@ pub struct Attached {
 }
 
 impl Attached {
-    /// The reason the first hard tool failure aborted the completion with;
-    /// resolves once at most.
+    // The reason the first hard tool failure aborted the completion with;
+    // resolves once at most.
     pub async fn aborted(&mut self) -> String {
         // the sender lives in the session until this guard drops, so the
         // channel never closes unsent under a live guard
@@ -209,7 +201,7 @@ impl Drop for Attached {
 
 #[derive(Default)]
 struct Handler {
-    /// Registered workers' agent tables, by bearer token.
+    // Registered workers' agent tables, by bearer token.
     workers: Mutex<HashMap<String, Arc<Sessions>>>,
 }
 
@@ -259,7 +251,7 @@ impl Handler {
         sessions.call_tool(&parts.headers, body).await
     }
 
-    /// The agent table of the worker whose bearer token the request carries.
+    // The agent table of the worker whose bearer token the request carries.
     fn authorize(&self, headers: &HeaderMap) -> Option<Arc<Sessions>> {
         let token = headers.get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?;
         lock(&self.workers).get(token).cloned()
@@ -272,7 +264,7 @@ impl fmt::Debug for Handler {
     }
 }
 
-/// One worker's live completions by `agent_id`.
+// One worker's live completions by `agent_id`.
 #[derive(Debug, Default)]
 struct Sessions {
     entries: Mutex<HashMap<String, Session>>,
@@ -351,9 +343,9 @@ impl Sessions {
     }
 }
 
-/// One live completion's callback route: the session's tool host plus the
-/// abort that ends the completion on a hard (non-repairable) tool failure,
-/// taken by the first such failure.
+// One live completion's callback route: the session's tool host plus the
+// abort that ends the completion on a hard (non-repairable) tool failure,
+// taken by the first such failure.
 #[derive(Debug)]
 struct Session {
     tool_host: Arc<dyn ToolHost>,
@@ -366,7 +358,7 @@ enum Codec {
     Proto,
 }
 
-/// One `CallCustomTool` request, as the JSON codec spells it.
+// One `CallCustomTool` request, as the JSON codec spells it.
 #[derive(Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct ToolCall {

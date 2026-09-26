@@ -18,9 +18,9 @@ use crate::elapsed_ms;
 use crate::failure::Outcome;
 use crate::protocol::{RunStreamMessage, SdkMessage, TokenUsage};
 
-/// One completion's start/finish events: the outcome and what it cost, on
-/// the `complete` span that names the model and format. Drop without
-/// [`Self::finish`] records [`Outcome::Abort`] (a cancelled future).
+// One completion's start/finish events: the outcome and what it cost, on
+// the `complete` span that names the model and format. Drop without
+// `finish` records `Outcome::Abort` (a cancelled future).
 pub struct Completion {
     started: Instant,
     attempts: u32,
@@ -56,7 +56,7 @@ impl Completion {
         self.attempts = self.attempts.saturating_add(1);
     }
 
-    /// Note one answered send and add its tokens to the completion's bill.
+    // Note one answered send and add its tokens to the completion's bill.
     pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
         tracing::debug!(result_bytes = result_len, tool_turns, ?usage, "send answered");
 
@@ -97,7 +97,7 @@ impl Drop for Completion {
     }
 }
 
-/// Reconstructs the tool transcript and run metadata from the SDK stream.
+// Reconstructs the tool transcript and run metadata from the SDK stream.
 #[derive(Default)]
 pub struct EventLog {
     run_id: Option<String>,
@@ -107,7 +107,7 @@ pub struct EventLog {
 }
 
 impl EventLog {
-    /// Absorb one stream message: its event, and the run id its result names.
+    // Absorb one stream message: its event, and the run id its result names.
     pub fn observe_message(&mut self, message: &RunStreamMessage) {
         if let Some(event) = &message.sdk_message {
             self.observe(event);
@@ -137,13 +137,13 @@ impl EventLog {
         }
     }
 
-    /// The run id observed in the stream, for `CancelRun`.
+    // The run id observed in the stream, for `CancelRun`.
     pub fn run_id(&self) -> Option<&str> {
         self.run_id.as_deref()
     }
 
-    /// The last `status`/`system` payload's message — the failure detail when
-    /// a run ends in an error status.
+    // The last `status`/`system` payload's message — the failure detail when
+    // a run ends in an error status.
     pub fn status_message(&self) -> Option<&str> {
         self.status_message.as_deref()
     }
@@ -190,13 +190,13 @@ impl EventLog {
         }
     }
 
-    /// The reconstructed tool transcript, or `None` when no tool completed.
+    // The reconstructed tool transcript, or `None` when no tool completed.
     pub fn finish(self) -> Option<Transcript> {
         if self.turns.is_empty() { None } else { Some(Transcript { turns: self.turns }) }
     }
 }
 
-/// A started tool call awaiting its completion event.
+// A started tool call awaiting its completion event.
 struct PendingCall {
     tool: String,
     args: Value,

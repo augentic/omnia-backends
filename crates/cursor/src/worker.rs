@@ -37,8 +37,8 @@ const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
 const TAIL_LINES: usize = 20;
 const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 
-/// A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`
-/// bound on it. Dropping it asks the worker to go.
+// A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`
+// bound on it. Dropping it asks the worker to go.
 #[derive(Debug)]
 pub struct Worker {
     watched: Watched,
@@ -46,14 +46,9 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Spawn `cursor-sdk-bridge` calling back as `callback`, and watch it.
-    /// The ready-line handshake is left to [`Spawned::handshake`] so a pool
-    /// lease can occupy the slot first.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the state root cannot be created or the
-    /// executable cannot be spawned.
+    // Spawn `cursor-sdk-bridge` calling back as `callback`, and watch it.
+    // The ready-line handshake is left to `Spawned::handshake` so a pool
+    // lease can occupy the slot first.
     pub fn spawn(callback: &Registration) -> Result<Spawned> {
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-")
@@ -86,17 +81,16 @@ impl Worker {
         Supervisor::spawn(child, state_root)
     }
 
-    /// The bound `sdk.v1` client.
     pub const fn rpc(&self) -> &Rpc {
         &self.rpc
     }
 
-    /// The bound `sdk.v1` client, while the worker is still running.
+    // The bound `sdk.v1` client, while the worker is still running.
     pub fn live_rpc(&self) -> Option<&Rpc> {
         self.watched.is_running().then_some(&self.rpc)
     }
 
-    /// `future`, failing as the worker's exit when it exits under it.
+    // `future`, failing as the worker's exit when it exits under it.
     pub async fn fail_on_exit<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
         self.watched.fail_on_exit(future).await
     }
@@ -220,26 +214,22 @@ impl Supervisor {
     }
 }
 
-/// A process [`Worker::spawn`] spawned, watched and killable, with its
-/// ready-line handshake still to run. Dropped, it is killed: nothing is
-/// bound to ask over.
+// A process `Worker::spawn` spawned, watched and killable, with its
+// ready-line handshake still to run. Dropped, it is killed: nothing is
+// bound to ask over.
 pub struct Spawned {
     watched: Watched,
     discovery: oneshot::Receiver<Result<Discovery>>,
 }
 
 impl Spawned {
-    /// Resolves once the process exits, however the handshake goes.
+    // Resolves once the process exits, however the handshake goes.
     pub fn exited(&self) -> impl Future<Output = Exit> + Send + 'static {
         self.watched.exited()
     }
 
-    /// Wait for the ready line and bind `sdk.v1` over it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the ready line never arrives or the RPC
-    /// handshake fails; the process is killed with it.
+    // Wait for the ready line and bind `sdk.v1` over it; a handshake that
+    // fails kills the process with it.
     pub async fn handshake(self) -> Result<Worker> {
         let Self { watched, discovery } = self;
         let scanned = async {

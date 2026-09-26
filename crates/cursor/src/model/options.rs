@@ -16,23 +16,23 @@ use crate::protocol::{
     ModelSelection, ToolList,
 };
 
-/// Everything one completion derives from the request: the agent to create
-/// and the prompt to send it.
+// Everything one completion derives from the request: the agent to create
+// and the prompt to send it.
 pub struct Turn {
     pub agent: AgentSpec,
     pub prompt: Prompt,
 }
 
-/// The prompt to send the agent: its text, the format steering candidate
-/// extraction, and whether the guest checks the answer.
+// The prompt to send the agent: its text, the format steering candidate
+// extraction, and whether the guest checks the answer.
 pub struct Prompt {
     pub text: String,
     pub format: Format,
     pub check: bool,
 }
 
-/// The agent one completion creates: the `CreateAgent` options, the pin
-/// every later call on the agent repeats, and the workspace they point into.
+// The agent one completion creates: the `CreateAgent` options, the pin
+// every later call on the agent repeats, and the workspace they point into.
 pub struct AgentSpec {
     pub options: AgentOptions,
     pub operation: AgentOperationOptions,
@@ -40,13 +40,8 @@ pub struct AgentSpec {
 }
 
 impl Turn {
-    /// Translate the request against the lent workspace path, pinning the
-    /// client's default model and API key into the agent options.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the workspace cannot be prepared or the request
-    /// does not map onto agent options.
+    // Translate the request against the lent workspace path, pinning the
+    // client's default model and API key into the agent options.
     pub async fn prepare(
         request: &Request, lent: Option<&Path>, default_model: &str, api_key: &str,
     ) -> Result<Self> {
@@ -77,8 +72,8 @@ impl Turn {
     }
 }
 
-/// The agent's working directory: the lent tree, or a private empty one for
-/// references-only completions.
+// The agent's working directory: the lent tree, or a private empty one for
+// references-only completions.
 pub enum Workspace {
     Lent(PathBuf),
     Private(tempfile::TempDir),
@@ -203,8 +198,8 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
     )
 }
 
-// The lent/private workspace wire distinction (CI floor). Tool/MCP/model
-// mapping is accepted by `tests/live.rs`.
+// The lent/private workspace wire distinction; tool, MCP and model mapping
+// is accepted by `tests/live.rs`.
 #[cfg(test)]
 mod tests {
     use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};

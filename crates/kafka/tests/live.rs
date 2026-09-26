@@ -23,7 +23,7 @@ use rdkafka::{ClientConfig, Message as _};
 
 const RECV_TIMEOUT: Duration = Duration::from_mins(1);
 
-/// A produce case: payload, message metadata, and the expected partition.
+// A produce case: payload, message metadata, and the expected partition.
 type Case = (&'static str, Vec<(&'static str, &'static str)>, i32);
 
 fn brokers() -> String {
@@ -38,7 +38,7 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}.{nanos}")
 }
 
-/// Raw rdkafka config mirroring the backend's broker/SASL settings.
+// Raw rdkafka config mirroring the backend's broker/SASL settings.
 fn raw_config() -> ClientConfig {
     let mut config = ClientConfig::new();
     config.set("bootstrap.servers", brokers());
@@ -89,9 +89,9 @@ fn keyed_message(payload: &str, metadata: &[(&str, &str)]) -> Message {
     message
 }
 
-/// Keys and expected partitions come from the `KafkaJS` murmur2 vectors pinned
-/// in `partitioner.rs` (partition count 12); the broker landing them there
-/// proves `send` routes through the custom partitioner, not librdkafka's.
+// Keys and expected partitions come from the `KafkaJS` murmur2 vectors pinned
+// in `partitioner.rs` (partition count 12); the broker landing them there
+// proves `send` routes through the custom partitioner, not librdkafka's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable Kafka broker (KAFKA_BROKERS); run with --run-ignored"]
 async fn keyed_sends() -> Result<()> {
@@ -143,9 +143,9 @@ async fn keyed_sends() -> Result<()> {
     Ok(())
 }
 
-/// Registers a JSON schema, sends through the boundary, and asserts both the
-/// Confluent wire layout on the raw bytes (magic byte + schema id + payload)
-/// and that the boundary subscriber hands back the decoded payload.
+// Registers a JSON schema, sends through the boundary, and asserts both the
+// Confluent wire layout on the raw bytes (magic byte + schema id + payload)
+// and that the boundary subscriber hands back the decoded payload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs Kafka + Schema Registry (KAFKA_BROKERS, KAFKA_REGISTRY_URL); run with --run-ignored"]
 async fn registry_wire_format() -> Result<()> {

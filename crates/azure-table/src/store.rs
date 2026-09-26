@@ -1,4 +1,5 @@
-//! `wasi-docstore` implementation for Azure Table Storage.
+//! The `wasi-docstore` contract over the Table service REST API, with the
+//! codecs it is built from.
 
 pub mod document;
 pub mod filter;
@@ -22,7 +23,6 @@ use crate::Client;
 const API_VERSION: &str = "2026-02-06";
 const ACCEPT_HEADER: &str = "application/json;odata=fullmetadata";
 
-/// `wasi-docstore` implementation backed by Azure Table Storage REST API.
 impl WasiDocStoreCtx for Client {
     fn get(&self, collection: String, id: String) -> FutureResult<Option<Document>> {
         let opts = Arc::clone(&self.options);
@@ -183,12 +183,6 @@ impl WasiDocStoreCtx for Client {
         .boxed()
     }
 
-    /// Query documents with optional filtering and pagination.
-    ///
-    /// Azure Table does not support server-side offsets (`$skip`). If
-    /// `options.offset` is set, the query is rejected with an error —
-    /// consistent with how unsupported filter nodes are handled. Use
-    /// continuation tokens for pagination instead.
     fn query(
         &self, collection: String, filter: Option<FilterTree>, options: QueryOpts,
     ) -> FutureResult<QueryResult> {
@@ -197,6 +191,8 @@ impl WasiDocStoreCtx for Client {
         let base = Arc::clone(&self.base_url);
         let hmac_key = Arc::clone(&self.hmac_key);
         async move {
+            // Azure Table has no `$skip`: an offset is rejected, like an
+            // unsupported filter node, rather than paged past client-side.
             if options.offset.is_some_and(|o| o > 0) {
                 bail!(
                     "offset is not supported by Azure Table — \
@@ -259,17 +255,13 @@ impl WasiDocStoreCtx for Client {
     }
 }
 
-/// Azure Table Storage management operations (outside the `wasi-docstore` trait).
 impl Client {
-    /// Creates the named table if it does not already exist.
-    ///
-    /// Returns `true` when the table was created, `false` when it already
-    /// existed.
+    /// Create the named table when absent; `true` when this call created it.
     ///
     /// # Errors
     ///
-    /// Returns an error if the HTTP request fails or the server responds with
-    /// an unexpected status code.
+    /// Returns an error when the request fails or the service answers with
+    /// an unexpected status.
     pub async fn ensure_table(&self, table: &str) -> anyhow::Result<bool> {
         let uri = format!("{}/Tables", self.base_url);
         let now = now_rfc1123();
@@ -298,11 +290,10 @@ impl Client {
     }
 }
 
-// ── helpers ──────────────────────────────────────────────────────────
+// --- Helpers ---
 
-/// Escape a value for use inside an `OData` entity-key predicate
-/// (e.g. `PartitionKey='...'`). Single quotes are doubled per `OData`
-/// convention and the result is percent-encoded for safe URL embedding.
+// A key lands inside an `OData` predicate (`PartitionKey='...'`): quotes
+// are doubled per `OData`, then the whole percent-encoded for the URL.
 fn escape_entity_key(value: &str) -> String {
     urlencoding::encode(&value.replace('\'', "''")).into_owned()
 }
@@ -383,9 +374,6 @@ async fn fetch_page(
     Ok((body, token))
 }
 
-/// Validate that `table` conforms to Azure Table naming rules: 3–63 ASCII
-/// alphanumeric characters, starting with a letter, and not the reserved
-/// name "tables".
 fn validate_table_name(table: &str) -> anyhow::Result<()> {
     let len = table.len();
     if !(3..=63).contains(&len) {
@@ -403,7 +391,6 @@ fn validate_table_name(table: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Split `collection` on the first `/` into `(table, partition_key)`.
 fn parse_collection(collection: &str) -> anyhow::Result<(String, Option<String>)> {
     match collection.split_once('/') {
         Some((table, pk)) if !table.is_empty() && !pk.is_empty() => {
@@ -426,17 +413,10 @@ fn now_rfc1123() -> String {
     chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string()
 }
 
-/// Compute a `SharedKeyLite` HMAC-SHA256 authorization header value for the
-/// Table service.
-///
-/// The canonicalized resource is built as `/{account_name}{uri_path}` where
-/// `uri_path` is the raw path from the request URL (excluding query string).
-/// For Azurite-style endpoints whose URL path already contains the account
-/// name (e.g. `http://127.0.0.1:10002/devstoreaccount1/Tables`), this
-/// intentionally produces a "doubled" account segment — Azurite's server-side
-/// auth uses the same algorithm, so both sides agree on the signature.
-///
-/// See <https://learn.microsoft.com/en-us/rest/api/storageservices/authorize-with-shared-key>.
+// The `SharedKeyLite` scheme signs `/{account}{raw path}`. An Azurite URL
+// already carries the account in its path (`/devstoreaccount1/Tables`), so
+// the resource doubles it — deliberately: Azurite signs the same way.
+// <https://learn.microsoft.com/en-us/rest/api/storageservices/authorize-with-shared-key>
 fn sign_request(
     account_name: &str, hmac_key: &[u8], date_time: &str, uri: &str,
 ) -> anyhow::Result<String> {
@@ -456,7 +436,6 @@ fn sign_request(
     Ok(format!("SharedKeyLite {account_name}:{encoded}"))
 }
 
-/// Build the standard Azure Table REST headers.
 fn azure_headers(date: &str, auth: &str) -> anyhow::Result<reqwest::header::HeaderMap> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("x-ms-date", date.parse().context("invalid x-ms-date header value")?);
@@ -466,6 +445,8 @@ fn azure_headers(date: &str, auth: &str) -> anyhow::Result<reqwest::header::Head
     Ok(headers)
 }
 
+// Collection parsing and the SharedKeyLite signature; the service accepting
+// either is the live suite's to prove.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,10 +508,8 @@ mod tests {
     fn sign_request_azurite() {
         let key = Base64::encode_string(b"fake-key-for-unit-test-1234567!");
         let hmac_key = Base64::decode_vec(&key).unwrap();
-        // Azurite and cloud produce DIFFERENT signatures because the
-        // Azurite URI path includes the account name. Both sides of
-        // the auth handshake use the same raw-path algorithm so
-        // signatures still match on each respective endpoint.
+        // the account in Azurite's path makes its signature differ from the
+        // cloud's; each endpoint signs its own raw path, so each still matches
         let auth_azurite = sign_request(
             "devstoreaccount1",
             &hmac_key,

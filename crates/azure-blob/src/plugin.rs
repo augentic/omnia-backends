@@ -17,8 +17,7 @@ use omnia_plugin::{ContentStore, ReleaseStore};
 
 use crate::Client;
 
-/// The container the plugin store writes; disjoint from guest containers
-/// because the store names it itself.
+// The store names its own container, so no guest container can be it.
 const STORE_CONTAINER: &str = "omnia-plugins";
 
 impl ContentStore for Client {
@@ -85,7 +84,6 @@ impl ReleaseStore for Client {
 }
 
 impl Client {
-    /// Create the store container when absent; an existing one is fine.
     async fn ensure_store_container(&self) -> Result<()> {
         match self.service.blob_container_client(STORE_CONTAINER).create(None).await {
             Ok(_) => Ok(()),
@@ -103,7 +101,7 @@ fn release_name(registry: &str, package: &str, version: &str) -> String {
     format!("releases/{registry}/{package}-{version}")
 }
 
-/// Read a blob's bytes; any 404 (blob or container) is an absent entry.
+// A 404 for the container, not just the blob, is an absent entry too.
 async fn read_optional(blob: &azure_storage_blob::BlobClient) -> Result<Option<Vec<u8>>> {
     match blob.download(None).await {
         Ok(response) => {

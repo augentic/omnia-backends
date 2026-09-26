@@ -11,8 +11,8 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use serde_repr::Deserialize_repr;
 
-/// The ready line's payload: where the worker listens, and how to
-/// authenticate to it.
+// The ready line's payload: where the worker listens, and how to
+// authenticate to it.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Discovery {
@@ -35,7 +35,7 @@ impl FromStr for Discovery {
 }
 
 impl Discovery {
-    /// Prefer `url`; fall back to `host` + `port` (bracketing `IPv6` hosts).
+    // Prefer `url`; fall back to `host` + `port` (bracketing `IPv6` hosts).
     pub fn base_url(&self) -> Result<String> {
         if let Some(url) = &self.url {
             return Ok(url.trim_end_matches('/').to_owned());
@@ -55,7 +55,7 @@ impl Discovery {
         Ok(url)
     }
 
-    /// Prefer an inline token when present; else read `authTokenFile`.
+    // Prefer an inline token when present; else read `authTokenFile`.
     pub async fn token(self) -> Result<String> {
         if let Some(token) = self.auth_token {
             return Ok(token);
@@ -91,9 +91,8 @@ enum Protocol {
     Connect,
 }
 
-// Deliberate unit tests: pure payload parsing (CI floor); `tests/worker.rs`
-// proves the line reaches the handshake, `tests/live.rs` the real
-// `cursor-sdk-bridge`.
+// Payload parsing alone; `tests/worker.rs` proves the line reaches the
+// handshake, `tests/live.rs` the real `cursor-sdk-bridge`.
 #[cfg(test)]
 mod tests {
     use super::Discovery;

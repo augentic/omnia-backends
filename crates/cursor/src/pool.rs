@@ -27,8 +27,8 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// Bind the callback endpoint. Nothing is spawned until the first lease,
-    /// so a missing or broken binary surfaces as that lease's failure.
+    // Bind the callback endpoint. Nothing is spawned until the first lease,
+    // so a missing or broken binary surfaces as that lease's failure.
     pub async fn connect(max_agents: usize) -> Result<Self> {
         Ok(Self {
             permits: Arc::new(Semaphore::new(max_agents.min(Semaphore::MAX_PERMITS))),
@@ -37,7 +37,7 @@ impl Pool {
         })
     }
 
-    /// Wait for a slot, in arrival order, then for the worker to run on.
+    // Wait for a slot, in arrival order, then for the worker to run on.
     pub async fn lease(&self) -> Result<Lease> {
         let queued = Instant::now();
         let permit =
@@ -66,8 +66,8 @@ impl Pool {
     }
 }
 
-/// One agent slot with its worker handshaken; dropping the lease asks the
-/// worker to go.
+// One agent slot with its worker handshaken; dropping the lease asks the
+// worker to go.
 #[derive(Debug)]
 pub struct Lease {
     worker: Worker,
@@ -79,9 +79,9 @@ impl Lease {
         &self.worker
     }
 
-    /// Route the worker's callbacks for `agent_id` into `tool_host` until
-    /// the returned guard drops; the guard also carries the abort the first
-    /// hard tool failure ends the completion with.
+    // Route the worker's callbacks for `agent_id` into `tool_host` until
+    // the returned guard drops; the guard also carries the abort the first
+    // hard tool failure ends the completion with.
     pub fn attach(&self, agent_id: String, tool_host: Arc<dyn ToolHost>) -> Attached {
         self.registration.attach(agent_id, tool_host)
     }

@@ -9,42 +9,36 @@ use anyhow::{Context, anyhow};
 use omnia_wasi_docstore::Document;
 use serde_json::{Map, Value};
 
-/// Azure Table system / `OData` metadata properties stripped during unflatten.
 const SYSTEM_KEYS: &[&str] = &["PartitionKey", "RowKey", "Timestamp"];
 
-/// Separator for composite document IDs. U+0000 is forbidden in Azure Table
-/// partition and row keys (control characters U+0000–U+001F are disallowed),
-/// so it is unambiguous.
+// U+0000 cannot appear in a partition or row key (control characters are
+// disallowed), so it never collides with either.
 const ID_SEP: char = '\0';
 
-/// Encode a partition key and row key into a composite document ID.
+/// Encode a partition key and row key into a composite document id.
 #[must_use]
 pub fn encode_id(partition_key: &str, row_key: &str) -> String {
     format!("{partition_key}{ID_SEP}{row_key}")
 }
 
-/// Decode a composite document ID into `(partition_key, row_key)`.
+/// Decode a composite document id into `(partition_key, row_key)`.
 ///
 /// # Errors
 ///
-/// Returns an error if `id` does not contain the `\0` separator.
+/// Returns an error when `id` carries no separator.
 pub fn decode_id(id: &str) -> anyhow::Result<(&str, &str)> {
     id.split_once(ID_SEP).ok_or_else(|| {
         anyhow!("invalid document id {id:?}: expected '{{PartitionKey}}\\0{{RowKey}}'")
     })
 }
 
-/// Build an Azure Table entity JSON body from a [`Document`].
-///
-/// The document's composite `id` (`{PartitionKey}\0{RowKey}`) is split to
-/// recover both Azure Table keys. Top-level JSON fields become entity
-/// properties. `OData` type annotations (`@odata.type`) are added for types
-/// that Azure Table cannot infer from the JSON representation alone.
+/// Build the entity JSON body for `doc`, its top-level fields as typed
+/// properties.
 ///
 /// # Errors
 ///
-/// Returns an error if the document id is not a valid composite id, the body
-/// is not valid JSON, or the body is not a JSON object.
+/// Returns an error when the id is not composite or the body is not a JSON
+/// object.
 pub fn flatten(doc: &Document) -> anyhow::Result<Value> {
     let (pk, rk) = decode_id(&doc.id)?;
     let body: Value =
@@ -65,22 +59,16 @@ pub fn flatten(doc: &Document) -> anyhow::Result<Value> {
     Ok(Value::Object(entity))
 }
 
-/// Convert an Azure Table entity JSON (from a GET/query response) into a
-/// [`Document`], stripping system and `OData` metadata properties.
+/// Convert an entity JSON body into a [`Document`] with a composite id.
 ///
-/// The returned document's `id` is a composite `{PartitionKey}\0{RowKey}`
-/// string that uniquely identifies the entity across all partitions.
-///
-/// Type annotations (`@odata.type`) are used to restore fidelity for
-/// `Edm.Int64` (string → i64 number) and `Edm.Double` (ensure f64
-/// representation). Nested objects and arrays that were serialized as JSON
-/// strings during [`flatten`] are **not** automatically restored — they
-/// remain as string values. See the crate README for details.
+/// Metadata properties are stripped; `Edm.Int64` and `Edm.Double` are
+/// restored from their annotations, and nested values stay the JSON strings
+/// [`flatten`] made of them.
 ///
 /// # Errors
 ///
-/// Returns an error if the entity is not a JSON object or is missing
-/// `PartitionKey` or `RowKey`.
+/// Returns an error when the entity is not a JSON object with a
+/// `PartitionKey` and `RowKey`.
 pub fn unflatten(entity: &Value) -> anyhow::Result<Document> {
     let obj = entity.as_object().ok_or_else(|| anyhow!("entity must be a JSON object"))?;
 
@@ -107,8 +95,6 @@ pub fn unflatten(entity: &Value) -> anyhow::Result<Document> {
     Ok(Document { id, data })
 }
 
-/// Use `@odata.type` annotations to restore type fidelity where Azure Table
-/// serialization loses the original JSON type.
 fn restore_typed_value(obj: &Map<String, Value>, key: &str, value: &Value) -> Value {
     let type_key = format!("{key}@odata.type");
     let Some(edm_type) = obj.get(&type_key).and_then(Value::as_str) else {
@@ -133,8 +119,6 @@ fn restore_typed_value(obj: &Map<String, Value>, key: &str, value: &Value) -> Va
     }
 }
 
-/// Create a `serde_json::Value::Number` from an f64, returning `None` for
-/// `NaN` / infinity which JSON cannot represent.
 fn json_f64(f: f64) -> Option<Value> {
     serde_json::Number::from_f64(f).map(Value::Number)
 }
@@ -143,8 +127,8 @@ fn is_metadata_key(key: &str) -> bool {
     SYSTEM_KEYS.contains(&key) || key.starts_with("odata.") || key.ends_with("@odata.type")
 }
 
-/// Insert a single user property into the entity map, adding `@odata.type`
-/// annotations where Azure Table cannot infer the type from raw JSON.
+// Annotate what the service cannot infer from raw JSON: doubles, and
+// integers past the i32 range, which travel as strings.
 fn insert_typed_property(
     entity: &mut Map<String, Value>, key: &str, value: &Value,
 ) -> anyhow::Result<()> {
@@ -186,16 +170,13 @@ fn insert_typed_property(
     Ok(())
 }
 
-// Unit tests cover the pure codec and rejection paths only. The happy-path
-// flatten/annotation mappings (Edm.Int64/Double, nulls, nested-as-string) are
-// proven against the real service by `tests/live.rs::edm_type`.
+// The codec and its rejections; the service accepting the flatten mappings
+// is `tests/live.rs::edm_type`.
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
-
-    // ── encode_id / decode_id ────────────────────────────────────────
 
     #[test]
     fn encode_decode_id() {
@@ -218,8 +199,6 @@ mod tests {
         assert_eq!(pk, "tenant/a");
         assert_eq!(rk, "row'key");
     }
-
-    // ── flatten ──────────────────────────────────────────────────────
 
     #[test]
     fn flatten_reserved_keys() {
@@ -259,8 +238,6 @@ mod tests {
         let err = flatten(&doc).unwrap_err().to_string();
         assert!(err.contains("invalid document id"), "{err}");
     }
-
-    // ── unflatten ────────────────────────────────────────────────────
 
     #[test]
     fn unflatten_int64() {

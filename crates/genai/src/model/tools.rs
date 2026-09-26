@@ -1,5 +1,3 @@
-//! Provider tool-call routing.
-//!
 //! The `read` and `list` tools access a lent workspace directly; all other
 //! calls are delegated through [`ToolHost::call_tool`]. Workspace failures
 //! are returned to the model as repairable tool output.
@@ -11,21 +9,18 @@ use genai::chat::ToolCall;
 use omnia_wasi_model::ToolHost;
 use serde_json::Value;
 
-/// Arguments accepted by the host-provided `read` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadArgs {
     path: String,
 }
 
-/// Arguments accepted by the host-provided `list` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListArgs {
     path: Option<String>,
 }
 
-/// Route a tool call to the host-injected handler or the session.
 pub async fn dispatch_tool(
     tool_host: &Arc<dyn ToolHost>, call: &ToolCall, max_result_bytes: usize,
 ) -> Result<String> {

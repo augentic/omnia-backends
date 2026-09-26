@@ -12,7 +12,6 @@ use tokio_postgres::row::Row as PgRow;
 use crate::Client;
 use crate::types::{Param, ParamRef, PgType};
 
-/// `wasi-sql` implementation backed by `deadpool-postgres` connection pools.
 impl WasiSqlCtx for Client {
     fn open(&self, name: String) -> FutureResult<Arc<dyn Connection>> {
         tracing::debug!("getting connection {name}");
@@ -32,7 +31,6 @@ impl WasiSqlCtx for Client {
     }
 }
 
-/// A pooled `PostgreSQL` connection implementing the `wasi-sql` `Connection` trait.
 #[derive(Debug)]
 pub struct PostgresConnection(Arc<Object>);
 
@@ -123,7 +121,7 @@ fn into_param(value: &DataType) -> anyhow::Result<Param> {
         DataType::Int64(v) => PgType::Int64(*v),
         DataType::Uint32(v) => PgType::Uint32(*v),
         DataType::Uint64(v) => {
-            // Postgres doesn't support u64, so clamping it to i64.
+            // postgres has no u64; anything past i64::MAX is rejected
             let converted = match v {
                 Some(raw) => {
                     let clamped = i64::try_from(*raw).map_err(|err| {
@@ -142,12 +140,11 @@ fn into_param(value: &DataType) -> anyhow::Result<Param> {
         DataType::Date(v) => PgType::Date(parse_date(v.as_deref())?),
         DataType::Time(v) => PgType::Time(parse_time(v.as_deref())?),
         DataType::Timestamp(v) => {
-            // Try RFC3339 format first (with timezone)
+            // RFC 3339 (with zone) first, else the naive form
             if let Some(s) = v.as_deref() {
                 if let Ok(ts) = DateTime::parse_from_rfc3339(s) {
                     PgType::TimestampTz(Some(ts.with_timezone(&Utc)))
                 } else {
-                    // Fall back to naive timestamp format
                     PgType::Timestamp(parse_timestamp_naive(v.as_deref())?)
                 }
             } else {
@@ -160,11 +157,6 @@ fn into_param(value: &DataType) -> anyhow::Result<Param> {
     Ok(Box::new(pg_value) as Param)
 }
 
-/// Converts a ``PostgreSQL`` row to WASI SQL format.
-///
-/// # Testing
-/// This function will have to tested via integration tests with a real database
-/// due to the difficulty of mocking `tokio_postgres::Row`.
 fn into_wasi_row(pg_row: &PgRow, idx: usize) -> anyhow::Result<Row> {
     let mut fields = Vec::new();
     for (i, col) in pg_row.columns().iter().enumerate() {
@@ -244,6 +236,9 @@ fn into_wasi_row(pg_row: &PgRow, idx: usize) -> anyhow::Result<Row> {
     })
 }
 
+// Parsing and parameter mapping. Row conversion needs a real database (a
+// `tokio_postgres::Row` cannot be built by hand) and is covered by the live
+// suite.
 #[cfg(test)]
 mod tests {
     use chrono::{Datelike, Timelike};
@@ -272,9 +267,6 @@ mod tests {
         parse_time(Some("25:00:00")).unwrap_err();
     }
 
-    // The tz-detection path in `into_param` is covered by
-    // `into_param_timestamp_format_detection` (real production fn) and the live
-    // query round-trip; no separate reimplementation is unit-tested here.
     #[test]
     fn naive_timestamps() {
         let valid = parse_timestamp_naive(Some("2024-01-20 15:30:45.123")).unwrap().unwrap();
@@ -289,7 +281,7 @@ mod tests {
 
     #[test]
     fn into_param_valid() {
-        // Basic types
+        // basic types
         into_param(&DataType::Int32(Some(42))).unwrap();
         into_param(&DataType::Int64(Some(i64::MAX))).unwrap();
         into_param(&DataType::Uint32(Some(u32::MAX))).unwrap();
@@ -300,7 +292,7 @@ mod tests {
         into_param(&DataType::Boolean(Some(true))).unwrap();
         into_param(&DataType::Binary(Some(vec![0x01, 0x02]))).unwrap();
 
-        // None values
+        // nulls
         into_param(&DataType::Int32(None)).unwrap();
         into_param(&DataType::Str(None)).unwrap();
     }

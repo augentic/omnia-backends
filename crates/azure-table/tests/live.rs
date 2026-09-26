@@ -28,8 +28,8 @@ async fn client() -> Result<Client> {
     Ok(client)
 }
 
-/// A partition key unique to this test run, so reruns and residue from failed
-/// runs never collide.
+// A partition key unique to this test run, so reruns and residue from failed
+// runs never collide.
 fn unique_partition(tag: &str) -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").subsec_nanos();
     format!("{tag}-{}-{nanos}", std::process::id())

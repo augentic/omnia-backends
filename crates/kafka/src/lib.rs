@@ -150,7 +150,7 @@ impl From<&ConnectOptions> for ClientConfig {
         config.set("client.id", format!("{}-{}", kafka.client_id, random_range(1000..9999)));
         config.set("bootstrap.servers", &kafka.brokers);
 
-        // SASL authentication
+        // sasl authentication
         if let Some(user) = &kafka.username
             && let Some(pass) = &kafka.password
         {

@@ -9,7 +9,6 @@ use omnia_wasi_identity::{AccessToken, FutureResult, Identity, WasiIdentityCtx};
 
 use crate::Client;
 
-/// `wasi-identity` implementation backed by Azure managed identity.
 impl WasiIdentityCtx for Client {
     fn get_identity(&self, name: String) -> FutureResult<Arc<dyn Identity>> {
         tracing::trace!("opening identity: {name}");
@@ -22,7 +21,7 @@ impl WasiIdentityCtx for Client {
     }
 }
 
-/// A named Azure identity that acquires tokens via managed identity.
+// A user-assigned managed identity, named by its client id.
 pub struct AzIdentity {
     name: String,
 }

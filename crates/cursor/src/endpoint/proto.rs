@@ -18,7 +18,6 @@ const EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
 pub struct CallCustomToolRequest {
     #[prost(string, tag = "1")]
     pub tool_name: String,
-    /// Tool arguments as a JSON object.
     #[prost(message, optional, tag = "2")]
     pub args: Option<prost_types::Struct>,
     #[prost(string, optional, tag = "3")]
@@ -29,12 +28,10 @@ pub struct CallCustomToolRequest {
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct CallCustomToolResponse {
-    /// Tool result as a JSON object.
     #[prost(message, optional, tag = "1")]
     pub result: Option<prost_types::Struct>,
 }
 
-/// Decode a `google.protobuf.Struct` into the equivalent JSON object.
 pub fn struct_to_value(fields: &prost_types::Struct) -> Value {
     Value::Object(
         fields.fields.iter().map(|(key, value)| (key.clone(), kind_to_value(value))).collect(),
@@ -67,7 +64,6 @@ fn number_to_value(number: f64) -> Value {
     }
 }
 
-/// Encode a JSON object as a `google.protobuf.Struct`.
 pub fn value_to_struct(object: &Map<String, Value>) -> prost_types::Struct {
     prost_types::Struct {
         fields: object.iter().map(|(key, value)| (key.clone(), value_to_kind(value))).collect(),

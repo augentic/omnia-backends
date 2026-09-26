@@ -24,12 +24,9 @@ fromenv.workspace = true
 futures.workspace = true
 omnia.workspace = true
 omnia-wasi-otel.workspace = true
-# Must match omnia's pin: the `WasiOtelCtx` request types come from this crate.
-opentelemetry-proto = { version = "0.32.0", features = ["gen-tonic"] }
+opentelemetry-proto = { version = "0.33.0", features = ["gen-tonic"] }
 tonic = "0.14.6"
 tracing.workspace = true
 
-# The live test (`tests/live.rs`) is a separate crate; it needs tokio's test
-# runtime, which the library dependencies do not enable.
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

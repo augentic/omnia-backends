@@ -18,9 +18,9 @@ use support::harness::{await_gone, connect, options, run_guest, sole_agent, spaw
 // here; a new program without one fails to compile.
 test_programs::foreach_model!();
 
-/// The candidates the `check_*` scenarios' fake proposes, spelled as the
-/// backend's schema extraction re-serializes them (sorted keys), so the
-/// correction quotes them verbatim.
+// The candidates the `check_*` scenarios' fake proposes, spelled as the
+// backend's schema extraction re-serializes them (sorted keys), so the
+// correction quotes them verbatim.
 const PASS: &str = r#"{"findings":[],"verdict":"pass"}"#;
 const FAIL: &str = r#"{"findings":["x"],"verdict":"fail"}"#;
 
@@ -110,9 +110,9 @@ async fn model_check_exhausted() {
     );
 }
 
-/// One tool-calling completion in `codec`: the fake's `CallCustomTool`
-/// reached the client's own endpoint with the URL and token the process
-/// was started with, and was answered.
+// One tool-calling completion in `codec`: the fake's `CallCustomTool`
+// reached the client's own endpoint with the URL and token the process
+// was started with, and was answered.
 async fn tool_roundtrip(codec: Codec) {
     let fake = Spawnable::new(&Config::tool("lookup").codec(codec));
     let client = spawning(&fake, 1).await;

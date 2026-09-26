@@ -6,6 +6,11 @@ Unreleased
 
 ### Changed
 
+- `omnia-opentelemetry` reads its collector endpoint from
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, OpenTelemetry's own variable and the one
+  the omnia host exports its spans to, where it read `OTEL_GRPC_URL`; one
+  setting names the collector for host and guest telemetry alike. The
+  `http://localhost:4317` default is unchanged.
 - `omnia-cursor` no longer attaches to a bridge another process manages.
   `ConnectOptions` drops `bridge_bin`, `bridge_url`, and `bridge_token`;
   the executable is `cursor-sdk-bridge` on `PATH`, and a ready line naming

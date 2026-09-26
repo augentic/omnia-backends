@@ -26,10 +26,10 @@ use omnia_wasi_model::{
 };
 use serde_json::Value;
 
-/// Deterministic stand-in for the host session: `call_tool("lookup", …)`
-/// answers `shelf:{arguments}`. The real guest closure round trip is proved
-/// by omnia's ABI tests; here we only need the genai backend to drive a
-/// declared function tool call and consume its result.
+// Deterministic stand-in for the host session: `call_tool("lookup", …)`
+// answers `shelf:{arguments}`. The real guest closure round trip is proved
+// by omnia's ABI tests; here we only need the genai backend to drive a
+// declared function tool call and consume its result.
 #[derive(Debug)]
 struct LiveTools;
 
@@ -65,8 +65,8 @@ impl ToolHost for LiveTools {
     }
 }
 
-/// A prompt that forces a `lookup` tool call and a JSON-object answer
-/// embedding the tool's result.
+// A prompt that forces a `lookup` tool call and a JSON-object answer
+// embedding the tool's result.
 fn lookup_request() -> Request {
     Request {
         model: None,
@@ -100,15 +100,15 @@ fn lookup_request() -> Request {
     }
 }
 
-/// Sentinel only reachable through the workspace tools: `list` reveals the
-/// one file, `read` returns the text carrying it.
+// Sentinel only reachable through the workspace tools: `list` reveals the
+// one file, `read` returns the text carrying it.
 const SENTINEL: &str = "omega-7734";
 
-/// Deterministic in-memory workspace stand-in for the host's `BoundToolHost`:
-/// `local_path` reports a resolved lend (which makes the backend advertise
-/// `read`/`list`), listing the root reveals `refs.md`, and reading it returns
-/// the sentinel. The real cap-std workspace is proved by omnia's ABI tests;
-/// here we only need the genai backend to discover, read, and use the file.
+// Deterministic in-memory workspace stand-in for the host's `BoundToolHost`:
+// `local_path` reports a resolved lend (which makes the backend advertise
+// `read`/`list`), listing the root reveals `refs.md`, and reading it returns
+// the sentinel. The real cap-std workspace is proved by omnia's ABI tests;
+// here we only need the genai backend to discover, read, and use the file.
 #[derive(Debug)]
 struct LiveWorkspace;
 
@@ -150,10 +150,10 @@ impl ToolHost for LiveWorkspace {
     }
 }
 
-/// Stand-in for the guest's `check`: rejects the first `rejections`
-/// candidates with a correction demanding the sentinel word, accepts after.
-/// The real guest round trip is proved by omnia's e2e scenarios; here we
-/// need the genai backend to feed the correction back and go round.
+// Stand-in for the guest's `check`: rejects the first `rejections`
+// candidates with a correction demanding the sentinel word, accepts after.
+// The real guest round trip is proved by omnia's e2e scenarios; here we
+// need the genai backend to feed the correction back and go round.
 #[derive(Debug)]
 struct LiveCheck {
     rejections: usize,
@@ -209,8 +209,8 @@ impl ToolHost for LiveCheck {
     }
 }
 
-/// A prompt whose first answer cannot contain the check's word — the model
-/// only learns it from the correction turn.
+// A prompt whose first answer cannot contain the check's word — the model
+// only learns it from the correction turn.
 fn check_request() -> Request {
     Request {
         model: None,
@@ -231,9 +231,9 @@ fn check_request() -> Request {
     }
 }
 
-/// A prompt that forces workspace discovery: the file name is never stated,
-/// so the model must `list` the root, `read` what it finds, and answer with
-/// the value inside.
+// A prompt that forces workspace discovery: the file name is never stated,
+// so the model must `list` the root, `read` what it finds, and answer with
+// the value inside.
 fn workspace_request() -> Request {
     Request {
         model: None,
@@ -255,7 +255,7 @@ fn workspace_request() -> Request {
     }
 }
 
-/// The answer text as the JSON object the prompts ask for.
+// The answer text as the JSON object the prompts ask for.
 fn object(answer: &Answer) -> Value {
     let value: Value = serde_json::from_str(&answer.answer)
         .unwrap_or_else(|e| panic!("the answer must be JSON ({e}): {}", answer.answer));

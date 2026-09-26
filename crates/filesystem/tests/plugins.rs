@@ -1,4 +1,7 @@
-//! Filesystem plugin-store contract tests.
+//! The filesystem backend as the plugin registry's `ContentStore` and
+//! `ReleaseStore`: content by digest, releases scoped per registry, and the
+//! plugin tree kept apart from the blobstore's and keyvalue's, against a
+//! temporary directory. No service, so it runs in CI.
 
 use omnia_core::Digest;
 use omnia_filesystem::Client;

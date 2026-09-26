@@ -16,7 +16,6 @@ use omnia_wasi_blobstore::{
 
 use crate::Client;
 
-/// `wasi-blobstore` implementation backed by Azure Blob Storage.
 impl WasiBlobstoreCtx for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("creating container: {name}");
@@ -84,7 +83,6 @@ impl WasiBlobstoreCtx for Client {
     }
 }
 
-/// A blobstore container backed by an Azure Blob Storage container.
 struct AzureBlobContainer {
     name: String,
     service: Arc<BlobServiceClient>,
@@ -131,7 +129,7 @@ impl Container for AzureBlobContainer {
         let blob_client = self.service.blob_client(&self.name, &name);
 
         async move {
-            // The SDK's RequestContent only converts from Vec<u8>.
+            // the SDK's `RequestContent` only converts from `Vec<u8>`
             let content = RequestContent::from(data.to_vec());
             blob_client.upload(content, None).await.context("uploading blob")?;
             Ok(())
@@ -230,12 +228,10 @@ fn range_options(
     }))
 }
 
+// Only `range_options` is pure enough to unit-test; the list and metadata
+// mappings are proven against the real service in `tests/live.rs`.
 #[cfg(test)]
 mod tests {
-    // Only `range_options` is unit-tested here: it is pure, deterministic logic.
-    // The list/metadata mappings (`list_objects`, `object_info`) are proven
-    // against the real service in `tests/live.rs` — a native unit test could
-    // only assert against a reimplementation of them, not the real code path.
     use azure_storage_blob::models::HttpRange;
 
     use super::*;

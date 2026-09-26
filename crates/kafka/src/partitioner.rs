@@ -1,26 +1,20 @@
-/// KafkaJS-style partitioner for `NodeJS` compatibility.
-///
-/// Our `NodeJS` Kafka publisher is based on `KafkaJS`, which uses a different partitioning scheme
-/// than the one used by librdkafka. It's not only different, it's based on a weird version of
-/// Murmur2 because JS only works with the Number type which is f64 internally, and so bit
-/// operations are not what they typically are
-///
-/// This partitioner replicates the partitioning scheme from `KafkaJS` so that we maintain backwards
-/// compatibility within our Kafka cluster.
+// KafkaJS's default partitioner, so keyed sends land on the partitions the
+// Node publishers on the same cluster use. KafkaJS hashes with a murmur2 run
+// on JS Numbers — f64 arithmetic with 32-bit bitwise operators — which is not
+// librdkafka's murmur2, so the arithmetic below reproduces JS rather than
+// calling a murmur2 crate.
 #[derive(Clone)]
 pub struct Partitioner {
     count: i32,
 }
 
 impl Partitioner {
-    /// Create a new partitioner with the given number of partitions.
     #[must_use]
     pub const fn new(count: i32) -> Self {
         Self { count }
     }
 
-    /// Based on
-    /// <https://github.com/tulios/kafkajs/blob/v1.15.0/src/producer/partitioners/default/partitioner.js#L33>
+    // kafkajs/src/producer/partitioners/default/partitioner.js (v1.15.0)
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
     pub fn partition(&self, key: &[u8]) -> i32 {
@@ -29,8 +23,7 @@ impl Partitioner {
     }
 }
 
-/// Based on:
-/// <https://github.com/tulios/kafkajs/blob/v1.15.0/src/producer/partitioners/default/murmur2.js>
+// kafkajs/src/producer/partitioners/default/murmur2.js (v1.15.0)
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -77,7 +70,7 @@ fn murmur2(key: &[u8]) -> f64 {
         i += 1;
     }
 
-    // Handle the last few bytes of the input array
+    // the trailing one to three bytes
     if len % 4 >= 3 {
         h = js_xor(h, ((key[(len & !3) + 2] as i32) << 16) as f64);
     }
@@ -101,47 +94,38 @@ const fn to_positive(x: f64) -> f64 {
     (x as i64 & i32::MAX as i64) as f64
 }
 
-/// How JS converts numbers (which are f64 internally) to i32 before doing bit operations.
+// JS's ToInt32: what a Number becomes on either side of a bitwise operator
+// (truncated, then wrapped modulo 2^32).
 #[allow(clippy::cast_possible_truncation)]
 const fn i(f: f64) -> i32 {
-    // Truncate towards zero
     let truncated = f.trunc();
-    // Convert to i64 to handle the full range of float64 before wrapping
     let i64_val = truncated as i64;
-    // Wrap around 2^32
     let wrapped = i64_val % (1 << 32);
-    // Convert to i32, preserving the wrapping effect
     wrapped as i32
 }
 
-/// How JS goes back from 32 bit ints to numbers after doing bitwise operations
+// The i32 a bitwise operator produced, back to a Number.
 fn f(i: i32) -> f64 {
     f64::from(i)
 }
 
-/// Do a JS-style zero padded right shift. `js_rshift(f, shift)` is equal to f >>> shift in JS.
+// JS's `>>>`: the shift runs on the Number's ToUint32.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)]
 fn js_rshift(f: f64, shift: i32) -> f64 {
-    // Truncate the float towards zero
     let truncated = f.trunc();
-    // Convert to i64 for handling full range before wrapping
     let i64_val = truncated as i64;
-    // Wrap around 2^32 to get into unsigned 32-bit range
     let u32_val = (i64_val % (1 << 32)) as u32;
-    // Perform the unsigned right shift
     let result = u32_val >> shift;
-    // Convert back to f64 for return
     f64::from(result)
 }
 
-/// Do a JS-style XOR operation. `js_xor(a, b)` is equal to a ^ b in JS.
+// JS's `^`.
 fn js_xor(a: f64, b: f64) -> f64 {
     f(i(a) ^ i(b))
 }
 
-// Deliberate unit tests: pure KafkaJS-compat vectors (CI floor). A real broker
-// landing keyed sends on these partitions is proven by
-// `tests/live.rs::keyed_sends`.
+// KafkaJS's own murmur2 vectors and partitions observed on the cluster. A
+// real broker landing keyed sends on them is `tests/live.rs::keyed_sends`.
 #[cfg(test)]
 mod tests {
 
@@ -157,8 +141,7 @@ mod tests {
     #[test]
     fn murmur2_vectors() {
         let cases = vec![
-            // Taken from
-            // https://github.com/tulios/kafkajs/blob/v1.15.0/src/producer/partitioners/default/murmur2.spec.js
+            // kafkajs/src/producer/partitioners/default/murmur2.spec.js (v1.15.0)
             TestCase {
                 key: b"0".to_vec(),
                 expected: 272_173_970,
@@ -223,7 +206,7 @@ mod tests {
                 key: b"170859375".to_vec(),
                 expected: 102_939_717,
             },
-            // Example TripId
+            // a trip id, as published
             TestCase {
                 key: b"1039-36302-36840-2-9f138052".to_vec(),
                 expected: 1_289_839_555,
@@ -246,7 +229,7 @@ mod tests {
     #[test]
     fn partitioning() {
         let cases = vec![
-            // Based on messages published in our Kafka cluster.
+            // keys and partitions observed on the cluster
             TestCase {
                 key: b"1039-36302-36840-2-9f138052".to_vec(),
                 expected: 7,

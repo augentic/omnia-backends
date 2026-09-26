@@ -57,12 +57,12 @@ pub struct Callback {
 
 pub struct Server {
     config: Config,
-    /// The process number claimed through the log (1-based, in start order).
+    // The process number claimed through the log (1-based, in start order).
     process: usize,
     token: String,
     callback: Option<Callback>,
     recorder: Recorder,
-    /// The release counts the test publishes, which a park waits on.
+    // The release counts the test publishes, which a park waits on.
     releases: PathBuf,
     state: Mutex<State>,
     shutdown: Notify,
@@ -75,7 +75,7 @@ struct State {
     creates: usize,
     sends: usize,
     agents: HashMap<String, AgentState>,
-    /// Live runs by id; firing one ends its stream as cancelled.
+    // Live runs by id; firing one ends its stream as cancelled.
     runs: HashMap<String, oneshot::Sender<()>>,
 }
 
@@ -654,7 +654,7 @@ fn gen_token() -> String {
     })
 }
 
-/// One Connect envelope: flags, big-endian length, JSON payload.
+// One Connect envelope: flags, big-endian length, JSON payload.
 fn envelope(flags: u8, payload: &Value) -> Bytes {
     let payload = payload.to_string();
     let mut frame = Vec::with_capacity(payload.len() + 5);

@@ -1,5 +1,3 @@
-//! OpenTelemetry implementation for the OpenTelemetry gRPC resource.
-
 use futures::FutureExt;
 use omnia::FutureResult;
 use omnia_wasi_otel::WasiOtelCtx;
@@ -8,12 +6,9 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
 use crate::Client;
 
-/// `wasi-otel` implementation backed by OpenTelemetry gRPC collectors.
+// Export failures are logged, never propagated: telemetry must not fail the
+// application logic it observes.
 impl WasiOtelCtx for Client {
-    /// Export traces using gRPC.
-    ///
-    /// Errors are logged but not propagated to prevent telemetry failures
-    /// from affecting application logic.
     fn export_traces(&self, request: ExportTraceServiceRequest) -> FutureResult<()> {
         let mut client = self.traces_client.clone();
 
@@ -26,10 +21,6 @@ impl WasiOtelCtx for Client {
         .boxed()
     }
 
-    /// Export metrics using gRPC.
-    ///
-    /// Errors are logged but not propagated to prevent telemetry failures
-    /// from affecting application logic.
     fn export_metrics(&self, request: ExportMetricsServiceRequest) -> FutureResult<()> {
         let mut client = self.metrics_client.clone();
 

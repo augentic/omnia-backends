@@ -1,5 +1,3 @@
-//! Completion telemetry and failure classification.
-//!
 //! [`Completion`] emits the start (DEBUG) and finish (INFO) events. [`Failure`]
 //! lets [`outcome_of`] classify backend errors by type instead of message text.
 
@@ -9,9 +7,9 @@ use omnia_wasi_model::Usage;
 
 use crate::model::options::Turn;
 
-/// One completion's start/finish events: the outcome and what it cost, on
-/// the `complete` span that names the model and format. Drop without
-/// [`Self::finish`] records `outcome=abort` (a cancelled future).
+// One completion's start/finish events: the outcome and what it cost, on
+// the `complete` span that names the model and format. Drop without
+// `finish` records `outcome=abort` (a cancelled future).
 pub struct Completion {
     started: Instant,
     attempts: u32,
@@ -43,7 +41,7 @@ impl Completion {
         self.attempts = self.attempts.saturating_add(1);
     }
 
-    /// Note one answer round and add its tokens to the completion's bill.
+    // Note one answer round and add its tokens to the completion's bill.
     pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
         tracing::debug!(result_bytes = result_len, tool_turns, ?usage, "round answered");
 
@@ -90,8 +88,8 @@ impl Drop for Completion {
     }
 }
 
-/// A completion failure this crate constructs. [`outcome_of`] downcasts this
-/// so the `outcome` field does not depend on message wording.
+// A completion failure this crate constructs. `outcome_of` downcasts this
+// so the `outcome` field does not depend on message wording.
 #[derive(Debug, thiserror::Error)]
 pub enum Failure {
     // Round budget spent without the model producing a final text answer.
@@ -107,8 +105,8 @@ impl Failure {
     }
 }
 
-/// Classify a failed `complete`: a [`Failure`] by variant, the typed
-/// `budget-exhausted` a rejected check ends on, anything else `error`.
+// Classify a failed `complete`: a `Failure` by variant, the typed
+// `budget-exhausted` a rejected check ends on, anything else `error`.
 pub fn outcome_of(error: &anyhow::Error) -> &'static str {
     if let Some(failure) = error.downcast_ref::<Failure>() {
         return failure.outcome();

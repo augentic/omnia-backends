@@ -8,7 +8,6 @@ use omnia_wasi_messaging::{
     Client, FutureResult, Message, Metadata, Reply, RequestOptions, Subscriptions, WasiMessagingCtx,
 };
 
-/// `wasi-messaging` implementation backed by NATS.
 impl WasiMessagingCtx for crate::Client {
     fn connect(&self) -> FutureResult<Arc<dyn Client>> {
         let client = self.clone();
@@ -16,7 +15,6 @@ impl WasiMessagingCtx for crate::Client {
     }
 }
 
-/// Translate an incoming NATS message into the host's [`Message`].
 fn from_nats(msg: async_nats::Message) -> Message {
     let metadata = msg.headers.as_ref().map(|headers| {
         let mut md = HashMap::new();

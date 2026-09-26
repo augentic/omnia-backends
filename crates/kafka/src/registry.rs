@@ -17,18 +17,16 @@ use crate::RegistryOptions;
 
 type SchemaMap = HashMap<String, Option<(i32, Value)>>;
 
-/// Schema Registry client with caching
 #[derive(Clone)]
 pub struct Registry {
     client: Option<SchemaRegistryClient>,
     schemas: Arc<Mutex<SchemaMap>>,
 }
 
-/// Endianness byte used in schema registry payloads
+// The Confluent wire format's magic byte.
 const BIG_ENDIAN: u8 = 0;
 
 impl Registry {
-    /// Create a new Schema Registry client
     #[must_use]
     pub fn new(options: RegistryOptions) -> Self {
         let mut config = RegistryConfig::new(vec![options.url.clone()]);
@@ -43,10 +41,11 @@ impl Registry {
         sr_client
     }
 
-    /// Serialize payload to JSON with optional schema registry
+    // Validate `buffer` against the topic's schema and frame it with the wire
+    // format header. It goes out as it came when the topic has no schema or
+    // the payload does not validate: a send is never failed here.
     #[instrument(skip(self, buffer))]
     pub async fn encode(&self, topic: &str, buffer: Vec<u8>) -> Vec<u8> {
-        // If schema registry is available, use it
         if self.client.is_some() {
             match self.get_schema(topic).await {
                 Ok(Some((id, schema))) => {
@@ -76,7 +75,9 @@ impl Registry {
         }
     }
 
-    /// Deserialize payload to JSON with optional schema registry
+    // Strip the wire format header and validate what is under it against the
+    // topic's schema. A validation failure is logged, not fatal; an unframed
+    // or schema-less buffer passes through as it came.
     #[instrument(skip(self, buffer))]
     pub async fn decode(&self, topic: &str, buffer: &[u8]) -> Vec<u8> {
         if self.client.is_some() {
@@ -111,11 +112,6 @@ impl Registry {
         }
     }
 
-    /// Validate a JSON payload against a provided schema.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error string when the payload does not conform to the schema.
     pub fn validate(schema: &Value, payload: &Value) -> Result<(), String> {
         validate(schema, payload).map_err(|e| format!("Validation error: {e}"))?;
         Ok(())
@@ -167,7 +163,8 @@ impl Registry {
         }
     }
 
-    /// Private method to spawn the cache cleaner task every hour
+    // Drop the whole cache every `cache_ttl_secs`, so a schema re-registered
+    // under a topic is picked up.
     fn start_cache_cleaner(&self, cache_ttl_secs: u64) {
         let schemas_clone = Arc::clone(&self.schemas);
         tokio::spawn(async move {
@@ -181,7 +178,7 @@ impl Registry {
     }
 }
 
-/// Confluent Schema Registry wire-format payload (magic byte + schema ID + data).
+// The Confluent wire format: magic byte, big-endian schema id, data.
 pub struct Payload<'a> {
     // Decoded for wire-format completeness; only asserted in tests today.
     #[allow(dead_code)]
@@ -192,7 +189,6 @@ pub struct Payload<'a> {
 }
 
 impl Payload<'_> {
-    /// Encode payload with schema registry ID repeats JS code
     #[must_use]
     pub fn encode(registry_id: i32, payload: Vec<u8>) -> Vec<u8> {
         let mut buf = Vec::with_capacity(1 + 4 + payload.len());
@@ -202,7 +198,6 @@ impl Payload<'_> {
         buf
     }
 
-    /// Decode payload
     pub fn decode(buffer: &[u8]) -> Option<Payload<'_>> {
         if buffer.len() < 5 {
             tracing::error!("Buffer too short to decode");
@@ -221,11 +216,11 @@ impl Payload<'_> {
     }
 }
 
-// Deliberate unit tests: pure wire-format codec (CI floor). A real registry
-// accepting this layout is proven by `tests/live.rs::registry_wire_format`.
+// The wire format codec alone; a real registry accepting the layout is
+// `tests/live.rs::registry_wire_format`.
 #[cfg(test)]
 mod tests {
-    use super::*; // brings Payload, BIG_ENDIAN, MessagingError into scope
+    use super::*;
 
     #[test]
     fn encode_decode() {
@@ -233,18 +228,15 @@ mod tests {
         let registry_id: i32 = 0xAABB_CCDDu32 as i32;
         let payload = b"hello world".to_vec();
 
-        // Encode
         let encoded = Payload::encode(registry_id, payload.clone());
 
-        // Expected layout:
-        // [ magic_byte ][ registry_id (4 bytes BE) ][ payload... ]
+        // layout: [magic byte][registry id, 4 bytes BE][payload]
         assert_eq!(encoded[0], BIG_ENDIAN, "magic byte mismatch");
 
         let expected_id_bytes = registry_id.to_be_bytes();
         assert_eq!(&encoded[1..5], &expected_id_bytes, "registry id mismatch");
         assert_eq!(&encoded[5..], &payload, "payload mismatch");
 
-        // Decode
         let decoded = Payload::decode(&encoded).expect("decode failed");
 
         assert_eq!(decoded.magic_byte, BIG_ENDIAN);

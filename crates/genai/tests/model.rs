@@ -15,12 +15,12 @@ use support::harness::{client, expect_error, run_guest};
 // here; a new program without one fails to compile.
 test_programs::foreach_model!();
 
-/// The candidates the `check_*` scenarios' fake proposes, spelled as the
-/// backend's schema extraction re-serializes them (sorted keys), so the
-/// correction quotes them verbatim.
+// The candidates the `check_*` scenarios' fake proposes, spelled as the
+// backend's schema extraction re-serializes them (sorted keys), so the
+// correction quotes them verbatim.
 const PASS: &str = r#"{"findings":[],"verdict":"pass"}"#;
 const FAIL: &str = r#"{"findings":["x"],"verdict":"fail"}"#;
-/// The backend's bound on provider round-trips per completion.
+// The backend's bound on provider round-trips per completion.
 const MAX_ROUNDS: usize = 8;
 
 #[tokio::test]

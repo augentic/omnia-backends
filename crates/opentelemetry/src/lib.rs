@@ -54,8 +54,9 @@ mod config {
     /// Connection options for the OpenTelemetry backend.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
-        /// gRPC endpoint URL for the OpenTelemetry Collector.
-        #[env(from = "OTEL_GRPC_URL", default = "http://localhost:4317")]
+        /// gRPC endpoint URL for the OpenTelemetry Collector: OpenTelemetry's
+        /// own variable, the one the omnia host exports its spans to.
+        #[env(from = "OTEL_EXPORTER_OTLP_ENDPOINT", default = "http://localhost:4317")]
         pub grpc_url: String,
     }
 }

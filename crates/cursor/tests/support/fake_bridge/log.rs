@@ -313,7 +313,7 @@ pub trait History {
         self.saw(rpc).len()
     }
 
-    /// The RPCs that named `agent`, in arrival order.
+    // The RPCs that named `agent`, in arrival order.
     fn sequence(&self, agent: &str) -> Vec<Rpc> {
         self.history()
             .iter()
@@ -322,16 +322,15 @@ pub trait History {
             .collect()
     }
 
-    /// Every agent id a `CreateAgent` handed out, in order.
+    // Every agent id a `CreateAgent` handed out, in order.
     fn agents(&self) -> Vec<String> {
         self.saw(Rpc::CreateAgent).into_iter().filter_map(|e| e.agent.clone()).collect()
     }
 
-    /// The most agents created and not yet closed or deleted at once.
-    ///
-    /// Spawned fakes mint `agent-1` independently, so the live set is keyed
-    /// by process as well as id: a workspace-wide scan must not collapse
-    /// concurrent leases, and one process's close must not retire another's.
+    // The most agents created and not yet closed or deleted at once. Spawned
+    // fakes mint `agent-1` independently, so the live set is keyed by process
+    // as well as id: a workspace-wide scan must not collapse concurrent
+    // leases, and one process's close must not retire another's.
     fn peak_live(&self) -> usize {
         let mut live = HashSet::new();
         let mut peak = 0;
@@ -358,7 +357,7 @@ pub trait History {
         self.history().iter().filter(|e| e.kind == Kind::Callback).collect()
     }
 
-    /// The RPC sequence per agent, for a failure message.
+    // The RPC sequence per agent, for a failure message.
     fn summary(&self) -> Value {
         let agents = self.agents();
         json!({

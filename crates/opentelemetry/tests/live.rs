@@ -2,7 +2,8 @@
 //! `omnia:otel` host boundary (`WasiOtelCtx`).
 //!
 //! `#[ignore]`d so it never dials a collector in CI. Run against a reachable
-//! OTLP/gRPC collector (`OTEL_GRPC_URL`, default `http://localhost:4317`):
+//! OTLP/gRPC collector (`OTEL_EXPORTER_OTLP_ENDPOINT`, default
+//! `http://localhost:4317`):
 //! `cargo nextest run -p omnia-opentelemetry --run-ignored all`.
 
 use anyhow::Result;
@@ -12,7 +13,7 @@ use omnia_wasi_otel::WasiOtelCtx;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs an OTLP/gRPC collector (OTEL_GRPC_URL); run with --run-ignored"]
+#[ignore = "live: needs an OTLP/gRPC collector (OTEL_EXPORTER_OTLP_ENDPOINT); run with --run-ignored"]
 async fn exports_metrics() -> Result<()> {
     let client = <Client as Backend>::connect().await?;
 

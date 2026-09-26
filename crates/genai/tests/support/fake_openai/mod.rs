@@ -267,8 +267,8 @@ async fn accept(listener: TcpListener, state: Arc<State>) {
     }
 }
 
-/// One request in flight: counts down on drop, and a drop before the answer
-/// went out is the client giving up on it.
+// One request in flight: counts down on drop, and a drop before the answer
+// went out is the client giving up on it.
 struct InFlight {
     state: Arc<State>,
     answered: bool,
@@ -387,7 +387,7 @@ fn answer_from(result: &str) -> String {
         .map_or_else(|| result.to_owned(), |(_, reason)| format!("tool failed: {reason}"))
 }
 
-/// One OpenAI-shaped chat completion: `content`, or `tool_calls`.
+// One OpenAI-shaped chat completion: `content`, or `tool_calls`.
 fn completion(content: Option<&str>, tool_calls: Option<Value>) -> Value {
     let mut message = json!({ "role": "assistant", "content": content });
     let finish_reason = tool_calls.map_or("stop", |tool_calls| {

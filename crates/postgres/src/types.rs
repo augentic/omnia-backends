@@ -4,12 +4,10 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use tokio_postgres::types::private::BytesMut;
 use tokio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
 
-/// An owned, type-erased SQL parameter.
 pub type Param = Box<dyn ToSql + Send + Sync>;
-/// A borrowed reference to a SQL parameter.
 pub type ParamRef<'a> = &'a (dyn ToSql + Sync);
 
-/// `PgType` to wrap around wasi-sql `DataType` to help implement `ToSql` trait
+// A wasi-sql `DataType` as a `ToSql` parameter.
 #[derive(Debug)]
 pub enum PgType {
     Int32(Option<i32>),
@@ -78,6 +76,8 @@ where
     value.map_or_else(|| Ok(IsNull::Yes), |inner| inner.to_sql(ty, out))
 }
 
+// Encoding of each variant, JSON re-parse included; that the server accepts
+// the bytes is the live suite's to prove.
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;

@@ -12,7 +12,6 @@ use omnia_wasi_vault::{FutureResult, Locker, WasiVaultCtx};
 
 use crate::Client;
 
-/// `wasi-vault` implementation backed by Azure Key Vault.
 impl WasiVaultCtx for Client {
     fn open_locker(&self, identifier: String) -> FutureResult<Arc<dyn Locker>> {
         tracing::trace!("opening locker: {identifier}");
@@ -31,7 +30,6 @@ impl WasiVaultCtx for Client {
     }
 }
 
-/// A namespaced secrets locker backed by Azure Key Vault.
 pub struct AzLocker {
     identifier: String,
     vault: Arc<SecretClient>,
@@ -127,7 +125,7 @@ impl Locker for AzLocker {
         async move {
             let iter = vault.list_secret_properties(None).context("issue listing secrets")?;
 
-            // filter and collect secret IDs for this 'locker'
+            // keep this locker's secrets, minus the prefix
             let secret_ids: Vec<String> = iter
                 .try_filter_map(|props| async {
                     let Some(id) = props.id else {

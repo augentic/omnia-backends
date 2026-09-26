@@ -13,7 +13,6 @@ use tokio::io::AsyncReadExt;
 
 use crate::Client;
 
-/// `wasi-blobstore` implementation backed by NATS JetStream object store.
 impl WasiBlobstoreCtx for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("creating container: {name}");
@@ -83,7 +82,6 @@ fn metadata(name: String) -> ContainerMetadata {
     }
 }
 
-/// A blobstore container backed by a NATS JetStream object store.
 pub struct NatsContainer {
     metadata: ContainerMetadata,
     store: ObjectStore,

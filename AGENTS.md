@@ -147,3 +147,37 @@ so the policy splits into three tiers:
   enforced, re-locking onto a freshly published omnia line needs an explicit
   bypass (`CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE="0 days" cargo fetch`).
   Locked versions are exempt, so `--locked` builds are unaffected.
+
+## Code comments
+
+Golden rule: do not document what is self-evident in code. The register is
+the one `crates/cursor/src/{worker,pool,failure}.rs` is written in, and
+behind it the way anyhow, serde, serde_json, tokio and rand comment.
+
+- Rustdoc (`///`) goes only on items rustdoc renders: crate-root items,
+  `pub use` re-exports, and the one `pub mod` (`azure-table::store`). A
+  one-line summary; an `# Errors` section only where the lint demands it
+  (a reachable fallible fn); no restated signatures or cross-references a
+  glance at the code already gives. The workspace `missing_docs` lint
+  under `-D warnings` is the guard: a reachable item without a doc fails
+  the build, so a `///` that survives `cargo clippy` being removed was not
+  reachable.
+- Everything else — `pub` in a private module, `pub(crate)`, private —
+  gets a `//` above the item, and only when a senior Rust developer would
+  not see it from the code. A `//` may run to several sentences when it
+  carries a *why*.
+- No doc labels on `impl` blocks or trait-impl methods: the trait already
+  documents them.
+- `//!` only where it says something the file's name does not.
+- Inside a body a `//` is a section header: one line, lowercase, no
+  trailing period, naming the purpose of the block under it, with white
+  space before it so the eye can find it. It never narrates what the next
+  line does. An arcane trick a senior Rust developer would not see through
+  is called out as `// HACK: ...`.
+- Section dividers in a long file are `// --- Name ---`, never box-drawing
+  characters.
+- Test fns take `//`, never `///`; a test module opens with a `//` above
+  `#[cfg(test)]` saying what the unit tier covers versus the live or e2e
+  tier. `pub` items in a suite's `tests/support` are that suite's shared
+  API and keep `///`.
+- Commented-out code is deleted, not kept.

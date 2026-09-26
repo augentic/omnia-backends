@@ -1,4 +1,3 @@
-//! Key-value implementation for the Redis backend.
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -10,20 +9,20 @@ use redis::aio::ConnectionManager;
 
 use crate::Client;
 
-const TTL_DAY: u64 = 24 * 60 * 60; // 1 day
+const TTL_DAY: u64 = 24 * 60 * 60;
 
-/// `INCRBY` plus the same one-day expiry `set` and `swap` apply. Bare
-/// `INCRBY` would leave increment-only keys permanent, and would not
-/// refresh the TTL on a key that was first written with `SET EX`.
+// `INCRBY` plus the same one-day expiry `set` and `swap` apply. Bare
+// `INCRBY` would leave increment-only keys permanent, and would not
+// refresh the TTL on a key that was first written with `SET EX`.
 const INCREMENT: &str = r"
 local n = redis.call('INCRBY', KEYS[1], ARGV[1])
 redis.call('EXPIRE', KEYS[1], ARGV[2])
 return n
 ";
 
-/// Server-side compare-and-set: the compare and the write are one atomic
-/// step. `WATCH`/`MULTI` is not an option on a multiplexed connection.
-/// Returns `{swapped, present, current}`.
+// Server-side compare-and-set: the compare and the write are one atomic
+// step. `WATCH`/`MULTI` is not an option on a multiplexed connection.
+// Returns `{swapped, present, current}`.
 const SWAP: &str = r"
 local current = redis.call('GET', KEYS[1])
 local matches
@@ -42,7 +41,6 @@ end
 return {0, 1, current}
 ";
 
-/// `wasi-keyvalue` implementation backed by Redis.
 impl WasiKeyValueCtx for Client {
     fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
         tracing::trace!("opening redis bucket: {}", identifier);
@@ -59,7 +57,7 @@ impl WasiKeyValueCtx for Client {
     }
 }
 
-/// Wrapper around [`ConnectionManager`] to implement [`Debug`].
+// `ConnectionManager` has no `Debug`, and the bucket derives it.
 pub struct Conn(ConnectionManager);
 
 impl Debug for Conn {
@@ -68,12 +66,9 @@ impl Debug for Conn {
     }
 }
 
-/// A key-value bucket backed by Redis, namespaced by identifier.
 #[derive(Debug)]
 pub struct RedisBucket {
-    /// Bucket identifier used as key prefix.
     pub identifier: String,
-    /// Redis connection.
     pub conn: Conn,
 }
 

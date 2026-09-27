@@ -8,7 +8,8 @@
 //! of `cursor-sdk-bridge`) — every field access is nullable and a malformed
 //! event is skipped, never fatal. The result's token counts become the
 //! guest's [`Usage`] here too. [`Completion`] emits the start (DEBUG) and
-//! finish events — the finish at INFO for an answer, WARN for anything else.
+//! finish events — the finish at INFO for an answer, WARN for anything else,
+//! carrying the bill and how the wait split across the phases.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -21,17 +22,22 @@ use tokio::time::Instant;
 use super::options::Turn;
 use crate::elapsed_ms;
 use crate::failure::Outcome;
-use crate::protocol::{RunStreamMessage, SdkMessage, TokenUsage};
+use crate::protocol::{RunStreamMessage, SdkMessage, TokenUsage, lenient_i64};
 
-// One completion's start/finish events: the outcome and what it cost, on
-// the `complete` span that names the model and format. Drop without
-// `finish` records `Outcome::Abort` (a cancelled future).
+// One completion's start/finish events: the outcome, what it cost, and
+// where its time went, on the `complete` span that names the model and
+// format. Drop without `finish` records `Outcome::Abort` (a cancelled
+// future).
 pub struct Completion {
     started: Instant,
     attempts: u32,
-    input_tokens: u64,
-    output_tokens: u64,
-    reasoning_tokens: u64,
+    bill: Bill,
+    // the wait booked per phase, every round of the completion together,
+    // and the guest's check of each candidate between rounds
+    opening: Duration,
+    tool: Duration,
+    model: Duration,
+    check: Duration,
     emitted: bool,
 }
 
@@ -42,55 +48,78 @@ impl From<&Turn> for Completion {
             mcp = turn.agent.options.mcp_servers.len(),
             "completion started"
         );
-
-        Self {
-            started: Instant::now(),
-            attempts: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            reasoning_tokens: 0,
-            emitted: false,
-        }
+        Self::new()
     }
 }
 
 impl Completion {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            attempts: 0,
+            bill: Bill::default(),
+            opening: Duration::ZERO,
+            tool: Duration::ZERO,
+            model: Duration::ZERO,
+            check: Duration::ZERO,
+            emitted: false,
+        }
+    }
+
     // Count an attempt as started, including ones that later time out.
     pub const fn attempt(&mut self) {
         self.attempts = self.attempts.saturating_add(1);
     }
 
-    pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
+    pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&TokenUsage>) {
         tracing::debug!(
             result_bytes = result_len,
             tool_turns,
             input_tokens = usage.map(|u| u.input_tokens),
+            cache_read_tokens = usage.and_then(|u| u.cache_read_tokens),
+            cache_write_tokens = usage.and_then(|u| u.cache_write_tokens),
             output_tokens = usage.map(|u| u.output_tokens),
             reasoning_tokens = usage.and_then(|u| u.reasoning_tokens),
+            total_tokens = usage.and_then(|u| u.total_tokens),
             "send answered"
         );
 
         if let Some(usage) = usage {
-            self.input_tokens += u64::from(usage.input_tokens);
-            self.output_tokens += u64::from(usage.output_tokens);
-            self.reasoning_tokens += u64::from(usage.reasoning_tokens.unwrap_or(0));
+            self.bill.add(&Bill::from(usage));
         }
     }
 
     // Raise the bill to the agent's total, read back after a run was cut
     // short: the total covers every send the agent answered too, so the
     // counts already booked from those are never added twice.
-    pub fn settle(&mut self, total: &Usage) {
+    pub fn settle(&mut self, total: &TokenUsage) {
         tracing::debug!(
             input_tokens = total.input_tokens,
+            cache_read_tokens = total.cache_read_tokens,
+            cache_write_tokens = total.cache_write_tokens,
             output_tokens = total.output_tokens,
             reasoning_tokens = total.reasoning_tokens,
+            total_tokens = total.total_tokens,
             "usage settled for the cancelled run"
         );
-        self.input_tokens = self.input_tokens.max(u64::from(total.input_tokens));
-        self.output_tokens = self.output_tokens.max(u64::from(total.output_tokens));
-        self.reasoning_tokens =
-            self.reasoning_tokens.max(u64::from(total.reasoning_tokens.unwrap_or(0)));
+        self.bill.raise_to(&Bill::from(total));
+    }
+
+    // Book a wait on `phase`: the bridge before its first frame — the
+    // agent's creation included — a tool call outstanding, or the model
+    // composing.
+    pub const fn spent(&mut self, phase: &Phase, waited: Duration) {
+        let bucket = match phase {
+            Phase::Opening => &mut self.opening,
+            Phase::Tool(_) => &mut self.tool,
+            Phase::Model => &mut self.model,
+        };
+        *bucket = bucket.saturating_add(waited);
+    }
+
+    // Book the guest's check of a candidate, which no phase of the stream covers.
+    pub const fn checked(&mut self, waited: Duration) {
+        self.check = self.check.saturating_add(waited);
     }
 
     pub const fn attempts(&self) -> u32 {
@@ -117,15 +146,80 @@ impl Completion {
                     outcome = outcome.as_str(),
                     attempts = self.attempts,
                     duration_ms = elapsed_ms(self.started),
-                    input_tokens = self.input_tokens,
-                    output_tokens = self.output_tokens,
-                    reasoning_tokens = self.reasoning_tokens,
+                    opening_ms = millis(self.opening),
+                    tool_ms = millis(self.tool),
+                    model_ms = millis(self.model),
+                    check_ms = millis(self.check),
+                    input_tokens = self.bill.input,
+                    cache_read_tokens = self.bill.cache_read,
+                    cache_write_tokens = self.bill.cache_write,
+                    output_tokens = self.bill.output,
+                    reasoning_tokens = self.bill.reasoning,
+                    total_tokens = self.bill.total,
                     "completion"
                 )
             };
         }
         if outcome.answered() { completion!(info) } else { completion!(warn) }
     }
+}
+
+// The tokens a completion has been billed so far, every send together. The
+// total is the bridge's own sum, absent until a send reports one.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Bill {
+    input: u64,
+    cache_read: u64,
+    cache_write: u64,
+    output: u64,
+    reasoning: u64,
+    total: Option<u64>,
+}
+
+impl From<&TokenUsage> for Bill {
+    fn from(usage: &TokenUsage) -> Self {
+        Self {
+            input: count(usage.input_tokens),
+            cache_read: count(usage.cache_read_tokens.unwrap_or(0)),
+            cache_write: count(usage.cache_write_tokens.unwrap_or(0)),
+            output: count(usage.output_tokens),
+            reasoning: count(usage.reasoning_tokens.unwrap_or(0)),
+            total: usage.total_tokens.map(count),
+        }
+    }
+}
+
+impl Bill {
+    const fn add(&mut self, other: &Self) {
+        self.input = self.input.saturating_add(other.input);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.output = self.output.saturating_add(other.output);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
+        self.total = match (self.total, other.total) {
+            (None, None) => None,
+            (Some(total), None) | (None, Some(total)) => Some(total),
+            (Some(booked), Some(total)) => Some(booked.saturating_add(total)),
+        };
+    }
+
+    fn raise_to(&mut self, total: &Self) {
+        self.input = self.input.max(total.input);
+        self.cache_read = self.cache_read.max(total.cache_read);
+        self.cache_write = self.cache_write.max(total.cache_write);
+        self.output = self.output.max(total.output);
+        self.reasoning = self.reasoning.max(total.reasoning);
+        self.total = self.total.max(total.total);
+    }
+}
+
+// A wire count booked on the bill: negatives become 0.
+fn count(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl Drop for Completion {
@@ -138,6 +232,8 @@ impl Drop for Completion {
 // and reports each tool call as the agent starts and completes it.
 #[derive(Default)]
 pub struct EventLog {
+    // the agent's working directory, which its tools spell paths under
+    cwd: Option<String>,
     run_id: Option<String>,
     status_message: Option<String>,
     frames: u64,
@@ -149,6 +245,13 @@ pub struct EventLog {
 }
 
 impl EventLog {
+    pub fn new(cwd: String) -> Self {
+        Self {
+            cwd: Some(cwd),
+            ..Self::default()
+        }
+    }
+
     pub fn observe_message(&mut self, message: &RunStreamMessage) {
         self.frames += 1;
         if let Some(event) = &message.sdk_message {
@@ -175,11 +278,12 @@ impl EventLog {
                     self.status_message = Some(message.to_owned());
                 }
             }
-            _ => {
-                let raw = payload.to_string();
-                let head: String = raw.chars().take(600).collect();
-                tracing::trace!(kind = %event.kind, payload = %head, "frame");
-            }
+            // a reasoning block ends with its duration; the text deltas before it stay frames
+            "thinking" => match thinking_duration(payload) {
+                Some(duration_ms) => tracing::debug!(duration_ms, "thinking"),
+                None => frame(event),
+            },
+            _ => frame(event),
         }
     }
 
@@ -227,7 +331,11 @@ impl EventLog {
             Some("started" | "running") => {
                 if let (Some(call_id), Some(pending)) = (call_id, call()) {
                     self.started += 1;
-                    tracing::debug!(tool = %pending.tool, subject = pending.subject(), "tool call");
+                    tracing::debug!(
+                        tool = %pending.tool,
+                        subject = pending.subject(self.cwd.as_deref()),
+                        "tool call"
+                    );
                     self.pending_tools.insert(call_id.to_owned(), pending);
                     self.last_pending = Some(call_id.to_owned());
                 }
@@ -253,7 +361,7 @@ impl EventLog {
 
                 tracing::debug!(
                     tool = %pending.tool,
-                    subject = pending.subject(),
+                    subject = pending.subject(self.cwd.as_deref()),
                     result_bytes = result.to_string().len(),
                     "tool call completed"
                 );
@@ -334,18 +442,40 @@ impl PendingCall {
     }
 
     // The one argument worth a log line: a path, a pattern, or the first
-    // line of a command, cut to a readable width.
-    fn subject(&self) -> Option<String> {
+    // line of a command, cut to a readable width. A path the agent spells
+    // under its `cwd` is shown relative to it, so the width goes on the
+    // part that tells one file from another.
+    fn subject(&self, cwd: Option<&str>) -> Option<String> {
         const KEYS: &[&str] = &["path", "globPattern", "pattern", "command", "query", "url"];
         const WIDTH: usize = 80;
         let text = first_match(&self.args, KEYS)?;
         let line = text.lines().next().unwrap_or_default();
+        let line = cwd
+            .and_then(|cwd| line.strip_prefix(cwd)?.strip_prefix('/'))
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(line);
         Some(if line.chars().count() > WIDTH {
             format!("{}…", line.chars().take(WIDTH).collect::<String>())
         } else {
             line.to_owned()
         })
     }
+}
+
+// Any other frame, at TRACE with the head of its payload.
+fn frame(event: &SdkMessage) {
+    let raw = event.message.to_string();
+    let head: String = raw.chars().take(600).collect();
+    tracing::trace!(kind = %event.kind, payload = %head, "frame");
+}
+
+// The `thinking_duration_ms` a reasoning block's closing frame carries, in
+// either spelling and as a number or a string; a text delta carries none.
+fn thinking_duration(payload: &Value) -> Option<u64> {
+    ["thinking_duration_ms", "thinkingDurationMs"]
+        .iter()
+        .find_map(|key| payload.get(key).and_then(lenient_i64))
+        .and_then(|duration| u64::try_from(duration).ok())
 }
 
 impl From<TokenUsage> for Usage {
@@ -369,22 +499,100 @@ fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
 }
 
-// Stream parsing and the token clamp alone; a run's events reach the log
-// through the fake in `tests/model.rs`.
+// Stream parsing, the token clamp, and the completion's books alone; a
+// run's events reach the log through the fake in `tests/model.rs`.
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use omnia_wasi_model::Usage;
     use serde_json::{Value, json};
 
-    use super::{EventLog, Phase};
+    use super::{Bill, Completion, EventLog, Phase};
+    use crate::failure::Outcome;
     use crate::protocol::{SdkMessage, TokenUsage};
 
-    fn usage(input: i64, output: i64, reasoning: Option<i64>) -> Usage {
-        Usage::from(TokenUsage {
+    fn wire(input: i64, output: i64, reasoning: Option<i64>) -> TokenUsage {
+        TokenUsage {
             input_tokens: input,
             output_tokens: output,
             reasoning_tokens: reasoning,
-        })
+            ..TokenUsage::default()
+        }
+    }
+
+    fn usage(input: i64, output: i64, reasoning: Option<i64>) -> Usage {
+        Usage::from(wire(input, output, reasoning))
+    }
+
+    // Two sends add up; a settled total only raises what is already booked,
+    // and a negative or absent wire count books nothing. The bridge's total
+    // stays absent until a send reports one.
+    #[test]
+    fn bill() {
+        let mut completion = Completion::new();
+        completion.record(10, 0, Some(&wire(30, 10, None)));
+        assert_eq!(completion.bill.total, None, "no send has reported a total");
+        completion.record(
+            10,
+            1,
+            Some(&TokenUsage {
+                cache_read_tokens: Some(50),
+                cache_write_tokens: Some(-1),
+                total_tokens: Some(140),
+                ..wire(70, 20, Some(15))
+            }),
+        );
+        completion.record(10, 0, None);
+        assert_eq!(
+            completion.bill,
+            Bill {
+                input: 100,
+                cache_read: 50,
+                cache_write: 0,
+                output: 30,
+                reasoning: 15,
+                total: Some(140),
+            }
+        );
+
+        completion.settle(&TokenUsage {
+            cache_read_tokens: Some(60),
+            total_tokens: Some(190),
+            ..wire(90, 40, Some(15))
+        });
+        assert_eq!(
+            completion.bill,
+            Bill {
+                input: 100,
+                cache_read: 60,
+                cache_write: 0,
+                output: 40,
+                reasoning: 15,
+                total: Some(190),
+            },
+            "the total raises a count, never lowers or doubles one"
+        );
+        completion.finish(Outcome::Ok);
+    }
+
+    // Every wait lands in its phase's bucket, tool calls together, and the
+    // guest's checks in their own.
+    #[test]
+    fn phase_buckets() {
+        let mut completion = Completion::new();
+        completion.spent(&Phase::Opening, Duration::from_secs(2));
+        completion.spent(&Phase::Tool("read".to_owned()), Duration::from_secs(3));
+        completion.spent(&Phase::Model, Duration::from_secs(5));
+        completion.spent(&Phase::Tool("grep".to_owned()), Duration::from_secs(1));
+        completion.spent(&Phase::Opening, Duration::from_millis(500));
+        completion.checked(Duration::from_millis(40));
+        completion.checked(Duration::from_millis(60));
+        assert_eq!(completion.opening, Duration::from_millis(2500));
+        assert_eq!(completion.tool, Duration::from_secs(4));
+        assert_eq!(completion.model, Duration::from_secs(5));
+        assert_eq!(completion.check, Duration::from_millis(100));
+        completion.finish(Outcome::Ok);
     }
 
     #[test]
@@ -455,8 +663,10 @@ mod tests {
             "args": { "path": "references/ids.md" },
         });
         let glob = json!({ "globPattern": "**/*.ts" });
-        let log = observe_all(&[
+        let mut log = EventLog::new("/Users/me/project".to_owned());
+        for event in [
             json!({ "type": "status", "message": { "run_id": "run-1", "status": "RUNNING" } }),
+            json!({ "type": "thinking", "message": { "text": "", "thinking_duration_ms": 12 } }),
             flat("glob", "c1", &glob, None),
             flat(
                 "glob",
@@ -471,10 +681,26 @@ mod tests {
                 &custom,
                 Some(json!({ "status": "success", "value": { "content": [] } })),
             ),
-        ]);
+            flat("read", "c3", &json!({ "path": "/Users/me/project/src/a.ts" }), None),
+            flat(
+                "read",
+                "c3",
+                &json!({ "path": "/Users/me/project/src/a.ts" }),
+                Some(json!({ "status": "success", "value": { "content": "" } })),
+            ),
+        ] {
+            observe_one(&mut log, &event);
+        }
         assert_eq!(log.run_id(), Some("run-1"));
-        assert_eq!(log.tool_calls(), 2);
-        let transcript = log.finish().expect("two completed tool turns");
+        assert_eq!(log.tool_calls(), 3);
+        assert_eq!(log.frames(), 8, "a thinking frame is a frame, not a turn");
+        let transcript = log.finish().expect("three completed tool turns");
+        assert_eq!(transcript.turns.len(), 3);
+        assert_eq!(
+            transcript.turns[2].args,
+            json!({ "path": "/Users/me/project/src/a.ts" }),
+            "the transcript keeps the path as the agent spelled it"
+        );
         assert_eq!(transcript.turns[0].tool, "glob");
         assert_eq!(transcript.turns[0].args, json!({ "globPattern": "**/*.ts" }));
         assert_eq!(transcript.turns[0].result["value"]["files"], json!(["a.ts"]));
@@ -614,5 +840,72 @@ mod tests {
             json!({ "type": "tool_call", "message": { "subtype": "completed" } }),
         ]);
         assert!(log.finish().is_none(), "nothing usable, nothing recorded");
+    }
+
+    // The closing frame of a reasoning block carries the duration; the text
+    // deltas before it carry none, and no thinking frame is a turn.
+    #[test]
+    fn thinking_frames() {
+        assert_eq!(
+            super::thinking_duration(&json!({ "text": "", "thinking_duration_ms": 4193 })),
+            Some(4193)
+        );
+        assert_eq!(
+            super::thinking_duration(&json!({ "text": "", "thinkingDurationMs": "4193" })),
+            Some(4193),
+            "an int64 spelled as a string, as the bridge spells its counts"
+        );
+        assert_eq!(super::thinking_duration(&json!({ "thinking_duration_ms": -1 })), None);
+        assert_eq!(super::thinking_duration(&json!({ "text": "I will extract" })), None);
+
+        let log = observe_all(&[
+            json!({ "type": "thinking", "message": { "run_id": "run-1", "text": "I will" } }),
+            json!({ "type": "thinking", "message": { "text": "", "thinking_duration_ms": 4193 } }),
+        ]);
+        assert_eq!(log.run_id(), Some("run-1"));
+        assert_eq!(log.phase(), Phase::Model);
+        assert!(log.finish().is_none());
+    }
+
+    // A path under the agent's `cwd` is shown relative to it; anything else
+    // is shown as spelled, cut to the width.
+    #[test]
+    fn subjects() {
+        let cwd = "/Users/me/project";
+        let subject = |args: Value, cwd: Option<&str>| {
+            super::PendingCall {
+                tool: "read".to_owned(),
+                args,
+            }
+            .subject(cwd)
+        };
+        assert_eq!(
+            subject(json!({ "path": "/Users/me/project/src/orders.ts" }), Some(cwd)).as_deref(),
+            Some("src/orders.ts")
+        );
+        assert_eq!(
+            subject(json!({ "path": "/Users/me/project" }), Some(cwd)).as_deref(),
+            Some("/Users/me/project"),
+            "the root itself is not cut to nothing"
+        );
+        assert_eq!(
+            subject(json!({ "path": "/Users/me/projects/x.ts" }), Some(cwd)).as_deref(),
+            Some("/Users/me/projects/x.ts"),
+            "a sibling that shares the prefix is not a path beneath"
+        );
+        assert_eq!(
+            subject(json!({ "path": "/Users/me/project/src/orders.ts" }), None).as_deref(),
+            Some("/Users/me/project/src/orders.ts")
+        );
+        assert_eq!(
+            subject(json!({ "command": "ls -la\nrm -rf /" }), Some(cwd)).as_deref(),
+            Some("ls -la"),
+            "the first line of a command"
+        );
+        let long = format!("{cwd}/{}", "a".repeat(100));
+        let shown = subject(json!({ "path": long }), Some(cwd)).expect("a path");
+        assert_eq!(shown.chars().count(), 81, "eighty characters and the ellipsis");
+        assert!(shown.starts_with("aaaa"), "the width is spent on the relative part: {shown}");
+        assert_eq!(subject(json!({ "other": 1 }), Some(cwd)), None);
     }
 }

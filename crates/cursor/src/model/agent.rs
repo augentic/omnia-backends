@@ -30,7 +30,7 @@ use super::options::{AgentSpec, Prompt, Turn, Workspace};
 use crate::endpoint::Attached;
 use crate::failure::Outcome;
 use crate::pool::Lease;
-use crate::protocol::{AgentOperationOptions, RunStatus, RunStream, RunStreamResult};
+use crate::protocol::{AgentOperationOptions, RunStatus, RunStream, RunStreamResult, TokenUsage};
 use crate::worker::Worker;
 use crate::{Failure, elapsed_ms};
 
@@ -106,7 +106,12 @@ impl Agent {
         let window = deadlines.inactivity;
         let created = worker.fail_on_exit(worker.rpc().create_agent(options));
 
-        let id = match timeout(window, created).await {
+        // the agent's creation is the first wait on the bridge, booked however it ends
+        let opened = Instant::now();
+        let created = timeout(window, created).await;
+        completion.spent(&Phase::Opening, opened.elapsed());
+
+        let id = match created {
             Ok(Ok(created)) if created.agent_id.is_empty() => {
                 Err(anyhow!("sdk.v1 RPC `CreateAgent` returned an empty agent id"))
             }
@@ -154,7 +159,11 @@ impl Agent {
                 return Ok(response.answer(candidate));
             }
 
-            match self.tool_host.check(candidate.clone()).await.map_err(Unanswered::settled)? {
+            let checked = Instant::now();
+            let verdict = self.tool_host.check(candidate.clone()).await;
+            self.completion.checked(checked.elapsed());
+
+            match verdict.map_err(Unanswered::settled)? {
                 Ok(()) => return Ok(response.answer(candidate)),
                 Err(correction) if round < MAX_ROUNDS => {
                     tracing::debug!(%correction, "check rejected the candidate");
@@ -194,6 +203,10 @@ impl Agent {
             Err(error) => Err(error),
         };
 
+        // the wait since the last frame, in the phase the round ended in, however it ended
+        let Activity { at, phase } = activity.borrow().clone();
+        self.completion.spent(&phase, at.elapsed());
+
         match &outcome {
             Ok(response) => {
                 let tools = response.transcript.as_ref().map_or(0, |t| t.turns.len());
@@ -218,7 +231,7 @@ impl Agent {
         &mut self, mut stream: RunStream, activity: &watch::Sender<Activity>,
         mut deadline: Pin<&mut impl Future<Output = Failure>>,
     ) -> Result<Response> {
-        let mut log = EventLog::default();
+        let mut log = EventLog::new(self.handle.operation.cwd.clone());
         let mut outcome: Option<RunStreamResult> = None;
         let mut progress = interval_at(Instant::now() + PROGRESS, PROGRESS);
 
@@ -227,7 +240,7 @@ impl Agent {
                 message = self.handle.worker().fail_on_exit(stream.next()) => {
                     let Some(message) = message? else { break };
                     log.observe_message(&message);
-                    activity.send_replace(Activity::now(log.phase()));
+                    self.advance(activity, log.phase());
                     if self.handle.run_id.is_none() {
                         self.handle.run_id = log.run_id().map(ToOwned::to_owned);
                     }
@@ -277,8 +290,16 @@ impl Agent {
         Ok(Response {
             result: result.result,
             transcript: log.finish(),
-            usage: result.usage.map(Usage::from),
+            usage: result.usage,
         })
+    }
+
+    // A frame arrived: book the wait since the last one on the phase it was
+    // spent in, then rearm the window on the phase the stream is now in
+    fn advance(&mut self, activity: &watch::Sender<Activity>, phase: Phase) {
+        let Activity { at, phase: waited } = activity.borrow().clone();
+        self.completion.spent(&waited, at.elapsed());
+        activity.send_replace(Activity::now(phase));
     }
 
     // A run still open was cut short: cancel it and book what the agent was
@@ -292,7 +313,7 @@ impl Agent {
         };
         call("CancelRun", rpc.cancel_run(run_id, self.handle.id.clone())).await;
         match timeout(TEARDOWN, rpc.get_usage(self.handle.id.clone())).await {
-            Ok(Ok(Some(usage))) => self.completion.settle(&Usage::from(usage)),
+            Ok(Ok(Some(usage))) => self.completion.settle(&usage),
             Ok(Ok(None)) => tracing::debug!("no usage reported for the cancelled run"),
             Ok(Err(error)) => tracing::debug!(%error, "usage unavailable for the cancelled run"),
             Err(_elapsed) => tracing::debug!("usage unanswered for the cancelled run"),
@@ -420,18 +441,20 @@ impl Activity {
     }
 }
 
+// The run's answer as the wire carried it; the usage narrows to the guest's
+// `Usage` only once the answer is the guest's
 #[derive(Debug)]
 struct Response {
     result: String,
     transcript: Option<Transcript>,
-    usage: Option<Usage>,
+    usage: Option<TokenUsage>,
 }
 
 impl Response {
     fn answer(self, candidate: String) -> Answer {
         Answer {
             answer: candidate,
-            usage: self.usage,
+            usage: self.usage.map(Usage::from),
             transcript: self.transcript,
         }
     }

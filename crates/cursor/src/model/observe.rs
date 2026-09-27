@@ -155,7 +155,11 @@ impl EventLog {
                     self.status_message = Some(message.to_owned());
                 }
             }
-            _ => {}
+            _ => {
+                let raw = payload.to_string();
+                let head: String = raw.chars().take(600).collect();
+                tracing::trace!(kind = %event.kind, payload = %head, "frame");
+            }
         }
     }
 

@@ -765,9 +765,11 @@ pub struct RunResult {
     pub usage: Option<TokenUsage>,
 }
 
-// Billed token counts; `int64` arrives as a string or a number. The cache
-// counts are among the input: what the provider read from its prompt cache
-// and what it wrote to it, absent when the bridge does not report them.
+// Billed token counts; `int64` arrives as a string or a number. The bridge's
+// `totalTokens` is input plus output plus cache reads, so the cache reads are
+// context beyond `inputTokens`, not a part of it; the reasoning tokens are
+// among the output. Every optional count is absent when the bridge does not
+// report it.
 #[allow(clippy::struct_field_names)] // names mirror the wire message
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -782,6 +784,8 @@ pub struct TokenUsage {
     pub cache_read_tokens: Option<i64>,
     #[serde(deserialize_with = "flexible_i64_opt")]
     pub cache_write_tokens: Option<i64>,
+    #[serde(deserialize_with = "flexible_i64_opt")]
+    pub total_tokens: Option<i64>,
 }
 
 fn flexible_i64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
@@ -790,11 +794,17 @@ fn flexible_i64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Er
 
 fn flexible_i64_opt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<i64>, D::Error> {
     let value = Option::<Value>::deserialize(deserializer)?;
-    Ok(value.and_then(|value| match value {
+    Ok(value.as_ref().and_then(lenient_i64))
+}
+
+// An `int64` as proto3 JSON spells it — a number, or a string when it may
+// not fit a double — read from either; anything else is no count.
+pub fn lenient_i64(value: &Value) -> Option<i64> {
+    match value {
         Value::Number(number) => number.as_i64(),
         Value::String(text) => text.parse().ok(),
         _ => None,
-    }))
+    }
 }
 
 // Service-free floor: codecs, framing, the URL guard, error decoding. The
@@ -822,16 +832,19 @@ mod tests {
             "reasoningTokens": "not a number",
             "cacheReadTokens": "5",
             "cacheWriteTokens": 0,
+            "totalTokens": "15",
         }))
         .expect("int64 as string or number");
         assert_eq!((usage.input_tokens, usage.output_tokens), (7, 3));
         assert_eq!(usage.reasoning_tokens, None, "an unparsable count is absent");
         assert_eq!((usage.cache_read_tokens, usage.cache_write_tokens), (Some(5), Some(0)));
+        assert_eq!(usage.total_tokens, Some(15));
 
         let bare: TokenUsage =
             serde_json::from_value(json!({ "inputTokens": 7, "outputTokens": 3 }))
                 .expect("a bridge that reports no cache counts");
         assert_eq!((bare.cache_read_tokens, bare.cache_write_tokens), (None, None));
+        assert_eq!(bare.total_tokens, None);
     }
 
     #[test]

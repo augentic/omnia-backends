@@ -106,7 +106,12 @@ impl Agent {
         let window = deadlines.inactivity;
         let created = worker.fail_on_exit(worker.rpc().create_agent(options));
 
-        let id = match timeout(window, created).await {
+        // the agent's creation is the first wait on the bridge, booked however it ends
+        let opened = Instant::now();
+        let created = timeout(window, created).await;
+        completion.spent(&Phase::Opening, opened.elapsed());
+
+        let id = match created {
             Ok(Ok(created)) if created.agent_id.is_empty() => {
                 Err(anyhow!("sdk.v1 RPC `CreateAgent` returned an empty agent id"))
             }
@@ -154,7 +159,11 @@ impl Agent {
                 return Ok(response.answer(candidate));
             }
 
-            match self.tool_host.check(candidate.clone()).await.map_err(Unanswered::settled)? {
+            let checked = Instant::now();
+            let verdict = self.tool_host.check(candidate.clone()).await;
+            self.completion.checked(checked.elapsed());
+
+            match verdict.map_err(Unanswered::settled)? {
                 Ok(()) => return Ok(response.answer(candidate)),
                 Err(correction) if round < MAX_ROUNDS => {
                     tracing::debug!(%correction, "check rejected the candidate");
@@ -194,7 +203,7 @@ impl Agent {
             Err(error) => Err(error),
         };
 
-        // the wait since the last frame, in the phase the run ended in
+        // the wait since the last frame, in the phase the round ended in, however it ended
         let Activity { at, phase } = activity.borrow().clone();
         self.completion.spent(&phase, at.elapsed());
 

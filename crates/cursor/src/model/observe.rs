@@ -22,7 +22,7 @@ use tokio::time::Instant;
 use super::options::Turn;
 use crate::elapsed_ms;
 use crate::failure::Outcome;
-use crate::protocol::{RunStreamMessage, SdkMessage, TokenUsage};
+use crate::protocol::{RunStreamMessage, SdkMessage, TokenUsage, lenient_i64};
 
 // One completion's start/finish events: the outcome, what it cost, and
 // where its time went, on the `complete` span that names the model and
@@ -32,10 +32,12 @@ pub struct Completion {
     started: Instant,
     attempts: u32,
     bill: Bill,
-    // the wait booked per phase, every round of the completion together
+    // the wait booked per phase, every round of the completion together,
+    // and the guest's check of each candidate between rounds
     opening: Duration,
     tool: Duration,
     model: Duration,
+    check: Duration,
     emitted: bool,
 }
 
@@ -59,6 +61,7 @@ impl Completion {
             opening: Duration::ZERO,
             tool: Duration::ZERO,
             model: Duration::ZERO,
+            check: Duration::ZERO,
             emitted: false,
         }
     }
@@ -77,6 +80,7 @@ impl Completion {
             cache_write_tokens = usage.and_then(|u| u.cache_write_tokens),
             output_tokens = usage.map(|u| u.output_tokens),
             reasoning_tokens = usage.and_then(|u| u.reasoning_tokens),
+            total_tokens = usage.and_then(|u| u.total_tokens),
             "send answered"
         );
 
@@ -95,13 +99,15 @@ impl Completion {
             cache_write_tokens = total.cache_write_tokens,
             output_tokens = total.output_tokens,
             reasoning_tokens = total.reasoning_tokens,
+            total_tokens = total.total_tokens,
             "usage settled for the cancelled run"
         );
         self.bill.raise_to(&Bill::from(total));
     }
 
-    // Book a wait on `phase`: the bridge before its first frame, a tool
-    // call outstanding, or the model composing.
+    // Book a wait on `phase`: the bridge before its first frame — the
+    // agent's creation included — a tool call outstanding, or the model
+    // composing.
     pub const fn spent(&mut self, phase: &Phase, waited: Duration) {
         let bucket = match phase {
             Phase::Opening => &mut self.opening,
@@ -109,6 +115,11 @@ impl Completion {
             Phase::Model => &mut self.model,
         };
         *bucket = bucket.saturating_add(waited);
+    }
+
+    // Book the guest's check of a candidate, which no phase of the stream covers.
+    pub const fn checked(&mut self, waited: Duration) {
+        self.check = self.check.saturating_add(waited);
     }
 
     pub const fn attempts(&self) -> u32 {
@@ -138,11 +149,13 @@ impl Completion {
                     opening_ms = millis(self.opening),
                     tool_ms = millis(self.tool),
                     model_ms = millis(self.model),
+                    check_ms = millis(self.check),
                     input_tokens = self.bill.input,
                     cache_read_tokens = self.bill.cache_read,
                     cache_write_tokens = self.bill.cache_write,
                     output_tokens = self.bill.output,
                     reasoning_tokens = self.bill.reasoning,
+                    total_tokens = self.bill.total,
                     "completion"
                 )
             };
@@ -151,7 +164,8 @@ impl Completion {
     }
 }
 
-// The tokens a completion has been billed so far, every send together.
+// The tokens a completion has been billed so far, every send together. The
+// total is the bridge's own sum, absent until a send reports one.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Bill {
     input: u64,
@@ -159,6 +173,7 @@ struct Bill {
     cache_write: u64,
     output: u64,
     reasoning: u64,
+    total: Option<u64>,
 }
 
 impl From<&TokenUsage> for Bill {
@@ -169,6 +184,7 @@ impl From<&TokenUsage> for Bill {
             cache_write: count(usage.cache_write_tokens.unwrap_or(0)),
             output: count(usage.output_tokens),
             reasoning: count(usage.reasoning_tokens.unwrap_or(0)),
+            total: usage.total_tokens.map(count),
         }
     }
 }
@@ -180,6 +196,11 @@ impl Bill {
         self.cache_write = self.cache_write.saturating_add(other.cache_write);
         self.output = self.output.saturating_add(other.output);
         self.reasoning = self.reasoning.saturating_add(other.reasoning);
+        self.total = match (self.total, other.total) {
+            (None, None) => None,
+            (Some(total), None) | (None, Some(total)) => Some(total),
+            (Some(booked), Some(total)) => Some(booked.saturating_add(total)),
+        };
     }
 
     fn raise_to(&mut self, total: &Self) {
@@ -188,6 +209,7 @@ impl Bill {
         self.cache_write = self.cache_write.max(total.cache_write);
         self.output = self.output.max(total.output);
         self.reasoning = self.reasoning.max(total.reasoning);
+        self.total = self.total.max(total.total);
     }
 }
 
@@ -448,11 +470,12 @@ fn frame(event: &SdkMessage) {
 }
 
 // The `thinking_duration_ms` a reasoning block's closing frame carries, in
-// either spelling; a text delta carries none.
+// either spelling and as a number or a string; a text delta carries none.
 fn thinking_duration(payload: &Value) -> Option<u64> {
     ["thinking_duration_ms", "thinkingDurationMs"]
         .iter()
-        .find_map(|key| payload.get(key).and_then(Value::as_u64))
+        .find_map(|key| payload.get(key).and_then(lenient_i64))
+        .and_then(|duration| u64::try_from(duration).ok())
 }
 
 impl From<TokenUsage> for Usage {
@@ -503,20 +526,23 @@ mod tests {
     }
 
     // Two sends add up; a settled total only raises what is already booked,
-    // and a negative or absent wire count books nothing.
+    // and a negative or absent wire count books nothing. The bridge's total
+    // stays absent until a send reports one.
     #[test]
     fn bill() {
         let mut completion = Completion::new();
+        completion.record(10, 0, Some(&wire(30, 10, None)));
+        assert_eq!(completion.bill.total, None, "no send has reported a total");
         completion.record(
             10,
             1,
             Some(&TokenUsage {
                 cache_read_tokens: Some(50),
                 cache_write_tokens: Some(-1),
+                total_tokens: Some(140),
                 ..wire(70, 20, Some(15))
             }),
         );
-        completion.record(10, 0, Some(&wire(30, 10, None)));
         completion.record(10, 0, None);
         assert_eq!(
             completion.bill,
@@ -526,11 +552,13 @@ mod tests {
                 cache_write: 0,
                 output: 30,
                 reasoning: 15,
+                total: Some(140),
             }
         );
 
         completion.settle(&TokenUsage {
             cache_read_tokens: Some(60),
+            total_tokens: Some(190),
             ..wire(90, 40, Some(15))
         });
         assert_eq!(
@@ -541,13 +569,15 @@ mod tests {
                 cache_write: 0,
                 output: 40,
                 reasoning: 15,
+                total: Some(190),
             },
             "the total raises a count, never lowers or doubles one"
         );
         completion.finish(Outcome::Ok);
     }
 
-    // Every wait lands in its phase's bucket, tool calls together.
+    // Every wait lands in its phase's bucket, tool calls together, and the
+    // guest's checks in their own.
     #[test]
     fn phase_buckets() {
         let mut completion = Completion::new();
@@ -556,9 +586,12 @@ mod tests {
         completion.spent(&Phase::Model, Duration::from_secs(5));
         completion.spent(&Phase::Tool("grep".to_owned()), Duration::from_secs(1));
         completion.spent(&Phase::Opening, Duration::from_millis(500));
+        completion.checked(Duration::from_millis(40));
+        completion.checked(Duration::from_millis(60));
         assert_eq!(completion.opening, Duration::from_millis(2500));
         assert_eq!(completion.tool, Duration::from_secs(4));
         assert_eq!(completion.model, Duration::from_secs(5));
+        assert_eq!(completion.check, Duration::from_millis(100));
         completion.finish(Outcome::Ok);
     }
 
@@ -819,9 +852,10 @@ mod tests {
         );
         assert_eq!(
             super::thinking_duration(&json!({ "text": "", "thinkingDurationMs": "4193" })),
-            None,
-            "a count spelled as a string is not a duration"
+            Some(4193),
+            "an int64 spelled as a string, as the bridge spells its counts"
         );
+        assert_eq!(super::thinking_duration(&json!({ "thinking_duration_ms": -1 })), None);
         assert_eq!(super::thinking_duration(&json!({ "text": "I will extract" })), None);
 
         let log = observe_all(&[

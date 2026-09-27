@@ -314,8 +314,7 @@ impl Server {
     }
 
     async fn send(self: &Arc<Self>, body: &[u8]) -> Response<Body> {
-        // The request rides as one Connect envelope: a 5-byte prefix, then
-        // the JSON `SendRequest`.
+        // one Connect envelope: a 5-byte prefix, then the JSON `SendRequest`
         let Some(request) =
             body.get(5..).and_then(|json| serde_json::from_slice::<Value>(json).ok())
         else {
@@ -383,9 +382,8 @@ impl Server {
             return;
         }
         if run.reset {
-            // hyper writes a queued frame out only once the body pends; an
-            // abort straight after the send would discard it unflushed, and
-            // the reset must land *after* the client has the run id.
+            // HACK: hyper writes a queued frame only once the body pends, so an
+            // abort straight after the send would discard the run id unflushed
             sleep(Duration::from_millis(100)).await;
             tx.abort("stream reset".into());
             return;
@@ -616,8 +614,8 @@ impl Server {
     }
 }
 
-/// The last user turn of a rendered prompt: the block before the format
-/// instruction the host appends, which is what the echo default answers.
+/// The last user turn of a rendered prompt — the block before the host's
+/// appended format instruction — which is what `Script::Echo` answers.
 pub fn echo_of(prompt: &str) -> String {
     let blocks: Vec<&str> = prompt.split("\n\n").collect();
     match blocks.len() {

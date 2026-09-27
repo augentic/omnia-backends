@@ -158,7 +158,8 @@ impl Agent {
                 Ok(()) => return Ok(response.answer(candidate)),
                 Err(correction) if round < MAX_ROUNDS => {
                     tracing::debug!(%correction, "check rejected the candidate");
-                    // session persists, so correction becomes the prompt
+
+                    // the session persists, so the correction becomes the prompt
                     prompt = correction;
                 }
                 Err(correction) => {
@@ -308,7 +309,7 @@ impl Agent {
         self.completion.finish(outcome);
     }
 
-    // Delete agent on worker; callback route goes with `self`
+    // The callback route (`session`) goes with `self`
     async fn delete(self) {
         self.handle.delete().await;
     }
@@ -419,7 +420,6 @@ impl Activity {
     }
 }
 
-// Completed turn: final text plus transcript and usage
 #[derive(Debug)]
 struct Response {
     result: String,
@@ -437,14 +437,14 @@ impl Response {
     }
 }
 
-// No answer: the failure, and whether it struck before any candidate — in `CreateAgent` or opening `Send`
+// No answer: the failure, and whether it struck before any candidate — in
+// `CreateAgent` or the opening `Send`
 pub struct Unanswered {
     error: anyhow::Error,
     before_candidate: bool,
 }
 
 impl Unanswered {
-    // Failure before guest saw the agent
     const fn before_candidate(error: anyhow::Error) -> Self {
         Self {
             error,
@@ -452,7 +452,6 @@ impl Unanswered {
         }
     }
 
-    // Failure as-is
     pub const fn settled(error: anyhow::Error) -> Self {
         Self {
             error,
@@ -473,7 +472,6 @@ impl Unanswered {
         self.before_candidate && Outcome::of(&self.error).lost_worker()
     }
 
-    // Exiting process, when that is the failure
     pub fn pid(&self) -> Option<u32> {
         match self.error.downcast_ref::<Failure>() {
             Some(Failure::WorkerExited(exit)) => Some(exit.pid),
@@ -543,6 +541,7 @@ mod tests {
         let activity = watch::Sender::new(Activity::opening());
         let deadline = DEADLINES.watch(&activity);
         tokio::pin!(deadline);
+
         // three tool frames, together well past the window, each inside it
         for _ in 0..3 {
             let still_watching = time::timeout(FRAME_GAP, &mut deadline).await.is_err();
@@ -575,10 +574,10 @@ mod tests {
         assert_eq!(started.elapsed(), DEADLINES.cap);
     }
 
+    // The model has its last tool result and says nothing until its answer:
+    // the window stands down and the cap alone ends the wait.
     #[tokio::test(start_paused = true)]
     async fn composing() {
-        // the model has its last tool result and says nothing until its
-        // answer: the window stands down and the cap alone ends the wait
         let started = Instant::now();
         let activity = watch::Sender::new(Activity::opening());
         let deadline = DEADLINES.watch(&activity);
@@ -591,9 +590,9 @@ mod tests {
         assert_eq!(started.elapsed(), DEADLINES.cap);
     }
 
+    // A tool call started mid-compose brings the window back, from that frame.
     #[tokio::test(start_paused = true)]
     async fn tool_rearms_window() {
-        // a tool call started mid-compose brings the window back, from that frame
         let started = Instant::now();
         let activity = watch::Sender::new(Activity::now(Phase::Model));
         let deadline = DEADLINES.watch(&activity);
@@ -625,8 +624,10 @@ mod tests {
 
         assert!(Unanswered::before_candidate(exited()).restartable());
         assert!(Unanswered::before_candidate(reset()).restartable());
+
         // the guest has seen a candidate: nothing is offered twice
         assert!(!Unanswered::settled(exited()).restartable());
+
         // the worker is up and answering, in its way
         assert!(!Unanswered::before_candidate(stalled()).restartable());
 

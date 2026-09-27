@@ -4,7 +4,36 @@ Unreleased
 
 ### Added
 
+- `omnia-cursor`'s `complete` span carries the request's schema name as
+  `label` when the format is a schema — the guest's own name for the
+  question — so a host log tells one completion from another by what was
+  asked, not by sequence number alone.
+- `omnia-cursor` reads `cursor-sdk-bridge`'s own tool-call frames — the
+  tool's `name` and `args` at the top of the payload, a custom tool as
+  `mcp` with its name and arguments beneath — beside the CLI stream's
+  nested `<name>ToolCall` shape it already read. `tool_calls` on the
+  `in progress` line and `tool_turns` on `send answered` count again, and
+  the `Transcript` a completion returns is populated. Each call is logged
+  at DEBUG as it starts (`tool call`, with `tool` and a compact `subject`:
+  a path, a pattern, or the first line of a command) and completes
+  (`tool call completed`, with `result_bytes`).
+- The `in progress` heartbeat and `Failure::Inactive` name what a silent
+  run is `waiting` on — `the opening frame`, ``tool `<name>` ``, or `the
+  model`; `Failure::Inactive` gains a `waiting` field.
+- A run cut short — at a deadline, aborted, or dropped — is cancelled and
+  its bill asked back through `SdkAgentService/GetUsage` before the
+  `completion` event, so the event's token counts cover it whenever the
+  bridge can report them; when it cannot, a DEBUG line says why.
+
 ### Changed
+
+- `omnia-cursor`'s inactivity window (`CURSOR_INACTIVITY_SECS`) bounds a
+  run only while it waits on the bridge — for the stream's opening frame,
+  or for a tool call the agent started to complete. Once the agent has
+  every tool result and the model is composing, the window stands down and
+  the absolute cap (`CURSOR_TIMEOUT_SECS`) alone ends the wait: the stream
+  carries no model text while it reasons, so a long answer was being cut
+  at the window for taking longer than 120s to think.
 
 - `omnia-opentelemetry` reads its collector endpoint from
   `OTEL_EXPORTER_OTLP_ENDPOINT`, OpenTelemetry's own variable and the one

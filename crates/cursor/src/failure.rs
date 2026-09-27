@@ -1,59 +1,56 @@
+//! Why a completion failed, typed, and the `outcome` label its `completion`
+//! event carries.
+
 use crate::protocol::{RpcError, RunStatus};
 use crate::worker::Exit;
 
-/// How a completion this backend ran came to fail, by variant rather than
-/// by message.
+/// Why a completion failed, by variant rather than by message.
 ///
-/// `complete`'s error downcasts to one of these — or to an [`RpcError`], or
-/// to the typed `budget-exhausted` a rejected check ends on.
+/// `complete`'s error downcasts to one of these, to an [`RpcError`], or to
+/// the typed `budget-exhausted` a rejected check ends on.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Failure {
-    /// The run reached a terminal status other than `finished`: the worker
-    /// or the provider answered with an error.
+    /// The run ended in a terminal status other than `finished`.
     #[error("cursor run {status}: {}", .detail.as_deref().unwrap_or("<no detail>"))]
     Run {
-        /// The status the stream's result carried.
+        /// The status the result carried.
         status: RunStatus,
-        /// The result's error code, else the last status message; `None`
-        /// when the stream carried neither.
+        /// The result's error code, else the last status message.
         detail: Option<String>,
     },
-    /// Absolute wall-clock cap exceeded while the stream was still active.
+    /// The absolute cap passed while the stream was still active.
     #[error("cursor run timed out after {cap_secs}s (absolute cap exceeded while still active)")]
     Timeout {
-        /// The cap in seconds, from connect options.
+        /// The cap, in seconds.
         cap_secs: u64,
     },
     /// No stream events within the inactivity window while the run waited on
-    /// the bridge: the opening frame, or a tool call it had started.
+    /// the bridge.
     #[error(
         "cursor run inactive for {idle_secs}s waiting on {waiting} (no stream events; \
          inactivity limit {inactivity_secs}s, absolute cap {cap_secs}s)"
     )]
     Inactive {
-        /// What the run was waiting on when the window closed: `the opening
-        /// frame`, or ``tool `<name>` ``.
+        /// What the run was waiting on: `the opening frame`, or ``tool `<name>` ``.
         waiting: String,
-        /// Observed idle span in seconds.
+        /// The idle span, in seconds.
         idle_secs: u64,
-        /// Configured inactivity limit in seconds.
+        /// The inactivity limit, in seconds.
         inactivity_secs: u64,
-        /// Configured absolute cap in seconds.
+        /// The absolute cap, in seconds.
         cap_secs: u64,
     },
-    /// Hard tool-host failure, or the guest dropping the completion (a
-    /// failure that then reaches no one).
+    /// A hard tool-host failure, or the guest dropping the completion.
     #[error("completion aborted: {0}")]
     Aborted(String),
-    /// The spawned worker exited under the completion — during its
-    /// handshake, or with a run on it.
+    /// The worker exited under the completion.
     #[error("cursor-sdk-bridge exited ({0})")]
     WorkerExited(Exit),
 }
 
 impl Failure {
-    /// The `outcome` field the `completion` event carries for this failure.
+    /// The `outcome` label the `completion` event carries for this failure.
     #[must_use]
     pub const fn outcome(&self) -> &'static str {
         Outcome::of_failure(self).as_str()
@@ -64,7 +61,6 @@ impl Failure {
 // `completion` event carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    // Answered on the opening prompt.
     Ok,
     // Answered after the guest's check rejected a candidate.
     Corrected,
@@ -73,13 +69,12 @@ pub enum Outcome {
     // `Failure::Aborted`, or a completion dropped before it finished.
     Abort,
     WorkerExit,
-    // An `RpcError::Transport`: the socket to the worker failed below
-    // Connect.
+    // `RpcError::Transport`: the socket to the worker failed below Connect.
     Transport,
     // The guest's check rejected every candidate.
     Exhausted,
-    // The worker or the provider answered with an error: a
-    // `Failure::Run`, an `RpcError::Connect`, or anything else.
+    // The worker or the provider answered with an error: a `Failure::Run`,
+    // an `RpcError::Connect`, or anything else.
     Error,
 }
 
@@ -110,16 +105,13 @@ impl Outcome {
         }
     }
 
-    // Whether the worker, or the socket to it, was lost under the
-    // completion. Neither says anything about the prompt, so a fresh
-    // worker may be given it again; every other outcome is the worker
-    // answering — a Connect error, an end-stream error, a run that ended
-    // in a failing status — and is not.
+    // Whether the worker, or the socket to it, was lost under the completion.
+    // Neither says anything about the prompt, so a fresh worker may be given
+    // it again; every other outcome is the worker answering, and is not.
     pub const fn lost_worker(self) -> bool {
         matches!(self, Self::WorkerExit | Self::Transport)
     }
 
-    // Whether the guest got an answer, on the opening prompt or corrected.
     pub const fn answered(self) -> bool {
         matches!(self, Self::Ok | Self::Corrected)
     }
@@ -143,7 +135,6 @@ impl Outcome {
 mod tests {
     use super::{Exit, Failure, Outcome, RpcError, RunStatus};
 
-    // an exit whose status the wait never reported
     const EXITED: Exit = Exit { status: None, pid: 1 };
 
     fn inactive() -> anyhow::Error {
@@ -235,7 +226,7 @@ mod tests {
         let torn: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
         assert!(Outcome::of(&torn).lost_worker());
 
-        // The worker answered, in one way or another.
+        // the worker answered, one way or another
         assert!(!Outcome::of(&inactive()).lost_worker());
         let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
         assert!(!Outcome::of(&timeout).lost_worker());

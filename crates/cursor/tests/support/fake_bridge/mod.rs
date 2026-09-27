@@ -1,32 +1,21 @@
-//! A protocol-faithful fake `cursor-sdk-bridge`.
+//! A protocol-faithful fake `cursor-sdk-bridge`: bearer-checked Connect JSON,
+//! `agent-<n>` ids counted per process so two processes hand out the same
+//! id, `Send` as an enveloped run stream, `CallCustomTool` posted back to
+//! the client's own endpoint — and nothing else.
 //!
 //! [`Spawnable`] stands it up as the process the client spawns: a home
-//! directory holding the reply script, the shared log, and a symlink named
-//! `cursor-sdk-bridge` to the `fake-cursor-sdk-bridge` binary (`main.rs`,
-//! this same module), put first on the test process's `PATH` so the client
-//! finds the fake the way a deployment finds the real one. The client
-//! starts one process per lease, each does the ready-line handshake, and
-//! all of them append to one JSONL log the test folds back into per-process
-//! histories. Faults and the reply script are one [`Config`], written as a
-//! file in the home the binary finds through `FAKE_BRIDGE_HOME`.
-//!
-//! A [`Fault::Park`] holds a request until the test releases it: the
-//! process records the park in the log and waits for the release count the
-//! test writes beside it to pass its ticket.
-//!
-//! The suites' side — [`Spawnable`] and the liveness probe — is `cfg(test)`:
-//! the binary is built against the crate's `[dependencies]` alone, and the
-//! probe's `libc` is a dev-dependency.
-//!
-//! The fake answers `sdk.v1` the way the real one does — bearer-checked
-//! Connect JSON, `agent-<n>` ids counted per process so two processes hand
-//! out the same id, `Send` as an enveloped run stream, `CallCustomTool`
-//! posted back to the client's own endpoint — and nothing else.
+//! holding the [`Config`] (script and faults), the shared JSONL log every
+//! spawned process appends to, and a `cursor-sdk-bridge` symlink to the
+//! `fake-cursor-sdk-bridge` binary (`main.rs`, this same module), put first
+//! on the test process's `PATH`. A [`Fault::Park`] holds a request until the
+//! test releases it: the process records the park and waits for the release
+//! count the test writes beside the log to pass its ticket. The suites' side
+//! — [`Spawnable`] and the liveness probe — is `cfg(test)`, since the binary
+//! is built against the crate's `[dependencies]` alone.
 
 mod log;
-// the crate's own callback codec, by path: this module is also a binary
-// built against `[dependencies]` alone, and one codec on both sides of the
-// callback is what keeps the fake honest
+// The crate's own callback codec, by path: one codec on both sides of the
+// callback keeps the fake honest.
 #[path = "../../../src/endpoint/proto.rs"]
 mod proto;
 mod server;
@@ -55,8 +44,7 @@ const BIN_NAME: &str = "cursor-sdk-bridge";
 // Where a spawned fake finds its home.
 const HOME_VAR: &str = "FAKE_BRIDGE_HOME";
 
-/// Where in an agent's lifecycle a [`Fault::Park`] or [`Fault::Hang`]
-/// holds the request.
+/// Where in an agent's lifecycle a [`Fault::Park`] or [`Fault::Hang`] holds the request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Point {
     /// The handshake's first RPC (hang only).
@@ -64,10 +52,9 @@ pub enum Point {
     /// The graceful exit request (hang only).
     Shutdown,
     CreateAgent,
-    /// The `Send` RPC itself, before its stream opens: no run id exists.
+    /// The `Send` RPC itself, before its stream opens: no run id yet.
     Send,
-    /// Mid-run: the stream is open and its first event, carrying the run
-    /// id, has gone out.
+    /// Mid-run: the stream is open and its first event, carrying the run id, is out.
     Stream,
     CloseAgent,
     DeleteAgent,
@@ -82,13 +69,11 @@ pub enum Fault {
     Hang(Point),
     /// `exit(EXIT_ON_CREATE)` as the nth `CreateAgent` (1-based) begins.
     ExitOnCreate(usize),
-    /// Two marker lines to stderr, then `SIGKILL` ourselves as the nth
-    /// `Send` begins.
+    /// Two marker lines to stderr, then `SIGKILL` ourselves as the nth `Send` begins.
     KillOnSend(usize),
     /// Open the nth `Send`'s stream, deliver the run id, then reset it.
     ResetStream(usize),
-    /// Two marker lines to stderr, then exit with this code before the
-    /// ready line.
+    /// Two marker lines to stderr, then exit with this code before the ready line.
     ExitBeforeReady(i32),
     /// Never print a ready line; sleep.
     NeverReady,
@@ -96,26 +81,21 @@ pub enum Fault {
     ReadyThenRefused,
     /// Print a ready line naming this URL instead of the bound one.
     ReadyUrl(String),
-    /// Print the ready line with the token inline (`authToken`) rather
-    /// than in a file.
+    /// Print the ready line with the token inline (`authToken`), not in a file.
     InlineToken,
     /// `CreateAgent` answers `agentId: ""`.
     EmptyId,
     /// `CloseAgent` fails `500 internal`.
     CloseFails,
-    /// Answer `Shutdown`, then stay up this many milliseconds before
-    /// exiting: the lease's slot stays held for that long.
+    /// Answer `Shutdown`, then stay up this many milliseconds: the slot stays held.
     LingerOnShutdown(u64),
-    /// Hold the run's answer until another spawned process has recorded
-    /// this RPC.
+    /// Hold the run's answer until another spawned process has recorded this RPC.
     WaitForPeer(Rpc),
-    /// Fork a `sleep` of our own before the ready line, inheriting our
-    /// stderr, and leave it running however we exit; its pid is recorded.
+    /// Fork a `sleep` inheriting our stderr before the ready line, and leave it running.
     Grandchild,
 }
 
-/// A fault and the spawned process it targets: 1-based in start order, or
-/// every process when unset.
+/// A fault and the process it targets: 1-based in start order, or every process when unset.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Injected {
     pub fault: Fault,
@@ -151,14 +131,11 @@ pub enum Script {
     /// The last user turn of the prompt comes back as the answer.
     #[default]
     Echo,
-    /// `Send` number n on an agent is answered with `replies[n]`; the last
-    /// reply repeats.
+    /// `Send` number n on an agent is answered with `replies[n]`; the last reply repeats.
     Replies(Vec<String>),
-    /// POST `CallCustomTool` for `name` to the callback endpoint and answer
-    /// with the tool's result.
+    /// POST `CallCustomTool` for `name` to the callback endpoint and answer with its result.
     Tool { name: String, args: Value, codec: Codec },
-    /// Stream one activity frame every `every_ms` for `frames` frames, then
-    /// finish (as `Echo`) or hang.
+    /// One activity frame every `every_ms` for `frames` frames, then finish as `Echo` or hang.
     Paced { every_ms: u64, frames: usize, then: Then },
 }
 
@@ -231,9 +208,8 @@ impl Config {
     }
 }
 
-/// Give the client the `CURSOR_API_KEY` it reads — at connect, in
-/// `CreateAgent`, in `DeleteAgent` — when the environment has none. Once
-/// per process, before any runtime thread exists.
+/// Give the client a `CURSOR_API_KEY` when the environment has none; once per
+/// process, before any runtime thread exists.
 pub fn dummy_key() {
     static SET: Once = Once::new();
     SET.call_once(|| {
@@ -244,9 +220,8 @@ pub fn dummy_key() {
     });
 }
 
-/// The fake as the process the client spawns: a home directory holding the
-/// script, the shared log, the release counts, and the `cursor-sdk-bridge`
-/// link to `fake-cursor-sdk-bridge`, put on `PATH` for this test process.
+/// The fake as the process the client spawns: a home holding the script, log
+/// and releases, and the `cursor-sdk-bridge` link on this test process's `PATH`.
 #[cfg(test)]
 pub struct Spawnable {
     home: tempfile::TempDir,
@@ -254,10 +229,8 @@ pub struct Spawnable {
 
 #[cfg(test)]
 impl Spawnable {
-    /// Lay out `config` for the binary to pick up and put the fake on `PATH`.
-    ///
-    /// `PATH` and `FAKE_BRIDGE_HOME` are process-wide, so one `Spawnable`
-    /// per test process: the suites run under nextest, one test each.
+    /// Lay out `config` and put the fake on `PATH`; `PATH` and `FAKE_BRIDGE_HOME`
+    /// are process-wide, so one `Spawnable` per test process (nextest's one test each).
     pub fn new(config: &Config) -> Self {
         let home =
             tempfile::Builder::new().prefix("fake-bridge-").tempdir().expect("a home directory");
@@ -277,9 +250,8 @@ impl Spawnable {
             path.push(":");
             path.push(rest);
         }
-        // SAFETY: set before the test spawns any thread of its own, and
-        // read only by the client's spawns, and the child processes they
-        // start, from here on.
+        // SAFETY: set before the test spawns any thread of its own, and read
+        // only by the client's spawns and their children from here on.
         unsafe { std::env::set_var("PATH", path) };
         // SAFETY: as above.
         unsafe { std::env::set_var(HOME_VAR, home.path()) };
@@ -291,19 +263,14 @@ impl Spawnable {
         Log::read(&self.home.path().join(LOG_FILE))
     }
 
-    /// Requests held at `point` right now: parked and not yet released. A
-    /// run that left a `Stream` park through `CancelRun` still counts.
+    /// Requests held at `point` right now: parked and not yet released; a run
+    /// that left a `Stream` park through `CancelRun` still counts.
     pub fn parked(&self, point: Point) -> usize {
         self.log().parked(point).saturating_sub(self.released().count(point))
     }
 
-    /// Wait until `count` requests are held at `point`. The bound is
-    /// generous: a guest's component is compiled on the way here, under
-    /// whatever load the rest of the suite puts on the machine.
-    ///
-    /// # Panics
-    ///
-    /// Panics when they have not arrived in time.
+    /// Wait until `count` requests are held at `point`; the bound is generous
+    /// because a guest's component is compiled on the way here.
     pub async fn await_parked(&self, point: Point, count: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         while self.parked(point) < count {
@@ -368,8 +335,7 @@ impl Releases {
         *self.0.entry(format!("{point:?}")).or_insert(0) += count;
     }
 
-    // Write the file whole and rename it into place, so a process never
-    // reads half.
+    // Written whole and renamed into place, so a process never reads half.
     fn write(&self, path: &Path) {
         let staged = path.with_extension("json.tmp");
         std::fs::write(&staged, serde_json::to_vec(self).expect("releases serialize"))
@@ -430,13 +396,11 @@ pub async fn run_spawned(args: Vec<String>) {
         |callback| json!({ "callbackUrl": callback.url, "callbackToken": callback.token }),
     );
     let server = Server::new(config, process, callback, recorder, home.releases_path());
-    // The fake's own bearer token: what the ready line carries, for a test
-    // proving it never reaches a log.
+
+    // the fake's own token rides in the ready event, for the row proving it is never logged
     ready_event["token"] = Value::String(server.token().to_owned());
 
-    // As the real `cursor-sdk-bridge` forks an agent process: a child in our
-    // group, holding the stderr pipe the client reads, that nothing of ours
-    // reaps.
+    // a child in our group holding the stderr pipe, as a real agent would, that nothing reaps
     #[allow(clippy::zombie_processes, reason = "the fault is a child nobody waits for")]
     if server.has(&Fault::Grandchild) {
         let child = std::process::Command::new("sleep")
@@ -495,8 +459,8 @@ pub async fn run_spawned(args: Vec<String>) {
     server.recorder().record(Kind::Ready, None, ready_event);
 
     server.shutdown_requested().await;
-    // Let the `Shutdown` reply reach the client before the process goes —
-    // or, when scripted, hold the slot for longer.
+
+    // let the shutdown reply reach the client before exiting, or linger as scripted
     let linger = server
         .find(|fault| match fault {
             Fault::LingerOnShutdown(ms) => Some(*ms),
@@ -507,11 +471,8 @@ pub async fn run_spawned(args: Vec<String>) {
     std::process::exit(0);
 }
 
-/// Poll `ready` every few milliseconds until it holds or `within` passes.
-///
-/// # Panics
-///
-/// Panics naming `what` when the bound passes first.
+/// Poll `ready` every few milliseconds until it holds, panicking naming `what`
+/// once `within` passes.
 pub async fn poll(mut ready: impl FnMut() -> bool, within: Duration, what: &str) {
     let deadline = tokio::time::Instant::now() + within;
     while !ready() {

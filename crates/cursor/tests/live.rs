@@ -1,15 +1,9 @@
-//! Key/PATH-gated live integration tests for the cursor backend — wasi-model
-//! "run 3" (the `cursor-sdk-bridge` agent acceptance gate).
-//!
-//! Mirrors the genai backend's `live.rs`: each test spawns a real
-//! `cursor-sdk-bridge`, drives a completion through the
-//! `omnia:model/completion` boundary, and parses the answer back.
-//!
-//! All tests are `#[ignore]`d so they never run or spawn a process in CI; run
-//! them with `cargo nextest run --run-ignored all` alongside an installed
-//! `cursor-sdk-bridge` and a `CURSOR_API_KEY`. The rows that watch the
-//! spawned processes install the process's tracing subscriber, so they run
-//! one per process, as nextest does.
+//! Live acceptance against a real `cursor-sdk-bridge`: each row drives a
+//! completion through `omnia:model` and parses the answer back. Every row is
+//! `#[ignore]`d — run with `cargo nextest run --run-ignored all`, an installed
+//! `cursor-sdk-bridge` and a `CURSOR_API_KEY`. The rows that watch spawned
+//! processes install the process's tracing subscriber, so they run one per
+//! process, as nextest does.
 
 mod support;
 
@@ -31,9 +25,8 @@ use support::{
 use tokio::net::TcpListener;
 use tracing_subscriber::layer::SubscriberExt as _;
 
-// How long the pool may take to be rid of every process once the answers
-// are in: each lease's process is shut down and waited for first, and a
-// slot reopens only then.
+// How long the pool may take to be rid of every process once the answers are
+// in: a slot reopens only once its process is shut down and waited for.
 const GONE: Duration = Duration::from_secs(15);
 
 // The answer text as the JSON object the prompts ask for.
@@ -139,9 +132,9 @@ async fn fanout(client: &Client, agents: usize, pids: &SpawnedPids) -> Result<()
 }
 
 // Four completions pending together, the way `emery_sdk::extract` puts its
-// seams up: one worker per agent on the pooled client, none held
-// two, every answer arrives, and every process is gone once they have.
-// `connect()` leaves `max_agents` at four, so nothing here queues.
+// seams up: one worker per agent, none held two, every answer arrives, and
+// every process is gone once they have. `connect()` leaves `max_agents` at
+// four, so nothing here queues.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
 async fn live_fanout() -> Result<()> {
@@ -150,10 +143,9 @@ async fn live_fanout() -> Result<()> {
     fanout(&client, 4, &pids).await
 }
 
-// `live_fanout` twenty times over on one client: a worker that exits
-// under the fan-out fails its completion with `cursor-sdk-bridge exited`,
-// and a lease that does not release leaves its process up, and a slot
-// closed, for the next round.
+// `live_fanout` twenty times over on one client: a worker exiting under the
+// fan-out fails its completion, and a lease that does not release leaves its
+// process up, and a slot closed, for the next round.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; slow (20 fan-outs); run with --run-ignored"]
 async fn stress_fanout() -> Result<()> {
@@ -182,9 +174,8 @@ impl SpawnedPids {
         self.0.lock().expect("pids lock").clone()
     }
 
-    // Wait for every process spawned so far to be gone, and with it every
-    // agent process it forked — the pool whole again, since a slot reopens
-    // only once its process is.
+    // Every process spawned so far gone, and every agent process it forked
+    // with it: the pool whole again, since a slot reopens only then.
     async fn await_gone(&self) -> Result<()> {
         let deadline = tokio::time::Instant::now() + GONE;
         loop {
@@ -253,7 +244,7 @@ impl tracing::field::Visit for Spawn {
 async fn worker_killed_mid_run_recovers() -> Result<()> {
     let pids = SpawnedPids::install();
 
-    // One slot, so the restart also proves the dead lease is reaped first.
+    // one slot, so the restart also proves the dead lease is reaped first
     let client = Client::connect_with(ConnectOptions {
         timeout_secs: 120,
         inactivity_secs: 120,
@@ -272,8 +263,8 @@ async fn worker_killed_mid_run_recovers() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let victim = pids.pids()[0];
-    // A moment for `CreateAgent` and `Send` to go out, well short of a
-    // real answer.
+
+    // a moment for create and send to go out, well short of a real answer
     tokio::time::sleep(Duration::from_secs(2)).await;
     let killed = std::process::Command::new("kill").args(["-9", &victim.to_string()]).status()?;
     anyhow::ensure!(killed.success(), "kill -9 {victim} failed: {killed}");
@@ -385,8 +376,7 @@ fn secret_request(url: String) -> Request {
             })
             .to_string(),
         }),
-        // Grant the `omnia` MCP server with its endpoint URL; the backend
-        // passes it inline through `CreateAgent`'s `mcp_servers`.
+        // the grant rides inline through `CreateAgent`'s `mcp_servers`
         tools: vec![Tool::Mcp(Mcp {
             name: "omnia".to_owned(),
             tools: vec![],

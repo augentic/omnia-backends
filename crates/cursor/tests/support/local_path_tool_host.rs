@@ -16,10 +16,9 @@ pub const TOOL_SENTINEL: &str = "OMNIA-TOOL-SENTINEL-7d21c3aa";
 /// correction turn.
 pub const CHECK_WORD: &str = "quokka";
 
-/// Tool host that resolves the lent workspace to an optional path, answers
-/// `lookup` calls with [`TOOL_SENTINEL`], and plays the guest's `check`:
-/// the first `rejections` candidates are corrected toward [`CHECK_WORD`],
-/// the rest accepted. Every candidate offered is recorded.
+// Lends an optional path, answers `lookup` with `TOOL_SENTINEL`, and plays
+// the guest's `check`: the first `rejections` candidates are corrected toward
+// `CHECK_WORD`, the rest accepted; every candidate offered is recorded.
 #[derive(Debug)]
 pub struct StubToolHost {
     path: Option<PathBuf>,

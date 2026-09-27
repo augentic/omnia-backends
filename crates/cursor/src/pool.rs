@@ -27,8 +27,8 @@ pub struct Pool {
 }
 
 impl Pool {
-    // Bind the callback endpoint. Nothing is spawned until the first lease,
-    // so a missing or broken binary surfaces as that lease's failure.
+    // Nothing is spawned until the first lease, so a missing or broken
+    // binary surfaces as that lease's failure.
     pub async fn connect(max_agents: usize) -> Result<Self> {
         Ok(Self {
             permits: Arc::new(Semaphore::new(max_agents.min(Semaphore::MAX_PERMITS))),
@@ -42,7 +42,7 @@ impl Pool {
         let queued = Instant::now();
         let permit =
             Arc::clone(&self.permits).acquire_owned().await.context("the agent pool is closed")?;
-        
+
         let wait_ms = elapsed_ms(queued);
         if wait_ms > 0 {
             tracing::debug!(wait_ms, "agent slot acquired");
@@ -50,8 +50,8 @@ impl Pool {
 
         let registration = Arc::new(self.endpoint.register()?);
         let spawned = Worker::spawn(&registration)?;
-        // The slot reopens, and the token is revoked, only once the
-        // process is gone — however the lease ends, handshake included.
+
+        // slot and token are held until the process is gone, however the lease ends
         let exited = spawned.exited();
         let token = Arc::clone(&registration);
 
@@ -83,9 +83,6 @@ impl Lease {
         &self.worker
     }
 
-    // Route the worker's callbacks for `agent_id` into `tool_host` until
-    // the returned guard drops; the guard also carries the abort the first
-    // hard tool failure ends the completion with.
     pub fn attach(&self, agent_id: String, tool_host: Arc<dyn ToolHost>) -> Attached {
         self.registration.attach(agent_id, tool_host)
     }

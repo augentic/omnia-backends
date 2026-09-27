@@ -36,7 +36,6 @@ pub struct Completion {
 }
 
 impl From<&Turn> for Completion {
-    // The start event: the clock runs from here.
     fn from(turn: &Turn) -> Self {
         tracing::debug!(
             prompt_bytes = turn.prompt.text.len(),
@@ -61,7 +60,6 @@ impl Completion {
         self.attempts = self.attempts.saturating_add(1);
     }
 
-    // Note one answered send and add its tokens to the completion's bill.
     pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
         tracing::debug!(
             result_bytes = result_len,
@@ -99,7 +97,6 @@ impl Completion {
         self.attempts
     }
 
-    // How long the completion has run, across its attempts.
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
@@ -113,7 +110,7 @@ impl Completion {
         }
         self.emitted = true;
 
-        // an event's level is fixed at its callsite, so each level is its own
+        // an event's level is fixed at its callsite, so each level is its own event
         macro_rules! completion {
             ($level:ident) => {
                 tracing::$level!(
@@ -152,7 +149,6 @@ pub struct EventLog {
 }
 
 impl EventLog {
-    // Absorb one stream message: its event, and the run id its result names.
     pub fn observe_message(&mut self, message: &RunStreamMessage) {
         self.frames += 1;
         if let Some(event) = &message.sdk_message {
@@ -187,7 +183,6 @@ impl EventLog {
         }
     }
 
-    // The run id observed in the stream, for `CancelRun`.
     pub fn run_id(&self) -> Option<&str> {
         self.run_id.as_deref()
     }
@@ -208,7 +203,6 @@ impl EventLog {
         self.started
     }
 
-    // What a silent stream is waiting on right now.
     pub fn phase(&self) -> Phase {
         if self.frames == 0 {
             return Phase::Opening;
@@ -270,7 +264,6 @@ impl EventLog {
         }
     }
 
-    // The reconstructed tool transcript, or `None` when no tool completed.
     pub fn finish(self) -> Option<Transcript> {
         if self.turns.is_empty() { None } else { Some(Transcript { turns: self.turns }) }
     }
@@ -375,6 +368,9 @@ fn clamp_u32(count: i64) -> u32 {
 fn first_match<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| payload.get(key).and_then(Value::as_str))
 }
+
+// Stream parsing and the token clamp alone; a run's events reach the log
+// through the fake in `tests/model.rs`.
 #[cfg(test)]
 mod tests {
     use omnia_wasi_model::Usage;
@@ -474,6 +470,7 @@ mod tests {
         assert_eq!(transcript.turns[0].tool, "glob");
         assert_eq!(transcript.turns[0].args, json!({ "globPattern": "**/*.ts" }));
         assert_eq!(transcript.turns[0].result["value"]["files"], json!(["a.ts"]));
+
         // a custom tool is named and argued by the call it wraps
         assert_eq!(transcript.turns[1].tool, "read_doc");
         assert_eq!(transcript.turns[1].args, json!({ "path": "references/ids.md" }));

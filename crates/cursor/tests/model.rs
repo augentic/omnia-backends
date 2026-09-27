@@ -1,9 +1,7 @@
-//! End-to-end tests for the cursor backend at the `omnia:model` boundary:
-//! every scenario runs a guest component from `crates/test-programs` through
-//! the omnia runtime over an `omnia_cursor::Client`, against the fake
-//! `cursor-sdk-bridge` the client spawns per lease. The guest asserts what
-//! it observes and traps on failure; the test asserts what reached the
-//! fake and that every process the client spawned is gone again.
+//! The `omnia:model` contract, one scenario per guest program: the guest
+//! (`crates/test-programs/programs/model/`) asserts what it observes over an
+//! `omnia_cursor::Client` and traps on failure; the test asserts what reached
+//! the fake `cursor-sdk-bridge` and that every spawned process is gone again.
 
 mod support;
 
@@ -14,20 +12,14 @@ use serde_json::json;
 use support::fake_bridge::{Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
 use support::harness::{await_gone, connect, options, run_guest, sole_agent, spawning};
 
-// Every guest program in `crates/test-programs` must have a matching test
-// here; a new program without one fails to compile.
+// A guest program without a matching test here fails to compile.
 test_programs::foreach_model!();
 
-// The candidates the `check_*` scenarios' fake proposes, spelled as the
-// backend's schema extraction re-serializes them (sorted keys), so the
-// correction quotes them verbatim.
+// The candidates the `check_*` fakes propose, spelled as the backend's schema
+// extraction re-serializes them (sorted keys), so a correction quotes them
+// verbatim.
 const PASS: &str = r#"{"findings":[],"verdict":"pass"}"#;
 const FAIL: &str = r#"{"findings":["x"],"verdict":"fail"}"#;
-
-// ------------------------------------------------------------------------
-// Scenarios (one per guest program; guest-side assertions live in
-// `crates/test-programs/programs/model/`)
-// ------------------------------------------------------------------------
 
 #[tokio::test]
 async fn model_echo_text() {
@@ -44,11 +36,11 @@ async fn model_echo_text() {
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
     assert!(workers[0].ended_with(Rpc::Shutdown), "the lease closed its process");
 
-    // The answer waits on the teardown.
+    // the answer waits on the teardown
     let deleted = workers[0].saw(Rpc::DeleteAgent)[0];
     assert!(deleted.at() <= returned, "DeleteAgent landed before the guest returned");
 
-    // Delete is scoped to the create-time cwd and repeats the API key.
+    // delete is scoped to the create-time cwd and repeats the api key
     let created = workers[0].saw(Rpc::CreateAgent)[0];
     assert_eq!(created.agent.as_deref(), Some(agent.as_str()));
     assert!(!created.text("cwd").is_empty(), "CreateAgent names a cwd: {}", created.arg);
@@ -85,8 +77,8 @@ async fn model_check_corrected() {
         [Rpc::CreateAgent, Rpc::Send, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent],
         "the correction goes on the same agent"
     );
-    // The agent keeps its session, so the second send is the guest's
-    // correction alone, verbatim.
+
+    // the session persists, so the second send is the correction alone
     let sends = log.saw(Rpc::Send);
     let correction = sends[1].text("text");
     assert!(correction.starts_with("## Previous answer (rejected)\n\n"), "{correction}");
@@ -110,9 +102,8 @@ async fn model_check_exhausted() {
     );
 }
 
-// One tool-calling completion in `codec`: the fake's `CallCustomTool`
-// reached the client's own endpoint with the URL and token the process
-// was started with, and was answered.
+// One tool-calling completion in `codec`: the fake's `CallCustomTool` reached
+// the client's endpoint with the URL and token the process was started with.
 async fn tool_roundtrip(codec: Codec) {
     let fake = Spawnable::new(&Config::tool("lookup").codec(codec));
     let client = spawning(&fake, 1).await;
@@ -158,8 +149,7 @@ async fn model_tool_failure() {
     run_guest(test_programs::MODEL_TOOL_FAILURE, &[], &client).await;
     await_gone(&fake).await;
 
-    // A repairable failure is a successful callback: the model, not the
-    // session, sees it.
+    // a repairable failure is a successful callback: the model sees it, not the session
     let log = fake.log();
     let callbacks = log.callbacks();
     assert_eq!(callbacks.len(), 1);
@@ -173,8 +163,7 @@ async fn model_undeclared_tool() {
     run_guest(test_programs::MODEL_UNDECLARED_TOOL, &[], &client).await;
     await_gone(&fake).await;
 
-    // The endpoint refuses the call and aborts the completion; the run
-    // ends and the agent is still torn down.
+    // the endpoint refuses the call and aborts the completion; the agent is still torn down
     let log = fake.log();
     let callbacks = log.callbacks();
     assert_eq!(callbacks.len(), 1);
@@ -212,8 +201,7 @@ async fn model_tool_fanout() {
     run_guest(test_programs::MODEL_TOOL_FANOUT, &[&WIDTH.to_string()], &client).await;
     await_gone(&fake).await;
 
-    // Every process chose the same id; the callbacks still reached the
-    // right completion, routed by each process's own token.
+    // every process chose the same id; callbacks route by each process's own token
     let log = fake.log();
     let workers = log.workers();
     assert_eq!(workers.len(), WIDTH);
@@ -242,7 +230,8 @@ async fn model_fanout_abandon() {
             run_guest(test_programs::MODEL_FANOUT_ABANDON, &[&WIDTH.to_string()], &client).await;
         }
     });
-    // Every completion is mid-run at once; the first released is the winner.
+
+    // every completion is mid-run at once; the first released wins
     fake.await_parked(Point::Stream, WIDTH).await;
     assert_eq!(fake.log().peak_live(), WIDTH);
     assert!(fake.release_one(Point::Stream));
@@ -280,8 +269,7 @@ async fn model_expect_error() {
     run_guest(test_programs::MODEL_EXPECT_ERROR, &["inactivity limit 1s"], &client).await;
     await_gone(&fake).await;
 
-    // No run id ever arrived, so nothing is cancelled; the agent is still
-    // closed and deleted.
+    // no run id arrived, so nothing is cancelled
     let log = fake.log();
     let (_, sequence) = sole_agent(&log);
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);

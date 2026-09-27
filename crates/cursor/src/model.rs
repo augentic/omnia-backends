@@ -29,6 +29,7 @@ impl WasiModelCtx for Client {
         let client = self.clone();
         let model = request.model.as_deref().unwrap_or(&self.model);
         let n = COMPLETION_ID.fetch_add(1, Ordering::Relaxed) + 1;
+
         // a schema's name is the guest's label for the question it asks
         let span = info_span!("complete", n, model, format = %request.format, label = Empty);
         if let Format::Schema(schema) = &request.format {

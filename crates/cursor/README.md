@@ -158,11 +158,16 @@ short for taking longer than the window to write. A completion that is
 corrected therefore gets a fresh inactivity window and a fresh cap on the
 second send. The two errors are distinct (`inactive for Ns waiting on …` vs
 `timed out after Ns (absolute cap …)`). A run cut short either way is
-cancelled and its bill read back (`GetUsage`) before the `completion` event
-is emitted, so the event's token counts cover a timed-out run too. While a
-run is open, an `in progress` event every 15s carries `elapsed_s`, `frames`,
-`tool_calls`, `silent_s`, and `waiting` — what the silence is on: `the
-opening frame`, ``tool `read` ``, or `the model`.
+cancelled and its bill asked back (`GetUsage`) before the `completion` event
+is emitted, so the event's token counts cover a timed-out run whenever the
+bridge can report them; the stream itself carries usage only once a turn
+ends. When the bridge cannot — today it answers `GetUsage` for a local agent
+from the cloud API, which rejects the id — the counts stay at what the
+answered sends reported and a DEBUG line (`usage unavailable for the
+cancelled run`) says why. While a run is open, an `in progress` event every
+15s carries `elapsed_s`, `frames`, `tool_calls`, `silent_s`, and `waiting` —
+what the silence is on: `the opening frame`, ``tool `read` ``, or `the
+model`.
 
 Concurrency is bounded by `CURSOR_MAX_AGENTS` (default 4): that many agents
 live at once, each on its own worker, and a further completion

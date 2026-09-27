@@ -236,6 +236,9 @@ impl EventLog {
                 let Some(call_id) = call_id else {
                     return;
                 };
+
+                // a terminal frame ends the call with or without a result, or the phase stays on the tool
+                let known = self.pending_tools.remove(call_id);
                 let Some(result) = nested
                     .and_then(|tool_call| tool_call.as_object())
                     .and_then(|map| map.values().find_map(|value| value.get("result").cloned()))
@@ -243,13 +246,10 @@ impl EventLog {
                 else {
                     return;
                 };
-                let pending =
-                    self.pending_tools.remove(call_id).or_else(call).unwrap_or_else(|| {
-                        PendingCall {
-                            tool: "unknown".to_owned(),
-                            args: Value::Null,
-                        }
-                    });
+                let pending = known.or_else(call).unwrap_or_else(|| PendingCall {
+                    tool: "unknown".to_owned(),
+                    args: Value::Null,
+                });
 
                 tracing::debug!(
                     tool = %pending.tool,
@@ -440,6 +440,14 @@ mod tests {
         json!({ "type": "tool_call", "message": payload })
     }
 
+    // A terminal frame that names the call but carries no result.
+    fn resultless(name: &str, call_id: &str, args: &Value, status: &str) -> Value {
+        json!({ "type": "tool_call", "message": {
+            "agent_id": "a-1", "run_id": "run-1", "call_id": call_id,
+            "name": name, "args": args, "status": status,
+        }})
+    }
+
     #[test]
     fn bridge_frames() {
         let custom = json!({
@@ -502,6 +510,50 @@ mod tests {
         assert!(Phase::Tool("read".to_owned()).bounded());
         assert!(!Phase::Model.bounded());
         assert_eq!(Phase::Tool("read".to_owned()).to_string(), "tool `read`");
+    }
+
+    // A terminal frame without a result still ends the call: the tool is
+    // done, so the run waits on the model through the silent compose and the
+    // inactivity window stands down instead of cutting it short.
+    #[test]
+    fn terminal_without_result() {
+        let mut log = EventLog::default();
+        let read = json!({ "path": "a.ts" });
+        let grep = json!({ "pattern": "fn" });
+
+        observe_one(&mut log, &flat("read", "c1", &read, None));
+        observe_one(&mut log, &resultless("read", "c1", &read, "completed"));
+        assert_eq!(log.phase(), Phase::Model);
+
+        observe_one(&mut log, &flat("read", "c2", &read, None));
+        observe_one(&mut log, &resultless("read", "c2", &read, "error"));
+        assert_eq!(log.phase(), Phase::Model);
+
+        observe_one(&mut log, &flat("read", "c3", &read, None));
+        observe_one(&mut log, &flat("grep", "c4", &grep, None));
+        observe_one(&mut log, &resultless("read", "c3", &read, "completed"));
+        assert_eq!(log.phase(), Phase::Tool("grep".to_owned()), "the one still pending");
+        observe_one(&mut log, &resultless("grep", "c4", &grep, "error"));
+        assert_eq!(log.phase(), Phase::Model);
+
+        observe_one(
+            &mut log,
+            &json!({ "type": "tool_call", "message": {
+                "subtype": "started", "call_id": "c5",
+                "tool_call": { "readToolCall": { "args": &read } },
+            }}),
+        );
+        observe_one(
+            &mut log,
+            &json!({ "type": "tool_call", "message": {
+                "subtype": "completed", "call_id": "c5",
+                "tool_call": { "readToolCall": { "args": &read } },
+            }}),
+        );
+        assert_eq!(log.phase(), Phase::Model);
+
+        assert_eq!(log.tool_calls(), 5);
+        assert!(log.finish().is_none(), "no result, no turn");
     }
 
     #[test]

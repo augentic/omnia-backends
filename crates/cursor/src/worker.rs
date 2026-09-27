@@ -29,14 +29,12 @@ use crate::endpoint::Registration;
 use crate::protocol::Rpc;
 use crate::{Failure, elapsed_ms, lock};
 
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READY_WAIT: Duration = Duration::from_secs(30);
+const CONNECT_WAIT: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
-const TAIL_LINES: usize = 20;
-const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 
 // A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`
 // bound on it. Dropping it asks the worker to go.
@@ -214,7 +212,7 @@ impl Supervisor {
             let _ = rpc.shutdown(SHUTDOWN_GRACE).await;
             let _ = self.child.wait().await;
         };
-        let _ = timeout(SHUTDOWN_TIMEOUT, asked).await;
+        let _ = timeout(SHUTDOWN_WAIT, asked).await;
     }
 }
 
@@ -241,14 +239,14 @@ impl Spawned {
                 Err(anyhow!("the stderr reader ended without a ready line"))
             })
         };
-        let discovery = watched.step("no ready line", READY_TIMEOUT, scanned).await?;
+        let discovery = watched.step("no ready line", READY_WAIT, scanned).await?;
 
         let bound = async {
             let base_url = discovery.base_url()?;
             let token = discovery.token().await?;
             Rpc::connect(&base_url, &token).await
         };
-        let rpc = watched.step("no answer to the sdk.v1 handshake", CONNECT_TIMEOUT, bound).await?;
+        let rpc = watched.step("no answer to the sdk.v1 handshake", CONNECT_WAIT, bound).await?;
 
         tracing::debug!(
             pid = watched.state.pid,
@@ -341,8 +339,8 @@ impl State {
     }
 }
 
-// The last few lines the worker wrote to stderr (the ready line aside),
-// shared between the reader and whoever reports how the process ended.
+const TAIL_LINES: usize = 20;
+
 #[derive(Debug, Default)]
 struct Tail(Mutex<VecDeque<String>>);
 
@@ -400,6 +398,8 @@ async fn wait_exit(exit: &mut watch::Receiver<Option<Exit>>, pid: u32) -> Exit {
 // the rest in the tail. The pipe is held however the handshake goes, so an
 // abandoned one never closes it under a live writer; an EOF before the
 // ready line reaches the handshake as the dropped sender.
+const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
+
 fn read_stderr(
     stderr: ChildStderr, state: Arc<State>,
 ) -> (oneshot::Receiver<Result<Discovery>>, JoinHandle<()>) {

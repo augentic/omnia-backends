@@ -33,7 +33,7 @@ use crate::{Failure, elapsed_ms};
 
 const MAX_ROUNDS: u32 = 2;
 const TEARDOWN: Duration = Duration::from_secs(5);
-const PROGRESS: Duration = Duration::from_secs(30);
+const PROGRESS: Duration = Duration::from_secs(15);
 
 // One completion attempt: its turn on a leased worker, callbacks into the tool host
 pub struct Attempt {

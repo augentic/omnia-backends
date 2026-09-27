@@ -25,20 +25,26 @@ Unreleased
   `completion` event, so the event's token counts cover it whenever the
   bridge can report them; when it cannot, a DEBUG line says why.
 - `omnia-cursor`'s `completion` line carries the bill in full and where
-  the wait went. `cache_read_tokens` and `cache_write_tokens` sit beside
-  `input_tokens` — the cache counts are among the input, and the bridge's
-  `usage` frame had carried them unread — so a completion with many tool
-  rounds is no longer read as fresh input it was never billed for;
-  `send answered` and the settled-usage line carry them too, and
-  `TokenUsage` gains the two fields, absent when the bridge reports none.
-  `opening_ms`, `tool_ms`, and `model_ms` split `duration_ms` by what the
-  run waited on — the bridge before its first frame, tool calls
-  outstanding, the model composing — every round of the completion
-  together, so whether a slow completion read too much or reasoned too
-  long is read off one INFO line rather than a TRACE log.
+  the wait went. `cache_read_tokens`, `cache_write_tokens`, and
+  `total_tokens` sit beside `input_tokens` and `output_tokens` — the
+  bridge's `usage` frame had carried all three unread. The bridge's total
+  is input plus output plus cache reads, so the cache reads are context
+  beyond `input_tokens` rather than a part of it, and a completion's
+  context is `input_tokens + cache_read_tokens`; `reasoning_tokens` is
+  among `output_tokens`. `send answered` and the settled-usage line carry
+  the same counts, and `TokenUsage` gains the three fields, each absent
+  when the bridge reports none. `opening_ms`, `tool_ms`, `model_ms`, and
+  `check_ms` split `duration_ms` by what the completion waited on — the
+  bridge before a round's first frame, the agent's creation included;
+  tool calls outstanding; the model composing; the guest's check of each
+  candidate — every round together, so whether a slow completion read too
+  much or reasoned too long is read off one INFO line rather than a TRACE
+  log. The four sum to `duration_ms` less the moments between them and,
+  on a run cut short, the cancel and usage read-back before the line.
 - A reasoning block's closing frame is a DEBUG `thinking` event carrying
-  its `duration_ms`, so a `-v` run shows the long silences between tool
-  calls for what they are; the text deltas before it stay TRACE `frame`s.
+  its `duration_ms` — read as the bridge spells an `int64`, a number or a
+  string — so a `-v` run shows the long silences between tool calls for
+  what they are; the text deltas before it stay TRACE `frame`s.
 - The `subject` on `tool call` / `tool call completed` shows a path under
   the agent's `cwd` relative to it, so the eighty characters go on the
   part that tells one file from another rather than on the lent tree's

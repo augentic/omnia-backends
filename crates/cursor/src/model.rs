@@ -15,8 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use agent::Deadlines;
 use agent::{Attempt, Unanswered};
-use omnia_wasi_model::{Answer, FutureResult, Request, ToolHost, WasiModelCtx};
+use omnia_wasi_model::{Answer, Format, FutureResult, Request, ToolHost, WasiModelCtx};
 use options::Turn;
+use tracing::field::Empty;
 use tracing::{Instrument, info_span};
 
 use crate::Client;
@@ -28,7 +29,11 @@ impl WasiModelCtx for Client {
         let client = self.clone();
         let model = request.model.as_deref().unwrap_or(&self.model);
         let n = COMPLETION_ID.fetch_add(1, Ordering::Relaxed) + 1;
-        let span = info_span!("complete", n, model, format = %request.format);
+        // a schema's name is the guest's label for the question it asks
+        let span = info_span!("complete", n, model, format = %request.format, label = Empty);
+        if let Format::Schema(schema) = &request.format {
+            span.record("label", schema.name.as_str());
+        }
 
         Box::pin(
             async move {

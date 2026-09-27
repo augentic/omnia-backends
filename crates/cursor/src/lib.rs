@@ -87,7 +87,10 @@ mod config {
         /// corrected gets a fresh cap on the second send.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
         pub timeout_secs: u64,
-        /// The period of time without events after which a run is cancelled.
+        /// The period of time without stream events after which a run
+        /// waiting on the bridge — for its opening frame, or for a tool call
+        /// to complete — is cancelled. A model composing its answer is
+        /// bounded by `timeout_secs` alone.
         #[env(from = "CURSOR_INACTIVITY_SECS", default = "120")]
         pub inactivity_secs: u64,
         /// The maximum number of agents that can be live at once.

@@ -80,9 +80,9 @@ const KILLED: &str = "cursor-sdk-bridge exited (signal: 9 (SIGKILL))";
 const ANSWERED: [Rpc; 4] = [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent];
 // The full sequence of a completion whose run was still open when it ended
 // — at a deadline, dropped, or with its stream lost — and was cancelled
-// before its agent was torn down.
-const CANCELLED: [Rpc; 5] =
-    [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::CloseAgent, Rpc::DeleteAgent];
+// and billed before its agent was torn down.
+const CANCELLED: [Rpc; 6] =
+    [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::GetUsage, Rpc::CloseAgent, Rpc::DeleteAgent];
 
 // The two workers of a two-way abandon: the one that recorded `rpc`, and
 // the one that did not.
@@ -454,9 +454,9 @@ async fn cap_hits() {
 }
 
 #[tokio::test]
-async fn slow_stream_rearms() {
-    // Five frames 400ms apart outlast the 1s window several times over;
-    // each one rearms it.
+async fn slow_stream_completes() {
+    // Five frames 400ms apart outlast the 1s window several times over: the
+    // model's frames stand it down, and the cap is nowhere near.
     let fake = Spawnable::new(&Config::paced(400, 5, Then::Finish));
     let client = connect(with_window(WINDOW, 1)).await;
     let started = Instant::now();
@@ -579,12 +579,17 @@ async fn killed_after_candidate_fails() {
 }
 
 #[tokio::test]
-async fn inactive_run_not_restarted() {
-    // A worker that stays up and silent is not a lost worker: the run is
-    // cancelled at the inactivity bound and the failure stands.
+async fn silent_run_not_restarted() {
+    // A worker that stays up and silent once its stream has opened is not a
+    // lost worker, and the silence is the model's: the cap ends the run,
+    // which is cancelled, and the failure stands.
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Stream)));
-    let client = connect(with_window(WINDOW, 1)).await;
-    expect_error("inactive for 1s", &[], &client).await;
+    let client = connect(ConnectOptions {
+        timeout_secs: 1,
+        ..with_window(WINDOW, 1)
+    })
+    .await;
+    expect_error("timed out after 1s", &[], &client).await;
     await_gone(&fake).await;
 
     let log = fake.log();

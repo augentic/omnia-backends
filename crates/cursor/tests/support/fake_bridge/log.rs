@@ -26,6 +26,7 @@ pub enum Rpc {
     CreateAgent,
     Send,
     CancelRun,
+    GetUsage,
     CloseAgent,
     DeleteAgent,
 }

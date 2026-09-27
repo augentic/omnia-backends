@@ -63,7 +63,7 @@ impl Rpc {
             base: base.to_owned(),
             bearer: format!("Bearer {token}"),
         };
-        
+
         rpc.ping().await?;
         let version = rpc.get_version().await?;
         ensure!(version.protocol_version == "sdk.v1", "unsupported protocol version");
@@ -119,6 +119,14 @@ impl Rpc {
     }
 
     // One agent turn; the stream yields the run's messages.
+    // What the agent has been billed so far, across every run it has made;
+    // `None` when the bridge reports no counts for it.
+    pub async fn get_usage(&self, agent_id: String) -> Result<Option<TokenUsage>> {
+        let request = GetUsageRequest { agent_id };
+        let response: GetUsageResponse = self.unary("SdkAgentService/GetUsage", &request).await?;
+        Ok(response.usage.and_then(|usage| usage.usage))
+    }
+
     pub async fn send(&self, agent_id: String, text: String) -> Result<RunStream> {
         let request = SendRequest {
             agent_id,
@@ -577,6 +585,25 @@ struct CancelRunRequest {
     run_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GetUsageRequest {
+    agent_id: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct GetUsageResponse {
+    usage: Option<AgentUsage>,
+}
+
+// The agent's bill: its total, with a per-run breakdown this backend leaves aside.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AgentUsage {
+    usage: Option<TokenUsage>,
 }
 
 #[derive(Serialize)]

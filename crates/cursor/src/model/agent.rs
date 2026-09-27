@@ -6,9 +6,12 @@
 //! is the guest's to drop at any `.await`: the drop cancels a token the task
 //! watches, and the task ends its run — cancelled by id once the stream has
 //! named one — and still deletes its agent. No wait on the worker is
-//! unbounded — the inactivity window that stream progress rearms, the
-//! absolute cap, the callback's abort and the worker's own exit each end
-//! one — so a worker alive but silent unblocks the guest.
+//! unbounded — the inactivity window that stream progress rearms while the
+//! run waits on the bridge, the absolute cap that bounds it while the model
+//! composes, the callback's abort and the worker's own exit each end one —
+//! so a worker alive but silent unblocks the guest. A run cut short is
+//! cancelled and its bill read back before the completion's one line, so a
+//! timeout still reports what it cost.
 
 use std::mem;
 use std::pin::Pin;
@@ -22,7 +25,7 @@ use tokio::time::{Instant, interval_at, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, Span, instrument};
 
-use super::observe::{Completion, EventLog};
+use super::observe::{Completion, EventLog, Phase};
 use super::options::{AgentSpec, Prompt, Turn, Workspace};
 use crate::endpoint::Attached;
 use crate::failure::Outcome;
@@ -63,6 +66,7 @@ impl Attempt {
     async fn run(self, cancel: CancellationToken) -> Result<Answer, Unanswered> {
         let mut agent = Agent::create(self, cancel).await.map_err(Unanswered::before_candidate)?;
         let result = agent.rounds().await;
+        agent.settle().await;
         agent.finish(&result);
         agent.delete().await;
         result
@@ -172,7 +176,7 @@ impl Agent {
         self.completion.attempt();
 
         // bounds run from `Send`, so an unopened stream is an inactivity failure
-        let activity = watch::Sender::new(Instant::now());
+        let activity = watch::Sender::new(Activity::opening());
         let deadline = self.deadlines.watch(&activity);
         tokio::pin!(deadline);
 
@@ -199,7 +203,7 @@ impl Agent {
                 if let Some(Failure::WorkerExited(exit)) = error.downcast_ref::<Failure>() {
                     tracing::debug!(
                         pid = exit.pid,
-                        silent_ms = elapsed_ms(*activity.borrow()),
+                        silent_ms = elapsed_ms(activity.borrow().at),
                         "run lost with its process"
                     );
                 }
@@ -210,21 +214,19 @@ impl Agent {
 
     // Follow run to terminal result, noting run id for cancel and reporting every `PROGRESS`
     async fn follow(
-        &mut self, mut stream: RunStream, activity: &watch::Sender<Instant>,
+        &mut self, mut stream: RunStream, activity: &watch::Sender<Activity>,
         mut deadline: Pin<&mut impl Future<Output = Failure>>,
     ) -> Result<Response> {
         let mut log = EventLog::default();
         let mut outcome: Option<RunStreamResult> = None;
-        let mut frames: u64 = 0;
         let mut progress = interval_at(Instant::now() + PROGRESS, PROGRESS);
 
         loop {
             tokio::select! {
                 message = self.handle.worker().fail_on_exit(stream.next()) => {
                     let Some(message) = message? else { break };
-                    frames += 1;
-                    activity.send_replace(Instant::now());
                     log.observe_message(&message);
+                    activity.send_replace(Activity::now(log.phase()));
                     if self.handle.run_id.is_none() {
                         self.handle.run_id = log.run_id().map(ToOwned::to_owned);
                     }
@@ -236,11 +238,13 @@ impl Agent {
                     }
                 }
                 _ = progress.tick() => {
+                    let current = activity.borrow();
                     tracing::info!(
                         elapsed_s = self.completion.elapsed().as_secs(),
-                        frames,
+                        frames = log.frames(),
                         tool_calls = log.tool_calls(),
-                        silent_s = activity.borrow().elapsed().as_secs(),
+                        silent_s = current.at.elapsed().as_secs(),
+                        waiting = %current.phase,
                         "in progress"
                     );
                 }
@@ -274,6 +278,24 @@ impl Agent {
             transcript: log.finish(),
             usage: result.usage.map(Usage::from),
         })
+    }
+
+    // A run still open was cut short: cancel it and book what the agent was
+    // billed, so the `completion` line carries the cost of a timeout too
+    async fn settle(&mut self) {
+        let Some(run_id) = self.handle.run_id.take() else {
+            return;
+        };
+        let Some(rpc) = self.handle.worker().live_rpc() else {
+            return;
+        };
+        call("CancelRun", rpc.cancel_run(run_id, self.handle.id.clone())).await;
+        match timeout(TEARDOWN, rpc.get_usage(self.handle.id.clone())).await {
+            Ok(Ok(Some(usage))) => self.completion.settle(&Usage::from(usage)),
+            Ok(Ok(None)) => tracing::debug!("no usage reported for the cancelled run"),
+            Ok(Err(error)) => tracing::debug!(%error, "usage unavailable for the cancelled run"),
+            Err(_elapsed) => tracing::debug!("usage unanswered for the cancelled run"),
+        }
     }
 
     // `Completion` line before delete, so `duration_ms` covers the run
@@ -339,30 +361,32 @@ impl Handle {
 // Inactivity and absolute bounds on one run, from connect options
 #[derive(Clone, Copy, Debug)]
 pub struct Deadlines {
-    // Kill run after this long with no stream events
+    // Kill run after this long with no stream events while it waits on the bridge
     pub inactivity: Duration,
     // Kill run after this long, streaming or not
     pub cap: Duration,
 }
 
 impl Deadlines {
-    // Resolve on inactivity or cap; `activity` rearms inactivity
-    async fn watch(self, activity: &watch::Sender<Instant>) -> Failure {
+    // Resolve on inactivity or cap; `activity` rearms inactivity, and a
+    // phase the window does not bound leaves the cap alone
+    async fn watch(self, activity: &watch::Sender<Activity>) -> Failure {
         let mut activity = activity.subscribe();
         let cap = sleep_until(Instant::now() + self.cap);
         tokio::pin!(cap);
 
         loop {
-            let last_activity = *activity.borrow_and_update();
+            let Activity { at, phase } = activity.borrow_and_update().clone();
             tokio::select! {
                 () = &mut cap => {
                     return Failure::Timeout {
                         cap_secs: self.cap.as_secs(),
                     };
                 }
-                () = sleep_until(last_activity + self.inactivity) => {
-                    let idle = Instant::now().saturating_duration_since(last_activity).as_secs();
+                () = sleep_until(at + self.inactivity), if phase.bounded() => {
+                    let idle = Instant::now().saturating_duration_since(at).as_secs();
                     return Failure::Inactive {
+                        waiting: phase.to_string(),
                         idle_secs: idle,
                         inactivity_secs: self.inactivity.as_secs(),
                         cap_secs: self.cap.as_secs(),
@@ -371,6 +395,26 @@ impl Deadlines {
                 // sender borrowed while polled, so channel never closes
                 _ = activity.changed() => {}
             }
+        }
+    }
+}
+
+// The stream's last frame: when it arrived and what the run has waited on since
+#[derive(Clone, Debug)]
+struct Activity {
+    at: Instant,
+    phase: Phase,
+}
+
+impl Activity {
+    fn opening() -> Self {
+        Self::now(Phase::Opening)
+    }
+
+    fn now(phase: Phase) -> Self {
+        Self {
+            at: Instant::now(),
+            phase,
         }
     }
 }
@@ -459,7 +503,7 @@ mod tests {
     use tokio::sync::watch;
     use tokio::time::{self, Instant};
 
-    use super::{Deadlines, Unanswered};
+    use super::{Activity, Deadlines, Phase, Unanswered};
     use crate::Failure;
     use crate::protocol::RpcError;
     use crate::worker::Exit;
@@ -476,16 +520,17 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn silent() {
         let started = Instant::now();
-        let activity = watch::Sender::new(started);
+        let activity = watch::Sender::new(Activity::opening());
         let failure = DEADLINES.watch(&activity).await;
         assert!(
             matches!(
-                failure,
+                &failure,
                 Failure::Inactive {
+                    waiting,
                     idle_secs: 1,
                     inactivity_secs: 1,
                     cap_secs: 5,
-                }
+                } if waiting == "the opening frame"
             ),
             "{failure}"
         );
@@ -495,36 +540,73 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn rearmed() {
         let started = Instant::now();
-        let activity = watch::Sender::new(started);
+        let activity = watch::Sender::new(Activity::opening());
         let deadline = DEADLINES.watch(&activity);
         tokio::pin!(deadline);
-        // three frames, together well past the window, each inside it
+        // three tool frames, together well past the window, each inside it
         for _ in 0..3 {
             let still_watching = time::timeout(FRAME_GAP, &mut deadline).await.is_err();
             assert!(still_watching, "the window fired {:?} in", started.elapsed());
-            activity.send_replace(Instant::now());
+            activity.send_replace(Activity::now(Phase::Tool("read".to_owned())));
         }
         let failure = deadline.await;
-        assert!(matches!(failure, Failure::Inactive { idle_secs: 1, .. }), "{failure}");
+        assert!(
+            matches!(&failure, Failure::Inactive { waiting, idle_secs: 1, .. } if waiting == "tool `read`"),
+            "{failure}"
+        );
         assert_eq!(started.elapsed(), 3 * FRAME_GAP + DEADLINES.inactivity);
     }
 
     #[tokio::test(start_paused = true)]
     async fn capped() {
         let started = Instant::now();
-        let activity = watch::Sender::new(started);
+        let activity = watch::Sender::new(Activity::opening());
         let deadline = DEADLINES.watch(&activity);
         tokio::pin!(deadline);
         let failure = loop {
             match time::timeout(FRAME_GAP, &mut deadline).await {
                 Ok(failure) => break failure,
                 Err(_elapsed) => {
-                    activity.send_replace(Instant::now());
+                    activity.send_replace(Activity::now(Phase::Tool("read".to_owned())));
                 }
             }
         };
         assert!(matches!(failure, Failure::Timeout { cap_secs: 5 }), "{failure}");
         assert_eq!(started.elapsed(), DEADLINES.cap);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn composing() {
+        // the model has its last tool result and says nothing until its
+        // answer: the window stands down and the cap alone ends the wait
+        let started = Instant::now();
+        let activity = watch::Sender::new(Activity::opening());
+        let deadline = DEADLINES.watch(&activity);
+        tokio::pin!(deadline);
+        let still_watching = time::timeout(FRAME_GAP, &mut deadline).await.is_err();
+        assert!(still_watching);
+        activity.send_replace(Activity::now(Phase::Model));
+        let failure = deadline.await;
+        assert!(matches!(failure, Failure::Timeout { cap_secs: 5 }), "{failure}");
+        assert_eq!(started.elapsed(), DEADLINES.cap);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tool_rearms_window() {
+        // a tool call started mid-compose brings the window back, from that frame
+        let started = Instant::now();
+        let activity = watch::Sender::new(Activity::now(Phase::Model));
+        let deadline = DEADLINES.watch(&activity);
+        tokio::pin!(deadline);
+        let still_watching = time::timeout(2 * DEADLINES.inactivity, &mut deadline).await.is_err();
+        assert!(still_watching, "the window fired under `Phase::Model`");
+        activity.send_replace(Activity::now(Phase::Tool("shell".to_owned())));
+        let failure = deadline.await;
+        assert!(
+            matches!(&failure, Failure::Inactive { waiting, idle_secs: 1, .. } if waiting == "tool `shell`"),
+            "{failure}"
+        );
+        assert_eq!(started.elapsed(), 3 * DEADLINES.inactivity);
     }
 
     #[test]
@@ -533,6 +615,7 @@ mod tests {
         let reset = || RpcError::truncated("SdkAgentService/Send", 3).into();
         let stalled = || {
             Failure::Inactive {
+                waiting: "the opening frame".to_owned(),
                 idle_secs: 1,
                 inactivity_secs: 1,
                 cap_secs: 5,

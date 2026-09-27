@@ -25,12 +25,16 @@ pub enum Failure {
         /// The cap in seconds, from connect options.
         cap_secs: u64,
     },
-    /// No stream events within the inactivity window.
+    /// No stream events within the inactivity window while the run waited on
+    /// the bridge: the opening frame, or a tool call it had started.
     #[error(
-        "cursor run inactive for {idle_secs}s (no stream events; inactivity limit \
-         {inactivity_secs}s, absolute cap {cap_secs}s)"
+        "cursor run inactive for {idle_secs}s waiting on {waiting} (no stream events; \
+         inactivity limit {inactivity_secs}s, absolute cap {cap_secs}s)"
     )]
     Inactive {
+        /// What the run was waiting on when the window closed: `the opening
+        /// frame`, or ``tool `<name>` ``.
+        waiting: String,
         /// Observed idle span in seconds.
         idle_secs: u64,
         /// Configured inactivity limit in seconds.
@@ -144,6 +148,7 @@ mod tests {
 
     fn inactive() -> anyhow::Error {
         Failure::Inactive {
+            waiting: "the opening frame".to_owned(),
             idle_secs: 120,
             inactivity_secs: 120,
             cap_secs: 600,

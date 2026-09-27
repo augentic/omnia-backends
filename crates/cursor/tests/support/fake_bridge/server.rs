@@ -57,12 +57,10 @@ pub struct Callback {
 
 pub struct Server {
     config: Config,
-    // The process number claimed through the log (1-based, in start order).
     process: usize,
     token: String,
     callback: Option<Callback>,
     recorder: Recorder,
-    // The release counts the test publishes, which a park waits on.
     releases: PathBuf,
     state: Mutex<State>,
     shutdown: Notify,
@@ -75,7 +73,6 @@ struct State {
     creates: usize,
     sends: usize,
     agents: HashMap<String, AgentState>,
-    // Live runs by id; firing one ends its stream as cancelled.
     runs: HashMap<String, oneshot::Sender<()>>,
 }
 
@@ -203,6 +200,7 @@ impl Server {
             "/sdk.v1.SdkAgentService/CreateAgent" => self.create_agent(&body).await,
             "/sdk.v1.SdkAgentService/Send" => self.send(&body).await,
             "/sdk.v1.SdkAgentService/CancelRun" => self.cancel_run(&body),
+            "/sdk.v1.SdkAgentService/GetUsage" => self.get_usage(&body),
             "/sdk.v1.SdkAgentService/CloseAgent" => self.close_agent(&body).await,
             "/sdk.v1.SdkAgentService/DeleteAgent" => self.delete_agent(&body).await,
             other => connect_error(
@@ -558,6 +556,23 @@ impl Server {
             let _ = cancel.send(());
         }
         empty()
+    }
+
+    // The agent's bill so far: fixed counts, spelled as proto3 JSON spells
+    // `int64`, so a test can tell a run read back from one that was not.
+    fn get_usage(&self, body: &[u8]) -> Response<Body> {
+        let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        let agent = request["agentId"].as_str().unwrap_or_default().to_owned();
+        if !self.state().agents.contains_key(&agent) {
+            return not_found(&agent);
+        }
+        self.record(Rpc::GetUsage, Some(&agent), Value::Null);
+        ok(&json!({
+            "usage": {
+                "usage": { "inputTokens": "1200", "outputTokens": "34", "reasoningTokens": "5" },
+                "runs": [],
+            },
+        }))
     }
 
     async fn close_agent(&self, body: &[u8]) -> Response<Body> {

@@ -150,6 +150,11 @@ fn agent_options(
     }
 
     let model = request.model.as_deref().unwrap_or(default_model).to_owned();
+    let names = if lent {
+        ["glob", "grep", "ls", "mcp", "read"].iter().map(ToString::to_string).collect()
+    } else {
+        Vec::new()
+    };
 
     Ok(AgentOptions {
         model: ModelSelection { id: model },
@@ -160,7 +165,7 @@ fn agent_options(
             custom_tools,
         },
         mcp_servers,
-        tools: if lent { None } else { Some(ToolList { names: Vec::new() }) },
+        tools: Some(ToolList { names }),
     })
 }
 
@@ -200,7 +205,17 @@ mod tests {
     #[test]
     fn workspace_shapes() {
         let options = agent_options(&request(), "/workspace", true, "auto", "test-key").unwrap();
-        assert!(options.tools.is_none());
+        assert_eq!(
+            options.tools.as_ref().map(|t| t.names.clone()),
+            Some(vec![
+                "glob".to_string(),
+                "grep".to_string(),
+                "ls".to_string(),
+                "mcp".to_string(),
+                "read".to_string()
+            ]),
+            "a lent workspace grants read-only tools plus the custom-tool channel"
+        );
         assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
         assert_eq!(options.api_key, "test-key");
 

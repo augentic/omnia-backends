@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use agent::Deadlines;
 use agent::{Attempt, Unanswered};
+use anyhow::anyhow;
 use omnia_wasi_model::{Answer, Format, FutureResult, Request, ToolHost, WasiModelCtx};
 use options::Turn;
 use tracing::field::Empty;
@@ -61,10 +62,17 @@ impl Client {
     async fn attempt(
         &self, request: &Request, tool_host: &Arc<dyn ToolHost>,
     ) -> Result<Answer, Unanswered> {
-        let turn = Turn::prepare(request, tool_host.local_path(), &self.model, &self.api_key)
+        let api_key = self
+            .api_key
+            .as_deref()
+            .ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))
+            .map_err(Unanswered::settled)?;
+
+        let turn = Turn::prepare(request, tool_host.local_path(), &self.model, api_key)
             .await
             .map_err(Unanswered::settled)?;
         let lease = self.pool.lease().await.map_err(Unanswered::settled)?;
+
         Attempt {
             lease,
             turn,

@@ -1,10 +1,8 @@
-//! What the fake records — one event per handshake step, RPC, park, and
-//! tool callback — and the test-side views that fold the record back into
-//! per-process histories.
-//!
-//! Every spawned fake appends JSONL lines to the one log in its home under
-//! `flock`, so several processes share it and number themselves through it:
-//! each lease's process counts up from 1, in start order.
+//! What the fake records — one event per handshake step, RPC, park, and tool
+//! callback — and the test-side views that fold the record back into
+//! per-process histories. Every spawned fake appends JSONL lines to the one
+//! log in its home under `flock`, and numbers itself through it: each
+//! lease's process counts up from 1, in start order.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -26,6 +24,7 @@ pub enum Rpc {
     CreateAgent,
     Send,
     CancelRun,
+    GetUsage,
     CloseAgent,
     DeleteAgent,
 }
@@ -35,22 +34,19 @@ pub enum Rpc {
 pub enum Kind {
     /// The process started and claimed its number.
     Started,
-    /// The ready line went out; `arg` carries the callback URL and token
-    /// the process was started with.
+    /// The ready line went out; `arg` carries the callback URL and token it was started with.
     Ready,
     /// One RPC arrived (recorded on arrival, before any hang or park).
     Rpc(Rpc),
     /// A request is held at this point until the test releases it.
     Parked(Point),
-    /// The fake posted `CallCustomTool`; `arg` carries the status and the
-    /// bearer token it used.
+    /// The fake posted `CallCustomTool`; `arg` carries the status and the bearer token used.
     Callback,
     /// The process forked a child of its own; `arg` carries its pid.
     Forked,
 }
 
-/// One recorded moment, timestamped in epoch microseconds so events from
-/// different processes order against each other and against the test.
+/// One recorded moment, in epoch microseconds so events order across processes and the test.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Event {
     pub pid: u32,
@@ -92,8 +88,7 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// The record for a spawned process, which claims the next process
-    /// number (from 1) under the log's lock and announces itself.
+    /// The record for a spawned process: claims the next number under the log's lock.
     pub fn to_file(path: &Path) -> Self {
         let file = lock(path);
         let started = Log::read(path).events.iter().filter(|e| e.kind == Kind::Started).count();
@@ -120,8 +115,7 @@ impl Recorder {
         append(&lock(&self.file), &self.event(kind, agent, arg));
     }
 
-    /// Record a park at `point` and take its ticket: how many requests
-    /// parked there before it, across every process.
+    /// Record a park at `point` and take its ticket: how many parked there before it.
     pub fn park(&self, point: Point) -> usize {
         let file = lock(&self.file);
         let ticket = Log::read(&self.file).parked(point);
@@ -211,8 +205,7 @@ impl Log {
         Some(Process { number, pid, events })
     }
 
-    /// Every spawned process, in start order — one per lease, since
-    /// `Client::connect` spawns nothing.
+    /// Every spawned process in start order: one per lease, as `connect` spawns nothing.
     pub fn workers(&self) -> Vec<Process> {
         self.processes()
     }
@@ -265,9 +258,8 @@ impl Process {
     }
 }
 
-/// Whether a process with `pid` is still running: a pid that answers a
-/// probe, and is not a zombie waiting on a parent that may never reap it
-/// (a forked child, reparented to a pid 1 that does not).
+/// Whether `pid` is still running: it answers a probe and is not a zombie (a
+/// forked child, reparented to a pid 1 that never reaps it).
 #[cfg(test)]
 pub fn alive(pid: u32) -> bool {
     let Ok(signed) = i32::try_from(pid) else {
@@ -405,7 +397,7 @@ mod tests {
 
     #[test]
     fn same_id_across_processes() {
-        // The `lease_waits` shape: three spawned processes each mint `agent-1`.
+        // the `lease_waits` shape: three processes each mint `agent-1`
         let concurrent = Log::from_events(vec![
             rpc(1, Rpc::CreateAgent, "agent-1"),
             rpc(2, Rpc::CreateAgent, "agent-1"),
@@ -413,7 +405,7 @@ mod tests {
         ]);
         assert_eq!(concurrent.peak_live(), 3);
 
-        // One process closing `agent-1` must not retire the others.
+        // one process closing `agent-1` must not retire the others
         let staggered = Log::from_events(vec![
             rpc(1, Rpc::CreateAgent, "agent-1"),
             rpc(2, Rpc::CreateAgent, "agent-1"),
@@ -422,7 +414,7 @@ mod tests {
         ]);
         assert_eq!(staggered.peak_live(), 2);
 
-        // Sequential reuse of the same id in one process is one live agent.
+        // sequential reuse of one id in one process is one live agent
         let reused = Log::from_events(vec![
             rpc(1, Rpc::CreateAgent, "agent-1"),
             rpc(1, Rpc::CloseAgent, "agent-1"),

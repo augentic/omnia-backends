@@ -80,23 +80,46 @@ cap deadline, a guest abort, `budget-exhausted`, a Connect or end-stream
 error (the worker answered), a lease that could not be taken, or a request
 that could not be shaped all stand as they are. Each attempt is its own
 agent on its own worker, so the `completion started` (DEBUG) / `completion`
-(INFO) lines are per attempt: a restarted
-call produces two pairs inside one `complete` span, the first ending
-`worker_exit` or `transport`, with the restart WARN between them, and
+(INFO for an answer, WARN for every other outcome) lines are per attempt: a
+restarted call produces two pairs inside one `complete` span, the first
+ending `worker_exit` or `transport`, with the restart WARN between them, and
 `attempts` on those lines still counts the sends on that one agent. A
 follow-up worth doing when `cursor-sdk-bridge` exposes it: resuming a run in
 flight (`ObserveRun` / `WaitLiveRun`) on the new process instead of re-sending
 the prompt. A worker
 that stays alive but stops answering is bounded too: no call waits on it
-longer than the inactivity window, and the teardown calls after a
-completion are bounded at a few seconds each, so a silent worker frees its
-slot instead of holding it. The agent's whole life — `CreateAgent`, the
+longer than the inactivity window while the run is the worker's to answer,
+nor longer than the cap in all, and the teardown calls after a completion
+are bounded at a few seconds each, so a silent worker frees its slot instead
+of holding it. The agent's whole life — `CreateAgent`, the
 run, the teardown — runs on a task of its own rather than on the completion
 future, so a completion the guest drops at any point ends its run
 (cancelled by id once the stream has named one) and still closes and
 deletes its agent, the id of a create still in flight included; an
 unanswered `CreateAgent` fails the completion after one window, and its
 worker is asked to go with nothing to tear down.
+
+Everything a completion logs sits under its `complete` span, which carries
+a process-wide sequence `n` beside the `model` and `format` — and, for a
+schema-formatted request, the schema's name as `label`, the guest's own name
+for the question it is asking — so the lines of completions live at once
+read apart without an agent id; each `Send` opens a `send` span (DEBUG)
+naming its `round`, and what the worker writes to stderr and how it exits
+are logged under the completion that spawned it. A run still streaming
+reports `in progress` at INFO every 15s — how long the completion has run
+(`elapsed_s`), the stream `frames` and `tool_calls` seen on that send, how
+long its stream has been silent (`silent_s`), and what it is `waiting` on —
+so a bare `info` run tells a long completion from a hung one. Each tool call
+the agent starts is logged at DEBUG (`tool call`, with its `tool` and the
+one argument worth a line as `subject`: a path, a pattern, or the first line
+of a command), and again when it completes (`tool call completed`, with
+`result_bytes`); a custom tool the guest declared is named by the call it
+wraps (`read_doc`, not the bridge's `mcp`). The teardown once it is done
+logs `agent deleted`, with `teardown_ms`. A
+custom-tool callback arrives from the worker over HTTP on no completion's
+task, so it runs as a root `callback` span at TRACE naming the `tool` alone;
+the guest's own line for the tool is the console's report of the call.
+
 `Client::connect()` binds the loopback callback endpoint and spawns nothing
 until the first lease, so a missing or broken `cursor-sdk-bridge` surfaces
 as that lease's spawn or handshake failure. Every spawn passes a private
@@ -125,17 +148,32 @@ The request's `generation` controls (temperature, max tokens, effort, …)
 are ignored: `CreateAgent` has no sampling knobs. Each `Send` — the opening
 prompt, and a check's correction if any — is bounded twice: an inactivity window
 (`CURSOR_INACTIVITY_SECS`, default 120s) cancels a run whose stream has gone
-silent (keepalive frames do not count), while the absolute wall-clock cap
-(`CURSOR_TIMEOUT_SECS`, default 600s) backstops a run that streams forever.
-A completion that is corrected therefore gets a fresh inactivity window and
-a fresh cap on the second send. The two errors are distinct
-(`inactive for Ns` vs `timed out after Ns (absolute cap …)`).
+silent while it waits on the bridge — for the stream's opening frame, or for
+a tool call the agent has started to complete (keepalive frames do not
+count) — while the absolute wall-clock cap (`CURSOR_TIMEOUT_SECS`, default
+600s) bounds the run as a whole. The stream carries no model text, so once
+the agent has every tool result and the model is composing its answer the
+window stands down and the cap alone ends the wait; a large answer is not cut
+short for taking longer than the window to write. A completion that is
+corrected therefore gets a fresh inactivity window and a fresh cap on the
+second send. The two errors are distinct (`inactive for Ns waiting on …` vs
+`timed out after Ns (absolute cap …)`). A run cut short either way is
+cancelled and its bill asked back (`GetUsage`) before the `completion` event
+is emitted, so the event's token counts cover a timed-out run whenever the
+bridge can report them; the stream itself carries usage only once a turn
+ends. When the bridge cannot — today it answers `GetUsage` for a local agent
+from the cloud API, which rejects the id — the counts stay at what the
+answered sends reported and a DEBUG line (`usage unavailable for the
+cancelled run`) says why. While a run is open, an `in progress` event every
+15s carries `elapsed_s`, `frames`, `tool_calls`, `silent_s`, and `waiting` —
+what the silence is on: `the opening frame`, ``tool `read` ``, or `the
+model`.
 
 Concurrency is bounded by `CURSOR_MAX_AGENTS` (default 4): that many agents
 live at once, each on its own worker, and a further completion
-waits its turn (first come, first served; the wait is logged at DEBUG as
-`agent slot acquired` with `wait_ms`, apart from the completion's own
-`duration_ms`, which
+waits its turn (first come, first served; a wait is logged at DEBUG as
+`agent slot acquired` with `wait_ms` — a slot taken at once logs nothing —
+apart from the completion's own `duration_ms`, which
 starts once the slot is held). The worker executable is `cursor-sdk-bridge`,
 resolved on `PATH`.
 

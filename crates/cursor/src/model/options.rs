@@ -23,8 +23,6 @@ pub struct Turn {
     pub prompt: Prompt,
 }
 
-// The prompt to send the agent: its text, the format steering candidate
-// extraction, and whether the guest checks the answer.
 pub struct Prompt {
     pub text: String,
     pub format: Format,
@@ -40,8 +38,6 @@ pub struct AgentSpec {
 }
 
 impl Turn {
-    // Translate the request against the lent workspace path, pinning the
-    // client's default model and API key into the agent options.
     pub async fn prepare(
         request: &Request, lent: Option<&Path>, default_model: &str, api_key: &str,
     ) -> Result<Self> {
@@ -80,8 +76,6 @@ pub enum Workspace {
 }
 
 impl Workspace {
-    // Create and canonicalize the lent tree; when none is lent, create a
-    // private empty temporary directory instead.
     async fn new(lent: Option<&Path>) -> Result<Self> {
         match lent {
             Some(path) => {
@@ -125,15 +119,13 @@ impl Workspace {
     }
 }
 
-// Translate `request` into the `CreateAgent` options for an agent run in
-// `workspace`.
 fn agent_options(
     request: &Request, cwd: &str, lent: bool, default_model: &str, api_key: &str,
 ) -> Result<AgentOptions> {
     let mut custom_tools = BTreeMap::new();
     let mut mcp_servers = BTreeMap::new();
 
-    // translate guest tools into custom tools
+    // guest function tools become custom tools; mcp grants ride inline
     for tool in &request.tools {
         match tool {
             Tool::Function(function) => {
@@ -157,7 +149,6 @@ fn agent_options(
         }
     }
 
-    // request.model, else the client's default (CURSOR_MODEL at connect, else auto)
     let model = request.model.as_deref().unwrap_or(default_model).to_owned();
 
     Ok(AgentOptions {

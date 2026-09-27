@@ -57,12 +57,10 @@ pub struct Callback {
 
 pub struct Server {
     config: Config,
-    // The process number claimed through the log (1-based, in start order).
     process: usize,
     token: String,
     callback: Option<Callback>,
     recorder: Recorder,
-    // The release counts the test publishes, which a park waits on.
     releases: PathBuf,
     state: Mutex<State>,
     shutdown: Notify,
@@ -75,7 +73,6 @@ struct State {
     creates: usize,
     sends: usize,
     agents: HashMap<String, AgentState>,
-    // Live runs by id; firing one ends its stream as cancelled.
     runs: HashMap<String, oneshot::Sender<()>>,
 }
 
@@ -203,6 +200,7 @@ impl Server {
             "/sdk.v1.SdkAgentService/CreateAgent" => self.create_agent(&body).await,
             "/sdk.v1.SdkAgentService/Send" => self.send(&body).await,
             "/sdk.v1.SdkAgentService/CancelRun" => self.cancel_run(&body),
+            "/sdk.v1.SdkAgentService/GetUsage" => self.get_usage(&body),
             "/sdk.v1.SdkAgentService/CloseAgent" => self.close_agent(&body).await,
             "/sdk.v1.SdkAgentService/DeleteAgent" => self.delete_agent(&body).await,
             other => connect_error(
@@ -316,8 +314,7 @@ impl Server {
     }
 
     async fn send(self: &Arc<Self>, body: &[u8]) -> Response<Body> {
-        // The request rides as one Connect envelope: a 5-byte prefix, then
-        // the JSON `SendRequest`.
+        // one Connect envelope: a 5-byte prefix, then the JSON `SendRequest`
         let Some(request) =
             body.get(5..).and_then(|json| serde_json::from_slice::<Value>(json).ok())
         else {
@@ -385,9 +382,8 @@ impl Server {
             return;
         }
         if run.reset {
-            // hyper writes a queued frame out only once the body pends; an
-            // abort straight after the send would discard it unflushed, and
-            // the reset must land *after* the client has the run id.
+            // HACK: hyper writes a queued frame only once the body pends, so an
+            // abort straight after the send would discard the run id unflushed
             sleep(Duration::from_millis(100)).await;
             tx.abort("stream reset".into());
             return;
@@ -560,6 +556,23 @@ impl Server {
         empty()
     }
 
+    // The agent's bill so far: fixed counts, spelled as proto3 JSON spells
+    // `int64`, so a test can tell a run read back from one that was not.
+    fn get_usage(&self, body: &[u8]) -> Response<Body> {
+        let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        let agent = request["agentId"].as_str().unwrap_or_default().to_owned();
+        if !self.state().agents.contains_key(&agent) {
+            return not_found(&agent);
+        }
+        self.record(Rpc::GetUsage, Some(&agent), Value::Null);
+        ok(&json!({
+            "usage": {
+                "usage": { "inputTokens": "1200", "outputTokens": "34", "reasoningTokens": "5" },
+                "runs": [],
+            },
+        }))
+    }
+
     async fn close_agent(&self, body: &[u8]) -> Response<Body> {
         let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
         let agent = request["agentId"].as_str().unwrap_or_default().to_owned();
@@ -601,8 +614,8 @@ impl Server {
     }
 }
 
-/// The last user turn of a rendered prompt: the block before the format
-/// instruction the host appends, which is what the echo default answers.
+/// The last user turn of a rendered prompt — the block before the host's
+/// appended format instruction — which is what `Script::Echo` answers.
 pub fn echo_of(prompt: &str) -> String {
     let blocks: Vec<&str> = prompt.split("\n\n").collect();
     match blocks.len() {

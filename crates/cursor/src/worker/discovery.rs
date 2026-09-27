@@ -11,8 +11,6 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 use serde_repr::Deserialize_repr;
 
-// The ready line's payload: where the worker listens, and how to
-// authenticate to it.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Discovery {
@@ -35,7 +33,6 @@ impl FromStr for Discovery {
 }
 
 impl Discovery {
-    // Prefer `url`; fall back to `host` + `port` (bracketing `IPv6` hosts).
     pub fn base_url(&self) -> Result<String> {
         if let Some(url) = &self.url {
             return Ok(url.trim_end_matches('/').to_owned());
@@ -55,17 +52,18 @@ impl Discovery {
         Ok(url)
     }
 
-    // Prefer an inline token when present; else read `authTokenFile`.
     pub async fn token(self) -> Result<String> {
         if let Some(token) = self.auth_token {
             return Ok(token);
         }
+
         let path = self
             .auth_token_file
             .context("discovery payload carries no auth token or token file")?;
         let token = tokio::fs::read_to_string(&path)
             .await
             .with_context(|| format!("reading token file {path}"))?;
+
         Ok(token.trim().to_owned())
     }
 }

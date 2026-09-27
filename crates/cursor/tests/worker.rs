@@ -1,17 +1,10 @@
-//! Lifecycle and fault matrix for the cursor backend, guest-driven: every
-//! row runs a guest component from `crates/test-programs` over an
-//! `omnia_cursor::Client` against the fake `cursor-sdk-bridge` — `expect_error`
-//! with the needle when the completion fails, `echo_text`/`fanout` when it
-//! succeeds, `fanout_abandon` when the guest must drop a completion — then
-//! asserts the fake's per-agent RPC sequence and every spawned process
-//! gone again within a stated bound (a slot reopens only once its process
-//! is). No row drives `Client::complete` from the test.
-//!
-//! The restart rows (under "Process death" and "Transport") pin the one
-//! retry the client makes: a worker lost before any candidate reached the
-//! guest is given up, and the prompt goes once more to a fresh lease; a
-//! second loss, a loss after a candidate, or a run that merely stalls is
-//! the failure as it stands.
+//! Lifecycle and fault matrix for the cursor backend: every row runs a guest
+//! from `crates/test-programs` over an `omnia_cursor::Client` against the
+//! fake `cursor-sdk-bridge`, then asserts the fake's per-agent RPC sequence
+//! and every spawned process gone within a stated bound. No row drives
+//! `Client::complete` from the test. The restart rows pin the one retry the
+//! client makes — a worker lost before any candidate reached the guest — and
+//! that no other loss earns one.
 
 mod support;
 
@@ -36,11 +29,9 @@ use tracing_subscriber::layer::SubscriberExt as _;
 const WINDOW: Duration = Duration::from_secs(1);
 // `agent.rs`'s bound on one teardown call.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-// `worker.rs`'s bound on a graceful exit: the `Shutdown` RPC and the exit
-// it asks for, together.
+// `worker.rs`'s bound on a graceful exit: `Shutdown` and the exit it asks for.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-// `worker.rs`'s bound on binding `sdk.v1` over the ready line (token read,
-// `Ping`, `GetVersion`).
+// `worker.rs`'s bound on binding `sdk.v1` over the ready line.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn with_window(window: Duration, max_agents: usize) -> ConnectOptions {
@@ -64,7 +55,6 @@ fn echo_guest(client: &Client) -> JoinHandle<()> {
     tokio::spawn(async move { run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await })
 }
 
-// Wait until the fake has recorded `count` `rpc`s.
 async fn await_rpcs(log: impl Fn() -> Log + Sync, rpc: Rpc, count: usize, within: Duration) {
     fake_bridge::poll(|| log().count(rpc) >= count, within, &format!("{count} {rpc:?}(s)")).await;
 }
@@ -76,13 +66,11 @@ fn killed(process: &Process) {
 
 // The `Failure::WorkerExited` detail a `SIGKILL`ed worker fails with.
 const KILLED: &str = "cursor-sdk-bridge exited (signal: 9 (SIGKILL))";
-// The full sequence of a completion that answered.
 const ANSWERED: [Rpc; 4] = [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent];
-// The full sequence of a completion whose run was still open when it ended
-// — at a deadline, dropped, or with its stream lost — and was cancelled
-// before its agent was torn down.
-const CANCELLED: [Rpc; 5] =
-    [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::CloseAgent, Rpc::DeleteAgent];
+// A completion whose run was still open when it ended — at a deadline,
+// dropped, or with its stream lost — is cancelled and billed before teardown.
+const CANCELLED: [Rpc; 6] =
+    [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::GetUsage, Rpc::CloseAgent, Rpc::DeleteAgent];
 
 // The two workers of a two-way abandon: the one that recorded `rpc`, and
 // the one that did not.
@@ -121,9 +109,7 @@ fn restarted_after(first: &Process, second: &Process) {
     );
 }
 
-// ------------------------------------------------------------------------
-// Configuration
-// ------------------------------------------------------------------------
+// --- Configuration ---
 
 #[tokio::test]
 async fn connect_rejects_invalid_options() {
@@ -162,19 +148,17 @@ async fn connect_rejects_invalid_options() {
     assert!(fake.log().events.is_empty(), "a rejected option spawned a process");
 }
 
-// ------------------------------------------------------------------------
-// Abandon: the guest drops a completion at every point it can be waiting
-// ------------------------------------------------------------------------
+// --- Abandon: the guest drops a completion at every point it can be waiting ---
 
+// Process 2 takes `Ping` and never answers: the loser is dropped with its
+// ready line seen but no RPC bound.
 #[tokio::test]
 async fn abandon_during_handshake() {
-    // Process 2 takes `Ping` and never answers: the loser is dropped with
-    // its ready line seen but no RPC bound.
     let fake = Spawnable::new(&Config::echo().fault_on(2, Fault::Hang(Point::Ping)));
     let client = spawning(&fake, 2).await;
     run_guest(test_programs::MODEL_FANOUT_ABANDON, &["2"], &client).await;
-    // Nothing to ask an unbound worker: it is killed at once, well under
-    // the graceful `SHUTDOWN_TIMEOUT`.
+
+    // nothing is bound to ask an unbound worker: killed at once, well under the graceful bound
     await_gone_within(&fake, AT_ONCE).await;
 
     let log = fake.log();
@@ -189,10 +173,10 @@ async fn abandon_during_handshake() {
     killed(loser);
 }
 
+// Process 2 forks a child, then never prints its ready line: the loser is
+// dropped inside the stderr scan.
 #[tokio::test]
 async fn abandon_before_ready() {
-    // Process 2 forks a child, then never prints its ready line: the loser
-    // is dropped inside the stderr scan.
     let fake = Spawnable::new(
         &Config::echo().fault_on(2, Fault::Grandchild).fault_on(2, Fault::NeverReady),
     );
@@ -208,15 +192,15 @@ async fn abandon_before_ready() {
     assert_eq!(loser.last_rpc(), None);
     assert_eq!(log.count(Rpc::CreateAgent), 1, "only the winner made an agent");
     killed(loser);
-    // Nothing was bound to ask, so the kill is the group's from the start:
-    // the forked child goes with it.
+
+    // the kill is the group's, so the forked child goes with it
     await_forked_gone(loser).await;
 }
 
+// The loser's create is held until the row releases it, inside the window
+// the client waits for an id, so the window is a wide one.
 #[tokio::test]
 async fn abandon_during_create() {
-    // The loser's create is held until the row releases it, inside the
-    // window the client waits for an id, so the window is a wide one.
     let fake = Spawnable::new(&Config::echo().fault(Fault::Park(Point::CreateAgent)));
     let client = connect(with_window(Duration::from_secs(30), 2)).await;
 
@@ -225,9 +209,7 @@ async fn abandon_during_create() {
     assert!(fake.release_one(Point::CreateAgent));
     guest.await.expect("the guest task joins");
 
-    // The loser's `CreateAgent` is still held: its task owns the slot — and
-    // so the process — until the id it will get is deleted, while the
-    // winner's process is asked to go.
+    // the held create owns its slot until its late id is deleted; the winner's process goes
     assert_eq!(fake.parked(Point::CreateAgent), 1);
     let (winner, loser) = split_by(&fake.log(), Rpc::Send);
     await_process_gone(&winner).await;
@@ -252,7 +234,7 @@ async fn abandon_during_create() {
     assert_eq!(deleted.arg["apiKeyMatchesCreate"], true);
     assert!(loser.ended_with(Rpc::Shutdown));
 
-    // Both slots are back: a fresh run gets one and completes.
+    // both slots are back
     let fresh = echo_guest(&client);
     fake.await_parked(Point::CreateAgent, 1).await;
     fake.release_all();
@@ -275,8 +257,7 @@ async fn abandon_before_stream() {
     guest.await.expect("the guest task joins");
     await_gone(&fake).await;
 
-    // No stream opened for the loser, so there is no run to cancel; the
-    // agent is still closed and deleted.
+    // no stream opened for the loser, so nothing to cancel
     let log = fake.log();
     let workers = log.workers();
     assert_eq!(workers.len(), 2, "{}", log.summary());
@@ -294,13 +275,11 @@ async fn abandon_during_teardown() {
     let client = spawning(&fake, 2).await;
 
     let guest = abandon_guest(&client, 2);
-    // Both runs are over; both teardowns are held at `CloseAgent`.
     fake.await_parked(Point::CloseAgent, 2).await;
     assert!(fake.release_one(Point::CloseAgent));
     guest.await.expect("the guest task joins");
 
-    // The loser was dropped while waiting on its teardown, which runs on
-    // and keeps its process; the winner's is asked to go.
+    // the dropped loser's teardown runs on and keeps its process; the winner's goes
     assert_eq!(fake.parked(Point::CloseAgent), 1);
     let (winner, loser) = split_by(&fake.log(), Rpc::DeleteAgent);
     await_process_gone(&winner).await;
@@ -317,14 +296,13 @@ async fn abandon_during_teardown() {
     }
 }
 
+// Three completions on two slots: process 1 answers once process 2 has
+// opened a run, process 2 hangs mid-run, and the third is still queued when
+// the guest drops it. `Send` is recorded before the stream's first event, so
+// a winner answering at once could drop the loser with no run id to cancel;
+// lingering after `Shutdown` keeps the third completion queued.
 #[tokio::test]
 async fn abandon_while_queued() {
-    // Three completions on two slots: process 1 answers once process 2
-    // has opened a run, process 2 hangs mid-run, and the third is still
-    // waiting for a permit when the guest drops it. `Send` is recorded
-    // before the stream's first event is observed, so a winner that
-    // answers at once can drop the loser with no run id to cancel.
-    // Lingering after `Shutdown` keeps the third completion queued.
     let fake = Spawnable::new(
         &Config::echo()
             .fault_on(1, Fault::WaitForPeer(Rpc::Send))
@@ -348,9 +326,7 @@ async fn abandon_while_queued() {
     }
 }
 
-// ------------------------------------------------------------------------
-// Pooling
-// ------------------------------------------------------------------------
+// --- Pooling ---
 
 #[tokio::test]
 async fn lease_waits() {
@@ -363,8 +339,8 @@ async fn lease_waits() {
     let workers = log.workers();
     assert_eq!(workers.len(), 3, "{}", log.summary());
     assert!(log.peak_live() <= 2, "no more agents than slots: {}", log.summary());
-    // The third completion waited for a slot, which reopened only once a
-    // first process had closed its agent and been shut down.
+
+    // the third agent waited for a slot, which reopened only once a process was gone
     let creates = log.saw(Rpc::CreateAgent);
     let first_close = log.saw(Rpc::CloseAgent)[0].at();
     let first_shutdown = workers
@@ -379,10 +355,9 @@ async fn lease_waits() {
     }
 }
 
-// `CreateAgent` never answered, one slot: the completion gives up after
-// one window and its worker is asked to go with nothing to tear down; the
-// next completion gets a worker of its own and reaches its own
-// `CreateAgent`.
+// `CreateAgent` never answered, one slot: the completion gives up after one
+// window and its worker goes with nothing to tear down; the next completion
+// gets a worker of its own.
 #[tokio::test]
 async fn hang_on_create() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::CreateAgent)));
@@ -417,9 +392,7 @@ async fn create_returns_empty_id() {
     assert!(log.workers()[0].ended_with(Rpc::Shutdown));
 }
 
-// ------------------------------------------------------------------------
-// Deadlines
-// ------------------------------------------------------------------------
+// --- Deadlines ---
 
 #[tokio::test]
 async fn hang_on_send() {
@@ -428,17 +401,17 @@ async fn hang_on_send() {
     expect_error("inactive for 1s", &[], &client).await;
     await_gone(&fake).await;
 
-    // The stream never opened, so there is no run id to cancel.
+    // the stream never opened, so nothing to cancel
     let log = fake.log();
     let (_, sequence) = sole_agent(&log);
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
     assert!(log.workers()[0].ended_with(Rpc::Shutdown));
 }
 
+// Activity every 200ms keeps the inactivity window rearmed; the 1s cap ends
+// the run anyway, and the run it noted is cancelled.
 #[tokio::test]
 async fn cap_hits() {
-    // Activity every 200ms keeps the inactivity window rearmed; the 1s cap
-    // ends the run anyway, and the run it noted is cancelled.
     let fake = Spawnable::new(&Config::paced(200, 1000, Then::Hang));
     let client = connect(ConnectOptions {
         timeout_secs: 1,
@@ -453,10 +426,10 @@ async fn cap_hits() {
     assert_eq!(sequence, CANCELLED);
 }
 
+// Five frames 400ms apart outlast the 1s window several times over: the
+// model's frames stand it down, and the cap is nowhere near.
 #[tokio::test]
-async fn slow_stream_rearms() {
-    // Five frames 400ms apart outlast the 1s window several times over;
-    // each one rearms it.
+async fn slow_stream_completes() {
     let fake = Spawnable::new(&Config::paced(400, 5, Then::Finish));
     let client = connect(with_window(WINDOW, 1)).await;
     let started = Instant::now();
@@ -468,15 +441,12 @@ async fn slow_stream_rearms() {
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
 }
 
-// ------------------------------------------------------------------------
-// Process death
-// ------------------------------------------------------------------------
+// --- Process death ---
 
+// Process 1 dies as the opening `Send` begins: no candidate has been offered,
+// so the prompt goes once more, on process 2, and the guest gets its answer.
 #[tokio::test]
 async fn worker_killed_on_send_restarts() {
-    // Process 1 dies as the opening `Send` begins: no candidate has been
-    // offered, so the prompt goes once more, on process 2, and the guest
-    // gets its answer.
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::KillOnSend(1)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
@@ -502,7 +472,8 @@ async fn worker_exited_on_create_restarts() {
 
     let log = fake.log();
     let (first, second) = restarted(&log);
-    // The fake exits before it records the create.
+
+    // the fake exits before recording the create
     assert_eq!(first.count(Rpc::CreateAgent), 0, "{}", first.summary());
     killed(&first);
     let (_, sequence) = sole_agent(&second);
@@ -511,12 +482,12 @@ async fn worker_exited_on_create_restarts() {
     restarted_after(&first, &second);
 }
 
+// Each process forks a child that outlives it: process 1 dies on its `Send`
+// with the child still up and holding the stderr pipe, process 2 exits on
+// `Shutdown` the same way. Neither child is anyone's to reap; both go with
+// their process as its exit is seen.
 #[tokio::test]
 async fn grandchildren_swept() {
-    // Each process forks a child that outlives it: process 1 dies on its
-    // `Send` with the child still up and holding the stderr pipe, process
-    // 2 exits on `Shutdown` the same way. Neither child is anyone's to
-    // reap; both go with their process as its exit is seen.
     let fake =
         Spawnable::new(&Config::echo().fault(Fault::Grandchild).fault_on(1, Fault::KillOnSend(1)));
     let client = spawning(&fake, 1).await;
@@ -532,16 +503,16 @@ async fn grandchildren_swept() {
     }
 }
 
+// Every process dies on its opening `Send`: one restart, then the second exit
+// stands. The socket resets as each process dies; the typed exit wins over
+// the transport error, and what the processes wrote to stderr stays out.
 #[tokio::test]
 async fn worker_killed_twice_fails() {
-    // Every process dies on its opening `Send`: one restart, then the
-    // second exit stands. The socket resets as each process dies; the typed
-    // exit wins over the transport error, and what the processes wrote to
-    // stderr stays out.
     let fake = Spawnable::new(&Config::echo().fault(Fault::KillOnSend(1)));
     let client = spawning(&fake, 1).await;
     expect_error(KILLED, &["without:fake-bridge marker"], &client).await;
-    // Teardown is skipped on a dead worker: no `TEARDOWN_TIMEOUT` is paid.
+
+    // teardown is skipped on a dead worker: no timeout is paid
     await_gone_within(&fake, AT_ONCE).await;
 
     let log = fake.log();
@@ -553,11 +524,11 @@ async fn worker_killed_twice_fails() {
     }
 }
 
+// The first candidate reached the guest's check and was rejected; the
+// process dies on the correction's `Send`. The guest has seen this agent, so
+// the prompt is not offered again.
 #[tokio::test]
 async fn killed_after_candidate_fails() {
-    // The first candidate reached the guest's check and was rejected; the
-    // process dies on the correction's `Send`. The guest has seen this
-    // agent, so the prompt is not offered again.
     let fake =
         Spawnable::new(&Config::replies(["alpha", "beta"]).fault_on(1, Fault::KillOnSend(2)));
     let client = spawning(&fake, 1).await;
@@ -578,13 +549,18 @@ async fn killed_after_candidate_fails() {
     killed(&workers[0]);
 }
 
+// A worker up and silent once its stream has opened is not a lost worker,
+// and the silence is the model's: the cap ends the run, which is cancelled,
+// and the failure stands.
 #[tokio::test]
-async fn inactive_run_not_restarted() {
-    // A worker that stays up and silent is not a lost worker: the run is
-    // cancelled at the inactivity bound and the failure stands.
+async fn silent_run_not_restarted() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Stream)));
-    let client = connect(with_window(WINDOW, 1)).await;
-    expect_error("inactive for 1s", &[], &client).await;
+    let client = connect(ConnectOptions {
+        timeout_secs: 1,
+        ..with_window(WINDOW, 1)
+    })
+    .await;
+    expect_error("timed out after 1s", &[], &client).await;
     await_gone(&fake).await;
 
     let log = fake.log();
@@ -621,8 +597,7 @@ async fn ready_then_refused() {
     expect_error("handshake failed", &[], &client).await;
     await_gone(&fake).await;
 
-    // The ready line was read but nothing answered at its URL: the process
-    // is not left behind.
+    // nothing answered at the ready line's url: the process is not left behind
     let log = fake.log();
     let worker = &log.workers()[0];
     assert!(worker.ready().is_some());
@@ -644,9 +619,7 @@ async fn ready_line_not_loopback() {
     killed(worker);
 }
 
-// ------------------------------------------------------------------------
-// Silence
-// ------------------------------------------------------------------------
+// --- Silence ---
 
 #[tokio::test]
 async fn hang_on_teardown() {
@@ -656,8 +629,7 @@ async fn hang_on_teardown() {
     let returned = SystemTime::now();
     await_gone(&fake).await;
 
-    // The answer waits on the teardown, and the hung call is bounded, not
-    // fatal: `DeleteAgent` still follows it.
+    // the hung close is bounded, not fatal: delete still follows, and the answer waits on it
     let log = fake.log();
     let (_, sequence) = sole_agent(&log);
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
@@ -674,8 +646,8 @@ async fn hang_on_shutdown() {
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
     assert!(fake.log().workers()[0].alive(), "the process is still up");
-    // `Shutdown` unanswered for the one bound, then the kill — of the
-    // group, so the child the process forked goes with it.
+
+    // shutdown unanswered for one bound, then the group is killed, forked child included
     await_gone_within(&fake, SHUTDOWN_TIMEOUT + GONE).await;
     let gone = SystemTime::now();
 
@@ -683,8 +655,8 @@ async fn hang_on_shutdown() {
     assert_eq!(worker.last_rpc(), Some(Rpc::Shutdown));
     let asked = worker.saw(Rpc::Shutdown)[0].at();
     let held = gone.duration_since(asked).unwrap_or_default();
-    // The bound's timer starts a round trip before the fake records the
-    // arrival, hence the slack.
+
+    // the bound's timer starts a round trip before the fake records the arrival
     let bound = SHUTDOWN_TIMEOUT.saturating_sub(Duration::from_millis(50));
     assert!(held >= bound, "the process was gone {held:?} after Shutdown");
     await_forked_gone(worker).await;
@@ -709,9 +681,7 @@ async fn handshake_hangs() {
     killed(worker);
 }
 
-// ------------------------------------------------------------------------
-// Transport
-// ------------------------------------------------------------------------
+// --- Transport ---
 
 #[tokio::test]
 async fn close_500() {
@@ -720,17 +690,17 @@ async fn close_500() {
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
     await_gone(&fake).await;
 
-    // A failed close is logged, and the delete still follows.
+    // a failed close is logged; delete still follows
     let (_, sequence) = sole_agent(&fake.log());
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
 }
 
+// Process 1 resets its opening run's stream after its first frame and stays
+// up: the socket failure alone is the lost worker. The run id that frame
+// carried is cancelled, the agent torn down and the process asked to go
+// before the restart takes the slot.
 #[tokio::test]
 async fn stream_reset_restarts() {
-    // Process 1 resets its opening run's stream after its first frame and
-    // stays up: the socket failure alone is the lost worker. The run id that
-    // frame carried is cancelled, the agent torn down and the process asked
-    // to go before the restart takes the slot.
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::ResetStream(1)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
@@ -748,10 +718,10 @@ async fn stream_reset_restarts() {
     restarted_after(&first, &second);
 }
 
+// Every process resets its opening stream: the second transport failure is
+// the guest's, typed below Connect.
 #[tokio::test]
 async fn stream_reset_twice_fails() {
-    // Every process resets its opening stream: the second transport failure
-    // is the guest's, typed below Connect.
     let fake = Spawnable::new(&Config::echo().fault(Fault::ResetStream(1)));
     let client = spawning(&fake, 1).await;
     expect_error(
@@ -771,18 +741,17 @@ async fn stream_reset_twice_fails() {
     }
 }
 
-// ------------------------------------------------------------------------
-// Callback endpoint
-// ------------------------------------------------------------------------
+// --- Callback endpoint ---
 
+// A run that streams for a few seconds keeps its agent live while the test
+// knocks on the endpoint the way a misbehaving worker would.
 #[tokio::test]
 async fn callback_rejections() {
-    // A run that streams for a few seconds keeps its agent live while the
-    // test knocks on the endpoint the way a misbehaving worker would.
     let fake = Spawnable::new(&Config::paced(200, 20, Then::Finish));
     let client = spawning(&fake, 1).await;
     let guest = echo_guest(&client);
-    // The guest's component is compiled on the way to its `Send`.
+
+    // the guest's component is compiled on the way to its send
     await_rpcs(|| fake.log(), Rpc::Send, 1, STARTUP).await;
     let worker = &fake.log().workers()[0];
     let (base, token) = worker.ready().expect("the process logged its callback identity");
@@ -792,8 +761,8 @@ async fn callback_rejections() {
 
     let (status, reply) = callback(Method::POST, &url, Some("wrong"), &body).await;
     assert_eq!((status, reply["code"].as_str()), (401, Some("unauthenticated")), "{reply}");
-    // A body still in flight when the head is rejected must be taken
-    // before the close, or the reply is lost to a TCP reset.
+
+    // a body in flight when the head is rejected must be drained, or the reply is a tcp reset
     let padded =
         json!({ "toolName": "lookup", "args": { "pad": "x".repeat(1 << 20) }, "agentId": agent });
     let (status, reply) = callback(Method::POST, &url, Some("wrong"), &padded).await;
@@ -814,10 +783,10 @@ async fn callback_rejections() {
     assert_eq!(fake.log().callbacks().len(), 0, "the fake itself never called back");
 }
 
+// The process lingers after `Shutdown`, so there is a moment when its
+// completion is over but its token is still the live one.
 #[tokio::test]
 async fn callback_token_revoked_after_exit() {
-    // The process lingers after `Shutdown`, so there is a moment when its
-    // completion is over but its token is still the live one.
     let fake = Spawnable::new(&Config::tool("lookup").fault(Fault::LingerOnShutdown(3000)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_TOOL_ROUNDTRIP, &[], &client).await;
@@ -831,14 +800,13 @@ async fn callback_token_revoked_after_exit() {
     let url = format!("{base}{CALLBACK_PATH}");
     let body = json!({ "toolName": "lookup", "args": {}, "agentId": worker.agents()[0] });
 
-    // Asked to go, still up: the finished completion no longer routes.
+    // asked to go, still up: the finished completion no longer routes
     fake_bridge::poll(|| fake.log().workers()[0].count(Rpc::Shutdown) == 1, GONE, "Shutdown").await;
     assert!(worker.alive(), "the process lingers");
     let (status, reply) = callback(Method::POST, &url, Some(&token), &body).await;
     assert_eq!((status, reply["code"].as_str()), (404, Some("not_found")), "{reply}");
 
-    // Gone, and its token with it: the client revokes it once it has seen
-    // the exit, a beat after the process is reaped.
+    // gone, and its token with it a beat after the client sees the exit
     await_gone(&fake).await;
     let deadline = Instant::now() + GONE;
     loop {
@@ -852,9 +820,7 @@ async fn callback_token_revoked_after_exit() {
     }
 }
 
-// ------------------------------------------------------------------------
-// Logging
-// ------------------------------------------------------------------------
+// --- Logging ---
 
 // Every event's fields, flattened to text.
 #[derive(Clone, Default)]
@@ -885,7 +851,7 @@ async fn ready_line_never_logged() {
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(captured.clone()))
         .expect("this test owns the process's subscriber");
 
-    // The older ready-line form carries the bearer token inline.
+    // the older ready-line form carries the bearer token inline
     let fake = Spawnable::new(&Config::echo().fault(Fault::InlineToken));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;

@@ -155,7 +155,9 @@ the one `crates/cursor/src/{worker,pool,failure}.rs` is written in, and
 behind it the way anyhow, serde, serde_json, tokio and rand comment.
 
 - Rustdoc (`///`) goes only on items rustdoc renders: crate-root items,
-  `pub use` re-exports, and the one `pub mod` (`azure-table::store`). A
+  `pub use` re-exports, and the one `pub mod` (`azure-table::store`) —
+  including the variants of a re-exported `pub enum` and their named
+  fields, which render and are linted however private they look. A
   one-line summary; an `# Errors` section only where the lint demands it
   (a reachable fallible fn); no restated signatures or cross-references a
   glance at the code already gives. The workspace `missing_docs` lint
@@ -164,20 +166,28 @@ behind it the way anyhow, serde, serde_json, tokio and rand comment.
   reachable.
 - Everything else — `pub` in a private module, `pub(crate)`, private —
   gets a `//` above the item, and only when a senior Rust developer would
-  not see it from the code. A `//` may run to several sentences when it
-  carries a *why*.
+  not see it from the code: an invariant, a lifetime the type guards, why
+  the obvious approach fails. A `//` may run to several sentences when it
+  carries a *why*; one that restates the name or the signature is deleted.
 - No doc labels on `impl` blocks or trait-impl methods: the trait already
   documents them.
-- `//!` only where it says something the file's name does not.
+- `//!` only where it says something the file's name does not, and the
+  item `///` below it stays shorter than the module essay above.
 - Inside a body a `//` is a section header: one line, lowercase, no
   trailing period, naming the purpose of the block under it, with white
-  space before it so the eye can find it. It never narrates what the next
-  line does. An arcane trick a senior Rust developer would not see through
-  is called out as `// HACK: ...`.
+  space before it so the eye can find it. It may carry its *why* in the
+  same breath (`// no stream opened, so nothing to cancel`); it never
+  narrates what the next line does, and a second line is for a genuinely
+  non-local reason only. An arcane trick a senior Rust developer would not
+  see through is called out as `// HACK: ...` with the reason; `unsafe` is
+  justified by `// SAFETY: ...` as usual.
 - Section dividers in a long file are `// --- Name ---`, never box-drawing
   characters.
-- Test fns take `//`, never `///`; a test module opens with a `//` above
-  `#[cfg(test)]` saying what the unit tier covers versus the live or e2e
-  tier. `pub` items in a suite's `tests/support` are that suite's shared
-  API and keep `///`.
+- Test fns take `//`, never `///`: a scenario's rationale is a `//` block
+  above the fn, prose allowed, and inside the body a `//` is a header as
+  anywhere else. A test module opens with a `//` above `#[cfg(test)]`
+  saying what the unit tier covers versus the live or e2e tier. `pub`
+  items in a suite's `tests/support` are that suite's shared API and keep
+  a one-line `///`; nothing there is linted, so no `# Errors` or
+  `# Panics` sections.
 - Commented-out code is deleted, not kept.

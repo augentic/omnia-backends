@@ -33,6 +33,7 @@ use proto::{CallCustomToolRequest, CallCustomToolResponse, struct_to_value, valu
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tracing::instrument;
 
 use crate::lock;
 
@@ -49,7 +50,6 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    // Bind `127.0.0.1:0` and start serving.
     pub async fn bind() -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -66,9 +66,8 @@ impl Endpoint {
         })
     }
 
-    // Register one worker: a fresh bearer token for it to call back with,
-    // and its own agent table behind that token. Dropping the registration
-    // revokes the token.
+    // One worker's fresh bearer token and, behind it, its own agent table;
+    // dropping the registration revokes the token.
     pub fn register(&self) -> Result<Registration> {
         let token = gen_token()?;
         let sessions = Arc::new(Sessions::default());
@@ -95,7 +94,8 @@ async fn serve(listener: TcpListener, handler: Arc<Handler>) {
             Ok((stream, _)) => stream,
             Err(error) => {
                 tracing::warn!(%error, "tool-callback accept error");
-                // don't spin on persistent failure (e.g. fd exhaustion)
+
+                // do not spin on a persistent failure such as fd exhaustion
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             }
@@ -128,12 +128,10 @@ pub struct Registration {
 }
 
 impl Registration {
-    // The full callback URL handed to the worker (`--tool-callback-url`).
     pub fn url(&self) -> &str {
         &self.url
     }
 
-    // The bearer token handed to the worker (`--tool-callback-auth-token`).
     pub fn token(&self) -> &str {
         &self.token
     }
@@ -185,8 +183,7 @@ impl Attached {
     // The reason the first hard tool failure aborted the completion with;
     // resolves once at most.
     pub async fn aborted(&mut self) -> String {
-        // the sender lives in the session until this guard drops, so the
-        // channel never closes unsent under a live guard
+        // the sender lives in the session until this guard drops: never closed unsent
         (&mut self.aborted)
             .await
             .unwrap_or_else(|_closed| unreachable!("session gone under its guard"))
@@ -209,9 +206,7 @@ impl Handler {
     async fn handle(&self, request: Request<Incoming>) -> Response<Full<Bytes>> {
         let (parts, body) = request.into_parts();
 
-        // Reject on the head alone — no body byte of an unauthenticated
-        // request is ever buffered — but discard the body before answering:
-        // closing with unread bytes turns the reply into a TCP reset.
+        // admit on the head alone: no body byte of a rejected request is buffered
         let admitted = if parts.method != Method::POST {
             Err(connect_error(StatusCode::METHOD_NOT_ALLOWED, "unimplemented", "POST required"))
         } else if parts.uri.path() != PATH {
@@ -222,6 +217,8 @@ impl Handler {
             })
         };
 
+        // HACK: drain a rejected request's body before answering; closing with
+        // unread bytes turns the reply into a TCP reset
         let sessions = match admitted {
             Ok(sessions) => sessions,
             Err(reply) => {
@@ -279,7 +276,6 @@ impl Sessions {
         lock(&self.entries).remove(agent_id);
     }
 
-    // Decode one callback and run it against this worker's agent table.
     async fn call_tool(&self, headers: &HeaderMap, body: Bytes) -> Response<Full<Bytes>> {
         let content_type =
             headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default();
@@ -295,17 +291,18 @@ impl Sessions {
             );
         };
 
-        let call = match ToolCall::decode(codec, &body) {
-            Ok(call) => call,
+        match ToolCall::decode(codec, &body) {
+            Ok(call) => self.dispatch(codec, call).await,
             Err(error) => {
-                return connect_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_argument",
-                    &format!("{error:#}"),
-                );
+                connect_error(StatusCode::BAD_REQUEST, "invalid_argument", &format!("{error:#}"))
             }
-        };
+        }
+    }
 
+    // The call arrives over HTTP on no completion's task, so its span is a
+    // root naming the tool alone; the guest's own line reports the call.
+    #[instrument(name = "callback", level = "trace", skip_all, fields(tool = %call.tool_name))]
+    async fn dispatch(&self, codec: Codec, call: ToolCall) -> Response<Full<Bytes>> {
         let Some(tool_host) = self.tool_host(&call.agent_id) else {
             return connect_error(
                 StatusCode::NOT_FOUND,
@@ -314,10 +311,7 @@ impl Sessions {
             );
         };
 
-        let arguments = call.args.to_string();
-        tracing::debug!(tool = %call.tool_name, agent = %call.agent_id, "custom tool callback");
-
-        match tool_host.call_tool(call.tool_name.clone(), arguments).await {
+        match tool_host.call_tool(call.tool_name.clone(), call.args.to_string()).await {
             Ok(Ok(output)) => respond(codec, &wrap_output(&output)),
             Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
             Err(error) => {
@@ -383,6 +377,7 @@ impl ToolCall {
                 }
             }
         };
+
         // a tool takes a JSON object; absent arguments are an empty one
         if call.args.is_null() {
             call.args = json!({});
@@ -405,7 +400,6 @@ async fn drain(mut body: Incoming, limit: usize) {
     }
 }
 
-// Draw 256 bits of entropy and spell them as lowercase hex.
 fn gen_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|error| anyhow::anyhow!("gathering entropy: {error}"))?;
@@ -454,9 +448,9 @@ fn reply(
     response
 }
 
-// The output-wrapping policy and the `Struct` codec — pure translation —
-// are unit-tested here; the server itself is exercised by a worker calling
-// back in `tests/model.rs` and `tests/worker.rs`.
+// Pure translation — the output-wrapping policy and the `Struct` codec; the
+// server itself is exercised by a worker calling back in `tests/model.rs`
+// and `tests/worker.rs`.
 #[cfg(test)]
 mod tests {
     use serde_json::{Map, Value, json};
@@ -497,6 +491,7 @@ mod tests {
         assert_eq!(read(42.0), json!({ "n": 42 }));
         assert_eq!(read(-7.0), json!({ "n": -7 }));
         assert_eq!(read(2.5), json!({ "n": 2.5 }));
+
         // past 2^53 an f64 no longer holds every integer, so the double stands
         assert_eq!(read(9_007_199_254_740_994.0), json!({ "n": 9_007_199_254_740_994.0 }));
     }

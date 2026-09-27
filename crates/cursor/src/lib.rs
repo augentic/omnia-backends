@@ -22,7 +22,7 @@ pub use worker::Exit;
 use crate::model::Deadlines;
 use crate::pool::Pool;
 
-/// Cursor model backend
+/// Cursor model backend.
 #[derive(Clone)]
 pub struct Client {
     deadlines: Deadlines,
@@ -83,14 +83,16 @@ mod config {
         /// Default model id.
         #[env(from = "CURSOR_MODEL", default = "auto")]
         pub model: String,
-        /// Absolute cap in seconds on one agent run. A completion that is
-        /// corrected gets a fresh cap on the second send.
+        /// Absolute cap in seconds on one agent run; a correction's send gets
+        /// a fresh cap.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
         pub timeout_secs: u64,
-        /// The period of time without events after which a run is cancelled.
+        /// Seconds without stream events before a run waiting on the bridge
+        /// (its opening frame, a tool call) is cancelled; a model composing
+        /// its answer is bounded by `timeout_secs` alone.
         #[env(from = "CURSOR_INACTIVITY_SECS", default = "120")]
         pub inactivity_secs: u64,
-        /// The maximum number of agents that can be live at once.
+        /// Maximum agents live at once.
         #[env(from = "CURSOR_MAX_AGENTS", default = "4")]
         pub max_agents: usize,
     }

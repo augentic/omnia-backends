@@ -1,6 +1,5 @@
-//! The protocol `cursor-sdk-bridge` speaks — `sdk.v1` over Connect on a
-//! loopback port: the messages this backend exchanges with it, and a client
-//! with one typed method per procedure.
+//! The `sdk.v1` protocol `cursor-sdk-bridge` speaks — Connect JSON over a
+//! loopback port — and a client with one typed method per procedure.
 //!
 //! The messages are the subset of `sdk.v1` this backend uses, in the proto3
 //! JSON mapping (camelCase field names, enums by name, `int64` tolerated as
@@ -54,8 +53,7 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    // Bind to `base` and prove the process answers `sdk.v1` (`Ping`, then
-    // `GetVersion`). Unbounded: the caller holds the handshake's bound.
+    // Unbounded: the caller holds the handshake's bound.
     pub async fn connect(base: &str, token: &str) -> Result<Self> {
         ensure_loopback(base)?;
         let rpc = Self {
@@ -63,10 +61,12 @@ impl Rpc {
             base: base.to_owned(),
             bearer: format!("Bearer {token}"),
         };
+
         rpc.ping().await?;
         let version = rpc.get_version().await?;
         ensure!(version.protocol_version == "sdk.v1", "unsupported protocol version");
-        tracing::debug!(?version.capabilities, "ready");
+        tracing::trace!(?version.capabilities, "ready");
+
         Ok(rpc)
     }
 
@@ -78,8 +78,6 @@ impl Rpc {
         self.unary("SdkBridgeControlService/GetVersion", &Empty {}).await
     }
 
-    // Ask the process to exit, giving its agents `grace` to finish (whole
-    // seconds, saturating).
     pub async fn shutdown(&self, grace: Duration) -> Result<()> {
         let request = ShutdownRequest {
             grace_seconds: u32::try_from(grace.as_secs()).unwrap_or(u32::MAX),
@@ -91,7 +89,6 @@ impl Rpc {
         self.unary("SdkAgentService/CreateAgent", &CreateAgentRequest { options }).await
     }
 
-    // Best-effort cancel of an abandoned run.
     pub async fn cancel_run(&self, run_id: String, agent_id: String) -> Result<()> {
         let request = CancelRunRequest {
             run_id,
@@ -107,8 +104,8 @@ impl Rpc {
         )
     }
 
-    // Discard durable session state. Local lookup is cwd-scoped, so the
-    // options must name the create-time workspace.
+    // Local lookup is cwd-scoped, so `options` must name the create-time
+    // workspace.
     pub async fn delete_agent(
         &self, agent_id: String, options: AgentOperationOptions,
     ) -> Result<()> {
@@ -116,7 +113,14 @@ impl Rpc {
         gone_ok(self.unary_empty("SdkAgentService/DeleteAgent", &request).await)
     }
 
-    // One agent turn; the stream yields the run's messages.
+    // The agent's bill so far, across every run; `None` when the bridge
+    // reports no counts for it.
+    pub async fn get_usage(&self, agent_id: String) -> Result<Option<TokenUsage>> {
+        let request = GetUsageRequest { agent_id };
+        let response: GetUsageResponse = self.unary("SdkAgentService/GetUsage", &request).await?;
+        Ok(response.usage.and_then(|usage| usage.usage))
+    }
+
     pub async fn send(&self, agent_id: String, text: String) -> Result<RunStream> {
         let request = SendRequest {
             agent_id,
@@ -188,14 +192,13 @@ impl fmt::Debug for Rpc {
     }
 }
 
-// The typed message stream of one `Send` call: envelope framing, end-stream
-// errors, keepalives, and unparsable frames are all absorbed here, so a
-// yielded message is always real progress.
+// The typed message stream of one `Send`: framing, end-stream errors,
+// keepalives, and unparsable frames are all absorbed here, so a yielded
+// message is always real progress.
 pub struct RunStream(FrameStream);
 
 impl RunStream {
-    // The next run message, or `None` once the run stream ends; a stream
-    // that ends with a Connect error is that error.
+    // `None` at a clean end; a stream closed by a Connect error is that error.
     pub async fn next(&mut self) -> Result<Option<RunStreamMessage>> {
         while let Some(frame) = self.0.next().await? {
             if frame.is_end_stream() {
@@ -223,10 +226,10 @@ impl RunStream {
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
     /// The process answered: a non-success status on a unary call, or an
-    /// `EndStreamResponse` carrying an error on a stream.
+    /// error `EndStreamResponse` on a stream.
     #[error(fmt = connect_fmt)]
     Connect {
-        /// The `Service/Method` the call named.
+        /// The `Service/Method` called.
         method: String,
         /// The HTTP status of a unary failure; a stream's error frame has none.
         status: Option<StatusCode>,
@@ -236,15 +239,15 @@ pub enum RpcError {
         message: String,
     },
     /// Below Connect: the request could not be sent, or the response or run
-    /// stream could not be read (a socket failure, or a body that ended
-    /// inside a frame). The process is not known to have seen the call.
+    /// stream could not be read; the process is not known to have seen the
+    /// call.
     #[error("sdk.v1 RPC `{method}` transport failed {doing}")]
     Transport {
-        /// The `Service/Method` the call named.
+        /// The `Service/Method` called.
         method: String,
         /// What the client was doing when the transport gave out.
         doing: &'static str,
-        /// The HTTP client's or the socket's own error.
+        /// The HTTP client's or the socket's error.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
@@ -299,8 +302,6 @@ impl RpcError {
         }
     }
 
-    // The body ended with a partial envelope still buffered: an unexpected
-    // EOF while reading the stream.
     #[must_use]
     pub(crate) fn truncated(method: &str, buffered: usize) -> Self {
         let eof = std::io::Error::new(
@@ -575,6 +576,25 @@ struct CancelRunRequest {
     run_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GetUsageRequest {
+    agent_id: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct GetUsageResponse {
+    usage: Option<AgentUsage>,
+}
+
+// The agent's bill: its total, with a per-run breakdown this backend leaves aside.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct AgentUsage {
+    usage: Option<TokenUsage>,
 }
 
 #[derive(Serialize)]
@@ -883,7 +903,7 @@ mod tests {
         let mut body = envelope(b"one");
         body.extend_from_slice(&envelope(b"two"));
 
-        // Feed byte by byte: no frame until its length is fully buffered.
+        // feed byte by byte: no frame until its length is fully buffered
         let mut frames = Vec::new();
         for byte in body {
             buffer.extend_from_slice(&[byte]);

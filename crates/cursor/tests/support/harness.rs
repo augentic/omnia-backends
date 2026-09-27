@@ -18,15 +18,11 @@ use serde_json::Value;
 
 use super::fake_bridge::{self, History, Process, Rpc, Spawnable};
 
-/// How long a lease's process may take to be gone once a guest has
-/// returned, when the row expects no timeout on the way.
+/// How long a lease's process may take to be gone once a guest has returned.
 pub const GONE: Duration = Duration::from_secs(8);
-/// How long a guest may take to reach its first RPC: its component is
-/// compiled on the way, under whatever load the rest of the suite puts on
-/// the machine.
+/// How long a guest may take to reach its first RPC; its component is compiled on the way.
 pub const STARTUP: Duration = Duration::from_secs(120);
-/// A bound that pins "at once": well under every 5s timeout the client
-/// pays when a worker will not answer.
+/// "At once": well under every 5s timeout the client pays for a worker that will not answer.
 pub const AT_ONCE: Duration = Duration::from_secs(4);
 
 pub fn options(max_agents: usize) -> ConnectOptions {
@@ -38,9 +34,7 @@ pub fn options(max_agents: usize) -> ConnectOptions {
     }
 }
 
-/// A client spawning one process of `fake` per lease: the fake is on
-/// `PATH` from the moment it is laid out, so this is `connect` with the
-/// dependency spelled out — nothing spawned until the first lease.
+/// A client spawning one process of `fake` per lease; `connect` itself spawns nothing.
 pub async fn spawning(fake: &Spawnable, max_agents: usize) -> Client {
     let client = connect(options(max_agents)).await;
     assert!(fake.log().processes().is_empty(), "connect spawns nothing: {}", fake.log().summary());
@@ -73,9 +67,8 @@ pub async fn expect_error(needle: &str, flags: &[&str], client: &Client) {
     run_guest(test_programs::MODEL_EXPECT_ERROR, &args, client).await;
 }
 
-/// Wait for every process the client spawned to be gone — reaped, so the
-/// client has seen each exit. A slot reopens only once its process is, so
-/// this is the pool whole again, and also the wait for each `Shutdown`.
+/// Wait for every spawned process to be reaped: the pool whole again, since a
+/// slot reopens only once its process is gone.
 pub async fn await_gone(fake: &Spawnable) {
     await_gone_within(fake, GONE).await;
 }

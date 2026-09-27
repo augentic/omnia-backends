@@ -23,19 +23,18 @@ use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
+use tracing::{Instrument as _, Span};
 
 use crate::endpoint::Registration;
 use crate::protocol::Rpc;
 use crate::{Failure, elapsed_ms, lock};
 
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READY_WAIT: Duration = Duration::from_secs(30);
+const CONNECT_WAIT: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
-const TAIL_LINES: usize = 20;
-const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 
 // A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`
 // bound on it. Dropping it asks the worker to go.
@@ -46,9 +45,8 @@ pub struct Worker {
 }
 
 impl Worker {
-    // Spawn `cursor-sdk-bridge` calling back as `callback`, and watch it.
-    // The ready-line handshake is left to `Spawned::handshake` so a pool
-    // lease can occupy the slot first.
+    // The handshake is left to `Spawned::handshake`, so a pool lease can
+    // occupy the slot first.
     pub fn spawn(callback: &Registration) -> Result<Spawned> {
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-")
@@ -71,12 +69,11 @@ impl Worker {
             command.env_remove(var);
         }
 
-        // create process group
+        // lead a process group, so a kill reaches the agents the worker forks
         let mut command = CommandWrap::from(command);
         command.wrap(KillOnDrop);
         command.wrap(ProcessGroup::leader());
 
-        // spawn the worker
         let child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
         Supervisor::spawn(child, state_root)
     }
@@ -85,12 +82,10 @@ impl Worker {
         &self.rpc
     }
 
-    // The bound `sdk.v1` client, while the worker is still running.
     pub fn live_rpc(&self) -> Option<&Rpc> {
         self.watched.is_running().then_some(&self.rpc)
     }
 
-    // `future`, failing as the worker's exit when it exits under it.
     pub async fn fail_on_exit<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
         self.watched.fail_on_exit(future).await
     }
@@ -119,8 +114,8 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    // Take the process under supervision: wire its pipes, spawn the
-    // supervisor as a task, and hand back the client's end of it.
+    // The tasks run under the caller's span, so what the process says and
+    // how it exits are reported under the completion that spawned it.
     fn spawn(mut child: Box<dyn ChildWrapper>, state_root: TempDir) -> Result<Spawned> {
         let started_at = Instant::now();
 
@@ -149,7 +144,8 @@ impl Supervisor {
                 stop,
                 exit: exit_tx,
             }
-            .run(),
+            .run()
+            .instrument(Span::current()),
         );
 
         Ok(Spawned {
@@ -167,10 +163,8 @@ impl Supervisor {
             // an exit in the same tick as a close is still an exit
             biased;
             _ = self.child.wait() => true,
-            // `close`, or the `Worker` or `Spawned` dropped
             _ = self.stop.changed() => {
-                // a `Worker` hands its client over to be asked; a `Spawned`
-                // has none to hand over, and is killed outright
+                // a `Worker` hands over a client to ask; a `Spawned` has none and is killed
                 let rpc = self.stop.borrow().clone();
                 if let Some(rpc) = rpc {
                     self.ask(&rpc).await;
@@ -184,7 +178,7 @@ impl Supervisor {
         let status = self.child.wait().await.ok();
         let uptime_ms = elapsed_ms(self.state.started_at);
 
-        // kill the stderr if it's not done yet
+        // a forked child may still hold the stderr pipe; do not wait on it
         if timeout(EXIT_GRACE, &mut self.stderr).await.is_err() {
             self.stderr.abort();
         }
@@ -210,7 +204,7 @@ impl Supervisor {
             let _ = rpc.shutdown(SHUTDOWN_GRACE).await;
             let _ = self.child.wait().await;
         };
-        let _ = timeout(SHUTDOWN_TIMEOUT, asked).await;
+        let _ = timeout(SHUTDOWN_WAIT, asked).await;
     }
 }
 
@@ -237,14 +231,14 @@ impl Spawned {
                 Err(anyhow!("the stderr reader ended without a ready line"))
             })
         };
-        let discovery = watched.step("no ready line", READY_TIMEOUT, scanned).await?;
+        let discovery = watched.step("no ready line", READY_WAIT, scanned).await?;
 
         let bound = async {
             let base_url = discovery.base_url()?;
             let token = discovery.token().await?;
             Rpc::connect(&base_url, &token).await
         };
-        let rpc = watched.step("no answer to the sdk.v1 handshake", CONNECT_TIMEOUT, bound).await?;
+        let rpc = watched.step("no answer to the sdk.v1 handshake", CONNECT_WAIT, bound).await?;
 
         tracing::debug!(
             pid = watched.state.pid,
@@ -282,18 +276,15 @@ impl Watched {
         let exited = self.exited();
         tokio::pin!(exited);
 
-        // wait for the future or the process to exit
         let error = tokio::select! {
-            // branch 1: the future completed
             outcome = future => match outcome {
                 Ok(value) => return Ok(value),
                 Err(error) => error,
             },
-            // branch 2: the process exited before the future completed
             exit = &mut exited => return Err(Failure::WorkerExited(exit).into()),
         };
 
-        // wait for the exit that explains the failure
+        // a failure under a dying worker is the worker's exit, if it lands in time
         match timeout(EXIT_WAIT, exited).await {
             Ok(exit) => Err(Failure::WorkerExited(exit).into()),
             Err(_elapsed) => Err(error),
@@ -337,8 +328,8 @@ impl State {
     }
 }
 
-// The last few lines the worker wrote to stderr (the ready line aside),
-// shared between the reader and whoever reports how the process ended.
+const TAIL_LINES: usize = 20;
+
 #[derive(Debug, Default)]
 struct Tail(Mutex<VecDeque<String>>);
 
@@ -392,42 +383,49 @@ async fn wait_exit(exit: &mut watch::Receiver<Option<Exit>>, pid: u32) -> Exit {
         .unwrap_or(Exit { status: None, pid })
 }
 
-// Read stderr to EOF, handing the ready line to the handshake and keeping
-// the rest in the tail. The pipe is held however the handshake goes, so an
-// abandoned one never closes it under a live writer; an EOF before the
-// ready line reaches the handshake as the dropped sender.
+const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
+
+// The pipe is held to EOF however the handshake goes, so an abandoned
+// handshake never closes it under a live writer; an EOF before the ready
+// line reaches the handshake as the dropped sender.
 fn read_stderr(
     stderr: ChildStderr, state: Arc<State>,
 ) -> (oneshot::Receiver<Result<Discovery>>, JoinHandle<()>) {
     let (discovery_tx, discovery_rx) = oneshot::channel();
-    let reader = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        let mut ready = Some(discovery_tx);
-        while let Ok(Some(line)) = lines.next_line().await {
-            // The ready line is the handshake's alone: it may carry the
-            // bearer token, so it is neither logged nor kept. A dropped
-            // receiver is an abandoned handshake; keep draining.
-            if let Some(payload) = line.strip_prefix(READY_PREFIX) {
-                if let Some(tx) = ready.take() {
-                    let _ = tx.send(payload.parse());
+
+    let reader = tokio::spawn(
+        async move {
+            let mut lines = BufReader::new(stderr).lines();
+            let mut ready = Some(discovery_tx);
+            while let Ok(Some(line)) = lines.next_line().await {
+                // the ready line may carry the bearer token: never logged
+                if let Some(payload) = line.strip_prefix(READY_PREFIX) {
+                    if let Some(tx) = ready.take() {
+                        let _ = tx.send(payload.parse());
+                    }
+                } else {
+                    tracing::debug!(%line, stream = "stderr", "cursor-sdk-bridge output");
+                    state.tail.push(line);
                 }
-            } else {
-                tracing::debug!(%line, stream = "stderr", "cursor-sdk-bridge output");
-                state.tail.push(line);
             }
         }
-    });
+        .instrument(Span::current()),
+    );
+
     (discovery_rx, reader)
 }
 
 // Drain stdout so a full pipe never blocks the process.
 fn drain_stdout(stdout: ChildStdout) {
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(%line, stream = "stdout", "cursor-sdk-bridge output");
+    tokio::spawn(
+        async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(%line, stream = "stdout", "cursor-sdk-bridge output");
+            }
         }
-    });
+        .instrument(Span::current()),
+    );
 }
 
 #[cfg(test)]

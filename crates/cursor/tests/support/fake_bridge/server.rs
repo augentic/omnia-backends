@@ -567,7 +567,10 @@ impl Server {
         self.record(Rpc::GetUsage, Some(&agent), Value::Null);
         ok(&json!({
             "usage": {
-                "usage": { "inputTokens": "1200", "outputTokens": "34", "reasoningTokens": "5" },
+                "usage": {
+                    "inputTokens": "1200", "outputTokens": "34", "reasoningTokens": "5",
+                    "cacheReadTokens": "800", "cacheWriteTokens": "0",
+                },
                 "runs": [],
             },
         }))

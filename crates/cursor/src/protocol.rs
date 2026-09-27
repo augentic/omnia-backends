@@ -765,7 +765,9 @@ pub struct RunResult {
     pub usage: Option<TokenUsage>,
 }
 
-// Billed token counts; `int64` arrives as a string or a number.
+// Billed token counts; `int64` arrives as a string or a number. The cache
+// counts are among the input: what the provider read from its prompt cache
+// and what it wrote to it, absent when the bridge does not report them.
 #[allow(clippy::struct_field_names)] // names mirror the wire message
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -776,6 +778,10 @@ pub struct TokenUsage {
     pub output_tokens: i64,
     #[serde(deserialize_with = "flexible_i64_opt")]
     pub reasoning_tokens: Option<i64>,
+    #[serde(deserialize_with = "flexible_i64_opt")]
+    pub cache_read_tokens: Option<i64>,
+    #[serde(deserialize_with = "flexible_i64_opt")]
+    pub cache_write_tokens: Option<i64>,
 }
 
 fn flexible_i64<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
@@ -814,10 +820,18 @@ mod tests {
             "inputTokens": "7",
             "outputTokens": 3,
             "reasoningTokens": "not a number",
+            "cacheReadTokens": "5",
+            "cacheWriteTokens": 0,
         }))
         .expect("int64 as string or number");
         assert_eq!((usage.input_tokens, usage.output_tokens), (7, 3));
         assert_eq!(usage.reasoning_tokens, None, "an unparsable count is absent");
+        assert_eq!((usage.cache_read_tokens, usage.cache_write_tokens), (Some(5), Some(0)));
+
+        let bare: TokenUsage =
+            serde_json::from_value(json!({ "inputTokens": 7, "outputTokens": 3 }))
+                .expect("a bridge that reports no cache counts");
+        assert_eq!((bare.cache_read_tokens, bare.cache_write_tokens), (None, None));
     }
 
     #[test]

@@ -24,6 +24,25 @@ Unreleased
   its bill asked back through `SdkAgentService/GetUsage` before the
   `completion` event, so the event's token counts cover it whenever the
   bridge can report them; when it cannot, a DEBUG line says why.
+- `omnia-cursor`'s `completion` line carries the bill in full and where
+  the wait went. `cache_read_tokens` and `cache_write_tokens` sit beside
+  `input_tokens` — the cache counts are among the input, and the bridge's
+  `usage` frame had carried them unread — so a completion with many tool
+  rounds is no longer read as fresh input it was never billed for;
+  `send answered` and the settled-usage line carry them too, and
+  `TokenUsage` gains the two fields, absent when the bridge reports none.
+  `opening_ms`, `tool_ms`, and `model_ms` split `duration_ms` by what the
+  run waited on — the bridge before its first frame, tool calls
+  outstanding, the model composing — every round of the completion
+  together, so whether a slow completion read too much or reasoned too
+  long is read off one INFO line rather than a TRACE log.
+- A reasoning block's closing frame is a DEBUG `thinking` event carrying
+  its `duration_ms`, so a `-v` run shows the long silences between tool
+  calls for what they are; the text deltas before it stay TRACE `frame`s.
+- The `subject` on `tool call` / `tool call completed` shows a path under
+  the agent's `cwd` relative to it, so the eighty characters go on the
+  part that tells one file from another rather than on the lent tree's
+  absolute path; the transcript keeps the path as the agent spelled it.
 
 ### Changed
 

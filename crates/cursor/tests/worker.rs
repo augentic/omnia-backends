@@ -148,6 +148,20 @@ async fn connect_rejects_invalid_options() {
     assert!(fake.log().events.is_empty(), "a rejected option spawned a process");
 }
 
+// A keyless client connects and fails its first completion instead: the key
+// is read at connect and required at attempt, before any lease is taken.
+#[tokio::test]
+async fn keyless_complete() {
+    // SAFETY: nextest runs one test per process, so removing the key races
+    // with nothing; every other row sets a dummy key and never unsets it.
+    unsafe { std::env::remove_var("CURSOR_API_KEY") };
+    let fake = Spawnable::new(&Config::echo());
+    let client = Client::connect_with(options(1)).await.expect("connect succeeds without a key");
+    expect_error("CURSOR_API_KEY must be set", &[], &client).await;
+    await_gone(&fake).await;
+    assert!(fake.log().events.is_empty(), "a keyless completion spawned a process");
+}
+
 // --- Abandon: the guest drops a completion at every point it can be waiting ---
 
 // Process 2 takes `Ping` and never answers: the loser is dropped with its

@@ -27,6 +27,16 @@ Unreleased
 
 ### Changed
 
+- `omnia-cursor` connects without a `CURSOR_API_KEY` and fails the first
+  completion instead, with the same message the connect once gave — so a
+  process whose verbs never complete runs keyless. Nothing spawns at
+  connect either way.
+- `omnia-cursor` grants a lent workspace a read-only tool allowlist —
+  `read`, `glob`, `grep`, `ls`, and `mcp`, the channel custom tools
+  arrive over — where it granted the agent's full default toolset. No
+  shell, write, or delete: a lent tree is inspected, never changed. The
+  guest's function tools are unaffected, since they arrive as `mcp`
+  frames.
 - `omnia-cursor`'s inactivity window (`CURSOR_INACTIVITY_SECS`) bounds a
   run only while it waits on the bridge — for the stream's opening frame,
   or for a tool call the agent started to complete. Once the agent has

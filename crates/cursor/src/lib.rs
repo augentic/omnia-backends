@@ -11,7 +11,7 @@ use std::env;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, ensure};
 pub use failure::Failure;
 use omnia::Backend;
 pub use protocol::{RpcError, RunStatus};
@@ -27,7 +27,7 @@ use crate::pool::Pool;
 pub struct Client {
     deadlines: Deadlines,
     model: String,
-    api_key: String,
+    api_key: Option<String>,
     pool: Arc<Pool>,
 }
 
@@ -46,8 +46,7 @@ impl Backend for Client {
 
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        let api_key =
-            env::var("CURSOR_API_KEY").map_err(|_unset| anyhow!("CURSOR_API_KEY must be set"))?;
+        let api_key = env::var("CURSOR_API_KEY").ok();
         ensure!(options.timeout_secs > 0, "timeout_secs must be greater than 0");
         ensure!(options.inactivity_secs > 0, "inactivity_secs must be greater than 0");
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");

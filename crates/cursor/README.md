@@ -41,11 +41,13 @@ MSRV: Rust 1.97
 
 The [`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge) executable
 must be on `PATH`, and `CURSOR_API_KEY`
-must be set — `sdk.v1` authenticates every agent with an explicit
-key, so a prior `cursor-agent login` no longer suffices. The key is read when
-the client connects and retained privately for its agents; it is never stored
-on `ConnectOptions`, exposed by `Client`'s `Debug`, logged, or recorded into
-fixtures.
+must be set for any completion — `sdk.v1` authenticates every agent with an
+explicit key, so a prior `cursor-agent login` no longer suffices. The key is
+read when the client connects and retained privately for its agents; it is
+never stored on `ConnectOptions`, exposed by `Client`'s `Debug`, logged, or
+recorded into fixtures. Connecting without one succeeds, so verbs that never
+complete run keyless; the first completion fails with the same message the
+connect once gave.
 
 Each live agent runs on its own worker, spawned for the completion
 as the leader of its own process group and shut down after it: a graceful
@@ -137,10 +139,15 @@ The working tree is lent per completion through the guest's
 `grants.workspace`: the runtime preopens the configured `[[mount]]`, the
 guest lends that descriptor, and the host resolves it to a node-local path
 exposed on the tool host (`ToolHost::local_path`). The agent runs there with
-its default built-in toolset, honoring the tree's own project settings and
-nothing from the host user. Without a lent workspace the completion still
-runs — in a private empty directory with every built-in tool disabled — so
-function-tool-only (references-style) completions work like genai's.
+a read-only subset of the built-in tools — `read`, `glob`, `grep`, `ls`,
+plus `mcp`, the channel custom tools arrive over — honoring the tree's own
+project settings and nothing from the host user. No shell, edit, or delete:
+a lent tree is inspected, never changed. Without a lent workspace the
+completion still runs — in a private empty directory with every built-in
+tool disabled — so function-tool-only (references-style) completions work
+like genai's. `read` takes absolute paths, so the allowlist does not
+confine the agent to the lent tree; staying inside it is the prompt's to
+ask, not the toolset's to enforce.
 
 The model id is taken from each request (`request.model`); an unset value
 falls back to `CURSOR_MODEL`, else `auto` (Cursor's server-side selection).

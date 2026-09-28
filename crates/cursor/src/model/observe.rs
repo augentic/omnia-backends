@@ -279,12 +279,36 @@ impl EventLog {
                 }
             }
             // a reasoning block ends with its duration; the text deltas before it stay frames
-            "thinking" => match thinking_duration(payload) {
-                Some(duration_ms) => tracing::debug!(duration_ms, "thinking"),
-                None => frame(event),
-            },
+            "thinking" => {
+                self.resumed();
+                match thinking_duration(payload) {
+                    Some(duration_ms) => tracing::debug!(duration_ms, "thinking"),
+                    None => frame(event),
+                }
+            }
+            "assistant" => {
+                self.resumed();
+                frame(event);
+            }
             _ => frame(event),
         }
+    }
+
+    // The model speaks only once every tool call it issued has answered, so
+    // a call still pending when it does was answered off the stream: the
+    // bridge drops a terminal frame now and then, most often for one of
+    // several calls started together. Its turn is lost; the phase is not.
+    fn resumed(&mut self) {
+        if self.pending_tools.is_empty() {
+            return;
+        }
+        let unterminated: Vec<String> =
+            self.pending_tools.drain().map(|(_, pending)| pending.tool).collect();
+        self.last_pending = None;
+        tracing::debug!(
+            tools = ?unterminated,
+            "the model resumed with tool calls still pending; closing them without a result"
+        );
     }
 
     pub fn run_id(&self) -> Option<&str> {
@@ -780,6 +804,40 @@ mod tests {
 
         assert_eq!(log.tool_calls(), 5);
         assert!(log.finish().is_none(), "no result, no turn");
+    }
+
+    // Three reads started together, one terminal frame: the model's next
+    // reasoning or text frame closes the two the bridge never terminated, so
+    // the run waits on the model, not on a tool that has already answered.
+    #[test]
+    fn resumed_without_terminal() {
+        let mut log = EventLog::default();
+        let read = |file: &str| json!({ "path": file });
+        let done = json!({ "status": "success", "value": {} });
+
+        observe_one(&mut log, &flat("read", "c1", &read("a.ts"), None));
+        observe_one(&mut log, &flat("read", "c2", &read("b.ts"), None));
+        observe_one(&mut log, &flat("read", "c3", &read("c.ts"), None));
+        observe_one(&mut log, &flat("read", "c1", &read("a.ts"), Some(done)));
+        assert_eq!(log.phase(), Phase::Tool("read".to_owned()), "two still pending");
+
+        observe_one(&mut log, &json!({ "type": "thinking", "message": { "text": "Now" } }));
+        assert_eq!(log.phase(), Phase::Model, "the model resumed, so nothing is pending");
+
+        observe_one(&mut log, &flat("grep", "c4", &json!({ "pattern": "fn" }), None));
+        assert_eq!(log.phase(), Phase::Tool("grep".to_owned()), "a later call is pending again");
+        observe_one(
+            &mut log,
+            &json!({ "type": "assistant", "message": {
+                "message": { "content": [{ "text": "The", "type": "text" }], "role": "assistant" },
+            }}),
+        );
+        assert_eq!(log.phase(), Phase::Model);
+
+        assert_eq!(log.tool_calls(), 4);
+        let transcript = log.finish().expect("the one terminated read is a turn");
+        assert_eq!(transcript.turns.len(), 1, "a call closed without a result is no turn");
+        assert_eq!(transcript.turns[0].args, read("a.ts"));
     }
 
     #[test]

@@ -195,7 +195,7 @@ impl Agent {
             biased;
             () = self.cancel.cancelled() => Err(abandoned()),
             stream = self.handle.worker().fail_on_exit(self.handle.send(text)) => stream,
-            failure = &mut deadline => Err(failure.into()),
+            failure = &mut deadline => Err(failure.into_error()),
         };
 
         let outcome = match opened {
@@ -262,7 +262,7 @@ impl Agent {
                         "in progress"
                     );
                 }
-                failure = &mut deadline => return Err(failure.into()),
+                failure = &mut deadline => return Err(failure.into_error()),
                 reason = self.session.aborted() => return Err(Failure::Aborted(reason).into()),
                 // abandoned run cancels by id, so follow to the opening frame
                 () = self.cancel.cancelled(), if self.handle.run_id.is_some() => {

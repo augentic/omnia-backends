@@ -3,7 +3,9 @@
 //! argument is the needle; further arguments are flags — `tools` declares
 //! `lookup`, `check` asks for a check and rejects every candidate it is
 //! offered (so the failure must strike after at least one has reached the
-//! guest), and `without:<text>` asserts the detail does not carry `text`.
+//! guest), `budget` expects the typed `budget-exhausted` in the backend
+//! failure's place, and `without:<text>` asserts the detail does not carry
+//! `text`.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -17,6 +19,7 @@ async fn scenario() {
     let (needle, flags) = arguments.split_first().expect("the needle is the first argument");
     let tools = if flags.iter().any(|flag| flag == "tools") { vec![lookup()] } else { vec![] };
     let check = flags.iter().any(|flag| flag == "check");
+    let budget = flags.iter().any(|flag| flag == "budget");
     let absent: Vec<&str> = flags.iter().filter_map(|flag| flag.strip_prefix("without:")).collect();
 
     let mut candidates = 0_usize;
@@ -41,8 +44,10 @@ async fn scenario() {
         )
         .await
         .expect_err("the backend fails the completion");
-    let Error::Backend(detail) = &error else {
-        panic!("expected a backend failure, got {error:?}");
+    let detail = match (&error, budget) {
+        (Error::Backend(detail), false) | (Error::BudgetExhausted(detail), true) => detail,
+        (_, false) => panic!("expected a backend failure, got {error:?}"),
+        (_, true) => panic!("expected the typed budget-exhausted, got {error:?}"),
     };
     assert!(detail.contains(needle), "expected {needle:?} in the detail: {detail}");
     for text in absent {

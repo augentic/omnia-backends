@@ -423,7 +423,8 @@ async fn hang_on_send() {
 }
 
 // Activity every 200ms keeps the inactivity window rearmed; the 1s cap ends
-// the run anyway, and the run it noted is cancelled.
+// the run anyway, as the guest's time budget rather than a backend failure,
+// and the run it noted is cancelled.
 #[tokio::test]
 async fn cap_hits() {
     let fake = Spawnable::new(&Config::paced(200, 1000, Then::Hang));
@@ -432,8 +433,12 @@ async fn cap_hits() {
         ..options(1)
     })
     .await;
-    expect_error("timed out after 1s (absolute cap exceeded while still active)", &[], &client)
-        .await;
+    expect_error(
+        "timed out after 1s (absolute cap exceeded while still active)",
+        &["budget"],
+        &client,
+    )
+    .await;
     await_gone(&fake).await;
 
     let (_, sequence) = sole_agent(&fake.log());
@@ -574,7 +579,7 @@ async fn silent_run_not_restarted() {
         ..with_window(WINDOW, 1)
     })
     .await;
-    expect_error("timed out after 1s", &[], &client).await;
+    expect_error("timed out after 1s", &["budget"], &client).await;
     await_gone(&fake).await;
 
     let log = fake.log();

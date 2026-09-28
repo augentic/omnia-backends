@@ -52,6 +52,19 @@ Unreleased
 
 ### Changed
 
+- `omnia-cursor` reports the absolute cap (`CURSOR_TIMEOUT_SECS`) as the
+  typed `omnia_wasi_model::Error::BudgetExhausted` — `Failure::into_error`
+  wraps the failure in it, and the failure still downcasts beneath — so a
+  guest sees `bad_request` and a retry-on-`bad_gateway` policy does not
+  put once more a request that takes as long the second time. The
+  inactivity window stays a backend failure: a run that fell silent may
+  answer when put again. The message and `Outcome::Timeout` are unchanged.
+- `omnia-cursor` closes a tool call the stream never terminated when the
+  model next reasons or speaks: the model resumes only once every call it
+  issued has answered, so a call still pending then was answered off the
+  stream. The phase leaves `Tool` for `Model`, so the inactivity window
+  bounds a thinking model as a thinking model again and `tool_ms` stops
+  booking model time; the unterminated call's turn is not counted.
 - `omnia-cursor` connects without a `CURSOR_API_KEY` and fails the first
   completion instead, with the same message the connect once gave — so a
   process whose verbs never complete runs keyless. Nothing spawns at

@@ -163,8 +163,16 @@ the agent has every tool result and the model is composing its answer the
 window stands down and the cap alone ends the wait; a large answer is not cut
 short for taking longer than the window to write. A completion that is
 corrected therefore gets a fresh inactivity window and a fresh cap on the
-second send. The two errors are distinct (`inactive for Ns waiting on …` vs
-`timed out after Ns (absolute cap …)`). A run cut short either way is
+second send. The two errors are distinct in text (`inactive for Ns waiting on
+…` vs `timed out after Ns (absolute cap …)`) and in class: the window is the
+bridge or a tool going silent, a `backend` failure a caller may retry, while
+the cap is the completion's time budget and reaches the guest as the typed
+`budget-exhausted`, since the same request put again would take as long. A
+tool call the bridge starts and never terminates — now and then one of several
+started together — is closed the moment the model's next reasoning or text
+frame arrives, since the model speaks only once every call it issued has
+answered; its turn is missing from the transcript, and the wait is booked to
+the model from that frame on. A run cut short either way is
 cancelled and its bill asked back (`GetUsage`) before the `completion` event
 is emitted, so the event's token counts cover a timed-out run whenever the
 bridge can report them; the stream itself carries usage only once a turn
@@ -195,8 +203,8 @@ worker log its RPCs to stderr, where this crate records them at DEBUG.
 
 A caller that needs to tell failures apart matches on the types `complete`'s
 error downcasts to — `Failure::{Run, Timeout, Inactive, Aborted, WorkerExited}`,
-`RpcError::{Connect, Transport}`, and `omnia_wasi_model::Error::BudgetExhausted`
-— rather than on message text; `Exit` is the process status a `WorkerExited`
+`RpcError::{Connect, Transport}`, and `omnia_wasi_model::Error::BudgetExhausted`,
+which a `Failure::Timeout` also downcasts to — rather than on message text; `Exit` is the process status a `WorkerExited`
 carries, and `RunStatus` the terminal status a `Run` ended in.
 
 MCP servers are supplied per-request: a prompt's `mcp` grant carries the

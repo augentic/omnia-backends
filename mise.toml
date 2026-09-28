@@ -1,15 +1,12 @@
 [task_config]
-includes = ["git::https://github.com/augentic/.github.git//mise/rust.toml?ref=v0.1.2"]
+includes = ["git::https://github.com/augentic/.github.git//mise/rust.toml?ref=v0.2.0"]
 
-# Service crates link host-only libraries (tokio and the rest) and do not
-# build for wasm32-wasip2. Guest code is test-programs, so only that package
-# is clippy-checked for the target. The shared lint task checks the workspace.
-[tasks.lint]
-description = "Clippy with -D warnings: all features and each feature natively, and test-programs for wasm32-wasip2"
-depends = ["install hack"]
-run = [
-  "cargo clippy --workspace --all-targets --all-features -- -D warnings",
-  "cargo clippy -p test-programs --all-targets --all-features --target wasm32-wasip2 -- -D warnings",
-  "cargo hack clippy --workspace --each-feature --exclude-all-features -- -D warnings",
-  "cargo hack clippy -p test-programs --each-feature --exclude-all-features --target wasm32-wasip2 -- -D warnings",
-]
+# Knobs read by the included tasks. Keep `WASM32_PACKAGES` in step with the
+# `wasm-packages` input in `.github/workflows/ci.yaml` and `publish.yaml`.
+#
+# The backend crates link host-only libraries (wasmtime, tokio and the rest)
+# and never build for wasm32-wasip2. The guest-capable members are the
+# `test-programs` scenarios and the `examples` package, whose host-only
+# examples are cfg-gated to an empty `main` on wasm32.
+[env]
+WASM32_PACKAGES = "test-programs examples"

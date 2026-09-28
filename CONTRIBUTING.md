@@ -57,12 +57,14 @@ Run the full CI check locally and make sure it passes:
 mise run ci
 ```
 
-This runs formatting (`cargo +nightly fmt --all`), clippy (warnings denied),
-the test suite, doc tests, rustdoc, and the dependency audits. Tasks run
-through [mise](https://mise.jdx.dev/getting-started.html), which is installed
-by hand; `mise tasks` lists them, and [mise.toml](mise.toml) includes the
-shared Rust tasks from [augentic/.github](https://github.com/augentic/.github)
-`v0.1.2`.
+This runs the format check (`cargo +nightly fmt --all --check`), clippy
+(warnings denied, natively and for `wasm32-wasip2`), the test suite, doc
+tests, rustdoc, and the supply-chain checks (`cargo vet`, `cargo deny`),
+exactly as CI does. Tasks run through
+[mise](https://mise.jdx.dev/getting-started.html), which is installed by
+hand; `mise tasks` lists them, and [mise.toml](mise.toml) includes the shared
+Rust tasks from [augentic/.github](https://github.com/augentic/.github)
+`v0.2.0`.
 
 ## Developer's Certificate of Origin
 

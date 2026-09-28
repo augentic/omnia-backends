@@ -12,5 +12,5 @@ permissions:
 
 jobs:
   ci:
-    uses: augentic/.github/.github/workflows/ci.yaml@main
+    uses: augentic/.github/.github/workflows/ci.yaml@v0.1.2
     secrets: inherit

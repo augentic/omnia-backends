@@ -25,7 +25,7 @@ jobs:
     if: ${{ startsWith(github.ref_name, 'release-') }}
     permissions:
       contents: read
-    uses: augentic/.github/.github/workflows/ci.yaml@main
+    uses: augentic/.github/.github/workflows/ci.yaml@v0.1.2
     secrets: inherit
 
   publish:
@@ -33,12 +33,12 @@ jobs:
     needs: ci
     permissions:
       contents: write
-    uses: augentic/.github/.github/workflows/publish.yaml@main
+    uses: augentic/.github/.github/workflows/publish.yaml@v0.1.2
 
   crates:
     name: Publish crates
     needs: publish
     permissions:
       contents: read
-    uses: augentic/.github/.github/workflows/crates.yaml@main
+    uses: augentic/.github/.github/workflows/crates.yaml@v0.1.2
     secrets: inherit

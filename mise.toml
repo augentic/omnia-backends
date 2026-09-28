@@ -1,0 +1,15 @@
+[task_config]
+includes = ["git::https://github.com/augentic/.github.git//mise/rust.toml?ref=v0.1.2"]
+
+# Service crates link host-only libraries (tokio and the rest) and do not
+# build for wasm32-wasip2. Guest code is test-programs, so only that package
+# is clippy-checked for the target. The shared lint task checks the workspace.
+[tasks.lint]
+description = "Clippy with -D warnings: all features and each feature natively, and test-programs for wasm32-wasip2"
+depends = ["install hack"]
+run = [
+  "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+  "cargo clippy -p test-programs --all-targets --all-features --target wasm32-wasip2 -- -D warnings",
+  "cargo hack clippy --workspace --each-feature --exclude-all-features -- -D warnings",
+  "cargo hack clippy -p test-programs --each-feature --exclude-all-features --target wasm32-wasip2 -- -D warnings",
+]

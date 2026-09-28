@@ -18,20 +18,21 @@ as published crates.io dependencies (currently 0.36.0), declared once under
 | Task | Command |
 |------|---------|
 | Build | `cargo build --all-features` |
-| Lint | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
+| Lint | `mise run lint` (native workspace clippy, plus `test-programs` for `wasm32-wasip2`) |
 | Format check | `cargo +nightly fmt --all --check` |
 | Format fix | `cargo +nightly fmt --all` |
 | Test a crate | `cargo nextest run -p <crate> --all-features` (the local verification step) |
-| Test (CI-runnable) | `cargo nextest run --all --all-features --no-tests=pass` (`cargo make test`) |
+| Test (CI-runnable) | `mise run test` (`cargo nextest run --workspace --all-features --locked --no-tests=pass`) |
 | Live tests (local) | `cargo nextest run -p <crate> --all-features --run-ignored all` (needs the service + credentials) |
-| Supply chain | `cargo make vet` after any dependency change |
-| Task runner | `cargo make <task>` (see `Makefile.toml`; `cargo make ci` is the full gate) |
+| Supply chain | `mise run vet` after any dependency change |
+| Task runner | `mise run <task>` (`mise.toml` includes the shared Rust tasks from `augentic/.github` `v0.1.2`; `mise run ci` is the full gate) |
 
 ## Verifying a change
 
-- Run the suite of the crate you changed, `cargo clippy --workspace
-  --all-targets --all-features -- -D warnings`, and `cargo +nightly fmt --all
-  --check`. `cargo make test` is the full run; leave it to CI.
+- Run the suite of the crate you changed, `mise run lint`, and
+  `cargo +nightly fmt --all --check`. `mise run lint` is native workspace
+  clippy plus `test-programs` for `wasm32-wasip2`. `mise run test` is the
+  full run; leave it to CI.
 - Never build or run the `examples` to check a change. They are demos a
   human runs by hand against a real service; nothing they do is a test.
 - A question of the form "does this work from a real guest?" is answered by
@@ -119,6 +120,9 @@ so the policy splits into three tiers:
 
 ## Gotchas
 
+- Tasks run through [mise](https://mise.jdx.dev/getting-started.html), which
+  must be installed by hand. `make <task>` only forwards to `mise run <task>`
+  and fails, rather than installing mise, when it is missing.
 - `rust-toolchain.toml` auto-installs the `wasm32-wasip2` target; the
   `test-programs` build script needs it, and it runs on every build of a
   crate that dev-depends on `test-programs`.

@@ -290,22 +290,29 @@ async fn abandon_during_teardown() {
 
     let guest = abandon_guest(&client, 2);
     fake.await_parked(Point::CloseAgent, 2).await;
-    assert!(fake.release_one(Point::CloseAgent));
     guest.await.expect("the guest task joins");
 
-    // the dropped loser's teardown runs on and keeps its process; the winner's goes
+    // both teardowns run on past the answer; the one released goes, the one
+    // still parked keeps its process
+    assert!(fake.release_one(Point::CloseAgent));
+    await_rpcs(|| fake.log(), Rpc::DeleteAgent, 1, GONE).await;
     assert_eq!(fake.parked(Point::CloseAgent), 1);
-    let (winner, loser) = split_by(&fake.log(), Rpc::DeleteAgent);
-    await_process_gone(&winner).await;
-    assert!(loser.alive(), "the teardown in flight holds its slot");
+    let (released, parked) = split_by(&fake.log(), Rpc::DeleteAgent);
+    await_process_gone(&released).await;
+    assert!(parked.alive(), "the teardown in flight holds its slot");
 
     fake.release_all();
     await_rpcs(|| fake.log(), Rpc::DeleteAgent, 2, GONE).await;
     await_gone(&fake).await;
     let log = fake.log();
     for process in log.workers() {
+        // the winner answered before its teardown, so the loser may have been dropped mid-run
         let (_, sequence) = sole_agent(&process);
-        assert_eq!(sequence, ANSWERED, "process {}", process.number);
+        assert!(
+            sequence == ANSWERED || sequence == CANCELLED,
+            "process {}: {sequence:?}",
+            process.number
+        );
         assert!(process.ended_with(Rpc::Shutdown), "process {}", process.number);
     }
 }
@@ -648,13 +655,16 @@ async fn hang_on_teardown() {
     let returned = SystemTime::now();
     await_gone(&fake).await;
 
-    // the hung close is bounded, not fatal: delete still follows, and the answer waits on it
+    // the hung close is bounded, not fatal: delete still follows, and the answer never waited on it
     let log = fake.log();
     let (_, sequence) = sole_agent(&log);
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
     let closed = log.saw(Rpc::CloseAgent)[0].at();
     let waited = returned.duration_since(closed).unwrap_or_default();
-    assert!(waited >= TEARDOWN_TIMEOUT, "the answer arrived {waited:?} after CloseAgent");
+    assert!(waited < TEARDOWN_TIMEOUT, "the answer arrived {waited:?} after CloseAgent");
+    let deleted = log.saw(Rpc::DeleteAgent)[0].at();
+    let held = deleted.duration_since(closed).unwrap_or_default();
+    assert!(held >= TEARDOWN_TIMEOUT, "DeleteAgent followed {held:?} after CloseAgent");
 }
 
 #[tokio::test]

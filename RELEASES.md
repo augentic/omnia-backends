@@ -44,7 +44,15 @@ Unreleased
 - A reasoning block's closing frame is a DEBUG `thinking` event carrying
   its `duration_ms` — read as the bridge spells an `int64`, a number or a
   string — so a `-v` run shows the long silences between tool calls for
-  what they are; the text deltas before it stay TRACE `frame`s.
+  what they are; the text deltas before it stay TRACE `frame`s. The
+  `completion` line sums them as `thinking_ms`, beside `model_ms` — the
+  part of the model's wait it spent reasoning by its own report, every
+  round together — so whether a slow completion thought or wrote is read
+  off the one INFO line.
+- Each tool call's arguments are logged whole at TRACE (`tool call args`,
+  with `tool` and `args`) as the call starts, beneath the DEBUG `tool
+  call` line's one-argument `subject`, so a `-vv` run reads what the
+  agent asked of each tool without the payload head of every frame.
 - The `subject` on `tool call` / `tool call completed` shows a path under
   the agent's `cwd` relative to it, so the eighty characters go on the
   part that tells one file from another rather than on the lent tree's
@@ -52,6 +60,13 @@ Unreleased
 
 ### Changed
 
+- `omnia-cursor` returns the answer before the teardown. `CloseAgent` and
+  `DeleteAgent` run on a task of their own once the `completion` line is
+  written, where the completion had awaited them — half a second to two
+  per agent, paid on the guest's critical path — so a guest waits on the
+  model and never on the bridge putting the agent away. The teardown
+  still runs whole, bounded as before, and the slot the agent held
+  reopens only once its process is gone.
 - `omnia-cursor` reports the absolute cap (`CURSOR_TIMEOUT_SECS`) as the
   typed `omnia_wasi_model::Error::BudgetExhausted` — `Failure::into_error`
   wraps the failure in it, and the failure still downcasts beneath — so a

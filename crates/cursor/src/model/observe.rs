@@ -12,8 +12,8 @@
 //! carrying the bill and how the wait split across the phases.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::time::Duration;
+use std::{fmt, mem};
 
 use omnia_wasi_model::{ToolTurn, Transcript, Usage};
 use serde_json::Value;
@@ -38,6 +38,8 @@ pub struct Completion {
     tool: Duration,
     model: Duration,
     check: Duration,
+    // the reasoning time the model reported, a part of `model` the stream names
+    thinking: Duration,
     emitted: bool,
 }
 
@@ -62,6 +64,7 @@ impl Completion {
             tool: Duration::ZERO,
             model: Duration::ZERO,
             check: Duration::ZERO,
+            thinking: Duration::ZERO,
             emitted: false,
         }
     }
@@ -122,6 +125,11 @@ impl Completion {
         self.check = self.check.saturating_add(waited);
     }
 
+    // Book the reasoning time a closing `thinking` frame reported.
+    pub const fn thought(&mut self, reported: Duration) {
+        self.thinking = self.thinking.saturating_add(reported);
+    }
+
     pub const fn attempts(&self) -> u32 {
         self.attempts
     }
@@ -149,6 +157,7 @@ impl Completion {
                     opening_ms = millis(self.opening),
                     tool_ms = millis(self.tool),
                     model_ms = millis(self.model),
+                    thinking_ms = millis(self.thinking),
                     check_ms = millis(self.check),
                     input_tokens = self.bill.input,
                     cache_read_tokens = self.bill.cache_read,
@@ -241,6 +250,8 @@ pub struct EventLog {
     pending_tools: HashMap<String, PendingCall>,
     // the started call most recently left pending, for `Phase::Tool`
     last_pending: Option<String>,
+    // reasoning time closing frames have reported since the last `thought`
+    thinking: Duration,
     turns: Vec<ToolTurn>,
 }
 
@@ -282,7 +293,11 @@ impl EventLog {
             "thinking" => {
                 self.resumed();
                 match thinking_duration(payload) {
-                    Some(duration_ms) => tracing::debug!(duration_ms, "thinking"),
+                    Some(duration_ms) => {
+                        self.thinking =
+                            self.thinking.saturating_add(Duration::from_millis(duration_ms));
+                        tracing::debug!(duration_ms, "thinking");
+                    }
                     None => frame(event),
                 }
             }
@@ -331,6 +346,11 @@ impl EventLog {
         self.started
     }
 
+    // The reasoning time reported since the last take, for the completion to book.
+    pub fn thought(&mut self) -> Duration {
+        mem::take(&mut self.thinking)
+    }
+
     pub fn phase(&self) -> Phase {
         if self.frames == 0 {
             return Phase::Opening;
@@ -360,6 +380,8 @@ impl EventLog {
                         subject = pending.subject(self.cwd.as_deref()),
                         "tool call"
                     );
+                    // the arguments whole, for a `-vv` run reading what the agent asked for
+                    tracing::trace!(tool = %pending.tool, args = %pending.args, "tool call args");
                     self.pending_tools.insert(call_id.to_owned(), pending);
                     self.last_pending = Some(call_id.to_owned());
                 }
@@ -916,12 +938,22 @@ mod tests {
         assert_eq!(super::thinking_duration(&json!({ "thinking_duration_ms": -1 })), None);
         assert_eq!(super::thinking_duration(&json!({ "text": "I will extract" })), None);
 
-        let log = observe_all(&[
+        let mut log = observe_all(&[
             json!({ "type": "thinking", "message": { "run_id": "run-1", "text": "I will" } }),
             json!({ "type": "thinking", "message": { "text": "", "thinking_duration_ms": 4193 } }),
+            json!({ "type": "thinking", "message": { "text": "", "thinking_duration_ms": 7 } }),
         ]);
         assert_eq!(log.run_id(), Some("run-1"));
         assert_eq!(log.phase(), Phase::Model);
+
+        // the closing frames' durations are taken once, for the completion's `thinking_ms`
+        assert_eq!(log.thought(), Duration::from_millis(4200));
+        assert_eq!(log.thought(), Duration::ZERO);
+        let mut completion = Completion::new();
+        completion.thought(Duration::from_millis(4200));
+        completion.thought(Duration::from_millis(300));
+        assert_eq!(completion.thinking, Duration::from_millis(4500));
+        completion.finish(Outcome::Ok);
         assert!(log.finish().is_none());
     }
 

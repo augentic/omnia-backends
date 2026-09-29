@@ -1,0 +1,12 @@
+[task_config]
+includes = ["git::https://github.com/augentic/.github.git//mise/rust.toml?ref=v0.2.0"]
+
+# Knobs read by the included tasks. Keep `WASM32_PACKAGES` in step with the
+# `wasm-packages` input in `.github/workflows/ci.yaml` and `publish.yaml`.
+#
+# The backend crates link host-only libraries (wasmtime, tokio and the rest)
+# and never build for wasm32-wasip2. The guest-capable members are the
+# `test-programs` scenarios and the `examples` package, whose host-only
+# examples are cfg-gated to an empty `main` on wasm32.
+[env]
+WASM32_PACKAGES = "test-programs examples"

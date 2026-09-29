@@ -19,6 +19,7 @@ There are many ways to help Augentic besides contributing code:
   - [Table of Contents](#table-of-contents)
   - [Contributing Code](#contributing-code)
   - [Code Style](#code-style)
+  - [Before you open a pull request](#before-you-open-a-pull-request)
   - [Developer's Certificate of Origin](#developers-certificate-of-origin)
   - [Pull request procedure](#pull-request-procedure)
   - [Conduct](#conduct)
@@ -46,7 +47,24 @@ after review.
 
 Please follow these guidelines when formatting source code:
 
-- Rust code should match the output of `cargo fmt`
+- Rust code should match the output of `cargo +nightly fmt --all`
+
+## Before you open a pull request
+
+Run the full CI check locally and make sure it passes:
+
+```shell
+mise run ci
+```
+
+This runs the format check (`cargo +nightly fmt --all --check`), clippy
+(warnings denied, natively and for `wasm32-wasip2`), the test suite, doc
+tests, rustdoc, and the supply-chain checks (`cargo vet`, `cargo deny`),
+exactly as CI does. Tasks run through
+[mise](https://mise.jdx.dev/getting-started.html), which is installed by
+hand; `mise tasks` lists them, and [mise.toml](mise.toml) includes the shared
+Rust tasks from [augentic/.github](https://github.com/augentic/.github)
+`v0.2.0`.
 
 ## Developer's Certificate of Origin
 
@@ -110,8 +128,8 @@ targeted at the `main` branch. Before creating a pull request, go through this c
 1. Create a feature branch off of `main` so that changes do not get mixed up.
 1. [Rebase](https://git-scm.com/book/en/Git-Branching-Rebasing) your local changes against the
    `main` branch.
-1. Run the full project test suite with the `cargo test` command and confirm that it passes.
-1. Run `cargo fmt` to format your code.
+1. Run `mise run ci` and confirm that it passes (see above).
+1. Run `cargo +nightly fmt --all` to format your code.
 1. Accept the Developer's Certificate of Origin on all commits (see above).
 1. Ensure that each commit has a subsystem prefix (ex: `controller:`).
 

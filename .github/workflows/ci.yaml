@@ -12,5 +12,9 @@ permissions:
 
 jobs:
   ci:
-    uses: augentic/.github/.github/workflows/ci.yaml@main
+    uses: augentic/.github/.github/workflows/ci.yaml@v0.2.0
     secrets: inherit
+    with:
+      targets: wasm32-wasip2
+      # Mirrors `WASM32_PACKAGES` in mise.toml.
+      wasm-packages: test-programs examples

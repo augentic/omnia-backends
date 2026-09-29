@@ -48,6 +48,7 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
                 parameters: json!({ "type": "object", "properties": {} }).to_string(),
             })],
             grants: Grants { workspace },
+            check: false,
         };
 
         // create a `ToolResult` stream for writing tool results to

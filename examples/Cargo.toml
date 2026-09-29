@@ -22,14 +22,16 @@ path = "azure_blob/main.rs"
 name = "azure_table"
 path = "azure_table/main.rs"
 
+# Every example here is clippy-checked for wasm32-wasip2 (`WASM32_PACKAGES` in
+# mise.toml); the host-only ones gate their entry point with `cfg_if`.
 [dependencies]
+cfg-if = "1.0.5"
 omnia-wasi-model.workspace = true
 omnia-wasi-otel.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 anyhow.workspace = true
-cfg-if = "1.0.5"
 dotenvy = "0.15.7"
 omnia.workspace = true
 omnia-azure-blob = { path = "../crates/azure-blob" }

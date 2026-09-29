@@ -130,6 +130,13 @@ Unreleased
   `status`; `run_in_flight` and `silent_ms` are gone from it. The completion
   that lost its run logs `run lost with its process` at INFO with the `pid`
   and its own `silent_ms`.
+- A rejected candidate is logged at DEBUG by its `round` and
+  `candidate_bytes`, in `omnia-cursor` and `omnia-genai` alike; the
+  correction the guest's check minted — the rejected answer echoed whole
+  with the findings after it — is the TRACE `correction turn`, where it had
+  been the DEBUG line's `correction` field, so `-v` no longer carries
+  every rejected candidate in full and the findings are read where the
+  guest logs them.
 
 ---
 

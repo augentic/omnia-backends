@@ -103,7 +103,12 @@ impl Conversation {
                     bail!(Error::BudgetExhausted(correction));
                 }
                 Err(correction) => {
-                    tracing::debug!(%correction, "check rejected the candidate");
+                    tracing::debug!(
+                        round,
+                        candidate_bytes = candidate.len(),
+                        "check rejected the candidate"
+                    );
+                    tracing::trace!(%correction, "correction turn");
                     self.chat = std::mem::take(&mut self.chat)
                         .append_message(ChatMessage::assistant(candidate))
                         .append_message(ChatMessage::user(correction));

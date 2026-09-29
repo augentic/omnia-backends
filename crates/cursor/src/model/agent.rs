@@ -171,7 +171,12 @@ impl Agent {
             match verdict.map_err(Unanswered::settled)? {
                 Ok(()) => return Ok(response.answer(candidate)),
                 Err(correction) if round < MAX_ROUNDS => {
-                    tracing::debug!(%correction, "check rejected the candidate");
+                    tracing::debug!(
+                        round,
+                        candidate_bytes = candidate.len(),
+                        "check rejected the candidate"
+                    );
+                    tracing::trace!(%correction, "correction turn");
 
                     // the session persists, so the correction becomes the prompt
                     prompt = correction;

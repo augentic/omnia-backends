@@ -59,7 +59,7 @@ A full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor).
 | `CURSOR_MODEL` | `auto` | Model id when a request leaves `model` unset (`auto` is Cursor's server-side choice) |
 | `CURSOR_TIMEOUT_SECS` | `600` | Absolute wall-clock cap on one agent run |
 | `CURSOR_INACTIVITY_SECS` | `120` | Cancel a run whose stream has gone silent while waiting on the bridge |
-| `CURSOR_MAX_AGENTS` | `4` | Agents live at once, each on its own worker; further completions queue |
+| `CURSOR_MAX_AGENTS` | `8` | Agents live at once, each on its own worker; further completions queue |
 
 Workers inherit the host's environment (minus the `GIT_*` identity variables), so `CURSOR_SDK_BRIDGE_LOG` passes straight through and the worker's RPC log lands in this crate's DEBUG output.
 

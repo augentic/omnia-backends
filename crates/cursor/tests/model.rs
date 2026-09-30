@@ -81,6 +81,27 @@ async fn model_check_corrected() {
 }
 
 #[tokio::test]
+async fn model_check_nudged() {
+    let fake =
+        Spawnable::new(&Config::replies(["Analyzing the claims to produce the verdict.", PASS]));
+    let client = spawning(&fake, 1).await;
+    run_guest(test_programs::MODEL_CHECK_ACCEPTED, &[], &client).await;
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let (_, sequence) = sole_agent(&log);
+    assert_eq!(
+        sequence,
+        [Rpc::CreateAgent, Rpc::Send, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent],
+        "the nudge goes on the same agent"
+    );
+    let sends = log.saw(Rpc::Send);
+    let nudge = sends[1].text("text");
+    assert!(nudge.starts_with("Your last reply held no JSON value"), "{nudge}");
+    assert!(!nudge.contains("## Findings"), "no check ran on the narration: {nudge}");
+}
+
+#[tokio::test]
 async fn model_check_exhausted() {
     let fake = Spawnable::new(&Config::replies([FAIL]));
     let client = spawning(&fake, 1).await;

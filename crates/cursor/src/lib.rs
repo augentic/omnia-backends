@@ -80,7 +80,7 @@ mod config {
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
         /// Default model id.
-        #[env(from = "CURSOR_MODEL", default = "auto")]
+        #[env(from = "CURSOR_MODEL", default = "composer-2.5")]
         pub model: String,
         /// Absolute cap in seconds on one agent run; a correction's send gets
         /// a fresh cap.
@@ -92,7 +92,7 @@ mod config {
         #[env(from = "CURSOR_INACTIVITY_SECS", default = "120")]
         pub inactivity_secs: u64,
         /// Maximum agents live at once.
-        #[env(from = "CURSOR_MAX_AGENTS", default = "4")]
+        #[env(from = "CURSOR_MAX_AGENTS", default = "8")]
         pub max_agents: usize,
     }
 }

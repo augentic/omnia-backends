@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
-use omnia_wasi_model::{Answer, Error, ToolHost, Transcript, Usage};
+use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
 use tokio::sync::watch;
 use tokio::time::{Instant, interval_at, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
@@ -38,6 +38,9 @@ use crate::worker::Worker;
 use crate::{Failure, elapsed_ms};
 
 const MAX_ROUNDS: u32 = 2;
+const NUDGE: &str = "Your last reply held no JSON value, so it is not the answer. Reply now with \
+                     only your final answer as a single JSON value in the shape the prompt asked \
+                     for, and nothing else.";
 const TEARDOWN: Duration = Duration::from_secs(5);
 const PROGRESS: Duration = Duration::from_secs(15);
 
@@ -151,17 +154,35 @@ impl Agent {
     async fn rounds(&mut self) -> Result<Answer, Unanswered> {
         let mut prompt = mem::take(&mut self.prompt.text);
         let mut round = 1;
+        let mut nudged = false;
+        let mut opening = true;
+
         loop {
-            // round 1 fails before any candidate, so the guest has seen nothing
             let response = match self.send(round, &prompt).await {
                 Ok(response) => response,
-                Err(error) if round == 1 => return Err(Unanswered::before_candidate(error)),
+                Err(error) if opening => return Err(Unanswered::before_candidate(error)),
                 Err(error) => return Err(Unanswered::settled(error)),
             };
+            opening = false;
 
             let candidate = self.prompt.format.candidate(&response.result);
             if !self.prompt.check {
                 return Ok(response.answer(candidate));
+            }
+
+            // nudge replies that are not JSON
+            if !nudged
+                && matches!(self.prompt.format, Format::Json | Format::Schema(_))
+                && serde_json::from_str::<serde_json::Value>(&candidate).is_err()
+            {
+                nudged = true;
+                tracing::debug!(
+                    round,
+                    reply_bytes = candidate.len(),
+                    "the reply is not JSON; nudging"
+                );
+                NUDGE.clone_into(&mut prompt);
+                continue;
             }
 
             let checked = Instant::now();
@@ -171,6 +192,7 @@ impl Agent {
             match verdict.map_err(Unanswered::settled)? {
                 Ok(()) => return Ok(response.answer(candidate)),
                 Err(correction) if round < MAX_ROUNDS => {
+                    self.completion.rejected();
                     tracing::debug!(
                         round,
                         candidate_bytes = candidate.len(),
@@ -334,7 +356,7 @@ impl Agent {
     // `Completion` line before delete, so `duration_ms` covers the run
     fn finish(&mut self, result: &Result<Answer, Unanswered>) {
         let outcome = match result {
-            Ok(_) if self.completion.attempts() > 1 => Outcome::Corrected,
+            Ok(_) if self.completion.corrected() => Outcome::Corrected,
             Ok(_) => Outcome::Ok,
             Err(unanswered) => Outcome::of(unanswered.error()),
         };
@@ -471,8 +493,9 @@ impl Response {
     }
 }
 
-// No answer: the failure, and whether it struck before any candidate — in
-// `CreateAgent` or the opening `Send`
+// No answer: the failure, and whether it struck before the opening prompt
+// was answered — in `CreateAgent` or the opening `Send` — when nothing the
+// guest asked for has run yet
 pub struct Unanswered {
     error: anyhow::Error,
     before_candidate: bool,
@@ -501,7 +524,7 @@ impl Unanswered {
         self.error
     }
 
-    // Retryable if worker lost before any candidate: nothing said twice
+    // Retryable if worker lost before the opening prompt was answered: nothing said twice
     pub fn restartable(&self) -> bool {
         self.before_candidate && Outcome::of(&self.error).lost_worker()
     }

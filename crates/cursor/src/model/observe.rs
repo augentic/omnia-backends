@@ -31,6 +31,9 @@ use crate::protocol::{RunStreamMessage, SdkMessage, TokenUsage, lenient_i64};
 pub struct Completion {
     started: Instant,
     attempts: u32,
+    // the guest's check rejected a candidate: an answer is then `Corrected`,
+    // which a nudge — a send with no verdict behind it — never makes it
+    corrected: bool,
     bill: Bill,
     // the wait booked per phase, every round of the completion together,
     // and the guest's check of each candidate between rounds
@@ -59,6 +62,7 @@ impl Completion {
         Self {
             started: Instant::now(),
             attempts: 0,
+            corrected: false,
             bill: Bill::default(),
             opening: Duration::ZERO,
             tool: Duration::ZERO,
@@ -72,6 +76,15 @@ impl Completion {
     // Count an attempt as started, including ones that later time out.
     pub const fn attempt(&mut self) {
         self.attempts = self.attempts.saturating_add(1);
+    }
+
+    // The guest's check rejected a candidate and a correction follows.
+    pub const fn rejected(&mut self) {
+        self.corrected = true;
+    }
+
+    pub const fn corrected(&self) -> bool {
+        self.corrected
     }
 
     pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&TokenUsage>) {
@@ -128,10 +141,6 @@ impl Completion {
     // Book the reasoning time a closing `thinking` frame reported.
     pub const fn thought(&mut self, reported: Duration) {
         self.thinking = self.thinking.saturating_add(reported);
-    }
-
-    pub const fn attempts(&self) -> u32 {
-        self.attempts
     }
 
     pub fn elapsed(&self) -> Duration {

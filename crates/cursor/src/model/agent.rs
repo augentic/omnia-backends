@@ -5,7 +5,10 @@
 //! The whole of it runs on a task of its own, because the completion future
 //! is the guest's to drop at any `.await`: the drop cancels a token the task
 //! watches, and the task ends its run — cancelled by id once the stream has
-//! named one — and still deletes its agent. No wait on the worker is
+//! named one — and still deletes its agent. The answer comes back before
+//! the delete: `CloseAgent` and `DeleteAgent` run on a task of their own
+//! once the completion's line is written, so a guest waits on the model,
+//! never on the bridge putting the agent away. No wait on the worker is
 //! unbounded — the inactivity window that stream progress rearms while the
 //! run waits on the bridge, the absolute cap that bounds it while the model
 //! composes, the callback's abort and the worker's own exit each end one —
@@ -47,7 +50,7 @@ pub struct Attempt {
 }
 
 impl Attempt {
-    // `CreateAgent`, prompt to answer, then `DeleteAgent` on its own task
+    // `CreateAgent`, prompt to answer on its own task, then `DeleteAgent` on another
     // Drop ends the run, never the delete; opening failures are `before_candidate`
     pub async fn complete(self) -> Result<Answer, Unanswered> {
         // drop cancels the run
@@ -62,13 +65,15 @@ impl Attempt {
         })
     }
 
-    // Whole life in order: answer waits on delete, so lease goes last
+    // Whole life in order, but the answer does not wait on the delete: the
+    // teardown runs on a task of its own, holding the lease, so the slot
+    // reopens only once the process is gone
     async fn run(self, cancel: CancellationToken) -> Result<Answer, Unanswered> {
         let mut agent = Agent::create(self, cancel).await.map_err(Unanswered::before_candidate)?;
         let result = agent.rounds().await;
         agent.settle().await;
         agent.finish(&result);
-        agent.delete().await;
+        tokio::spawn(agent.delete().instrument(Span::current()));
         result
     }
 }
@@ -166,7 +171,12 @@ impl Agent {
             match verdict.map_err(Unanswered::settled)? {
                 Ok(()) => return Ok(response.answer(candidate)),
                 Err(correction) if round < MAX_ROUNDS => {
-                    tracing::debug!(%correction, "check rejected the candidate");
+                    tracing::debug!(
+                        round,
+                        candidate_bytes = candidate.len(),
+                        "check rejected the candidate"
+                    );
+                    tracing::trace!(%correction, "correction turn");
 
                     // the session persists, so the correction becomes the prompt
                     prompt = correction;
@@ -195,7 +205,7 @@ impl Agent {
             biased;
             () = self.cancel.cancelled() => Err(abandoned()),
             stream = self.handle.worker().fail_on_exit(self.handle.send(text)) => stream,
-            failure = &mut deadline => Err(failure.into()),
+            failure = &mut deadline => Err(failure.into_error()),
         };
 
         let outcome = match opened {
@@ -240,6 +250,7 @@ impl Agent {
                 message = self.handle.worker().fail_on_exit(stream.next()) => {
                     let Some(message) = message? else { break };
                     log.observe_message(&message);
+                    self.completion.thought(log.thought());
                     self.advance(activity, log.phase());
                     if self.handle.run_id.is_none() {
                         self.handle.run_id = log.run_id().map(ToOwned::to_owned);
@@ -262,7 +273,7 @@ impl Agent {
                         "in progress"
                     );
                 }
-                failure = &mut deadline => return Err(failure.into()),
+                failure = &mut deadline => return Err(failure.into_error()),
                 reason = self.session.aborted() => return Err(Failure::Aborted(reason).into()),
                 // abandoned run cancels by id, so follow to the opening frame
                 () = self.cancel.cancelled(), if self.handle.run_id.is_some() => {

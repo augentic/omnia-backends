@@ -55,6 +55,25 @@ impl Failure {
     pub const fn outcome(&self) -> &'static str {
         Outcome::of_failure(self).as_str()
     }
+
+    /// Returns the error `complete` ends on for this failure.
+    ///
+    /// The absolute cap is the completion's time budget, so a
+    /// [`Failure::Timeout`] reaches the guest as the typed
+    /// [`omnia_wasi_model::Error::BudgetExhausted`], carrying this failure's
+    /// text: the same request put again would take as long, where a backend
+    /// failure invites a retry. Every other failure is the backend's. The
+    /// failure itself stays beneath for a caller that downcasts to it.
+    #[must_use]
+    pub fn into_error(self) -> anyhow::Error {
+        match &self {
+            Self::Timeout { .. } => {
+                let budget = omnia_wasi_model::Error::BudgetExhausted(self.to_string());
+                anyhow::Error::new(self).context(budget)
+            }
+            _ => self.into(),
+        }
+    }
 }
 
 // How one completion came out: the closed set of `outcome` values the
@@ -213,6 +232,30 @@ mod tests {
         assert_eq!(run_error(None).to_string(), "cursor run error: <no detail>");
 
         assert_eq!(Outcome::of(&anyhow::anyhow!("sdk.v1 RPC failed")), Outcome::Error);
+    }
+
+    // The cap is the time budget: the guest's typed error is the budget, the
+    // completion event still reads `timeout`, and nothing else changes class.
+    #[test]
+    fn timeout_is_budget() {
+        let timeout = Failure::Timeout { cap_secs: 600 }.into_error();
+        assert!(matches!(
+            timeout.downcast_ref::<omnia_wasi_model::Error>(),
+            Some(omnia_wasi_model::Error::BudgetExhausted(detail))
+                if detail == "cursor run timed out after 600s (absolute cap exceeded while still active)"
+        ));
+        assert_eq!(Outcome::of(&timeout), Outcome::Timeout);
+        assert!(!Outcome::of(&timeout).lost_worker());
+
+        let inactive = Failure::Inactive {
+            waiting: "the opening frame".to_owned(),
+            idle_secs: 120,
+            inactivity_secs: 120,
+            cap_secs: 600,
+        }
+        .into_error();
+        assert!(inactive.downcast_ref::<omnia_wasi_model::Error>().is_none());
+        assert_eq!(Outcome::of(&inactive), Outcome::Inactive);
     }
 
     #[test]

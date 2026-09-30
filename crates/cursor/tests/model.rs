@@ -5,8 +5,6 @@
 
 mod support;
 
-use std::time::SystemTime;
-
 use omnia_cursor::ConnectOptions;
 use serde_json::json;
 use support::fake_bridge::{Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
@@ -26,7 +24,6 @@ async fn model_echo_text() {
     let fake = Spawnable::new(&Config::echo());
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    let returned = SystemTime::now();
     await_gone(&fake).await;
 
     let log = fake.log();
@@ -36,11 +33,8 @@ async fn model_echo_text() {
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
     assert!(workers[0].ended_with(Rpc::Shutdown), "the lease closed its process");
 
-    // the answer waits on the teardown
-    let deleted = workers[0].saw(Rpc::DeleteAgent)[0];
-    assert!(deleted.at() <= returned, "DeleteAgent landed before the guest returned");
-
     // delete is scoped to the create-time cwd and repeats the api key
+    let deleted = workers[0].saw(Rpc::DeleteAgent)[0];
     let created = workers[0].saw(Rpc::CreateAgent)[0];
     assert_eq!(created.agent.as_deref(), Some(agent.as_str()));
     assert!(!created.text("cwd").is_empty(), "CreateAgent names a cwd: {}", created.arg);

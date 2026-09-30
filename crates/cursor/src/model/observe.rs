@@ -12,8 +12,8 @@
 //! carrying the bill and how the wait split across the phases.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::time::Duration;
+use std::{fmt, mem};
 
 use omnia_wasi_model::{ToolTurn, Transcript, Usage};
 use serde_json::Value;
@@ -38,6 +38,8 @@ pub struct Completion {
     tool: Duration,
     model: Duration,
     check: Duration,
+    // the reasoning time the model reported, a part of `model` the stream names
+    thinking: Duration,
     emitted: bool,
 }
 
@@ -62,6 +64,7 @@ impl Completion {
             tool: Duration::ZERO,
             model: Duration::ZERO,
             check: Duration::ZERO,
+            thinking: Duration::ZERO,
             emitted: false,
         }
     }
@@ -122,6 +125,11 @@ impl Completion {
         self.check = self.check.saturating_add(waited);
     }
 
+    // Book the reasoning time a closing `thinking` frame reported.
+    pub const fn thought(&mut self, reported: Duration) {
+        self.thinking = self.thinking.saturating_add(reported);
+    }
+
     pub const fn attempts(&self) -> u32 {
         self.attempts
     }
@@ -149,6 +157,7 @@ impl Completion {
                     opening_ms = millis(self.opening),
                     tool_ms = millis(self.tool),
                     model_ms = millis(self.model),
+                    thinking_ms = millis(self.thinking),
                     check_ms = millis(self.check),
                     input_tokens = self.bill.input,
                     cache_read_tokens = self.bill.cache_read,
@@ -241,6 +250,8 @@ pub struct EventLog {
     pending_tools: HashMap<String, PendingCall>,
     // the started call most recently left pending, for `Phase::Tool`
     last_pending: Option<String>,
+    // reasoning time closing frames have reported since the last `thought`
+    thinking: Duration,
     turns: Vec<ToolTurn>,
 }
 
@@ -279,12 +290,40 @@ impl EventLog {
                 }
             }
             // a reasoning block ends with its duration; the text deltas before it stay frames
-            "thinking" => match thinking_duration(payload) {
-                Some(duration_ms) => tracing::debug!(duration_ms, "thinking"),
-                None => frame(event),
-            },
+            "thinking" => {
+                self.resumed();
+                match thinking_duration(payload) {
+                    Some(duration_ms) => {
+                        self.thinking =
+                            self.thinking.saturating_add(Duration::from_millis(duration_ms));
+                        tracing::debug!(duration_ms, "thinking");
+                    }
+                    None => frame(event),
+                }
+            }
+            "assistant" => {
+                self.resumed();
+                frame(event);
+            }
             _ => frame(event),
         }
+    }
+
+    // The model speaks only once every tool call it issued has answered, so
+    // a call still pending when it does was answered off the stream: the
+    // bridge drops a terminal frame now and then, most often for one of
+    // several calls started together. Its turn is lost; the phase is not.
+    fn resumed(&mut self) {
+        if self.pending_tools.is_empty() {
+            return;
+        }
+        let unterminated: Vec<String> =
+            self.pending_tools.drain().map(|(_, pending)| pending.tool).collect();
+        self.last_pending = None;
+        tracing::debug!(
+            tools = ?unterminated,
+            "the model resumed with tool calls still pending; closing them without a result"
+        );
     }
 
     pub fn run_id(&self) -> Option<&str> {
@@ -305,6 +344,11 @@ impl EventLog {
     // How many tool calls the agent has started, completed or not.
     pub const fn tool_calls(&self) -> usize {
         self.started
+    }
+
+    // The reasoning time reported since the last take, for the completion to book.
+    pub fn thought(&mut self) -> Duration {
+        mem::take(&mut self.thinking)
     }
 
     pub fn phase(&self) -> Phase {
@@ -336,6 +380,8 @@ impl EventLog {
                         subject = pending.subject(self.cwd.as_deref()),
                         "tool call"
                     );
+                    // the arguments whole, for a `-vv` run reading what the agent asked for
+                    tracing::trace!(tool = %pending.tool, args = %pending.args, "tool call args");
                     self.pending_tools.insert(call_id.to_owned(), pending);
                     self.last_pending = Some(call_id.to_owned());
                 }
@@ -782,6 +828,40 @@ mod tests {
         assert!(log.finish().is_none(), "no result, no turn");
     }
 
+    // Three reads started together, one terminal frame: the model's next
+    // reasoning or text frame closes the two the bridge never terminated, so
+    // the run waits on the model, not on a tool that has already answered.
+    #[test]
+    fn resumed_without_terminal() {
+        let mut log = EventLog::default();
+        let read = |file: &str| json!({ "path": file });
+        let done = json!({ "status": "success", "value": {} });
+
+        observe_one(&mut log, &flat("read", "c1", &read("a.ts"), None));
+        observe_one(&mut log, &flat("read", "c2", &read("b.ts"), None));
+        observe_one(&mut log, &flat("read", "c3", &read("c.ts"), None));
+        observe_one(&mut log, &flat("read", "c1", &read("a.ts"), Some(done)));
+        assert_eq!(log.phase(), Phase::Tool("read".to_owned()), "two still pending");
+
+        observe_one(&mut log, &json!({ "type": "thinking", "message": { "text": "Now" } }));
+        assert_eq!(log.phase(), Phase::Model, "the model resumed, so nothing is pending");
+
+        observe_one(&mut log, &flat("grep", "c4", &json!({ "pattern": "fn" }), None));
+        assert_eq!(log.phase(), Phase::Tool("grep".to_owned()), "a later call is pending again");
+        observe_one(
+            &mut log,
+            &json!({ "type": "assistant", "message": {
+                "message": { "content": [{ "text": "The", "type": "text" }], "role": "assistant" },
+            }}),
+        );
+        assert_eq!(log.phase(), Phase::Model);
+
+        assert_eq!(log.tool_calls(), 4);
+        let transcript = log.finish().expect("the one terminated read is a turn");
+        assert_eq!(transcript.turns.len(), 1, "a call closed without a result is no turn");
+        assert_eq!(transcript.turns[0].args, read("a.ts"));
+    }
+
     #[test]
     fn tool_calls() {
         let log = observe_all(&[
@@ -858,12 +938,22 @@ mod tests {
         assert_eq!(super::thinking_duration(&json!({ "thinking_duration_ms": -1 })), None);
         assert_eq!(super::thinking_duration(&json!({ "text": "I will extract" })), None);
 
-        let log = observe_all(&[
+        let mut log = observe_all(&[
             json!({ "type": "thinking", "message": { "run_id": "run-1", "text": "I will" } }),
             json!({ "type": "thinking", "message": { "text": "", "thinking_duration_ms": 4193 } }),
+            json!({ "type": "thinking", "message": { "text": "", "thinking_duration_ms": 7 } }),
         ]);
         assert_eq!(log.run_id(), Some("run-1"));
         assert_eq!(log.phase(), Phase::Model);
+
+        // the closing frames' durations are taken once, for the completion's `thinking_ms`
+        assert_eq!(log.thought(), Duration::from_millis(4200));
+        assert_eq!(log.thought(), Duration::ZERO);
+        let mut completion = Completion::new();
+        completion.thought(Duration::from_millis(4200));
+        completion.thought(Duration::from_millis(300));
+        assert_eq!(completion.thinking, Duration::from_millis(4500));
+        completion.finish(Outcome::Ok);
         assert!(log.finish().is_none());
     }
 

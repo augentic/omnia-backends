@@ -3,211 +3,22 @@
 [![crates.io](https://img.shields.io/crates/v/omnia-cursor.svg)](https://crates.io/crates/omnia-cursor)
 [![docs.rs](https://docs.rs/omnia-cursor/badge.svg)](https://docs.rs/omnia-cursor)
 
-Cursor model backend for the Omnia WASI runtime, implementing the
-`omnia:model/completion` boundary (`wasi-model`) through
-[`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge) — a local process
-wrapping Cursor's SDK behind Connect RPCs.
+Cursor model backend for the Omnia WASI runtime, implementing the `omnia:model/completion` boundary (`wasi-model`) through [`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge), a local process that wraps Cursor's SDK behind Connect RPCs.
 
-Each completion spawns a `cursor-sdk-bridge` process of its own — a *worker*
-— and creates a fresh agent on it that owns its own tool loop and edits the
-lent working tree directly, then returns its answer
-through the same boundary as `omnia-genai`. Guest-declared function
-tools round-trip through the session exactly as genai's do: they are declared
-as SDK custom tools at `CreateAgent`, and when the agent calls one the worker
-POSTs `CallCustomTool` to this crate's loopback callback endpoint, which routes
-it into the completion's session via `ToolHost::call_tool` — so the guest's
-tool closure answers, under the host's declared-name check, budget, size cap,
-and per-call timeout. `Tool::Mcp` grants pass inline as the agent's
-`mcp_servers`; nothing is written into the workspace. The guest only ever
-sees the answer string; the model id, the API key, and the `sdk.v1` protocol
-stay inside this crate.
-
-The request's `format` reaches the agent as a final-answer instruction in
-the prompt — steering only; nothing here validates the answer. When the
-request sets `check`, the agent's answer is offered to the guest through
-`ToolHost::check`: `Ok` ends the completion, `Err(correction)` sends the
-guest's correction verbatim as the next prompt on the same agent — its
-session already carries the prompt and the rejected answer, so the
-provider's prompt cache stays warm. Two rounds are allowed; a rejection of
-the second fails the completion with the typed `budget-exhausted` carrying
-that correction. Agent scope is strictly one `complete` call: agents are
-never reused across completions. Each is closed and then deleted against
-the create-time workspace (a missing agent is already gone) before its
-answer is returned.
+Each completion gets its own `cursor-sdk-bridge` process (a *worker*) and a fresh agent on it. The agent runs its own tool loop against the lent workspace and returns its answer through the same boundary `omnia-genai` uses. The guest only sees the answer; the model id, API key, and `sdk.v1` protocol stay inside this crate.
 
 MSRV: Rust 1.97
 
 ## Requirements
 
-The [`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge) executable
-must be on `PATH`, and `CURSOR_API_KEY`
-must be set for any completion — `sdk.v1` authenticates every agent with an
-explicit key, so a prior `cursor-agent login` no longer suffices. The key is
-read when the client connects and retained privately for its agents; it is
-never stored on `ConnectOptions`, exposed by `Client`'s `Debug`, logged, or
-recorded into fixtures. Connecting without one succeeds, so verbs that never
-complete run keyless; the first completion fails with the same message the
-connect once gave.
+- `cursor-sdk-bridge` on `PATH`.
+- `CURSOR_API_KEY` set. `sdk.v1` authenticates every agent with an explicit key, so a prior `cursor-agent login` is not enough. The key is never logged, stored on `ConnectOptions`, or shown by `Client`'s `Debug`.
 
-Each live agent runs on its own worker, spawned for the completion
-as the leader of its own process group and shut down after it: a graceful
-`Shutdown` RPC with 5s for the exit it asks for, then a kill of the whole
-group, which reaches the agent processes the worker forks; whatever a worker
-left in its group when it exited on its own is swept as the exit is seen,
-so nothing of a slot's process outlives it. A worker that
-crashes fails the completion running on it with the typed
-`cursor-sdk-bridge exited (…)` (outcome `worker_exit`)
-rather than as the next completion's stall. The exit is logged at WARN with
-the process's `pid`, its `uptime_ms`, and the `status` (`signal: 9 (SIGKILL)`,
-`exit status: 7`); the completion that
-lost its run to it logs `run lost with its process` at DEBUG under the same
-`pid`, with how long that run's stream had been `silent_ms`. The last lines
-the process wrote to stderr are logged at DEBUG only — they are untrusted
-subprocess output and never reach WARN or the error a guest sees.
-
-A worker lost under the *opening* of a completion is not the prompt's
-doing, so the completion restarts once: when `CreateAgent` or the opening
-`Send` fails because the process exited (`Failure::WorkerExited`) or its
-socket failed below Connect (`RpcError::Transport` — the request could not
-be sent, the stream reset, or it ended mid-frame), and no candidate has yet
-reached the guest, the dead lease is released, a fresh one is taken (with
-one slot that means waiting for the dead process to be reaped), and the
-original prompt is sent again with fresh deadlines. The restart is logged at
-WARN (`completion restarting on a fresh worker`, with the first attempt's
-`error` and `pid` when the process is known); the second attempt's result
-is final, whatever it
-is. Nothing else restarts: a failure after the guest's `check` has seen a
-candidate (the guest would be offered a candidate twice), an inactivity or
-cap deadline, a guest abort, `budget-exhausted`, a Connect or end-stream
-error (the worker answered), a lease that could not be taken, or a request
-that could not be shaped all stand as they are. Each attempt is its own
-agent on its own worker, so the `completion started` (DEBUG) / `completion`
-(INFO for an answer, WARN for every other outcome) lines are per attempt: a
-restarted call produces two pairs inside one `complete` span, the first
-ending `worker_exit` or `transport`, with the restart WARN between them, and
-`attempts` on those lines still counts the sends on that one agent. A
-follow-up worth doing when `cursor-sdk-bridge` exposes it: resuming a run in
-flight (`ObserveRun` / `WaitLiveRun`) on the new process instead of re-sending
-the prompt. A worker
-that stays alive but stops answering is bounded too: no call waits on it
-longer than the inactivity window while the run is the worker's to answer,
-nor longer than the cap in all, and the teardown calls after a completion
-are bounded at a few seconds each, so a silent worker frees its slot instead
-of holding it. The agent's whole life — `CreateAgent`, the
-run, the teardown — runs on a task of its own rather than on the completion
-future, so a completion the guest drops at any point ends its run
-(cancelled by id once the stream has named one) and still closes and
-deletes its agent, the id of a create still in flight included; an
-unanswered `CreateAgent` fails the completion after one window, and its
-worker is asked to go with nothing to tear down.
-
-Everything a completion logs sits under its `complete` span, which carries
-a process-wide sequence `n` beside the `model` and `format` — and, for a
-schema-formatted request, the schema's name as `label`, the guest's own name
-for the question it is asking — so the lines of completions live at once
-read apart without an agent id; each `Send` opens a `send` span (DEBUG)
-naming its `round`, and what the worker writes to stderr and how it exits
-are logged under the completion that spawned it. A run still streaming
-reports `in progress` at INFO every 15s — how long the completion has run
-(`elapsed_s`), the stream `frames` and `tool_calls` seen on that send, how
-long its stream has been silent (`silent_s`), and what it is `waiting` on —
-so a bare `info` run tells a long completion from a hung one. Each tool call
-the agent starts is logged at DEBUG (`tool call`, with its `tool` and the
-one argument worth a line as `subject`: a path, a pattern, or the first line
-of a command), and again when it completes (`tool call completed`, with
-`result_bytes`); a custom tool the guest declared is named by the call it
-wraps (`read_doc`, not the bridge's `mcp`). The teardown once it is done
-logs `agent deleted`, with `teardown_ms`. A
-custom-tool callback arrives from the worker over HTTP on no completion's
-task, so it runs as a root `callback` span at TRACE naming the `tool` alone;
-the guest's own line for the tool is the console's report of the call.
-
-`Client::connect()` binds the loopback callback endpoint and spawns nothing
-until the first lease, so a missing or broken `cursor-sdk-bridge` surfaces
-as that lease's spawn or handshake failure. Every spawn passes a private
-`--state-root` so no durable agent state lands in `~/.cursor`, registers
-with the callback endpoint under its own bearer token (agent ids are each
-process's own to choose, so a callback routes by the token that carries it
-as well as the id it names, and the token is revoked once the process is
-gone), parses the worker's stderr discovery line, and verifies the endpoint
-with `Ping`/`GetVersion` (`sdk.v1`). A spawn that never completes that handshake fails with the
-process's exit status and the step that failed; its stderr tail is at DEBUG.
-
-## Configuration
-
-The working tree is lent per completion through the guest's
-`grants.workspace`: the runtime preopens the configured `[[mount]]`, the
-guest lends that descriptor, and the host resolves it to a node-local path
-exposed on the tool host (`ToolHost::local_path`). The agent runs there with
-a read-only subset of the built-in tools — `read`, `glob`, `grep`, `ls`,
-plus `mcp`, the channel custom tools arrive over — honoring the tree's own
-project settings and nothing from the host user. No shell, edit, or delete:
-a lent tree is inspected, never changed. Without a lent workspace the
-completion still runs — in a private empty directory with every built-in
-tool disabled — so function-tool-only (references-style) completions work
-like genai's. `read` takes absolute paths, so the allowlist does not
-confine the agent to the lent tree; staying inside it is the prompt's to
-ask, not the toolset's to enforce.
-
-The model id is taken from each request (`request.model`); an unset value
-falls back to `CURSOR_MODEL`, else `auto` (Cursor's server-side selection).
-The request's `generation` controls (temperature, max tokens, effort, …)
-are ignored: `CreateAgent` has no sampling knobs. Each `Send` — the opening
-prompt, and a check's correction if any — is bounded twice: an inactivity window
-(`CURSOR_INACTIVITY_SECS`, default 120s) cancels a run whose stream has gone
-silent while it waits on the bridge — for the stream's opening frame, or for
-a tool call the agent has started to complete (keepalive frames do not
-count) — while the absolute wall-clock cap (`CURSOR_TIMEOUT_SECS`, default
-600s) bounds the run as a whole. The stream carries no model text, so once
-the agent has every tool result and the model is composing its answer the
-window stands down and the cap alone ends the wait; a large answer is not cut
-short for taking longer than the window to write. A completion that is
-corrected therefore gets a fresh inactivity window and a fresh cap on the
-second send. The two errors are distinct (`inactive for Ns waiting on …` vs
-`timed out after Ns (absolute cap …)`). A run cut short either way is
-cancelled and its bill asked back (`GetUsage`) before the `completion` event
-is emitted, so the event's token counts cover a timed-out run whenever the
-bridge can report them; the stream itself carries usage only once a turn
-ends. When the bridge cannot — today it answers `GetUsage` for a local agent
-from the cloud API, which rejects the id — the counts stay at what the
-answered sends reported and a DEBUG line (`usage unavailable for the
-cancelled run`) says why. While a run is open, an `in progress` event every
-15s carries `elapsed_s`, `frames`, `tool_calls`, `silent_s`, and `waiting` —
-what the silence is on: `the opening frame`, ``tool `read` ``, or `the
-model`.
-
-Concurrency is bounded by `CURSOR_MAX_AGENTS` (default 4): that many agents
-live at once, each on its own worker, and a further completion
-waits its turn (first come, first served; a wait is logged at DEBUG as
-`agent slot acquired` with `wait_ms` — a slot taken at once logs nothing —
-apart from the completion's own `duration_ms`, which
-starts once the slot is held). The worker executable is `cursor-sdk-bridge`,
-resolved on `PATH`.
-
-`Client::connect()` / `FromEnv` reads the optional `CURSOR_TIMEOUT_SECS`,
-`CURSOR_INACTIVITY_SECS`, `CURSOR_MODEL`, and `CURSOR_MAX_AGENTS`; callers
-that need different bounds, a default model, or another pool shape pass
-`ConnectOptions` to `connect_with`. A worker inherits the host's
-environment (bar the `GIT_*` identity variables, which would point the
-agent at the host's repository), so `cursor-sdk-bridge`'s own `CURSOR_SDK_BRIDGE_LOG`
-passes straight through: set it on the host process to have every spawned
-worker log its RPCs to stderr, where this crate records them at DEBUG.
-
-A caller that needs to tell failures apart matches on the types `complete`'s
-error downcasts to — `Failure::{Run, Timeout, Inactive, Aborted, WorkerExited}`,
-`RpcError::{Connect, Transport}`, and `omnia_wasi_model::Error::BudgetExhausted`
-— rather than on message text; `Exit` is the process status a `WorkerExited`
-carries, and `RunStatus` the terminal status a `Run` ended in.
-
-MCP servers are supplied per-request: a prompt's `mcp` grant carries the
-endpoint `url` directly, passed inline through `CreateAgent`'s `mcp_servers`.
-The grant's `tools` allowlist is advisory — it is named in the prompt hint
-but not enforced by a filtering proxy.
+Connecting without a key succeeds; the first completion fails instead.
 
 ## Usage
 
-Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
-(see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
+Bind the backend in your host's `runtime!` map. The guest `.wasm` is untouched (see the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md)):
 
 ```rust,ignore
 use omnia_cursor::Client as Cursor;
@@ -226,14 +37,10 @@ For direct or embedded use, connect it yourself:
 use omnia::Backend;
 use omnia_cursor::{Client, ConnectOptions};
 
-// CURSOR_TIMEOUT_SECS / CURSOR_INACTIVITY_SECS / CURSOR_MODEL /
-// CURSOR_MAX_AGENTS when set; else a 600s cap, a 120s inactivity window, a
-// Cursor-chosen model, and up to four agents, each in its own
-// `cursor-sdk-bridge` process.
+// Reads CURSOR_* from the environment, with the defaults below.
 let client = Client::connect().await?;
 
-// Explicit bounds, default model, and pool shape for long-running judgment
-// legs.
+// Or set the bounds, default model, and pool shape explicitly.
 let client = Client::connect_with(ConnectOptions {
     timeout_secs: 1800,
     inactivity_secs: 120,
@@ -242,91 +49,70 @@ let client = Client::connect_with(ConnectOptions {
 }).await?;
 ```
 
-## End-to-end example
+A full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor).
 
-The full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor). The guest declares a function tool and answers each session `tool-call` with a `ToolResult`.
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CURSOR_API_KEY` | — | Required for any completion |
+| `CURSOR_MODEL` | `auto` | Model id when a request leaves `model` unset (`auto` is Cursor's server-side choice) |
+| `CURSOR_TIMEOUT_SECS` | `600` | Absolute wall-clock cap on one agent run |
+| `CURSOR_INACTIVITY_SECS` | `120` | Cancel a run whose stream has gone silent while waiting on the bridge |
+| `CURSOR_MAX_AGENTS` | `4` | Agents live at once, each on its own worker; further completions queue |
+
+Workers inherit the host's environment (minus the `GIT_*` identity variables), so `CURSOR_SDK_BRIDGE_LOG` passes straight through and the worker's RPC log lands in this crate's DEBUG output.
+
+The request's `generation` controls (temperature, max tokens, …) are ignored: `CreateAgent` has no sampling knobs.
+
+## How a completion runs
+
+**Workspace.** The guest lends a working tree through `grants.workspace`; the agent runs there with a read-only toolset (`read`, `glob`, `grep`, `ls`, plus `mcp`). No shell, edit, or delete. Without a lent workspace the agent runs in a private empty directory with every built-in tool disabled, so function-tool-only completions still work. `read` takes absolute paths, so staying inside the tree is the prompt's to ask, not the toolset's to enforce.
+
+**Tools.** Guest-declared function tools become SDK custom tools at `CreateAgent`. When the agent calls one, the worker POSTs to this crate's loopback callback endpoint, which routes it into the session via `ToolHost::call_tool` under the host's name check, budget, size cap, and per-call timeout. `Tool::Mcp` grants pass inline as `mcp_servers`; the grant's `tools` allowlist is advisory.
+
+**Format and check.** `format` reaches the agent as a final-answer instruction — steering only. With `check`, the answer is offered through `ToolHost::check`: `Ok` ends the completion, `Err(correction)` sends the correction as the next prompt on the same agent (its cache stays warm). Two rounds are allowed; a second rejection fails with the typed `budget-exhausted`.
+
+**Lifecycle.** Agent scope is one `complete` call. The agent's whole life runs on its own task, so a completion the guest drops still cancels its run and tears its agent down. The answer is returned before teardown finishes; the pool slot reopens only once the process is gone.
+
+## Timeouts and failure
+
+Each `Send` (the opening prompt, and a correction if any) is bounded twice:
+
+- **Inactivity window** — the stream went silent while waiting on the bridge (opening frame, or a tool call in flight). A `backend` failure a caller may retry. Stands down once the model is composing its answer.
+- **Absolute cap** — the completion's time budget. Reaches the guest as the typed `budget-exhausted`.
+
+Workers are process-group leaders and are shut down after their completion: a graceful `Shutdown` with 5s grace, then a kill of the whole group. A worker that crashes fails its completion with the typed `cursor-sdk-bridge exited (…)` rather than stalling the next one.
+
+A worker lost while a completion is *opening* (`CreateAgent` or the first `Send` fails with `WorkerExited` or `RpcError::Transport`, and no candidate has reached the guest) restarts the completion once on a fresh worker. Nothing else restarts.
+
+Match failures on types, not messages: `Failure::{Run, Timeout, Inactive, Aborted, WorkerExited}`, `RpcError::{Connect, Transport}`, and `omnia_wasi_model::Error::BudgetExhausted`.
+
+## Observability
+
+Everything a completion logs sits under its `complete` span (`n`, `model`, `format`, and the schema name as `label` where there is one).
+
+- `completion started` (DEBUG) / `completion` (INFO on an answer, WARN otherwise), with phase buckets `opening_ms`, `tool_ms`, `model_ms`, `check_ms`, `thinking_ms`, and token counts.
+- `in progress` (INFO) every 15s while a run is open: `elapsed_s`, `frames`, `tool_calls`, `silent_s`, and what it is `waiting` on.
+- `tool call` / `tool call completed` (DEBUG), arguments at TRACE.
+- Worker exit at WARN with `pid`, `uptime_ms`, `status`; its stderr tail at DEBUG only, since it is untrusted subprocess output.
 
 ## Tests
 
-Three tiers. The first two run on every `cargo nextest run -p omnia-cursor`
-with no `cursor-sdk-bridge` installed and no key; the third is the real one,
-by hand.
+Three tiers. The first two run on every `cargo nextest run -p omnia-cursor` with no `cursor-sdk-bridge` installed and no key.
 
-**Tier 1 — the fake `cursor-sdk-bridge`.** [`tests/support/fake_bridge`](tests/support/fake_bridge)
-is a protocol-faithful `cursor-sdk-bridge`: bearer-checked `sdk.v1` Connect
-RPCs, `agent-<n>` ids counted per process (so two processes hand out the
-same id, as the real one does), `Send` as an enveloped run stream, and
-`CallCustomTool` posted back to this crate's own callback endpoint. It is
-built as the `fake-cursor-sdk-bridge` binary alongside the suites and
-linked onto the test process's `PATH` as `cursor-sdk-bridge`, so the
-client finds it exactly as a deployment finds the real one — nothing on
-`Client` or `ConnectOptions` exists for the tests' sake. The client starts
-one process per lease and every process appends to one JSONL log the test
-folds back into per-process histories; a test can park a request at any
-point of an agent's life and release it, the parks and releases going
-through files in the fake's home. A scripted `Config` decides the reply
-(`Echo`, `Replies`, `Tool`, `Paced`) and the faults (hang or park at a
-point, exit or `SIGKILL` on the nth call, a missing, refused, or
-non-loopback ready line, a reset stream, an empty id, a failing close, a
-forked child left running past the process's own exit), each fault aimed
-at one spawned process or all of them.
+**The fake bridge.** [`tests/support/fake_bridge`](tests/support/fake_bridge) is a protocol-faithful `cursor-sdk-bridge`, built as `fake-cursor-sdk-bridge` and linked onto the test's `PATH` as `cursor-sdk-bridge`, so the client finds it exactly as a deployment finds the real one. A scripted `Config` decides replies and faults (hangs, parks, exits, `SIGKILL`, broken ready lines, reset streams, forked children), each aimed at one spawned process or all.
 
-**Tier 2 — guests through the runtime.** Every scenario is a guest
-component from [`crates/test-programs`](../test-programs) run through
-`omnia_test::host::Deployment` over an `omnia_cursor::Client`, so what is
-asserted is the guest-visible contract; the test then asserts the fake's
-per-agent RPC sequence and that every process the client spawned is gone
-again (a slot reopens only once its process is). [`tests/model.rs`](tests/model.rs)
-is one row per guest program (`foreach_model!` fails to compile when a
-program has no row): echo, the three `check` outcomes, tool round-trips in
-every callback codec, a repairable and an undeclared tool, fan-out over
-four processes, tool fan-out where every process calls its agent `agent-1`,
-and a fan-out whose losers are dropped mid-run.
-[`tests/worker.rs`](tests/worker.rs) is the lifecycle and fault matrix:
-option validation, a completion dropped at every point it can be waiting
-(handshake, pre-ready, create, pre-stream, teardown, and still queued for a
-slot), pooling and a `CreateAgent` never answered, the inactivity and cap
-deadlines,
-process death before the ready line, the restart matrix (a worker killed on
-the opening `Send` or exited on `CreateAgent` restarts once on a fresh
-process that answers; killed twice fails with the typed exit; killed after
-the guest's `check` has seen a candidate is not restarted; a run that stalls
-mid-stream is cancelled, not restarted; a stream reset restarts on a fresh
-process once the reset one has been asked to go, and reset twice fails with
-the typed transport error), the children a worker forked swept with it
-whether it was killed mid-run, exited on `Shutdown`, or was dropped before
-its ready line, a worker that hangs on `Ping`, `CloseAgent`, or `Shutdown`
-(the last killed as a group after the one bound, its forked child with
-it), the callback endpoint's rejections
-and token revocation, and a check that the ready line and its token never
-reach a log. Guests are
-compiled by the `test-programs` build script; there is no separate
-`--target` build to run.
+**Guests through the runtime.** Every scenario is a guest from [`crates/test-programs`](../test-programs) run through `omnia_test::host::Deployment`. [`tests/model.rs`](tests/model.rs) is one row per guest program (the `omnia:model` contract); [`tests/worker.rs`](tests/worker.rs) is the lifecycle and fault matrix. Each test also asserts the fake's RPC sequence and that every spawned process is gone afterwards.
 
-**Tier 3 — the real `cursor-sdk-bridge`.** [`tests/live.rs`](tests/live.rs)
-drives real completions through the `wasi-model` boundary: the plain acceptance run, a
-function-tool round-trip with a lent workspace, a no-workspace function-tool
-run, an in-process MCP grant, the guest `check` loop, a four-way fan-out
-that holds four workers at once and then sees every one of them
-gone, `stress_fanout`, that fan-out twenty times over (a worker that exits
-under load fails its completion with `cursor-sdk-bridge exited`), and
-`worker_killed_mid_run_recovers`, which `kill -9`s a real worker under its
-opening run and sees the completion answer from the restart. The rows that
-watch the spawned processes read their pids from the client's own
-`cursor-sdk-bridge spawned` DEBUG events through the process's tracing
-subscriber, so they run one per process, as nextest does; "gone" is the
-whole process group each worker led, so a `cursor-agent` left behind by a
-worker is a failure here, not just the worker itself. All are
-`#[ignore]`d so they never spawn a process in CI; run them with
-`cursor-sdk-bridge` installed:
+**The real bridge.** [`tests/live.rs`](tests/live.rs) drives real completions, including fan-out and a `kill -9` of a worker mid-run. All are `#[ignore]`d; run them by hand:
 
 ```bash
 CURSOR_API_KEY=... \
   cargo nextest run -p omnia-cursor --run-ignored all
 ```
 
-Add `CURSOR_SDK_BRIDGE_LOG=1` when a live failure needs the worker's
-per-RPC stderr; the client logs the tail of it at DEBUG.
+Add `CURSOR_SDK_BRIDGE_LOG=1` when a failure needs the worker's per-RPC stderr.
 
 ## License
 

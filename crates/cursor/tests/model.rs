@@ -20,7 +20,7 @@ const PASS: &str = r#"{"findings":[],"verdict":"pass"}"#;
 const FAIL: &str = r#"{"findings":["x"],"verdict":"fail"}"#;
 
 #[tokio::test]
-async fn echo_text() {
+async fn model_echo_text() {
     let fake = Spawnable::new(&Config::echo());
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
@@ -45,7 +45,7 @@ async fn echo_text() {
 }
 
 #[tokio::test]
-async fn check_accepted() {
+async fn model_check_accepted() {
     let fake = Spawnable::new(&Config::replies([PASS]));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_CHECK_ACCEPTED, &[], &client).await;
@@ -58,7 +58,7 @@ async fn check_accepted() {
 }
 
 #[tokio::test]
-async fn check_corrected() {
+async fn model_check_corrected() {
     let fake = Spawnable::new(&Config::replies([FAIL, PASS]));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_CHECK_CORRECTED, &[], &client).await;
@@ -81,7 +81,7 @@ async fn check_corrected() {
 }
 
 #[tokio::test]
-async fn check_nudged() {
+async fn model_check_nudged() {
     let fake =
         Spawnable::new(&Config::replies(["Analyzing the claims to produce the verdict.", PASS]));
     let client = spawning(&fake, 1).await;
@@ -102,7 +102,7 @@ async fn check_nudged() {
 }
 
 #[tokio::test]
-async fn check_exhausted() {
+async fn model_check_exhausted() {
     let fake = Spawnable::new(&Config::replies([FAIL]));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_CHECK_EXHAUSTED, &[], &client).await;
@@ -143,7 +143,7 @@ async fn tool_roundtrip(codec: Codec) {
 }
 
 #[tokio::test]
-async fn tool_roundtrip_json() {
+async fn model_tool_roundtrip() {
     tool_roundtrip(Codec::Json).await;
 }
 
@@ -158,7 +158,7 @@ async fn tool_roundtrip_chunked() {
 }
 
 #[tokio::test]
-async fn tool_failure() {
+async fn model_tool_failure() {
     let fake = Spawnable::new(&Config::tool("lookup"));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_TOOL_FAILURE, &[], &client).await;
@@ -172,7 +172,7 @@ async fn tool_failure() {
 }
 
 #[tokio::test]
-async fn undeclared_tool() {
+async fn model_undeclared_tool() {
     let fake = Spawnable::new(&Config::tool("lookup"));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_UNDECLARED_TOOL, &[], &client).await;
@@ -190,7 +190,7 @@ async fn undeclared_tool() {
 }
 
 #[tokio::test]
-async fn fanout() {
+async fn model_fanout() {
     const WIDTH: usize = 4;
     let fake = Spawnable::new(&Config::echo());
     let client = spawning(&fake, WIDTH).await;
@@ -209,7 +209,7 @@ async fn fanout() {
 }
 
 #[tokio::test]
-async fn tool_fanout() {
+async fn model_tool_fanout() {
     const WIDTH: usize = 4;
     let fake = Spawnable::new(&Config::tool("lookup"));
     let client = spawning(&fake, WIDTH).await;
@@ -234,7 +234,7 @@ async fn tool_fanout() {
 }
 
 #[tokio::test]
-async fn fanout_abandon() {
+async fn model_fanout_abandon() {
     const WIDTH: usize = 4;
     let fake = Spawnable::new(&Config::echo().fault(Fault::Park(Point::Stream)));
     let client = spawning(&fake, WIDTH).await;
@@ -274,7 +274,7 @@ async fn fanout_abandon() {
 }
 
 #[tokio::test]
-async fn expect_error() {
+async fn model_expect_error() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Send)));
     let client = connect(ConnectOptions {
         inactivity_secs: 1,

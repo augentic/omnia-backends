@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
-use omnia_wasi_model::{Answer, Error, ToolHost, Transcript, Usage};
+use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
 use tokio::sync::watch;
 use tokio::time::{Instant, interval_at, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
@@ -38,6 +38,9 @@ use crate::worker::Worker;
 use crate::{Failure, elapsed_ms};
 
 const MAX_ROUNDS: u32 = 2;
+const NUDGE: &str = "Your last reply held no JSON value, so it is not the answer. Reply now with \
+                     only your final answer as a single JSON value in the shape the prompt asked \
+                     for, and nothing else.";
 const TEARDOWN: Duration = Duration::from_secs(5);
 const PROGRESS: Duration = Duration::from_secs(15);
 
@@ -151,6 +154,8 @@ impl Agent {
     async fn rounds(&mut self) -> Result<Answer, Unanswered> {
         let mut prompt = mem::take(&mut self.prompt.text);
         let mut round = 1;
+        let mut nudged = false;
+
         loop {
             // round 1 fails before any candidate, so the guest has seen nothing
             let response = match self.send(round, &prompt).await {
@@ -162,6 +167,21 @@ impl Agent {
             let candidate = self.prompt.format.candidate(&response.result);
             if !self.prompt.check {
                 return Ok(response.answer(candidate));
+            }
+
+            // nudge replies that are not JSON
+            if !nudged
+                && matches!(self.prompt.format, Format::Json | Format::Schema(_))
+                && serde_json::from_str::<serde_json::Value>(&candidate).is_err()
+            {
+                nudged = true;
+                tracing::debug!(
+                    round,
+                    reply_bytes = candidate.len(),
+                    "the reply is not JSON; nudging"
+                );
+                NUDGE.clone_into(&mut prompt);
+                continue;
             }
 
             let checked = Instant::now();

@@ -158,8 +158,6 @@ impl Agent {
         let mut opening = true;
 
         loop {
-            // a loss before the opening prompt is answered leaves nothing to say twice;
-            // a nudge is a second send in round 1, and by then its tools have run
             let response = match self.send(round, &prompt).await {
                 Ok(response) => response,
                 Err(error) if opening => return Err(Unanswered::before_candidate(error)),

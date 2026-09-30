@@ -575,6 +575,33 @@ async fn killed_after_candidate_fails() {
     killed(&workers[0]);
 }
 
+// The opening reply was narration, not JSON, so the nudge went on the same
+// session and the process died on its `Send`. No candidate has reached the
+// guest, but the opening prompt has been answered — whatever tools it ran
+// have run — so the prompt is not offered again.
+#[tokio::test]
+async fn killed_on_nudge_fails() {
+    let fake = Spawnable::new(
+        &Config::replies(["Analyzing the claims.", "{}"]).fault_on(1, Fault::KillOnSend(2)),
+    );
+    let client = spawning(&fake, 1).await;
+    expect_error(KILLED, &["nudged"], &client).await;
+    await_gone_within(&fake, AT_ONCE).await;
+
+    let log = fake.log();
+    let workers = log.workers();
+    assert_eq!(workers.len(), 1, "no restart after the opening answer: {}", log.summary());
+    let (_, sequence) = sole_agent(&log);
+    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::Send]);
+    let sends = log.saw(Rpc::Send);
+    assert!(
+        sends[1].text("text").starts_with("Your last reply held no JSON value"),
+        "the second send was the nudge: {}",
+        sends[1].arg
+    );
+    killed(&workers[0]);
+}
+
 // A worker up and silent once its stream has opened is not a lost worker,
 // and the silence is the model's: the cap ends the run, which is cancelled,
 // and the failure stands.
@@ -897,4 +924,57 @@ async fn ready_line_never_logged() {
         assert!(!event.contains(&token), "the bearer token reached a log event: {event}");
         assert!(!event.contains("cursor-sdk-bridge ready"), "the ready line was logged: {event}");
     }
+}
+
+// The one `completion` finish line the capture saw: one attempt, one line.
+fn completion_event(captured: &Captured) -> String {
+    let events = captured.0.lock().expect("captured lock").clone();
+    let mut completions =
+        events.iter().filter(|event| event.contains("message=completion outcome="));
+    let (Some(completion), None) = (completions.next(), completions.next()) else {
+        panic!("one completion event: {events:#?}");
+    };
+    completion.clone()
+}
+
+// A narration reply is nudged, and the JSON that follows passes the guest's
+// check first time: two sends, no correction. `corrected` is the check's
+// verdict, not the send count.
+#[tokio::test]
+async fn nudged_completion_is_ok() {
+    let captured = Captured::default();
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(captured.clone()))
+        .expect("this test owns the process's subscriber");
+
+    let fake = Spawnable::new(&Config::replies([
+        "Analyzing the claims to produce the verdict.",
+        r#"{"findings":[],"verdict":"pass"}"#,
+    ]));
+    let client = spawning(&fake, 1).await;
+    run_guest(test_programs::MODEL_CHECK_ACCEPTED, &[], &client).await;
+    await_gone(&fake).await;
+
+    assert_eq!(fake.log().count(Rpc::Send), 2, "{}", fake.log().summary());
+    let completion = completion_event(&captured);
+    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
+    assert!(completion.contains("attempts=2 "), "{completion}");
+}
+
+#[tokio::test]
+async fn corrected_completion_is_corrected() {
+    let captured = Captured::default();
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(captured.clone()))
+        .expect("this test owns the process's subscriber");
+
+    let fake = Spawnable::new(&Config::replies([
+        r#"{"findings":["x"],"verdict":"fail"}"#,
+        r#"{"findings":[],"verdict":"pass"}"#,
+    ]));
+    let client = spawning(&fake, 1).await;
+    run_guest(test_programs::MODEL_CHECK_CORRECTED, &[], &client).await;
+    await_gone(&fake).await;
+
+    let completion = completion_event(&captured);
+    assert!(completion.contains(r#"outcome="corrected""#), "{completion}");
+    assert!(completion.contains("attempts=2 "), "{completion}");
 }

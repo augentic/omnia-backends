@@ -155,14 +155,17 @@ impl Agent {
         let mut prompt = mem::take(&mut self.prompt.text);
         let mut round = 1;
         let mut nudged = false;
+        let mut opening = true;
 
         loop {
-            // round 1 fails before any candidate, so the guest has seen nothing
+            // a loss before the opening prompt is answered leaves nothing to say twice;
+            // a nudge is a second send in round 1, and by then its tools have run
             let response = match self.send(round, &prompt).await {
                 Ok(response) => response,
-                Err(error) if round == 1 => return Err(Unanswered::before_candidate(error)),
+                Err(error) if opening => return Err(Unanswered::before_candidate(error)),
                 Err(error) => return Err(Unanswered::settled(error)),
             };
+            opening = false;
 
             let candidate = self.prompt.format.candidate(&response.result);
             if !self.prompt.check {
@@ -191,6 +194,7 @@ impl Agent {
             match verdict.map_err(Unanswered::settled)? {
                 Ok(()) => return Ok(response.answer(candidate)),
                 Err(correction) if round < MAX_ROUNDS => {
+                    self.completion.rejected();
                     tracing::debug!(
                         round,
                         candidate_bytes = candidate.len(),
@@ -354,7 +358,7 @@ impl Agent {
     // `Completion` line before delete, so `duration_ms` covers the run
     fn finish(&mut self, result: &Result<Answer, Unanswered>) {
         let outcome = match result {
-            Ok(_) if self.completion.attempts() > 1 => Outcome::Corrected,
+            Ok(_) if self.completion.corrected() => Outcome::Corrected,
             Ok(_) => Outcome::Ok,
             Err(unanswered) => Outcome::of(unanswered.error()),
         };
@@ -491,8 +495,9 @@ impl Response {
     }
 }
 
-// No answer: the failure, and whether it struck before any candidate — in
-// `CreateAgent` or the opening `Send`
+// No answer: the failure, and whether it struck before the opening prompt
+// was answered — in `CreateAgent` or the opening `Send` — when nothing the
+// guest asked for has run yet
 pub struct Unanswered {
     error: anyhow::Error,
     before_candidate: bool,
@@ -521,7 +526,7 @@ impl Unanswered {
         self.error
     }
 
-    // Retryable if worker lost before any candidate: nothing said twice
+    // Retryable if worker lost before the opening prompt was answered: nothing said twice
     pub fn restartable(&self) -> bool {
         self.before_candidate && Outcome::of(&self.error).lost_worker()
     }

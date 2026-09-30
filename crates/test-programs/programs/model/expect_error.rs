@@ -3,13 +3,15 @@
 //! argument is the needle; further arguments are flags — `tools` declares
 //! `lookup`, `check` asks for a check and rejects every candidate it is
 //! offered (so the failure must strike after at least one has reached the
-//! guest), `budget` expects the typed `budget-exhausted` in the backend
-//! failure's place, and `without:<text>` asserts the detail does not carry
-//! `text`.
+//! guest), `nudged` asks for a JSON answer with a check — so a reply that is
+//! not JSON is nudged before any check — and requires the failure to strike
+//! before any candidate has reached the guest, `budget` expects the typed
+//! `budget-exhausted` in the backend failure's place, and `without:<text>`
+//! asserts the detail does not carry `text`.
 
 #![cfg(target_arch = "wasm32")]
 
-use omnia_sdk::model::{CHECK_TOOL, Error, Model as _, Request, ToolCall, WasiModel};
+use omnia_sdk::model::{CHECK_TOOL, Error, Format, Model as _, Request, ToolCall, WasiModel};
 use test_programs::{arguments, lookup, user};
 
 omnia_sdk::command!(scenario);
@@ -19,13 +21,20 @@ async fn scenario() {
     let (needle, flags) = arguments.split_first().expect("the needle is the first argument");
     let tools = if flags.iter().any(|flag| flag == "tools") { vec![lookup()] } else { vec![] };
     let check = flags.iter().any(|flag| flag == "check");
+    let nudged = flags.iter().any(|flag| flag == "nudged");
     let budget = flags.iter().any(|flag| flag == "budget");
     let absent: Vec<&str> = flags.iter().filter_map(|flag| flag.strip_prefix("without:")).collect();
+    let format = if nudged { Format::Json } else { Format::Text };
 
     let mut candidates = 0_usize;
     let error = WasiModel
         .complete_with(
-            Request::builder().messages(vec![user("hi")]).tools(tools).check(check).build(),
+            Request::builder()
+                .messages(vec![user("hi")])
+                .tools(tools)
+                .format(format)
+                .check(check || nudged)
+                .build(),
             |call: ToolCall| {
                 if call.name == CHECK_TOOL {
                     candidates += 1;
@@ -55,5 +64,8 @@ async fn scenario() {
     }
     if check {
         assert!(candidates >= 1, "the failure struck before any candidate reached the check");
+    }
+    if nudged {
+        assert_eq!(candidates, 0, "a candidate reached the check before the failure struck");
     }
 }

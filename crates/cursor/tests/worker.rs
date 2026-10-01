@@ -595,7 +595,7 @@ async fn killed_on_nudge_fails() {
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::Send]);
     let sends = log.saw(Rpc::Send);
     assert!(
-        sends[1].text("text").starts_with("Your last reply held no JSON value"),
+        sends[1].text("text").starts_with("Your last reply is not one well-formed JSON value"),
         "the second send was the nudge: {}",
         sends[1].arg
     );

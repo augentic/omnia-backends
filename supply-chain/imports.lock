@@ -726,6 +726,11 @@ version = "0.259.0"
 when = "2026-09-10"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
+[[publisher.wasm-encoder]]
+version = "0.260.0"
+when = "2026-09-30"
+trusted-publisher = "github:bytecodealliance/wasm-tools"
+
 [[publisher.wasm-metadata]]
 version = "0.253.0"
 when = "2026-07-07"
@@ -764,6 +769,11 @@ trusted-publisher = "github:bytecodealliance/wasm-tools"
 [[publisher.wasmparser]]
 version = "0.259.0"
 when = "2026-09-10"
+trusted-publisher = "github:bytecodealliance/wasm-tools"
+
+[[publisher.wasmparser]]
+version = "0.260.0"
+when = "2026-09-30"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wasmprinter]]
@@ -852,13 +862,13 @@ when = "2026-09-24"
 trusted-publisher = "github:bytecodealliance/wasmtime"
 
 [[publisher.wast]]
-version = "259.0.0"
-when = "2026-09-10"
+version = "260.0.0"
+when = "2026-09-30"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.wat]]
-version = "1.259.0"
-when = "2026-09-10"
+version = "1.260.0"
+when = "2026-09-30"
 trusted-publisher = "github:bytecodealliance/wasm-tools"
 
 [[publisher.winapi-util]]

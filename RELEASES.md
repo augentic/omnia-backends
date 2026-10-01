@@ -60,6 +60,14 @@ Unreleased
 
 ### Changed
 
+- `omnia-cursor`'s nudge for a reply that is not JSON names what the parser
+  said of it — `Your last reply is not one well-formed JSON value (EOF while
+  parsing an object at line 1 column 34), so it is not the answer. …` —
+  where it told every such reply it "held no JSON value", so a truncated
+  document is told where it broke. A truncated document is nudged at all
+  only once omnia's `Format::candidate` passes over a bracketed block that
+  does not parse whole rather than reading the values inside it; before
+  that, `{"findings":[],"verdict":"pass"` reached the check as `[]`.
 - `omnia-cursor` returns the answer before the teardown. `CloseAgent` and
   `DeleteAgent` run on a task of their own once the `completion` line is
   written, where the completion had awaited them — half a second to two

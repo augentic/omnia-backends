@@ -97,8 +97,42 @@ async fn model_check_nudged() {
     );
     let sends = log.saw(Rpc::Send);
     let nudge = sends[1].text("text");
-    assert!(nudge.starts_with("Your last reply held no JSON value"), "{nudge}");
+    assert!(
+        nudge.starts_with(
+            "Your last reply is not one well-formed JSON value (expected value at line 1 column 1)"
+        ),
+        "{nudge}"
+    );
     assert!(!nudge.contains("## Findings"), "no check ran on the narration: {nudge}");
+}
+
+// A reply that opens a JSON document and does not close it is nudged as raw
+// text, the nudge naming where the parser stopped, rather than checked as a
+// fragment of itself.
+#[tokio::test]
+async fn model_check_malformed() {
+    let fake = Spawnable::new(&Config::replies([r#"{"findings":[],"verdict":"pass""#, PASS]));
+    let client = spawning(&fake, 1).await;
+    run_guest(test_programs::MODEL_CHECK_ACCEPTED, &[], &client).await;
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let (_, sequence) = sole_agent(&log);
+    assert_eq!(
+        sequence,
+        [Rpc::CreateAgent, Rpc::Send, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent],
+        "the nudge goes on the same agent"
+    );
+    let sends = log.saw(Rpc::Send);
+    let nudge = sends[1].text("text");
+    assert!(
+        nudge.starts_with(
+            "Your last reply is not one well-formed JSON value (EOF while parsing an object at \
+             line 1 column "
+        ),
+        "{nudge}"
+    );
+    assert!(!nudge.contains("## Findings"), "no check ran on the malformed document: {nudge}");
 }
 
 #[tokio::test]

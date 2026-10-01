@@ -652,26 +652,14 @@ mod tests {
 
     #[test]
     fn token_counts() {
+        let counts =
+            |usage: Usage| (usage.input_tokens, usage.output_tokens, usage.reasoning_tokens);
+        assert_eq!(counts(usage(-1, -1, Some(-1))), (0, 0, Some(0)));
         assert_eq!(
-            usage(-1, -1, Some(-1)),
-            Usage {
-                input_tokens: 0,
-                output_tokens: 0,
-                reasoning_tokens: Some(0),
-            }
+            counts(usage(i64::MAX, i64::MAX, Some(i64::MAX))),
+            (u32::MAX, u32::MAX, Some(u32::MAX))
         );
-        let saturated = usage(i64::MAX, i64::MAX, Some(i64::MAX));
-        assert_eq!(saturated.input_tokens, u32::MAX);
-        assert_eq!(saturated.output_tokens, u32::MAX);
-        assert_eq!(saturated.reasoning_tokens, Some(u32::MAX));
-        assert_eq!(
-            usage(7, 3, None),
-            Usage {
-                input_tokens: 7,
-                output_tokens: 3,
-                reasoning_tokens: None,
-            }
-        );
+        assert_eq!(counts(usage(7, 3, None)), (7, 3, None));
     }
 
     fn observe_all(events: &[Value]) -> EventLog {

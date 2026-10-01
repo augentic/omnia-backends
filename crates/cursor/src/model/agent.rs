@@ -38,9 +38,6 @@ use crate::worker::Worker;
 use crate::{Failure, elapsed_ms};
 
 const MAX_ROUNDS: u32 = 2;
-const NUDGE: &str = "Your last reply held no JSON value, so it is not the answer. Reply now with \
-                     only your final answer as a single JSON value in the shape the prompt asked \
-                     for, and nothing else.";
 const TEARDOWN: Duration = Duration::from_secs(5);
 const PROGRESS: Duration = Duration::from_secs(15);
 
@@ -170,18 +167,23 @@ impl Agent {
                 return Ok(response.answer(candidate));
             }
 
-            // nudge replies that are not JSON
+            // a reply that is not JSON is nudged once, told what the parser said of it
             if !nudged
                 && matches!(self.prompt.format, Format::Json | Format::Schema(_))
-                && serde_json::from_str::<serde_json::Value>(&candidate).is_err()
+                && let Err(fault) = serde_json::from_str::<serde_json::Value>(&candidate)
             {
                 nudged = true;
                 tracing::debug!(
                     round,
                     reply_bytes = candidate.len(),
+                    %fault,
                     "the reply is not JSON; nudging"
                 );
-                NUDGE.clone_into(&mut prompt);
+                prompt = format!(
+                    "Your last reply is not one well-formed JSON value ({fault}), so it is not \
+                     the answer. Reply now with only your final answer as a single JSON value in \
+                     the shape the prompt asked for, and nothing else."
+                );
                 continue;
             }
 

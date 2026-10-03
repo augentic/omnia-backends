@@ -16,21 +16,12 @@ impl Partitioner {
 
     // kafkajs/src/producer/partitioners/default/partitioner.js (v1.15.0)
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn partition(&self, key: &[u8]) -> i32 {
-        let hash = to_positive(murmur2(key)) as i64;
-        (hash % i64::from(self.count)) as i32
+        to_positive(murmur2(key)) % self.count
     }
 }
 
 // kafkajs/src/producer/partitioners/default/murmur2.js (v1.15.0)
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::identity_op,
-    clippy::cast_lossless,
-    clippy::cast_possible_wrap
-)]
 fn murmur2(key: &[u8]) -> f64 {
     const SEED: f64 = 0x9747_B28C_u32 as f64;
     const M: f64 = 0x5BD1_E995_u32 as f64;
@@ -38,47 +29,38 @@ fn murmur2(key: &[u8]) -> f64 {
 
     let len = key.len();
 
-    let length = f(len as i32);
-    let mut h = f(i(SEED) ^ i(length));
-    let length4 = length / 4.0;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "JS ToInt32 of the key length"
+    )]
+    let length = len as i32;
+    let mut h = f(i(SEED) ^ length);
 
-    let mut i = 0;
-    #[allow(clippy::while_float)]
-    while f(i) < length4 {
-        let i4 = (i * 4) as usize;
-        let mut acc: i32 = 0;
-        if i4 + 0 < len {
-            acc += (key[i4 + 0] as i32) << 0;
-        }
-        if i4 + 1 < len {
-            acc += (key[i4 + 1] as i32) << 8;
-        }
-        if i4 + 2 < len {
-            acc += (key[i4 + 2] as i32) << 16;
-        }
-        if i4 + 3 < len {
-            acc += (key[i4 + 3] as i32) << 24;
-        }
+    // every chunk, the short last one zero-padded: KafkaJS's loop bound
+    // `i < length / 4` is not floored
+    for chunk in key.chunks(4) {
+        let mut bytes = [0u8; 4];
+        bytes[..chunk.len()].copy_from_slice(chunk);
 
-        let mut k = f(acc);
+        let mut k = f(i32::from_le_bytes(bytes));
         k *= M;
-        k = js_xor(k, js_rshift(k, R as i32));
+        k = js_xor(k, js_rshift(k, R));
         k *= M;
         h *= M;
         h = js_xor(h, k);
-
-        i += 1;
     }
 
-    // the trailing one to three bytes
+    // the trailing one to three bytes, a second time
+    let tail = len & !3;
     if len % 4 >= 3 {
-        h = js_xor(h, ((key[(len & !3) + 2] as i32) << 16) as f64);
+        h = js_xor(h, f(i32::from(key[tail + 2]) << 16));
     }
     if len % 4 >= 2 {
-        h = js_xor(h, ((key[(len & !3) + 1] as i32) << 8) as f64);
+        h = js_xor(h, f(i32::from(key[tail + 1]) << 8));
     }
     if len % 4 >= 1 {
-        h = js_xor(h, ((key[len & !3] as i32) << 0) as f64);
+        h = js_xor(h, f(i32::from(key[tail])));
         h *= M;
     }
 
@@ -89,19 +71,15 @@ fn murmur2(key: &[u8]) -> f64 {
     h
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-const fn to_positive(x: f64) -> f64 {
-    (x as i64 & i32::MAX as i64) as f64
+// KafkaJS's `toPositive`: `x & 0x7fffffff`.
+const fn to_positive(x: f64) -> i32 {
+    i(x) & i32::MAX
 }
 
-// JS's ToInt32: what a Number becomes on either side of a bitwise operator
-// (truncated, then wrapped modulo 2^32).
-#[allow(clippy::cast_possible_truncation)]
+// JS's ToInt32: what a Number becomes on either side of a bitwise operator.
+#[expect(clippy::cast_possible_truncation, reason = "ToInt32 truncates, then wraps modulo 2^32")]
 const fn i(f: f64) -> i32 {
-    let truncated = f.trunc();
-    let i64_val = truncated as i64;
-    let wrapped = i64_val % (1 << 32);
-    wrapped as i32
+    (f as i64) as i32
 }
 
 // The i32 a bitwise operator produced, back to a Number.
@@ -110,13 +88,8 @@ fn f(i: i32) -> f64 {
 }
 
 // JS's `>>>`: the shift runs on the Number's ToUint32.
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)]
-fn js_rshift(f: f64, shift: i32) -> f64 {
-    let truncated = f.trunc();
-    let i64_val = truncated as i64;
-    let u32_val = (i64_val % (1 << 32)) as u32;
-    let result = u32_val >> shift;
-    f64::from(result)
+fn js_rshift(f: f64, shift: u32) -> f64 {
+    f64::from(i(f).cast_unsigned() >> shift)
 }
 
 // JS's `^`.

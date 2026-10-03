@@ -4,8 +4,8 @@
 //! the boundary `Message` deliberately does not expose them.
 //!
 //! `#[ignore]`d so it never touches the network in CI. Run against a reachable
-//! broker (`KAFKA_BROKERS`, plus `KAFKA_REGISTRY_URL` for the wire-format
-//! test): `cargo nextest run -p omnia-kafka --run-ignored all`.
+//! broker (`KAFKA_BROKERS`, plus `KAFKA_REGISTRY_URL` for the registry
+//! tests): `cargo nextest run -p omnia-kafka --run-ignored all`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,7 +15,9 @@ use anyhow::{Context as _, Result, anyhow};
 use futures::StreamExt;
 use omnia::Backend;
 use omnia_kafka::{Client, ConnectOptions, ConsumerOptions, RegistryOptions};
-use omnia_wasi_messaging::{Client as MessagingClient, Message, Metadata, WasiMessagingCtx};
+use omnia_wasi_messaging::{
+    Client as MessagingClient, Message, Metadata, Subscriptions, WasiMessagingCtx,
+};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{Consumer, StreamConsumer};
@@ -143,66 +145,95 @@ async fn keyed_sends() -> Result<()> {
     Ok(())
 }
 
+// A boundary client over a fresh single-partition topic whose value subject
+// carries a permissive JSON schema, already subscribed: the backend consumer
+// starts from the latest offset, so it is assigned before a caller produces.
+struct RegistrySubscriber {
+    client: Arc<dyn MessagingClient>,
+    subscription: Subscriptions,
+    topic: String,
+    schema_id: i32,
+}
+
+impl RegistrySubscriber {
+    async fn connect(prefix: &str) -> Result<Self> {
+        use schema_registry_client::rest::client_config::ClientConfig as RegistryClientConfig;
+        use schema_registry_client::rest::models::Schema;
+        use schema_registry_client::rest::schema_registry_client::{
+            Client as _, SchemaRegistryClient,
+        };
+
+        let url = std::env::var("KAFKA_REGISTRY_URL")
+            .expect("KAFKA_REGISTRY_URL must be set for the registry live tests");
+        let api_key = std::env::var("KAFKA_REGISTRY_API_KEY").unwrap_or_default();
+        let api_secret = std::env::var("KAFKA_REGISTRY_API_SECRET").unwrap_or_default();
+
+        let topic = unique(prefix);
+        create_topic(&topic, 1).await?;
+
+        let mut registry_config = RegistryClientConfig::new(vec![url.clone()]);
+        registry_config.basic_auth = Some((api_key.clone(), Some(api_secret.clone())));
+        let registry = SchemaRegistryClient::new(registry_config);
+        let registered = registry
+            .register_schema(
+                &format!("{topic}-value"),
+                &Schema::new(Some("JSON".to_owned()), r#"{"type":"object"}"#.to_owned()),
+                false,
+            )
+            .await
+            .map_err(|e| anyhow!("registering schema: {e:?}"))?;
+        let schema_id = registered.id.ok_or_else(|| anyhow!("registered schema has no id"))?;
+
+        let options = ConnectOptions {
+            client_id: "omnia-live".to_owned(),
+            brokers: brokers(),
+            username: std::env::var("KAFKA_USERNAME").ok(),
+            password: std::env::var("KAFKA_PASSWORD").ok(),
+            partition_count: 1,
+            consumer: Some(ConsumerOptions {
+                topics: vec![topic.clone()],
+                group_id: Some(unique("omnia-live-registry")),
+            }),
+            registry: Some(RegistryOptions {
+                url,
+                api_key,
+                api_secret,
+                cache_ttl_secs: 3600,
+            }),
+        };
+        let backend = Client::connect_with(options).await?;
+        let client: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
+        let subscription = client.subscribe().await?;
+        tokio::time::sleep(Duration::from_secs(8)).await;
+
+        Ok(Self {
+            client,
+            subscription,
+            topic,
+            schema_id,
+        })
+    }
+
+    async fn next(&mut self) -> Result<Message> {
+        tokio::time::timeout(RECV_TIMEOUT, self.subscription.next())
+            .await
+            .context("timed out waiting for boundary message")?
+            .ok_or_else(|| anyhow!("subscription closed"))
+    }
+}
+
 // Registers a JSON schema, sends through the boundary, and asserts both the
 // Confluent wire layout on the raw bytes (magic byte + schema id + payload)
 // and that the boundary subscriber hands back the decoded payload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs Kafka + Schema Registry (KAFKA_BROKERS, KAFKA_REGISTRY_URL); run with --run-ignored"]
 async fn registry_wire_format() -> Result<()> {
-    use schema_registry_client::rest::client_config::ClientConfig as RegistryClientConfig;
-    use schema_registry_client::rest::models::Schema;
-    use schema_registry_client::rest::schema_registry_client::{Client as _, SchemaRegistryClient};
-
-    let url = std::env::var("KAFKA_REGISTRY_URL")
-        .expect("KAFKA_REGISTRY_URL must be set for the registry live test");
-    let api_key = std::env::var("KAFKA_REGISTRY_API_KEY").unwrap_or_default();
-    let api_secret = std::env::var("KAFKA_REGISTRY_API_SECRET").unwrap_or_default();
-
-    let topic = unique("omnia.live.registry");
-    create_topic(&topic, 1).await?;
-
-    // Register a permissive JSON schema for the topic's value subject.
-    let mut registry_config = RegistryClientConfig::new(vec![url.clone()]);
-    registry_config.basic_auth = Some((api_key.clone(), Some(api_secret.clone())));
-    let registry = SchemaRegistryClient::new(registry_config);
-    let registered = registry
-        .register_schema(
-            &format!("{topic}-value"),
-            &Schema::new(Some("JSON".to_owned()), r#"{"type":"object"}"#.to_owned()),
-            false,
-        )
-        .await
-        .map_err(|e| anyhow!("registering schema: {e:?}"))?;
-    let schema_id = registered.id.ok_or_else(|| anyhow!("registered schema has no id"))?;
-
-    let options = ConnectOptions {
-        client_id: "omnia-live".to_owned(),
-        brokers: brokers(),
-        username: std::env::var("KAFKA_USERNAME").ok(),
-        password: std::env::var("KAFKA_PASSWORD").ok(),
-        partition_count: 1,
-        consumer: Some(ConsumerOptions {
-            topics: vec![topic.clone()],
-            group_id: Some(unique("omnia-live-registry")),
-        }),
-        registry: Some(RegistryOptions {
-            url,
-            api_key,
-            api_secret,
-            cache_ttl_secs: 3600,
-        }),
-    };
-    let backend = Client::connect_with(options).await?;
-    let client: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
-
-    // Subscribe through the boundary before producing: the backend consumer
-    // starts from the latest offset, so it must be assigned first.
-    let mut subscription = client.subscribe().await?;
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    let mut subscriber = RegistrySubscriber::connect("omnia.live.registry").await?;
+    let topic = subscriber.topic.clone();
 
     let payload = br#"{"hello":"wire"}"#;
     let json = String::from_utf8(payload.to_vec())?;
-    client.send(topic.clone(), keyed_message(&json, &[("key", "wire")])).await?;
+    subscriber.client.send(topic.clone(), keyed_message(&json, &[("key", "wire")])).await?;
 
     // Raw bytes carry the Confluent wire format: magic byte 0, schema id
     // big-endian, then the JSON payload.
@@ -215,15 +246,41 @@ async fn registry_wire_format() -> Result<()> {
     assert!(bytes.len() > 5, "wire payload has the 5-byte header: {bytes:?}");
     assert_eq!(bytes[0], 0, "magic byte");
     let wire_id = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    assert_eq!(wire_id, schema_id, "schema id in wire header");
+    assert_eq!(wire_id, subscriber.schema_id, "schema id in wire header");
     assert_eq!(&bytes[5..], payload, "payload follows the header");
 
     // The boundary subscriber strips the header on the way back out.
-    let received = tokio::time::timeout(RECV_TIMEOUT, subscription.next())
-        .await
-        .context("timed out waiting for boundary message")?
-        .ok_or_else(|| anyhow!("subscription closed"))?;
+    let received = subscriber.next().await?;
     assert_eq!(received.payload, payload, "decoded payload round-trips");
     assert_eq!(received.topic, topic, "topic round-trips");
+    Ok(())
+}
+
+// A message framed under a schema id other than the topic's latest, as a
+// producer still on an earlier version writes, reaches the subscriber with
+// its header stripped: the mismatch is logged, never a dropped message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs Kafka + Schema Registry (KAFKA_BROKERS, KAFKA_REGISTRY_URL); run with --run-ignored"]
+async fn registry_id_mismatch() -> Result<()> {
+    use rdkafka::producer::{FutureProducer, FutureRecord};
+
+    let mut subscriber = RegistrySubscriber::connect("omnia.live.registry-mismatch").await?;
+
+    let payload = br#"{"hello":"stale"}"#;
+    let mut framed = vec![0u8];
+    framed.extend(subscriber.schema_id.wrapping_add(1).to_be_bytes());
+    framed.extend_from_slice(payload);
+
+    let producer: FutureProducer = raw_config().create().context("creating raw producer")?;
+    producer
+        .send(
+            FutureRecord::to(&subscriber.topic).key("stale").payload(&framed),
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(|(err, _)| anyhow!("raw send: {err}"))?;
+
+    let received = subscriber.next().await?;
+    assert_eq!(received.payload, payload, "the header is stripped despite the foreign id");
     Ok(())
 }

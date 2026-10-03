@@ -75,7 +75,7 @@ impl Backend for Client {
     }
 }
 
-#[allow(missing_docs, reason = "`FromEnv` has no docs")]
+#[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
     use fromenv::{FromEnv, ParseResult};
 
@@ -135,8 +135,7 @@ mod config {
         pub cache_ttl_secs: u64,
     }
 
-    // The `FromEnv` `with =` hook requires a `ParseResult` return type.
-    #[allow(clippy::unnecessary_wraps)]
+    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
     fn split(s: &str) -> ParseResult<Vec<String>> {
         Ok(s.split(',').map(ToOwned::to_owned).collect())
     }

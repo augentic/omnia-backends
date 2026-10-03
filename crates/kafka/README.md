@@ -56,8 +56,10 @@ let client = Client::connect_with(options).await?;
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging` boundary against a
 real broker: keyed sends must land on the partitions the KafkaJS-compatible
 partitioner predicts, and (when a Schema Registry is reachable) sends must
-carry the Confluent wire format and decode back through `subscribe`. The tests
-are `#[ignore]`d so they never run in CI; run them explicitly:
+carry the Confluent wire format and decode back through `subscribe`, while a
+message framed under a schema id other than the topic's latest still decodes
+(the mismatch is only logged). The tests are `#[ignore]`d so they never run in
+CI; run them explicitly:
 
 ```bash
 # One container provides both the broker and a schema registry:

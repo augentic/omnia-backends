@@ -69,7 +69,7 @@ http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.11.1", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
-jsonschema = { version = "0.58.0", default-features = false }
+jsonschema = { version = "0.58.5", default-features = false }
 libc = "0.2"
 process-wrap = { version = "10.0.1", default-features = false }
 prost = "0.14.4"

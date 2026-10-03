@@ -72,7 +72,7 @@ fn elapsed_ms(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
     use fromenv::FromEnv;
 

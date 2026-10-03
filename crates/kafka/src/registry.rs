@@ -76,12 +76,13 @@ impl Registry {
     }
 
     // Strip the wire format header and validate what is under it against the
-    // topic's schema. A validation failure is logged, not fatal; an unframed
-    // or schema-less buffer passes through as it came.
+    // topic's schema. A validation failure or a header naming another schema
+    // is logged, not fatal; an unframed or schema-less buffer passes through
+    // as it came.
     #[instrument(skip(self, buffer))]
     pub async fn decode(&self, topic: &str, buffer: &[u8]) -> Vec<u8> {
         if self.client.is_some() {
-            let (_id, schema) = match self.get_schema(topic).await {
+            let (id, schema) = match self.get_schema(topic).await {
                 Ok(Some((id, schema))) => (id, schema),
                 Ok(None) => {
                     return buffer.to_vec();
@@ -92,7 +93,16 @@ impl Registry {
                 }
             };
 
-            let Some(decoded) = Payload::decode(buffer) else { return buffer.to_vec() };
+            let Some(decoded) = Payload::decode(buffer) else {
+                tracing::warn!("Message on topic {topic} has no Confluent wire header");
+                return buffer.to_vec();
+            };
+            if decoded.registry_id != id {
+                tracing::warn!(
+                    "Message on topic {topic} was written with schema {}, not the latest {id}",
+                    decoded.registry_id
+                );
+            }
 
             let payload: Value = match serde_json::from_slice(decoded.data) {
                 Ok(v) => v,
@@ -180,10 +190,6 @@ impl Registry {
 
 // The Confluent wire format: magic byte, big-endian schema id, data.
 pub struct Payload<'a> {
-    // Decoded for wire-format completeness; only asserted in tests today.
-    #[allow(dead_code)]
-    magic_byte: u8,
-    #[allow(dead_code)]
     registry_id: i32,
     data: &'a [u8],
 }
@@ -198,19 +204,14 @@ impl Payload<'_> {
         buf
     }
 
+    // `None` for a buffer without the header: too short, or another magic byte.
     pub fn decode(buffer: &[u8]) -> Option<Payload<'_>> {
-        if buffer.len() < 5 {
-            tracing::error!("Buffer too short to decode");
+        let ([magic_byte, id @ ..], data) = buffer.split_first_chunk::<5>()?;
+        if *magic_byte != BIG_ENDIAN {
             return None;
         }
-
-        let magic_byte = buffer[0];
-        let registry_id = i32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]);
-        let data = &buffer[5..];
-
         Some(Payload {
-            magic_byte,
-            registry_id,
+            registry_id: i32::from_be_bytes(*id),
             data,
         })
     }
@@ -224,23 +225,27 @@ mod tests {
 
     #[test]
     fn encode_decode() {
-        #[allow(clippy::cast_possible_wrap)]
-        let registry_id: i32 = 0xAABB_CCDDu32 as i32;
+        let registry_id = i32::from_be_bytes([0xAA, 0xBB, 0xCC, 0xDD]);
         let payload = b"hello world".to_vec();
 
         let encoded = Payload::encode(registry_id, payload.clone());
 
         // layout: [magic byte][registry id, 4 bytes BE][payload]
         assert_eq!(encoded[0], BIG_ENDIAN, "magic byte mismatch");
-
-        let expected_id_bytes = registry_id.to_be_bytes();
-        assert_eq!(&encoded[1..5], &expected_id_bytes, "registry id mismatch");
+        assert_eq!(&encoded[1..5], &[0xAA, 0xBB, 0xCC, 0xDD], "registry id mismatch");
         assert_eq!(&encoded[5..], &payload, "payload mismatch");
 
         let decoded = Payload::decode(&encoded).expect("decode failed");
 
-        assert_eq!(decoded.magic_byte, BIG_ENDIAN);
         assert_eq!(decoded.registry_id, registry_id);
         assert_eq!(decoded.data, payload.as_slice());
+    }
+
+    #[test]
+    fn wrong_magic_byte() {
+        let mut encoded = Payload::encode(7, b"hello world".to_vec());
+        encoded[0] = 1;
+
+        assert!(Payload::decode(&encoded).is_none());
     }
 }

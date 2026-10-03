@@ -1,3 +1,0 @@
-name = "Omnia Backends"
-targets = ["wasm32-wasip2"]
-wasm-packages = ["test-programs", "examples"]

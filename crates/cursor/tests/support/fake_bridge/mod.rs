@@ -457,7 +457,7 @@ pub async fn run_spawned(args: Vec<String>) {
     } else {
         tokio::spawn(Arc::clone(&server).serve(listener));
     }
-    eprintln!("cursor-sdk-bridge ready {ready}");
+    server::stderr_line(format_args!("cursor-sdk-bridge ready {ready}"));
     server.recorder().record(Kind::Ready, None, ready_event);
 
     server.shutdown_requested().await;

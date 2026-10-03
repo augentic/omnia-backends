@@ -24,7 +24,7 @@ impl Backend for Client {
     }
 }
 
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
     use fromenv::FromEnv;
 

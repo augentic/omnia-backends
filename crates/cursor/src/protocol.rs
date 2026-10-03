@@ -324,8 +324,11 @@ impl RpcError {
     }
 }
 
-// `#[error(fmt = ..)]` hands every field over by reference.
-#[expect(clippy::ref_option, clippy::trivially_copy_pass_by_ref)]
+#[expect(
+    clippy::ref_option,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "`#[error(fmt = ..)]` hands every field over by reference"
+)]
 fn connect_fmt(
     method: &str, status: &Option<StatusCode>, code: &str, message: &str,
     f: &mut fmt::Formatter<'_>,
@@ -528,8 +531,8 @@ pub struct AgentOperationOptions {
 
 // --- Requests and responses ---
 
+// The braces keep it a JSON object: a unit struct serializes as `null`.
 #[derive(Serialize, Deserialize, Default)]
-#[allow(clippy::empty_structs_with_brackets)] // prevent serialization as `null`
 struct Empty {}
 
 #[derive(Debug, Default, Deserialize)]
@@ -770,7 +773,7 @@ pub struct RunResult {
 // context beyond `inputTokens`, not a part of it; the reasoning tokens are
 // among the output. Every optional count is absent when the bridge does not
 // report it.
-#[allow(clippy::struct_field_names)] // names mirror the wire message
+#[expect(clippy::struct_field_names, reason = "the names mirror the wire message")]
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TokenUsage {

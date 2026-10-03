@@ -14,7 +14,6 @@ use hmac::{Hmac, KeyInit, Mac};
 use omnia_wasi_docstore::{
     Document, FilterTree, FutureResult, QueryOpts, QueryResult, WasiDocStoreCtx,
 };
-use reqwest::Client as HttpClient;
 use serde_json::Value;
 use sha2::Sha256;
 
@@ -186,10 +185,7 @@ impl WasiDocStoreCtx for Client {
     fn query(
         &self, collection: String, filter: Option<FilterTree>, options: QueryOpts,
     ) -> FutureResult<QueryResult> {
-        let opts = Arc::clone(&self.options);
-        let http = self.http.clone();
-        let base = Arc::clone(&self.base_url);
-        let hmac_key = Arc::clone(&self.hmac_key);
+        let client = self.clone();
         async move {
             // Azure Table has no `$skip`: an offset is rejected, like an
             // unsupported filter node, rather than paged past client-side.
@@ -218,17 +214,14 @@ impl WasiDocStoreCtx for Client {
             loop {
                 let remaining = fetch_limit.map(|lim| lim - all_documents.len());
 
-                let (body, continuation) = fetch_page(
-                    &http,
-                    &opts,
-                    &base,
-                    &hmac_key,
-                    &table,
-                    odata_filter.as_deref(),
-                    remaining,
-                    next_continuation.as_deref(),
-                )
-                .await?;
+                let (body, continuation) = client
+                    .fetch_page(
+                        &table,
+                        odata_filter.as_deref(),
+                        remaining,
+                        next_continuation.as_deref(),
+                    )
+                    .await?;
 
                 if let Some(entries) = body.get("value").and_then(Value::as_array) {
                     for entity in entries {
@@ -288,6 +281,75 @@ impl Client {
             }
         }
     }
+
+    // One page of a query: the response body and the continuation token
+    // for the next page, if any.
+    async fn fetch_page(
+        &self, table: &str, odata_filter: Option<&str>, fetch_limit: Option<usize>,
+        continuation: Option<&str>,
+    ) -> anyhow::Result<(Value, Option<String>)> {
+        let base_uri = format!("{}/{table}()", self.base_url);
+
+        let mut query_params: Vec<String> = Vec::new();
+        if let Some(f) = odata_filter {
+            query_params.push(format!("$filter={}", urlencoding::encode(f)));
+        }
+        if let Some(limit) = fetch_limit {
+            query_params.push(format!("$top={limit}"));
+        }
+        if let Some(cont) = continuation {
+            let (next_partition, next_row) = query::decode_continuation(cont);
+            query_params.push(format!("NextPartitionKey={}", urlencoding::encode(&next_partition)));
+            if let Some(row) = next_row {
+                query_params.push(format!("NextRowKey={}", urlencoding::encode(&row)));
+            }
+        }
+
+        let uri = if query_params.is_empty() {
+            base_uri
+        } else {
+            format!("{base_uri}?{}", query_params.join("&"))
+        };
+
+        let now = now_rfc1123();
+        let auth = sign_request(&self.options.name, &self.hmac_key, &now, &uri)?;
+
+        let response = self
+            .http
+            .get(&uri)
+            .headers(azure_headers(&now, &auth)?)
+            .send()
+            .await
+            .map_err(|e| anyhow!("HTTP request error: {e}"))?;
+
+        if !response.status().is_success() {
+            bail!(
+                "Azure Table query failed ({}): {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+        }
+
+        let continuation_partition = response
+            .headers()
+            .get("x-ms-continuation-NextPartitionKey")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let continuation_row = response
+            .headers()
+            .get("x-ms-continuation-NextRowKey")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+
+        let body: Value =
+            response.json().await.map_err(|e| anyhow!("failed to parse response JSON: {e}"))?;
+
+        let token = query::encode_continuation(
+            continuation_partition.as_deref(),
+            continuation_row.as_deref(),
+        );
+        Ok((body, token))
+    }
 }
 
 // --- Helpers ---
@@ -307,71 +369,6 @@ fn build_odata_filter(pk: Option<&str>, server_filter: Option<&str>) -> Option<S
         parts.push(sf.to_owned());
     }
     if parts.is_empty() { None } else { Some(parts.join(" and ")) }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn fetch_page(
-    http: &HttpClient, opts: &crate::ConnectOptions, base: &str, hmac_key: &[u8], table: &str,
-    odata_filter: Option<&str>, fetch_limit: Option<usize>, continuation: Option<&str>,
-) -> anyhow::Result<(Value, Option<String>)> {
-    let base_uri = format!("{base}/{table}()");
-
-    let mut query_params: Vec<String> = Vec::new();
-    if let Some(f) = odata_filter {
-        query_params.push(format!("$filter={}", urlencoding::encode(f)));
-    }
-    if let Some(limit) = fetch_limit {
-        query_params.push(format!("$top={limit}"));
-    }
-    if let Some(cont) = continuation {
-        let (next_partition, next_row) = query::decode_continuation(cont);
-        query_params.push(format!("NextPartitionKey={}", urlencoding::encode(&next_partition)));
-        if let Some(row) = next_row {
-            query_params.push(format!("NextRowKey={}", urlencoding::encode(&row)));
-        }
-    }
-
-    let uri = if query_params.is_empty() {
-        base_uri
-    } else {
-        format!("{base_uri}?{}", query_params.join("&"))
-    };
-
-    let now = now_rfc1123();
-    let auth = sign_request(&opts.name, hmac_key, &now, &uri)?;
-
-    let response = http
-        .get(&uri)
-        .headers(azure_headers(&now, &auth)?)
-        .send()
-        .await
-        .map_err(|e| anyhow!("HTTP request error: {e}"))?;
-
-    if !response.status().is_success() {
-        bail!(
-            "Azure Table query failed ({}): {}",
-            response.status(),
-            response.text().await.unwrap_or_default()
-        );
-    }
-
-    let continuation_partition = response
-        .headers()
-        .get("x-ms-continuation-NextPartitionKey")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    let continuation_row = response
-        .headers()
-        .get("x-ms-continuation-NextRowKey")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-
-    let body: Value =
-        response.json().await.map_err(|e| anyhow!("failed to parse response JSON: {e}"))?;
-
-    let token =
-        query::encode_continuation(continuation_partition.as_deref(), continuation_row.as_deref());
-    Ok((body, token))
 }
 
 fn validate_table_name(table: &str) -> anyhow::Result<()> {

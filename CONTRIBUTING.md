@@ -50,13 +50,11 @@ mise run ci
 
 This runs the format check (`cargo +nightly fmt --all --check`), clippy
 (warnings denied, natively and for `wasm32-wasip2`), the test suite, doc
-tests, rustdoc, the supply-chain checks (`cargo vet`, `cargo deny`), and
-`conventions-check`, exactly as CI does. Tasks run through
+tests, rustdoc, and the supply-chain checks (`cargo vet`, `cargo deny`), exactly as CI does. Tasks run through
 [mise](https://mise.jdx.dev/getting-started.html), which is installed by
 hand; `mise tasks` lists them, and [mise.toml](mise.toml) includes the shared
 Rust tasks from [augentic/toolkit](https://github.com/augentic/toolkit).
 
-<!-- conventions:begin contributing/dco -->
 ## Developer's Certificate of Origin
 
 All contributions must include acceptance of the [DCO](https://developercertificate.org/):
@@ -107,9 +105,7 @@ Signed-off-by: Jane Example <jane@example.com>
 ```
 
 For legal reasons, no anonymous or pseudonymous contributions are accepted; open a GitHub issue if this is a problem for you.
-<!-- conventions:end contributing/dco -->
 
-<!-- conventions:begin contributing/pull-requests -->
 ## Pull request procedure
 
 Pull requests should be targeted at the `main` branch. Before creating a pull request, go through this checklist:
@@ -122,11 +118,9 @@ Pull requests should be targeted at the `main` branch. Before creating a pull re
 All contributions are made via pull request. All patches from all contributors get reviewed. At least one review from a maintainer is required for all patches (even patches from maintainers). When CI fails, authors are expected to update the pull request until it passes.
 
 Normally, all pull requests must include tests that cover your change. Occasionally, a change will be very difficult to test for; in those cases, include a note in your commit message explaining why.
-<!-- conventions:end contributing/pull-requests -->
 
 Each commit has a subsystem prefix (`cursor:`, `genai:`, `postgres:`, ...).
 
-<!-- conventions:begin contributing/conduct -->
 ## Conduct
 
 Whether you are a regular contributor or a newcomer, we care about making this community a safe place for you and we've got your back.
@@ -138,4 +132,3 @@ Whether you are a regular contributor or a newcomer, we care about making this c
 - Likewise any spamming, trolling, flaming, baiting or other attention-stealing behaviour is not welcome.
 
 We welcome discussion about creating a welcoming, safe, and productive environment for the community. If you have any questions, feedback, or concerns please let us know with a GitHub issue. The [Code of Conduct](CODE_OF_CONDUCT.md) applies throughout.
-<!-- conventions:end contributing/conduct -->

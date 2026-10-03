@@ -643,8 +643,14 @@ fn answer_from(result: &Value) -> String {
 
 pub fn write_markers() {
     for marker in MARKERS {
-        eprintln!("{marker}");
+        stderr_line(marker);
     }
+}
+
+/// One line on the fake's stderr, where the real bridge writes its ready line.
+#[expect(clippy::print_stderr, reason = "stderr is the bridge's protocol channel")]
+pub fn stderr_line(line: impl std::fmt::Display) {
+    eprintln!("{line}");
 }
 
 // `SIGKILL` ourselves as an OOM killer would: no handler runs, and the

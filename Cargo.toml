@@ -13,12 +13,17 @@ repository = "https://github.com/augentic/omnia-backends"
 rust-version = "1.97"
 version = "0.31.0"
 
+# conventions:begin lints/rust
 [workspace.lints.rust]
+# https://doc.rust-lang.org/rustc/lints/listing/allowed-by-default.html
 missing_docs = "warn"
 trivial_numeric_casts = "warn"
+unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "warn"
 unused_extern_crates = "warn"
+# conventions:end lints/rust
 
+# conventions:begin lints/clippy
 [workspace.lints.clippy]
 # https://doc.rust-lang.org/stable/clippy/index.html
 all = { level = "warn", priority = -1 }      # correctness, suspicious, style, complexity, perf
@@ -26,16 +31,9 @@ cargo = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 
-# wasm-pkg-client's transitive tree (via omnia's omnia-plugin) pins dependency
-# versions conflicting with wasmtime's; deduplication is upstream territory, so
-# the whole workspace accepts the duplication.
-multiple_crate_versions = "allow"
-
 # Cherry-picked lints are from the `restriction` lint group in order to drive up
 # consistency, quality, and brevity
 # See https://microsoft.github.io/rust-guidelines/guidelines/universal/index.html
-
-# allow_attributes_without_reason = "warn"
 as_pointer_underscore = "warn"
 assertions_on_result_states = "warn"
 clone_on_ref_ptr = "warn"
@@ -55,6 +53,12 @@ unnecessary_safety_comment = "warn"
 unnecessary_safety_doc = "warn"
 unneeded_field_pattern = "warn"
 unused_result_ok = "warn"
+# conventions:end lints/clippy
+
+# wasm-pkg-client's transitive tree (via omnia's omnia-plugin) pins dependency
+# versions conflicting with wasmtime's; deduplication is upstream territory, so
+# the whole workspace accepts the duplication.
+multiple_crate_versions = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.104"

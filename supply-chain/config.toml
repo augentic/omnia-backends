@@ -4,6 +4,9 @@
 [cargo-vet]
 version = "0.10"
 
+[imports.augentic]
+url = "https://raw.githubusercontent.com/augentic/toolkit/main/supply-chain/augentic/audits.toml"
+
 [imports.bytecode-alliance]
 url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
 
@@ -21,6 +24,108 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
+
+[policy.omnia]
+audit-as-crates-io = false
+
+[policy.omnia-azure-blob]
+audit-as-crates-io = false
+
+[policy.omnia-azure-id]
+audit-as-crates-io = false
+
+[policy.omnia-azure-table]
+audit-as-crates-io = false
+
+[policy.omnia-azure-vault]
+audit-as-crates-io = false
+
+[policy.omnia-cli]
+audit-as-crates-io = false
+
+[policy.omnia-core]
+audit-as-crates-io = false
+
+[policy.omnia-cursor]
+audit-as-crates-io = false
+
+[policy.omnia-filesystem]
+audit-as-crates-io = false
+
+[policy.omnia-genai]
+audit-as-crates-io = false
+
+[policy.omnia-guest-macros]
+audit-as-crates-io = false
+
+[policy.omnia-host-macros]
+audit-as-crates-io = false
+
+[policy.omnia-kafka]
+audit-as-crates-io = false
+
+[policy.omnia-link]
+audit-as-crates-io = false
+
+[policy.omnia-mongodb]
+audit-as-crates-io = false
+
+[policy.omnia-nats]
+audit-as-crates-io = false
+
+[policy.omnia-opentelemetry]
+audit-as-crates-io = false
+
+[policy.omnia-plugin]
+audit-as-crates-io = false
+
+[policy.omnia-postgres]
+audit-as-crates-io = false
+
+[policy.omnia-redis]
+audit-as-crates-io = false
+
+[policy.omnia-sdk]
+audit-as-crates-io = false
+
+[policy.omnia-test]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-blobstore]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-config]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-docstore]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-http]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-identity]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-keyvalue]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-messaging]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-model]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-otel]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-sql]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-vault]
+audit-as-crates-io = false
+
+[policy.omnia-wasi-websocket]
+audit-as-crates-io = false
 
 [[exemptions.addr2line]]
 version = "0.26.1"
@@ -202,24 +307,8 @@ criteria = "safe-to-deploy"
 version = "0.4.45"
 criteria = "safe-to-deploy"
 
-[[exemptions.clap]]
-version = "4.6.7"
-criteria = "safe-to-deploy"
-
-[[exemptions.clap_builder]]
-version = "4.6.7"
-criteria = "safe-to-deploy"
-
 [[exemptions.clap_complete]]
 version = "4.6.11"
-criteria = "safe-to-deploy"
-
-[[exemptions.clap_derive]]
-version = "4.6.7"
-criteria = "safe-to-deploy"
-
-[[exemptions.clap_lex]]
-version = "1.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.cmov]]
@@ -664,10 +753,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.hyper-timeout]]
 version = "0.5.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.hyper-util]]
-version = "0.1.21"
 criteria = "safe-to-deploy"
 
 [[exemptions.iana-time-zone]]
@@ -1262,10 +1347,6 @@ criteria = "safe-to-deploy"
 version = "0.3.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.rustix]]
-version = "1.1.5"
-criteria = "safe-to-deploy"
-
 [[exemptions.rustls]]
 version = "0.23.37"
 criteria = "safe-to-deploy"
@@ -1426,10 +1507,6 @@ criteria = "safe-to-deploy"
 version = "0.28.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.syn]]
-version = "3.0.6"
-criteria = "safe-to-deploy"
-
 [[exemptions.sync_wrapper]]
 version = "1.0.2"
 criteria = "safe-to-deploy"
@@ -1452,14 +1529,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tempfile]]
 version = "3.27.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.thiserror]]
-version = "2.0.21"
-criteria = "safe-to-deploy"
-
-[[exemptions.thiserror-impl]]
-version = "2.0.21"
 criteria = "safe-to-deploy"
 
 [[exemptions.thread_local]]
@@ -1620,10 +1689,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.unicode-general-category]]
 version = "1.1.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.unicode-ident]]
-version = "1.0.26"
 criteria = "safe-to-deploy"
 
 [[exemptions.untrusted]]

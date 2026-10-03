@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn tail_bounded() {
         let tail = Tail::default();
-        assert!(tail.to_string().is_empty());
+        assert_eq!(tail.to_string(), "");
         for index in 0..TAIL_LINES + 5 {
             tail.push(format!("line {index}"));
         }

@@ -23,5 +23,5 @@ async fn scenario() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "lookup");
     assert_eq!(calls[0].arguments, "{}");
-    assert!(!calls[0].id.is_empty());
+    assert_ne!(calls[0].id, "");
 }

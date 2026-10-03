@@ -421,6 +421,7 @@ fn json_response(status: StatusCode, body: Bytes) -> Response<Full<Bytes>> {
 
 /// The key the SDK's `OpenAI` adapter reads per request, when the
 /// environment has none. Once per process, before any runtime thread exists.
+#[expect(unsafe_code, reason = "the key is read from the process environment")]
 pub fn dummy_key() {
     static SET: Once = Once::new();
     SET.call_once(|| {

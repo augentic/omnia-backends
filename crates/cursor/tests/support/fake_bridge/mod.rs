@@ -210,6 +210,7 @@ impl Config {
 
 /// Give the client a `CURSOR_API_KEY` when the environment has none; once per
 /// process, before any runtime thread exists.
+#[expect(unsafe_code, reason = "the key is read from the process environment")]
 pub fn dummy_key() {
     static SET: Once = Once::new();
     SET.call_once(|| {
@@ -231,6 +232,7 @@ pub struct Spawnable {
 impl Spawnable {
     /// Lay out `config` and put the fake on `PATH`; `PATH` and `FAKE_BRIDGE_HOME`
     /// are process-wide, so one `Spawnable` per test process (nextest's one test each).
+    #[expect(unsafe_code, reason = "the client finds the bridge through PATH and HOME")]
     pub fn new(config: &Config) -> Self {
         let home =
             tempfile::Builder::new().prefix("fake-bridge-").tempdir().expect("a home directory");

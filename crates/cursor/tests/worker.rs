@@ -151,6 +151,7 @@ async fn connect_rejects_invalid_options() {
 // A keyless client connects and fails its first completion instead: the key
 // is read at connect and required at attempt, before any lease is taken.
 #[tokio::test]
+#[expect(unsafe_code, reason = "the key is read from the process environment")]
 async fn keyless_complete() {
     // SAFETY: nextest runs one test per process, so removing the key races
     // with nothing; every other row sets a dummy key and never unsets it.
@@ -914,7 +915,7 @@ async fn ready_line_never_logged() {
     await_gone(&fake).await;
 
     let token = fake.log().workers()[0].token().expect("the process logged its token");
-    assert!(!token.is_empty());
+    assert_ne!(token, "");
     let events = captured.0.lock().expect("captured lock").clone();
     assert!(
         events.iter().any(|event| event.contains("cursor-sdk-bridge spawned")),

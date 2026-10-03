@@ -30,18 +30,9 @@ Unless you are fixing a known bug, we **strongly** recommend discussing it with 
 a GitHub issue before getting started to ensure your work is consistent with Augentic's roadmap
 and architecture.
 
-All contributions are made via pull request. Note that **all patches from all contributors get
-reviewed**. After a pull request is made other contributors will offer feedback, and if the patch
-passes review a maintainer will accept it with a comment. When pull requests fail testing,
-authors are expected to update their pull requests to address the failures until the tests pass
-and the pull request merges successfully.
-
-At least one review from a maintainer is required for all patches (even patches from
-maintainers).
-
 Reviewers should leave a "LGTM" comment once they are satisfied with the patch. If the patch was
 submitted by a maintainer with write access, the pull request should be merged by the submitter
-after review.
+after review (the procedure is [below](#pull-request-procedure)).
 
 ## Code Style
 
@@ -59,16 +50,16 @@ mise run ci
 
 This runs the format check (`cargo +nightly fmt --all --check`), clippy
 (warnings denied, natively and for `wasm32-wasip2`), the test suite, doc
-tests, rustdoc, and the supply-chain checks (`cargo vet`, `cargo deny`),
-exactly as CI does. Tasks run through
+tests, rustdoc, the supply-chain checks (`cargo vet`, `cargo deny`), and
+`conventions-check`, exactly as CI does. Tasks run through
 [mise](https://mise.jdx.dev/getting-started.html), which is installed by
 hand; `mise tasks` lists them, and [mise.toml](mise.toml) includes the shared
-Rust tasks from [augentic/.github](https://github.com/augentic/.github)
-`v0.2.0`.
+Rust tasks from [augentic/toolkit](https://github.com/augentic/toolkit).
 
+<!-- conventions:begin contributing/dco -->
 ## Developer's Certificate of Origin
 
-All contributions must include acceptance of the DCO:
+All contributions must include acceptance of the [DCO](https://developercertificate.org/):
 
 ```text
 Developer Certificate of Origin
@@ -109,55 +100,42 @@ By making a contribution to this project, I certify that:
     this project or the open source license(s) involved.
 ```
 
-To accept the DCO, simply add this line to each commit message with your name and email address
-(`git commit -s` will do this for you):
+To accept the DCO, add this line to each commit message with your name and email address (`git commit -s` will do this for you):
 
 ```text
 Signed-off-by: Jane Example <jane@example.com>
 ```
 
-For legal reasons, no anonymous or pseudonymous contributions are accepted.
+For legal reasons, no anonymous or pseudonymous contributions are accepted; open a GitHub issue if this is a problem for you.
+<!-- conventions:end contributing/dco -->
 
+<!-- conventions:begin contributing/pull-requests -->
 ## Pull request procedure
 
-To make a pull request, you will need a GitHub account; if you are unclear on this process, see
-GitHub's documentation on [forking](https://help.github.com/articles/fork-a-repo) and
-[pull requests](https://help.github.com/articles/using-pull-requests). Pull requests should be
-targeted at the `main` branch. Before creating a pull request, go through this checklist:
+Pull requests should be targeted at the `main` branch. Before creating a pull request, go through this checklist:
 
-1. Create a feature branch off of `main` so that changes do not get mixed up.
-1. [Rebase](https://git-scm.com/book/en/Git-Branching-Rebasing) your local changes against the
-   `main` branch.
-1. Run `mise run ci` and confirm that it passes (see above).
-1. Run `cargo +nightly fmt --all` to format your code.
-1. Accept the Developer's Certificate of Origin on all commits (see above).
-1. Ensure that each commit has a subsystem prefix (ex: `controller:`).
+1. Create a feature branch off of `main`.
+2. [Rebase](https://git-scm.com/book/en/Git-Branching-Rebasing) your local changes against `main`.
+3. Run `make ci` and confirm that it passes: exactly the CI jobs, in order.
+4. Accept the Developer's Certificate of Origin on all commits (see above).
 
-Pull requests will be treated as "review requests," and maintainers will give feedback on the
-style and substance of the patch.
+All contributions are made via pull request. All patches from all contributors get reviewed. At least one review from a maintainer is required for all patches (even patches from maintainers). When CI fails, authors are expected to update the pull request until it passes.
 
-Normally, all pull requests must include tests that test your change. Occasionally, a change will
-be very difficult to test for. In those cases, please include a note in your commit message
-explaining why.
+Normally, all pull requests must include tests that cover your change. Occasionally, a change will be very difficult to test for; in those cases, include a note in your commit message explaining why.
+<!-- conventions:end contributing/pull-requests -->
 
+Each commit has a subsystem prefix (`cursor:`, `genai:`, `postgres:`, ...).
+
+<!-- conventions:begin contributing/conduct -->
 ## Conduct
 
-Whether you are a regular contributor or a newcomer, we care about making this community a safe
-place for you and we've got your back.
+Whether you are a regular contributor or a newcomer, we care about making this community a safe place for you and we've got your back.
 
-- We are committed to providing a friendly, safe and welcoming environment for all, regardless of
-  gender, sexual orientation, disability, ethnicity, religion, or similar personal characteristic.
-- Please avoid using nicknames that might detract from a friendly, safe and welcoming environment
-  for all.
+- We are committed to providing a friendly, safe and welcoming environment for all, regardless of gender, sexual orientation, disability, ethnicity, religion, or similar personal characteristic.
 - Be kind and courteous. There is no need to be mean or rude.
-- We will exclude you from interaction if you insult, demean or harass anyone. In particular, we
-  do not tolerate behavior that excludes people in socially marginalized groups.
-- Private harassment is also unacceptable. No matter who you are, if you feel you have been or
-  are being harassed or made uncomfortable by a community member, please contact one of the
-  channel ops or a member of the Augentic core team immediately.
-- Likewise any spamming, trolling, flaming, baiting or other attention-stealing behaviour is not
-  welcome.
+- We will exclude you from interaction if you insult, demean or harass anyone. In particular, we do not tolerate behavior that excludes people in socially marginalized groups.
+- Private harassment is also unacceptable. If you feel you have been or are being harassed or made uncomfortable by a community member, please contact a member of the core team immediately.
+- Likewise any spamming, trolling, flaming, baiting or other attention-stealing behaviour is not welcome.
 
-We welcome discussion about creating a welcoming, safe, and productive environment for the
-community. If you have any questions, feedback, or concerns please let us know with a GitHub
-issue.
+We welcome discussion about creating a welcoming, safe, and productive environment for the community. If you have any questions, feedback, or concerns please let us know with a GitHub issue. The [Code of Conduct](CODE_OF_CONDUCT.md) applies throughout.
+<!-- conventions:end contributing/conduct -->

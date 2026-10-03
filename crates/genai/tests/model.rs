@@ -137,7 +137,7 @@ async fn model_undeclared_tool() {
     // The host refuses the call and the completion ends: no second round.
     let requests = fake.requests();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].tools().is_empty());
+    assert_eq!(requests[0].tools(), Vec::<String>::new());
 }
 
 #[tokio::test]

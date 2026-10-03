@@ -261,6 +261,7 @@ impl Process {
 /// Whether `pid` is still running: it answers a probe and is not a zombie (a
 /// forked child, reparented to a pid 1 that never reaps it).
 #[cfg(test)]
+#[expect(unsafe_code, reason = "a signal-0 probe is the one portable liveness check for a pid")]
 pub fn alive(pid: u32) -> bool {
     let Ok(signed) = i32::try_from(pid) else {
         return false;

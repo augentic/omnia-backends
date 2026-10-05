@@ -7,7 +7,7 @@ Azure Key Vault secrets backend for the Omnia WASI runtime, implementing the `wa
 
 Manages secrets in Azure Key Vault using the official `azure_security_keyvault_secrets` SDK. Secrets are base64url-encoded and namespaced per locker identifier.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Configuration
 

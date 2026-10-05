@@ -7,7 +7,7 @@ Kafka messaging backend for the Omnia WASI runtime, implementing the `wasi-messa
 
 Provides a Kafka producer and consumer backed by `rdkafka`, with optional Confluent Schema Registry integration and custom partitioning.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Configuration
 

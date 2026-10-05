@@ -27,7 +27,7 @@ round-trips); a rejection on the last round fails the completion with the
 typed `budget-exhausted` carrying that correction. Without a `check` the
 guest sees the model's final text as-is.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Configuration
 

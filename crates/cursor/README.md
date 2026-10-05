@@ -7,7 +7,7 @@ Cursor model backend for the Omnia WASI runtime, implementing the `omnia:model/c
 
 Each completion gets its own `cursor-sdk-bridge` process (a *worker*) and a fresh agent on it. The agent runs its own tool loop against the lent workspace and returns its answer through the same boundary `omnia-genai` uses. The guest only sees the answer; the model id, API key, and `sdk.v1` protocol stay inside this crate.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Requirements
 

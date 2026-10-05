@@ -7,7 +7,7 @@ Redis key-value backend for the Omnia WASI runtime, implementing the `wasi-keyva
 
 Uses the `redis` crate with a `ConnectionManager` for automatic reconnection and retry.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Configuration
 

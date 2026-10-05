@@ -1786,7 +1786,6 @@ name = "examples"
 version = "0.31.0"
 dependencies = [
  "anyhow",
- "cfg-if",
  "dotenvy",
  "futures",
  "omnia",

@@ -23,7 +23,7 @@ never the store's `omnia-plugins`. A guest that names `omnia-plugins` itself
 shares that Azure container; deployments that lend guests blobstore access on
 the same storage account should treat the name as reserved.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Configuration
 

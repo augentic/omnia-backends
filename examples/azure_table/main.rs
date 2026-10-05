@@ -4,11 +4,12 @@
 //! host-only program lives in `desk.rs` and this entry point is an empty
 //! `main` on wasm32.
 
-cfg_if::cfg_if! {
-    if #[cfg(not(target_arch = "wasm32"))] {
+cfg_select! {
+    not(target_arch = "wasm32") => {
         mod desk;
         use desk::main;
-    } else {
+    }
+    _ => {
         fn main() {}
     }
 }

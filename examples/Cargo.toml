@@ -23,9 +23,8 @@ name = "azure_table"
 path = "azure_table/main.rs"
 
 # Every example here is clippy-checked for wasm32-wasip2 (`WASM32_PACKAGES` in
-# mise.toml); the host-only ones gate their entry point with `cfg_if`.
+# mise.toml); the host-only ones gate their entry point with `cfg_select!`.
 [dependencies]
-cfg-if = "1.0.5"
 omnia-wasi-model.workspace = true
 omnia-wasi-otel.workspace = true
 serde_json.workspace = true

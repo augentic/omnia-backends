@@ -7,7 +7,7 @@ NATS backend for the Omnia WASI runtime, implementing the `wasi-messaging`, `was
 
 Uses `async-nats` with JetStream for key-value and object store capabilities. Supports JWT/NKey authentication.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Configuration
 

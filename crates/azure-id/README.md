@@ -7,7 +7,7 @@ Azure Identity backend for the Omnia WASI runtime, implementing the `wasi-identi
 
 Acquires Azure AD access tokens via Managed Identity credentials using the official `azure_identity` SDK.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Configuration
 

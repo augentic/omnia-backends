@@ -7,7 +7,7 @@
 
 Uses `deadpool-postgres` connection pooling with optional TLS via `rustls`. Supports multiple named pools for connecting to several databases from a single runtime.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Configuration
 

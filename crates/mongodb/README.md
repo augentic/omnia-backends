@@ -7,7 +7,7 @@ MongoDB blobstore backend for the Omnia WASI runtime, implementing the `wasi-blo
 
 Maps blobstore containers to MongoDB collections using the official `mongodb` driver.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Configuration
 

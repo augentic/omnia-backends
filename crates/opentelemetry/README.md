@@ -7,7 +7,7 @@ OpenTelemetry gRPC backend for the Omnia WASI runtime, implementing the `wasi-ot
 
 Exports traces and metrics to an OpenTelemetry Collector via gRPC using the OTLP protocol. Telemetry failures are logged but never propagated to application logic.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Configuration
 

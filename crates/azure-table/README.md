@@ -7,7 +7,7 @@ Azure Table Storage backend for the Omnia WASI runtime, implementing the `wasi-d
 
 Azure Table Storage is a `NoSQL` key-value store. This crate maps the document store model onto Azure Table entities: top-level JSON fields are flattened into entity properties so that server-side `OData` `$filter` queries work, while nested objects are serialized as JSON string properties.
 
-MSRV: Rust 1.97
+MSRV: Rust 1.99
 
 ## Key Mapping
 

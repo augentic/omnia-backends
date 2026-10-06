@@ -60,6 +60,20 @@ Unreleased
 
 ### Changed
 
+- `omnia-azure-blob` implements omnia's one `PackageStore` in place of the
+  retired `ContentStore` and `ReleaseStore` pair: one blob per release in
+  the `omnia-plugins` container, named as omnia's local `FsStore` files it
+  (`namespace_name@version.wasm`), read before any registry and written once
+  — a blob already there is never replaced, so a stored release is final
+  until it is deleted. The release-record tier, and with it the per-registry
+  scoping of a stored release, is gone with omnia's.
+- `omnia-azure-blob`'s `wasi:blobstore` view refuses the store's
+  `omnia-plugins` container by name — create, get, delete, and exists alike,
+  which copy and move go through — so a guest lent blobstore on the same
+  storage account can no longer plant, replace, or delete a release the
+  acquirer would serve ahead of every registry. The name was documented as
+  reserved; now the backend holds it so.
+
 - `omnia-cursor`'s nudge for a reply that is not JSON names what the parser
   said of it — `Your last reply is not one well-formed JSON value (EOF while
   parsing an object at line 1 column 34), so it is not the answer. …` —
@@ -145,6 +159,13 @@ Unreleased
   been the DEBUG line's `correction` field, so `-v` no longer carries
   every rejected candidate in full and the findings are read where the
   guest logs them.
+
+### Removed
+
+- `omnia-filesystem`'s plugin store. omnia's `FsStore`, named by a
+  deployment's `plugins.store`, is the local package store; the backend
+  serves `wasi:blobstore` and `wasi:keyvalue` alone, and depends on
+  `omnia-core` and `omnia-plugin` no longer.
 
 ---
 

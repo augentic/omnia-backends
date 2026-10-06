@@ -14,7 +14,20 @@ use omnia_wasi_blobstore::{
     Bytes, Container, ContainerMetadata, FutureResult, ObjectMetadata, WasiBlobstoreCtx,
 };
 
-use crate::Client;
+use crate::{Client, STORE_CONTAINER};
+
+// SECURITY: the store's container holds the releases the host loads, and the
+// acquirer serves a stored one before any registry; a guest handle on it
+// could plant, replace, or delete a release, so the blobstore view never
+// opens it. `copy_object` and `move_object` reach containers through
+// `get_container`, so the four entry points cover every guest path.
+fn ensure_not_reserved(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        name != STORE_CONTAINER,
+        "container `{name}` is reserved for the package store"
+    );
+    Ok(())
+}
 
 impl WasiBlobstoreCtx for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
@@ -22,6 +35,7 @@ impl WasiBlobstoreCtx for Client {
         let service = Arc::clone(&self.service);
 
         async move {
+            ensure_not_reserved(&name)?;
             let container_client = service.blob_container_client(&name);
             container_client
                 .create(Option::<BlobContainerClientCreateOptions<'_>>::None)
@@ -44,6 +58,7 @@ impl WasiBlobstoreCtx for Client {
         let service = Arc::clone(&self.service);
 
         async move {
+            ensure_not_reserved(&name)?;
             Ok(Arc::new(AzureBlobContainer {
                 name,
                 service,
@@ -58,6 +73,7 @@ impl WasiBlobstoreCtx for Client {
         let service = Arc::clone(&self.service);
 
         async move {
+            ensure_not_reserved(&name)?;
             service
                 .blob_container_client(&name)
                 .delete(Option::<BlobContainerClientDeleteOptions<'_>>::None)
@@ -73,6 +89,7 @@ impl WasiBlobstoreCtx for Client {
         let service = Arc::clone(&self.service);
 
         async move {
+            ensure_not_reserved(&name)?;
             service
                 .blob_container_client(&name)
                 .exists()

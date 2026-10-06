@@ -95,8 +95,7 @@ async fn package_store() -> Result<()> {
     let client = <Client as Backend>::connect().await?;
 
     // a reference of this run's own, so a rerun never meets a stale blob
-    let reference: Reference =
-        format!("live:component-{}@1.2.3", std::process::id()).parse()?;
+    let reference: Reference = format!("live:component-{}@1.2.3", std::process::id()).parse()?;
     let bytes = format!("component-{}", std::process::id()).into_bytes();
 
     assert_eq!(client.get(&reference).await?, None, "nothing stored yet");

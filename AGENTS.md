@@ -6,10 +6,10 @@
 interfaces (Azure Blob/Table/Vault/Identity, Postgres, Redis, NATS, Kafka,
 MongoDB, OpenTelemetry, and the `genai`/`cursor` model backends). Each crate
 implements the corresponding `omnia` `WasiXxxCtx` trait against a real service.
-`omnia-filesystem` and `omnia-azure-blob` additionally implement
-`omnia_plugin::ContentStore` and `omnia_plugin::ReleaseStore` (the
-store bound behind the `RegistryClient` acquirer);
-registry acquisition itself lives in `omnia-plugin`. The `omnia` runtime is consumed
+`omnia-azure-blob` additionally implements `omnia_plugin::PackageStore` (the
+store the `RegistryClient` acquirer reads before any registry and writes
+what it fetches to); registry acquisition itself, and the local `FsStore`,
+live in `omnia-plugin`. The `omnia` runtime is consumed
 as published crates.io dependencies (currently 0.36.0), declared once under
 `[workspace.dependencies]` in the root `Cargo.toml`.
 

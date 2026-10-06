@@ -72,8 +72,8 @@ impl WasiKeyValueCtx for Client {
 | `kafka`         | Apache Kafka            | messaging                               |
 | `mongodb`       | MongoDB                 | blobstore                               |
 | `postgres`      | PostgreSQL              | sql                                     |
-| `filesystem`    | Local filesystem        | keyvalue, blobstore, plugin store       |
-| `azure-blob`    | Azure Blob Storage      | blobstore, plugin store                 |
+| `filesystem`    | Local filesystem        | keyvalue, blobstore                     |
+| `azure-blob`    | Azure Blob Storage      | blobstore, package store                |
 | `azure-id`      | Azure Managed Identity  | identity                                |
 | `azure-vault`   | Azure Key Vault         | vault                                   |
 | `azure-table`   | Azure Table Storage     | docstore                                |
@@ -83,9 +83,9 @@ impl WasiKeyValueCtx for Client {
 
 No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; those use Omnia's in-tree defaults.
 
-### Plugin store
+### Package store
 
-`filesystem` and `azure-blob` additionally implement `omnia_plugin::ContentStore` and `omnia_plugin::ReleaseStore` — the store bound behind omnia's registry acquirer (the `runtime!` macro's plugin cache). Each impl owns a tree disjoint from guest storage by construction: `filesystem` writes a `plugins/` subtree beside `blobstore/` and `keyvalue/`; `azure-blob` writes a dedicated container it names itself (`omnia-plugins`). Content entries are shared across registries (the digest is the identity); release records are scoped per registry. Verification of served bytes lives in the acquirer — the content impls only refuse writes whose bytes do not hash to their digest key.
+`azure-blob` additionally implements `omnia_plugin::PackageStore` — the store omnia's registry acquirer reads before any registry and writes a fetched release to once (the `runtime!` macro's `plugins: { store: .. }` names omnia's own local `FsStore`; this impl is the remote counterpart an embedder selects through `Deployment::registry_source`). It owns a container disjoint from guest storage by construction, named by the impl itself (`omnia-plugins`), with one blob per release under the file name `FsStore` uses (`namespace_name@version.wasm`). A blob already there is never replaced: a stored release is final until it is deleted. Verification lives in the acquirer — a fetched release is hashed against the registry's digest before the write, and a served one against the load's pin.
 
 ### Model backends
 
@@ -96,7 +96,7 @@ The two `wasi-model` backends serve `omnia:model/completion` requests and differ
 
 ### Registry acquisition
 
-Registry acquisition itself is not a backend: omnia's `RegistryClient` (the `omnia-plugin` crate, re-exported from `omnia`) fetches and verifies packages, compiled in at the composition root through the `runtime!` macro's `plugins:` block. This repository only supplies the `ContentStore` / `ReleaseStore` impls for it (see [Plugin store](#plugin-store) above).
+Registry acquisition itself is not a backend: omnia's `RegistryClient` (the `omnia-plugin` crate, re-exported from `omnia`) fetches and verifies packages, compiled in at the composition root through the `runtime!` macro's `plugins:` block. This repository only supplies the Azure `PackageStore` impl for it (see [Package store](#package-store) above).
 
 ## Wiring a backend into a host runtime
 

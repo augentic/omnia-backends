@@ -2,7 +2,6 @@
 
 mod blobstore;
 mod keyvalue;
-mod plugin;
 
 use std::fs;
 use std::path::{Path, PathBuf};

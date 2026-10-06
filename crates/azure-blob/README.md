@@ -3,19 +3,19 @@
 [![crates.io](https://img.shields.io/crates/v/omnia-azure-blob.svg)](https://crates.io/crates/omnia-azure-blob)
 [![docs.rs](https://docs.rs/omnia-azure-blob/badge.svg)](https://docs.rs/omnia-azure-blob)
 
-Azure Blob Storage blobstore backend for the Omnia WASI runtime, implementing the `wasi-blobstore` interface and the plugin loader's `ContentStore` and `ReleaseStore`.
+Azure Blob Storage blobstore backend for the Omnia WASI runtime, implementing the `wasi-blobstore` interface and the plugin loader's `PackageStore`.
 
 Maps blobstore containers to Azure Blob containers and blobs to block blobs using the official `azure_storage_blob` SDK.
 
-## Plugin store
+## Package store
 
-`Client` also implements `omnia_plugin::ContentStore` and
-`omnia_plugin::ReleaseStore`, the digest-keyed store behind omnia's
-registry acquirer, in a dedicated container the backend names itself:
-`omnia-plugins`. Content blobs are keyed `content/<sha256:hex>` and shared
-across registries; release records are keyed
-`releases/<registry>/<package>-<version>.json`, scoped per registry. Writes
-are verify-before-persist; a blob PUT is atomic on the service side.
+`Client` also implements `omnia_plugin::PackageStore`, the store omnia's
+registry acquirer reads before any registry and writes what it fetches to,
+in a dedicated container the backend names itself: `omnia-plugins`. One
+blob per release, named as omnia's `FsStore` files it
+(`namespace_name@version.wasm`); a blob already there is never replaced, so
+a stored release is final until it is deleted. The acquirer verifies what it
+fetches before the write and what the store serves against a load's pin.
 
 Guest `wasi:blobstore` containers map one-to-one onto Azure containers, so a
 guest container named `plugins` is simply the Azure container `plugins` —

@@ -83,32 +83,30 @@ async fn ranged_reads() -> Result<()> {
     Ok(())
 }
 
-// Plugin-store round-trip over the dedicated `omnia-plugins` container:
-// content by digest, release records per registry, and disjointness from a
-// guest container named `plugins`.
+// Package-store round-trip over the dedicated `omnia-plugins` container: a
+// release by reference, a second write leaving the first in place, an absent
+// reference answering none, and disjointness from a guest container named
+// `plugins`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
-async fn plugin_store() -> Result<()> {
-    use omnia_core::Digest;
-    use omnia_plugin::{ContentStore, ReleaseStore};
+async fn package_store() -> Result<()> {
+    use omnia_plugin::{PackageStore, Reference};
 
     let client = <Client as Backend>::connect().await?;
 
+    // a reference of this run's own, so a rerun never meets a stale blob
+    let reference: Reference =
+        format!("live:component-{}@1.2.3", std::process::id()).parse()?;
     let bytes = format!("component-{}", std::process::id()).into_bytes();
-    let digest = Digest::of(&bytes).to_string();
 
-    // Content round-trips by digest.
-    client.put_content(&digest, &bytes).await?;
-    assert_eq!(client.content(&digest).await?.as_deref(), Some(bytes.as_slice()));
+    assert_eq!(client.get(&reference).await?, None, "nothing stored yet");
+    client.put(&reference, &bytes).await?;
+    assert_eq!(client.get(&reference).await?.as_deref(), Some(bytes.as_slice()));
 
-    // A mismatched write is refused before it reaches the service.
-    let err = client.put_content(&digest, b"other bytes").await.expect_err("must refuse");
-    assert!(err.to_string().contains("refusing to persist"), "unexpected error: {err}");
-
-    // Release records are scoped per registry.
-    client.put_release("omnia.host", "emery:intent", "1.2.3", &digest).await?;
-    assert_eq!(client.release("omnia.host", "emery:intent", "1.2.3").await?, Some(digest.clone()));
-    assert_eq!(client.release("registry.example", "emery:intent", "1.2.3").await?, None);
+    // A stored release is final: a second write leaves the first.
+    client.put(&reference, b"other bytes").await?;
+    assert_eq!(client.get(&reference).await?.as_deref(), Some(bytes.as_slice()));
+    assert!(client.describe(&reference).contains(&reference.file_name()));
 
     // A guest container named `plugins` shares nothing with the store's
     // own `omnia-plugins` container.
@@ -116,9 +114,15 @@ async fn plugin_store() -> Result<()> {
         client.create_container("plugins".to_string()).await?;
     let names = guest.list_objects().await?;
     assert!(
-        !names.iter().any(|name| name.starts_with("content/")),
-        "guest container must not see plugin store blobs: {names:?}"
+        !names.iter().any(|name| name == &reference.file_name()),
+        "guest container must not see stored packages: {names:?}"
     );
     client.delete_container("plugins".to_string()).await?;
+
+    // the store's container is the Azure container of that name, so the
+    // blobstore view reaches the blob to remove it
+    let store: std::sync::Arc<dyn Container> =
+        client.create_container("omnia-plugins".to_string()).await?;
+    store.delete_object(reference.file_name()).await?;
     Ok(())
 }

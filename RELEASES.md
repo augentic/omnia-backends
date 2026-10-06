@@ -67,6 +67,12 @@ Unreleased
   — a blob already there is never replaced, so a stored release is final
   until it is deleted. The release-record tier, and with it the per-registry
   scoping of a stored release, is gone with omnia's.
+- `omnia-azure-blob`'s `wasi:blobstore` view refuses the store's
+  `omnia-plugins` container by name — create, get, delete, and exists alike,
+  which copy and move go through — so a guest lent blobstore on the same
+  storage account can no longer plant, replace, or delete a release the
+  acquirer would serve ahead of every registry. The name was documented as
+  reserved; now the backend holds it so.
 
 - `omnia-cursor`'s nudge for a reply that is not JSON names what the parser
   said of it — `Your last reply is not one well-formed JSON value (EOF while

@@ -19,9 +19,9 @@ fetches before the write and what the store serves against a load's pin.
 
 Guest `wasi:blobstore` containers map one-to-one onto Azure containers, so a
 guest container named `plugins` is simply the Azure container `plugins` —
-never the store's `omnia-plugins`. A guest that names `omnia-plugins` itself
-shares that Azure container; deployments that lend guests blobstore access on
-the same storage account should treat the name as reserved.
+never the store's `omnia-plugins`. The name `omnia-plugins` is reserved: the
+blobstore view refuses to create, open, delete, or probe it, so the store is
+the container's only writer even when guests share the storage account.
 
 MSRV: Rust 1.99
 
@@ -67,10 +67,12 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-blobstore` boundary against
-a real storage account (or Azurite): write/read/list/metadata round-trips plus
-the ranged-read cases mirroring the `range_options` unit vectors. The tests are
-`#[ignore]`d so they never run in CI; run them explicitly (authentication is
-Entra ID only — service principal or developer tools):
+a real storage account (or Azurite): write/read/list/metadata round-trips, the
+ranged-read cases mirroring the `range_options` unit vectors, and the package
+store round-trip. The tests are `#[ignore]`d so they never run in CI; run them
+explicitly (authentication is Entra ID only — service principal or developer
+tools). [`tests/blobstore.rs`](tests/blobstore.rs) holds what the view refuses
+before any request, such as the reserved `omnia-plugins` name, and runs in CI.
 
 ```bash
 AZURE_BLOB_ENDPOINT=https://<account>.blob.core.windows.net \

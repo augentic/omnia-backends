@@ -118,10 +118,32 @@ async fn package_store() -> Result<()> {
     );
     client.delete_container("plugins".to_string()).await?;
 
-    // the store's container is the Azure container of that name, so the
-    // blobstore view reaches the blob to remove it
-    let store: std::sync::Arc<dyn Container> =
-        client.create_container("omnia-plugins".to_string()).await?;
-    store.delete_object(reference.file_name()).await?;
+    delete_stored(&reference).await
+}
+
+// The blobstore view refuses the store's container (`tests/blobstore.rs`),
+// so cleanup reaches the blob through the SDK under the same connection
+// options the client connected with.
+async fn delete_stored(reference: &omnia_plugin::Reference) -> Result<()> {
+    use std::sync::Arc;
+
+    use azure_core::credentials::{Secret, TokenCredential};
+    use azure_identity::{ClientSecretCredential, DeveloperToolsCredential};
+    use azure_storage_blob::BlobServiceClient;
+    use omnia::FromEnv as _;
+    use omnia_azure_blob::ConnectOptions;
+
+    let options = ConnectOptions::load_env()?;
+    let credential: Arc<dyn TokenCredential> = match &options.credential {
+        Some(cred) => ClientSecretCredential::new(
+            &cred.tenant_id,
+            cred.client_id.clone(),
+            Secret::new(cred.client_secret.clone()),
+            None,
+        )?,
+        None => DeveloperToolsCredential::new(None)?,
+    };
+    let service = BlobServiceClient::new(options.endpoint.parse()?, Some(credential), None)?;
+    service.blob_client("omnia-plugins", &reference.file_name()).delete(None).await?;
     Ok(())
 }

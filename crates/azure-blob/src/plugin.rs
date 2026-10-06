@@ -1,8 +1,8 @@
 //! [`PackageStore`] backed by a dedicated Azure Blob container.
 //!
 //! The store owns the `omnia-plugins` container — a name the impl chooses,
-//! never an operator input — so guest `wasi:blobstore` containers map
-//! elsewhere by construction. One blob per release, named as omnia's
+//! never an operator input, and one the `wasi:blobstore` view refuses — so
+//! no guest container is it. One blob per release, named as omnia's
 //! `FsStore` files it (`namespace_name@version.wasm`); a blob already there
 //! is never replaced, so a stored release is final until removed.
 
@@ -13,10 +13,7 @@ use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use omnia_plugin::{PackageStore, Reference};
 
-use crate::Client;
-
-// The store names its own container, so no guest container can be it.
-const STORE_CONTAINER: &str = "omnia-plugins";
+use crate::{Client, STORE_CONTAINER};
 
 impl PackageStore for Client {
     fn get<'a>(&'a self, reference: &'a Reference) -> BoxFuture<'a, Result<Option<Vec<u8>>>> {
@@ -36,8 +33,17 @@ impl PackageStore for Client {
             let create_only = BlobClientUploadOptions::default().if_not_exists();
             match blob.upload(content, Some(create_only)).await {
                 Ok(_) => Ok(()),
-                // a release already stored stays as it is
-                Err(err) if err.http_status() == Some(StatusCode::Conflict) => Ok(()),
+                // a release already stored stays as it is: the service answers
+                // `If-None-Match: *` with 409 `BlobAlreadyExists`, and its
+                // conditional-header contract documents 412 for the same case
+                Err(err)
+                    if matches!(
+                        err.http_status(),
+                        Some(StatusCode::Conflict | StatusCode::PreconditionFailed)
+                    ) =>
+                {
+                    Ok(())
+                }
                 Err(err) => Err(err).context("uploading package"),
             }
         }

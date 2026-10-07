@@ -18,12 +18,50 @@ MSRV: Rust 1.99
 | `KAFKA_USERNAME` | no | | SASL username (enables `SASL_SSL`) |
 | `KAFKA_PASSWORD` | no | | SASL password |
 | `KAFKA_PARTITION_COUNT` | no | `12` | Partition count for custom partitioner |
+| `KAFKA_PARTITIONER` | no | `kafkajs` | Key-to-partition scheme for sends without `metadata["partition"]`: `kafkajs` matches the Node and .NET producers, `java` matches Kafka's Java client |
 | `KAFKA_TOPICS` | no | | Comma-separated topics for consumer |
 | `KAFKA_CONSUMER_GROUP` | no | `wrt-kafka-consumer` | Consumer group ID |
+| `KAFKA_COMMIT_INTERVAL_MS` | no | `200` | How often processed offsets are committed; bounds how much a restart replays |
 | `KAFKA_REGISTRY_URL` | no | | Schema Registry URL |
 | `KAFKA_REGISTRY_API_KEY` | no | | Schema Registry API key |
 | `KAFKA_REGISTRY_API_SECRET` | no | | Schema Registry API secret |
 | `KAFKA_REGISTRY_CACHE_TTL` | no | `3600` | Schema cache TTL in seconds |
+
+## Behaviour
+
+### Consuming
+
+Each record reaches the guest with `metadata` carrying `key`, `partition`, `offset`, `timestamp` and the record's headers. A payload on a topic with a registered schema is unwrapped and validated when it carries the Confluent wire-format header (first byte `0x00`), and passed through untouched when it does not. At most 64 records are being handled at once. Records sharing a key are handled one at a time in offset order; records with different keys run concurrently.
+
+### Offsets
+
+Delivery is at-least-once. A record's offset is eligible to commit once the guest's handler has returned — with `Ok`, with `Err`, by trapping, or by timing out — and every message the guest sent before returning has been acknowledged by the broker. Offsets are committed every `KAFKA_COMMIT_INTERVAL_MS`, so a crash or redeploy replays at most that much input plus the records still waiting on a broker acknowledgement; guests must tolerate seeing a record twice. A returned `Err` does not cause redelivery; it is logged and counted.
+
+### Producing
+
+`send` returns once librdkafka has queued the message; an `Err` means it was refused (queue full, too large, invalid partition) and nothing was sent. Delivery happens in the background with librdkafka's retries, up to 120 s; a message that cannot be delivered in that time is logged with its key and counted, and the record that produced it is still committed. A message with no `metadata["key"]` is sent with a null key. `metadata["partition"]` takes precedence over the partitioner.
+
+### Failure and shutdown
+
+A fatal consumer error (librdkafka has given up on the consumer) ends the subscription and the process exits non-zero for the orchestrator to restart; so does a record for which the host could not load or instantiate a guest, since every record would fail the same way. Transient errors are logged and retried by librdkafka. On shutdown the producer is flushed for up to 10 s and the consumer commits what it has stored.
+
+### Counters
+
+| Counter | Counts |
+|---------|--------|
+| `discarded_messages` | Framed payload that failed to decode |
+| `publish_refused` | librdkafka refused to enqueue |
+| `delivery_failures` | Queued message not delivered within 120 s |
+| `unacked_messages` | Token dropped without an ack: the host ran no guest for the record |
+
+### Gauges
+
+Emitted at `trace` level, like the runtime's pool gauges, whenever either changes.
+
+| Gauge | Measures |
+|-------|----------|
+| `kafka_in_flight` | Records with the host, out of 64. Pinned at 64 under lag: the slot count is the limit |
+| `kafka_parked` | Records waiting behind a key already in flight, out of 4096. Climbing while `kafka_in_flight` is low: fewer distinct keys than slots |
 
 ## Usage
 
@@ -54,12 +92,15 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging` boundary against a
-real broker: keyed sends must land on the partitions the KafkaJS-compatible
-partitioner predicts, and (when a Schema Registry is reachable) sends must
-carry the Confluent wire format and decode back through `subscribe`, while a
-message framed under a schema id other than the topic's latest still decodes
-(the mismatch is only logged). The tests are `#[ignore]`d so they never run in
-CI; run them explicitly:
+real broker: keyed sends must land on the partitions the configured
+partitioner predicts, under both the `kafkajs` and `java` schemes, and (when a
+Schema Registry is reachable) framed sends must carry the Confluent wire
+format and decode back through `subscribe`, while an unframed payload on a
+topic that has a schema is delivered unchanged and a message framed under a
+schema id other than the topic's latest still decodes (the mismatch is only
+logged). `at_least_once` acks received messages in various orders and checks
+what is yielded and what is committed. The tests are `#[ignore]`d so they
+never run in CI; run them explicitly:
 
 ```bash
 # One container provides both the broker and a schema registry:

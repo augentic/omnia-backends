@@ -92,20 +92,20 @@ omnia-wasi-sql = { version = "0.37.0", default-features = false }
 omnia-wasi-vault = "0.37.0"
 
 [patch.crates-io]
-omnia = { git = "https://github.com/augentic/omnia" }
-omnia-core = { git = "https://github.com/augentic/omnia" }
-omnia-plugin = { git = "https://github.com/augentic/omnia" }
-omnia-sdk = { git = "https://github.com/augentic/omnia" }
-omnia-test = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-docstore = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-identity = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-messaging = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-model = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-otel = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-sql = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-vault = { git = "https://github.com/augentic/omnia" }
+omnia = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-core = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-plugin = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-sdk = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-test = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-wasi-docstore = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-wasi-identity = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-wasi-messaging = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-wasi-model = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-wasi-otel = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-wasi-sql = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia-wasi-vault = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
 
 [profile.release]
 lto = true

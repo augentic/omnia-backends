@@ -1,37 +1,69 @@
 #![doc = include_str!("../README.md")]
 
+mod dispatch;
 mod messaging;
 mod partitioner;
 mod registry;
+mod tracker;
 
 use std::fmt::{self, Debug};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use omnia::Backend;
 use rand::random_range;
-use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::producer::{DeliveryResult, ProducerContext, ThreadedProducer};
+use rdkafka::consumer::Consumer;
+use rdkafka::producer::{DeliveryResult, Producer, ProducerContext, ThreadedProducer};
 use rdkafka::{ClientConfig, ClientContext, Message as _};
+use tokio::task::JoinHandle;
 use tracing::instrument;
 
+use crate::dispatch::{KafkaConsumer, KafkaContext, Shared};
 use crate::partitioner::Partitioner;
 use crate::registry::Registry;
 
 const DEFAULT_GROUP: &str = "wrt-kafka-consumer";
 
+// Apache Kafka's own producer default (`delivery.timeout.ms`): long enough
+// to ride out a leader election or a rolling broker restart. librdkafka's is
+// 5 minutes. A record's offset is held until its sends resolve, so this also
+// bounds how long an unreachable broker stalls commits.
+const MESSAGE_TIMEOUT: &str = "120000";
+
+// How long shutdown waits for queued produces to reach the broker.
+const PRODUCER_FLUSH: Duration = Duration::from_secs(10);
+
 /// Kafka backend client with producer, optional consumer, and optional schema registry.
 #[derive(Clone)]
 pub struct Client {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     producer: ThreadedProducer<Tracer>,
     partitioner: Partitioner,
     registry: Option<Registry>,
-    consumer: Option<Arc<StreamConsumer>>,
+    shared: Arc<Shared>,
+    forwarder: Mutex<Option<JoinHandle<()>>>,
+    consumer: Option<Arc<KafkaConsumer>>,
 }
 
 impl Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KafkaClient").finish()
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Err(error) = self.producer.flush(PRODUCER_FLUSH) {
+            tracing::warn!("producer flush on shutdown: {error}");
+        }
+        self.shared.stop();
+        if let Some(task) = self.forwarder.get_mut().expect("forwarder").take() {
+            task.abort();
+        }
     }
 }
 
@@ -41,36 +73,57 @@ impl Backend for Client {
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
         let mut config = ClientConfig::from(&options);
+        config.set("message.timeout.ms", MESSAGE_TIMEOUT);
 
-        // producer
-        let producer = config.create_with_context(Tracer {}).context("issue creating producer")?;
+        let shared = Shared::new();
+        let producer = config
+            .create_with_context(Tracer {
+                shared: Arc::clone(&shared),
+            })
+            .context("issue creating producer")?;
 
-        // custom partitioner and maybe schema registry
-        let partitioner = Partitioner::new(options.partition_count);
+        let partitioner = Partitioner::new(options.partition_count, options.partitioner);
         let registry = options.registry.map(Registry::new);
 
-        // maybe consumer
         let consumer = if let Some(consumer_options) = options.consumer {
             let group_id = consumer_options.group_id.as_deref().unwrap_or(DEFAULT_GROUP);
             config.set("group.id", group_id);
+            // the tracker decides when a record is done; librdkafka commits
+            // the stored offsets on its own thread
+            config.set("enable.auto.offset.store", "false");
+            config.set("enable.auto.commit", "true");
+            config.set("auto.commit.interval.ms", options.commit_interval_ms.to_string());
+            // librdkafka queues a partition's fetch whole before the next
+            // partition's. At the 1 MiB default one partition's few repeated
+            // keys fill the gate's parked queues before any other partition is
+            // seen; at 64 KiB each contributes a short run and the keys
+            // interleave. A record larger than this is still fetched whole.
+            config.set("max.partition.fetch.bytes", "65536");
 
-            let consumer: StreamConsumer = config.create().context("issue creating consumer")?;
+            let consumer: KafkaConsumer = config
+                .create_with_context(KafkaContext::new(Arc::clone(&shared)))
+                .context("issue creating consumer")?;
 
-            // subscribe to topics
             let topics = consumer_options.topics.iter().map(String::as_str).collect::<Vec<_>>();
             consumer.subscribe(&topics).context("issue subscribing to topics")?;
             tracing::debug!("subscribed to topics: {topics:?}");
 
-            Some(Arc::new(consumer))
+            let consumer = Arc::new(consumer);
+            shared.set_consumer(&consumer);
+            Some(consumer)
         } else {
             None
         };
 
         Ok(Self {
-            producer,
-            partitioner,
-            registry,
-            consumer,
+            inner: Arc::new(Inner {
+                producer,
+                partitioner,
+                registry,
+                shared,
+                forwarder: Mutex::new(None),
+                consumer,
+            }),
         })
     }
 }
@@ -78,6 +131,8 @@ impl Backend for Client {
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
     use fromenv::{FromEnv, ParseResult};
+
+    use crate::partitioner::PartitionerScheme;
 
     /// Connection options for the Kafka backend.
     #[derive(Debug, Clone, FromEnv)]
@@ -99,6 +154,12 @@ mod config {
         /// Partition count for custom partitioner.
         #[env(from = "KAFKA_PARTITION_COUNT", default = "12")]
         pub partition_count: i32,
+        /// Key-to-partition scheme when a send has no `metadata["partition"]`.
+        #[env(from = "KAFKA_PARTITIONER", default = "kafkajs", with = partitioner)]
+        pub partitioner: PartitionerScheme,
+        /// How often processed offsets are committed, in milliseconds.
+        #[env(from = "KAFKA_COMMIT_INTERVAL_MS", default = "200")]
+        pub commit_interval_ms: u64,
         /// Optional consumer configuration.
         #[env(nested)]
         pub consumer: Option<ConsumerOptions>,
@@ -139,8 +200,28 @@ mod config {
     fn split(s: &str) -> ParseResult<Vec<String>> {
         Ok(s.split(',').map(ToOwned::to_owned).collect())
     }
+
+    fn partitioner(value: &str) -> ParseResult<PartitionerScheme> {
+        match value {
+            "kafkajs" => Ok(PartitionerScheme::KafkaJs),
+            "java" => Ok(PartitionerScheme::Java),
+            other => Err(UnknownPartitioner(other.to_owned()).into()),
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnknownPartitioner(String);
+
+    impl std::fmt::Display for UnknownPartitioner {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "unknown KAFKA_PARTITIONER `{}`", self.0)
+        }
+    }
+
+    impl std::error::Error for UnknownPartitioner {}
 }
 pub use config::{ConnectOptions, ConsumerOptions, RegistryOptions};
+pub use partitioner::PartitionerScheme;
 
 impl From<&ConnectOptions> for ClientConfig {
     fn from(kafka: &ConnectOptions) -> Self {
@@ -170,25 +251,42 @@ impl omnia::FromEnv for ConnectOptions {
 }
 
 /// Kafka producer delivery callback that logs send results.
-pub struct Tracer;
-impl ClientContext for Tracer {}
-impl ProducerContext for Tracer {
-    type DeliveryOpaque = ();
+pub struct Tracer {
+    shared: Arc<Shared>,
+}
 
-    fn delivery(&self, delivery_result: &DeliveryResult<'_>, (): Self::DeliveryOpaque) {
+impl ClientContext for Tracer {}
+
+impl ProducerContext for Tracer {
+    type DeliveryOpaque = usize;
+
+    fn delivery(
+        &self, delivery_result: &DeliveryResult<'_>, delivery_opaque: Self::DeliveryOpaque,
+    ) {
+        let id = u64::try_from(delivery_opaque).unwrap_or(u64::MAX);
         match delivery_result {
-            Ok(msg) => {
-                let key: &str = msg.key_view().unwrap().unwrap();
+            Ok(message) => {
+                let key = record_key(message);
                 tracing::debug!(
                     "sent message {key} in offset {offset} of partition {partition}",
-                    offset = msg.offset(),
-                    partition = msg.partition()
+                    offset = message.offset(),
+                    partition = message.partition()
                 );
             }
-            Err((err, message)) => {
-                let key: &str = message.key_view().unwrap().unwrap();
-                tracing::error!("Failed to send message {key}: {err}");
+            Err((error, message)) => {
+                let key = record_key(message);
+                tracing::error!("failed to deliver message {key}: {error}");
+                tracing::info!(monotonic_counter.delivery_failures = 1, key = %key);
             }
         }
+        self.shared.note_delivered(id);
+    }
+}
+
+fn record_key(message: &impl rdkafka::Message) -> String {
+    match message.key_view::<str>() {
+        Some(Ok(key)) => key.to_owned(),
+        Some(Err(_)) => "<non-utf8>".to_owned(),
+        None => "<null>".to_owned(),
     }
 }

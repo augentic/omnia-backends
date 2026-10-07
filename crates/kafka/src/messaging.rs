@@ -1,21 +1,24 @@
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use futures::Stream;
 use futures::future::FutureExt;
-use futures::stream::StreamExt;
 use futures::task::{Context, Poll};
 use omnia_wasi_messaging::{
-    Client, FutureResult, Message, Metadata, RequestOptions, Subscriptions, WasiMessagingCtx,
+    Client, FutureResult, Message, RequestOptions, Subscriptions, WasiMessagingCtx,
 };
-use rdkafka::Message as _;
-use rdkafka::message::{Headers, OwnedMessage};
+use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::BaseRecord;
 use tokio::sync::mpsc;
 
+use crate::dispatch;
+
 const CAPACITY: usize = 1024;
+
+// One retry, long enough for a full queue to drain a slot.
+const QUEUE_RETRY: Duration = Duration::from_millis(20);
 
 impl WasiMessagingCtx for crate::Client {
     fn connect(&self) -> FutureResult<Arc<dyn Client>> {
@@ -24,64 +27,25 @@ impl WasiMessagingCtx for crate::Client {
     }
 }
 
-fn from_kafka(msg: &OwnedMessage, payload: Vec<u8>) -> Message {
-    let metadata = msg.headers().map(|headers| {
-        let mut md = HashMap::new();
-        for h in headers.iter() {
-            let bytes = h.value.unwrap_or_default();
-            md.insert(h.key.to_string(), String::from_utf8_lossy(bytes).to_string());
-        }
-        Metadata { inner: md }
-    });
-
-    let mut message = Message::new(payload);
-    message.topic = msg.topic().to_string();
-    message.metadata = metadata;
-    message
-}
-
 impl Client for crate::Client {
     fn subscribe(&self) -> FutureResult<Subscriptions> {
         let client = self.clone();
 
         async move {
-            let Some(consumer) = client.consumer else {
+            let Some(consumer) = client.inner.consumer.clone() else {
                 return Err(anyhow!("No topics specified"));
             };
-            let registry = client.registry;
+            let mut forwarder = client.inner.forwarder.lock().expect("forwarder");
+            if forwarder.is_some() {
+                return Err(anyhow!("already subscribed"));
+            }
+            let registry = client.inner.registry.clone();
+            let shared = Arc::clone(&client.inner.shared);
 
-            // forward the consumer stream to the subscriber
             let (sender, receiver) = mpsc::channel::<Message>(CAPACITY);
-            tokio::spawn(async move {
-                consumer
-                    .stream()
-                    .filter_map(|res| async {
-                        res.map_or_else(
-                            |e| {
-                                tracing::error!("kafka consumer error: {e}");
-                                None
-                            },
-                            Some,
-                        )
-                    })
-                    .for_each(|msg| {
-                        let sender = sender.clone();
-                        let registry = registry.clone();
-                        async move {
-                            let payload = msg.payload().unwrap_or_default().to_vec();
-                            let decoded = if let Some(sr) = &registry {
-                                sr.decode(msg.topic(), &payload).await
-                            } else {
-                                payload
-                            };
-                            let message = from_kafka(&msg.detach(), decoded);
-                            if let Err(e) = sender.send(message).await {
-                                tracing::error!("failed to send message to subscriber: {e}");
-                            }
-                        }
-                    })
-                    .await;
-            });
+            shared.install_sender(sender);
+            *forwarder = Some(dispatch::spawn(shared, consumer, registry));
+            drop(forwarder);
 
             Ok(Box::pin(Subscriber { receiver }) as Subscriptions)
         }
@@ -92,34 +56,50 @@ impl Client for crate::Client {
         let client = self.clone();
 
         async move {
-            // schema registry validation when available
-            let payload = if let Some(sr) = &client.registry {
-                sr.encode(&topic, message.payload).await
+            let payload = if let Some(registry) = &client.inner.registry {
+                registry.encode(&topic, message.payload).await
             } else {
                 message.payload
             };
 
             let metadata = message.metadata.unwrap_or_default();
             let now = chrono::Utc::now().timestamp_millis();
+            let key = metadata.get("key").cloned();
+            let partition = explicit_partition(&metadata).or_else(|| {
+                key.as_deref().map(|key| client.inner.partitioner.partition(key.as_bytes()))
+            });
 
-            let key = metadata.get("key").cloned().unwrap_or_default();
-            let mut record =
-                BaseRecord::to(&topic).payload(&payload).key(key.as_bytes()).timestamp(now);
+            let id = client.inner.shared.next_send_id();
+            let opaque = usize::try_from(id).expect("send id fits a pointer");
+            let key_bytes = key.as_deref().map(str::as_bytes);
 
-            // an explicit partition, else the key's KafkaJS partition
-            let partition = metadata.get("partition").cloned().unwrap_or_default();
-            let partition = partition.parse().unwrap_or(-1);
-            if partition >= 0 {
-                record = record.partition(partition);
-            } else if let Some(key) = metadata.get("key") {
-                let partition = client.partitioner.partition(key.as_bytes());
-                record = record.partition(partition);
+            let mut attempt = enqueue(
+                &client.inner.producer,
+                &topic,
+                &payload,
+                key_bytes,
+                partition,
+                now,
+                opaque,
+            );
+            if attempt.as_ref().is_err_and(queue_full) {
+                tokio::time::sleep(QUEUE_RETRY).await;
+                attempt = enqueue(
+                    &client.inner.producer,
+                    &topic,
+                    &payload,
+                    key_bytes,
+                    partition,
+                    now,
+                    opaque,
+                );
             }
-
-            if let Err((e, _)) = client.producer.send(record) {
-                tracing::error!("producer::error {e}");
+            if let Err(error) = attempt {
+                // no delivery callback will fire for a record that never queued
+                client.inner.shared.note_delivered(id);
+                tracing::info!(monotonic_counter.publish_refused = 1, topic = %topic);
+                return Err(anyhow!(error));
             }
-
             Ok(())
         }
         .boxed()
@@ -129,6 +109,34 @@ impl Client for crate::Client {
         &self, _topic: String, _message: Message, _options: Option<RequestOptions>,
     ) -> FutureResult<Message> {
         async move { unimplemented!() }.boxed()
+    }
+}
+
+fn explicit_partition(metadata: &omnia_wasi_messaging::Metadata) -> Option<i32> {
+    metadata
+        .get("partition")
+        .and_then(|value| value.parse().ok())
+        .filter(|partition| *partition >= 0)
+}
+
+const fn queue_full(error: &KafkaError) -> bool {
+    matches!(error, KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull))
+}
+
+fn enqueue(
+    producer: &rdkafka::producer::ThreadedProducer<crate::Tracer>, topic: &str, payload: &[u8],
+    key: Option<&[u8]>, partition: Option<i32>, timestamp: i64, opaque: usize,
+) -> Result<(), KafkaError> {
+    let mut record =
+        BaseRecord::with_opaque_to(topic, opaque).payload(payload).timestamp(timestamp);
+    if let Some(partition) = partition {
+        record = record.partition(partition);
+    }
+    // `.key()` changes the record's key type, so each arm maps its own error.
+    if let Some(key) = key {
+        producer.send(record.key(key)).map_err(|(error, _)| error)
+    } else {
+        producer.send(record).map_err(|(error, _)| error)
     }
 }
 

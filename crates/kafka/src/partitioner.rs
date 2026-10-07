@@ -1,24 +1,89 @@
-// KafkaJS's default partitioner, so keyed sends land on the partitions the
-// Node publishers on the same cluster use. KafkaJS hashes with a murmur2 run
-// on JS Numbers — f64 arithmetic with 32-bit bitwise operators — which is not
-// librdkafka's murmur2, so the arithmetic below reproduces JS rather than
-// calling a murmur2 crate.
-#[derive(Clone)]
+// Keyed sends land on the partitions the other publishers on the cluster use.
+// `KafkaJs` reproduces KafkaJS's murmur2, which runs on JS Numbers — f64
+// arithmetic with 32-bit bitwise operators — rather than librdkafka's.
+// `Java` is Kafka's `Utils.murmur2`, wrapping 32-bit integers throughout.
+#[derive(Clone, Copy)]
 pub struct Partitioner {
     count: i32,
+    scheme: PartitionerScheme,
+}
+
+/// Key-to-partition scheme for sends that do not set `metadata["partition"]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PartitionerScheme {
+    /// `KafkaJS` murmur2, matching the Node and .NET producers.
+    #[default]
+    KafkaJs,
+    /// Kafka's `Utils.murmur2`, matching the Java client.
+    Java,
 }
 
 impl Partitioner {
     #[must_use]
-    pub const fn new(count: i32) -> Self {
-        Self { count }
+    pub const fn new(count: i32, scheme: PartitionerScheme) -> Self {
+        Self { count, scheme }
+    }
+
+    #[must_use]
+    pub fn partition(self, key: &[u8]) -> i32 {
+        match self.scheme {
+            PartitionerScheme::KafkaJs => self.kafkajs(key),
+            PartitionerScheme::Java => java_partition(key, self.count),
+        }
     }
 
     // kafkajs/src/producer/partitioners/default/partitioner.js (v1.15.0)
-    #[must_use]
-    pub fn partition(&self, key: &[u8]) -> i32 {
+    fn kafkajs(self, key: &[u8]) -> i32 {
         to_positive(murmur2(key)) % self.count
     }
+}
+
+// Kafka's `Utils.murmur2` / `toPositive`: wrapping `u32` arithmetic, then
+// the non-negative hash modulo the partition count.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "Java Utils.murmur2 wraps the byte length and the hash through i32"
+)]
+fn java_murmur2(data: &[u8]) -> i32 {
+    const SEED: u32 = 0x9747_b28c;
+    const M: u32 = 0x5bd1_e995;
+    const R: u32 = 24;
+
+    let length = data.len() as u32;
+    let mut hash = SEED ^ length;
+    let mut index = 0;
+    while index + 4 <= data.len() {
+        let mut chunk =
+            u32::from_le_bytes([data[index], data[index + 1], data[index + 2], data[index + 3]]);
+        chunk = chunk.wrapping_mul(M);
+        chunk ^= chunk >> R;
+        chunk = chunk.wrapping_mul(M);
+        hash = hash.wrapping_mul(M);
+        hash ^= chunk;
+        index += 4;
+    }
+
+    let rest = data.len() - index;
+    if rest >= 3 {
+        hash ^= u32::from(data[index + 2]) << 16;
+    }
+    if rest >= 2 {
+        hash ^= u32::from(data[index + 1]) << 8;
+    }
+    if rest >= 1 {
+        hash ^= u32::from(data[index]);
+        hash = hash.wrapping_mul(M);
+    }
+
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(M);
+    hash ^= hash >> 15;
+    hash as i32
+}
+
+fn java_partition(key: &[u8], count: i32) -> i32 {
+    (java_murmur2(key) & 0x7fff_ffff) % count
 }
 
 // kafkajs/src/producer/partitioners/default/murmur2.js (v1.15.0)
@@ -243,7 +308,7 @@ mod tests {
         ];
 
         for case in cases {
-            let got = Partitioner::new(12).partition(&case.key);
+            let got = Partitioner::new(12, PartitionerScheme::KafkaJs).partition(&case.key);
             assert_eq!(
                 got,
                 case.expected,
@@ -252,6 +317,39 @@ mod tests {
                 got,
                 case.expected
             );
+        }
+
+        // Kafka's Utils.murmur2 over the same keys, 12 partitions.
+        let java = [
+            ("1039-36302-36840-2-9f138052", 4),
+            ("1388-20023-36900-2-c9985f66", 0),
+            ("1175-03505-36600-2-126dd9ca", 1),
+            ("1011-98208-36480-2-9eef750a", 8),
+            ("233-75504-36900-2-609151bd", 10),
+            ("1182-07205-22440-2-0ad4507d", 9),
+            ("1010-98110-23700-2-295bfb4c", 10),
+            ("1137-01302-23820-2-d560d49a", 4),
+            ("599999", 3),
+        ];
+        let partitioner = Partitioner::new(12, PartitionerScheme::Java);
+        for (key, expected) in java {
+            assert_eq!(partitioner.partition(key.as_bytes()), expected, "java partition of {key}");
+        }
+    }
+
+    #[test]
+    fn java_murmur2_vectors() {
+        // Kafka's UtilsTest.
+        let cases = [
+            ("21", -973_932_308),
+            ("foobar", -790_332_482),
+            ("a-little-bit-long-string", -985_981_536),
+            ("a-little-bit-longer-string", -1_486_304_829),
+            ("abc", 479_470_107),
+            ("lkjh234lh9fiuh90y23oiuhsafujhadof229phr9h19h89h8", -58_897_971),
+        ];
+        for (key, expected) in cases {
+            assert_eq!(java_murmur2(key.as_bytes()), expected, "java murmur2 of {key}");
         }
     }
 
@@ -263,7 +361,7 @@ mod tests {
 
     #[test]
     fn load_partitions() {
-        let partitioner = Partitioner::new(12);
+        let partitioner = Partitioner::new(12, PartitionerScheme::KafkaJs);
         let data = include_bytes!("../data/partitions.csv");
         let mut reader = csv::ReaderBuilder::new().from_reader(data.as_slice());
 

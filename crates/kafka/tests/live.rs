@@ -1,7 +1,7 @@
 //! Live tests for the Kafka backend, driven through the `omnia:messaging`
 //! host boundary (`WasiMessagingCtx` + the `Client` producer/consumer proxy).
-//! A raw `rdkafka` consumer observes landed partitions and wire bytes, since
-//! the boundary `Message` deliberately does not expose them.
+//! A raw `rdkafka` consumer observes landed partitions, wire bytes, and the
+//! group's committed offsets.
 //!
 //! `#[ignore]`d so it never touches the network in CI. Run against a reachable
 //! broker (`KAFKA_BROKERS`, plus `KAFKA_REGISTRY_URL` for the registry
@@ -14,9 +14,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use futures::StreamExt;
 use omnia::Backend;
-use omnia_kafka::{Client, ConnectOptions, ConsumerOptions, RegistryOptions};
+use omnia_kafka::{Client, ConnectOptions, ConsumerOptions, PartitionerScheme, RegistryOptions};
 use omnia_wasi_messaging::{
-    Client as MessagingClient, Message, Metadata, Subscriptions, WasiMessagingCtx,
+    Ack, Client as MessagingClient, Message, Metadata, Subscriptions, WasiMessagingCtx,
 };
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
@@ -81,6 +81,23 @@ fn observer(topic: &str) -> Result<StreamConsumer> {
     Ok(consumer)
 }
 
+fn options(
+    partition_count: i32, partitioner: PartitionerScheme, consumer: Option<ConsumerOptions>,
+    registry: Option<RegistryOptions>,
+) -> ConnectOptions {
+    ConnectOptions {
+        client_id: "omnia-live".to_owned(),
+        brokers: brokers(),
+        username: std::env::var("KAFKA_USERNAME").ok(),
+        password: std::env::var("KAFKA_PASSWORD").ok(),
+        partition_count,
+        partitioner,
+        commit_interval_ms: 200,
+        consumer,
+        registry,
+    }
+}
+
 fn keyed_message(payload: &str, metadata: &[(&str, &str)]) -> Message {
     let mut message = Message::new(payload.as_bytes().to_vec());
     let mut md = Metadata::new();
@@ -97,28 +114,30 @@ fn keyed_message(payload: &str, metadata: &[(&str, &str)]) -> Message {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable Kafka broker (KAFKA_BROKERS); run with --run-ignored"]
 async fn keyed_sends() -> Result<()> {
-    let topic = unique("omnia.live.partitions");
-    create_topic(&topic, 12).await?;
-
-    let options = ConnectOptions {
-        client_id: "omnia-live".to_owned(),
-        brokers: brokers(),
-        username: std::env::var("KAFKA_USERNAME").ok(),
-        password: std::env::var("KAFKA_PASSWORD").ok(),
-        partition_count: 12,
-        consumer: None,
-        registry: None,
-    };
-    let backend = Client::connect_with(options).await?;
-    let producer: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
-
-    let cases: Vec<Case> = vec![
+    let kafkajs = vec![
         ("kafkajs-vector-a", vec![("key", "1039-36302-36840-2-9f138052")], 7),
         ("kafkajs-vector-b", vec![("key", "1182-07205-22440-2-0ad4507d")], 3),
         ("kafkajs-vector-c", vec![("key", "599999")], 6),
         // Explicit partition metadata overrides the keyed partitioner.
         ("explicit-override", vec![("key", "599999"), ("partition", "9")], 9),
     ];
+    let java = vec![
+        ("java-vector-a", vec![("key", "1039-36302-36840-2-9f138052")], 4),
+        ("java-vector-b", vec![("key", "1182-07205-22440-2-0ad4507d")], 9),
+        ("java-vector-c", vec![("key", "599999")], 3),
+        ("explicit-override", vec![("key", "599999"), ("partition", "9")], 9),
+    ];
+    assert_keyed_sends(PartitionerScheme::KafkaJs, kafkajs).await?;
+    assert_keyed_sends(PartitionerScheme::Java, java).await?;
+    Ok(())
+}
+
+async fn assert_keyed_sends(scheme: PartitionerScheme, cases: Vec<Case>) -> Result<()> {
+    let topic = unique("omnia.live.partitions");
+    create_topic(&topic, 12).await?;
+
+    let backend = Client::connect_with(options(12, scheme, None, None)).await?;
+    let producer: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
 
     for (payload, metadata, _) in &cases {
         producer.send(topic.clone(), keyed_message(payload, metadata)).await?;
@@ -190,6 +209,8 @@ impl RegistrySubscriber {
             username: std::env::var("KAFKA_USERNAME").ok(),
             password: std::env::var("KAFKA_PASSWORD").ok(),
             partition_count: 1,
+            partitioner: PartitionerScheme::KafkaJs,
+            commit_interval_ms: 200,
             consumer: Some(ConsumerOptions {
                 topics: vec![topic.clone()],
                 group_id: Some(unique("omnia-live-registry")),
@@ -253,6 +274,253 @@ async fn registry_wire_format() -> Result<()> {
     let received = subscriber.next().await?;
     assert_eq!(received.payload, payload, "decoded payload round-trips");
     assert_eq!(received.topic, topic, "topic round-trips");
+    if let Some(ack) = &received.ack {
+        ack.ack();
+    }
+    Ok(())
+}
+
+// A topic with a registered subject whose producer writes plain JSON. The
+// guest must see those bytes unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs Kafka + Schema Registry (KAFKA_BROKERS, KAFKA_REGISTRY_URL); run with --run-ignored"]
+async fn registry_unframed_payload() -> Result<()> {
+    use rdkafka::producer::{FutureProducer, FutureRecord};
+    use schema_registry_client::rest::client_config::ClientConfig as RegistryClientConfig;
+    use schema_registry_client::rest::models::Schema;
+    use schema_registry_client::rest::schema_registry_client::{Client as _, SchemaRegistryClient};
+
+    let url = std::env::var("KAFKA_REGISTRY_URL")
+        .expect("KAFKA_REGISTRY_URL must be set for the registry live test");
+    let api_key = std::env::var("KAFKA_REGISTRY_API_KEY").unwrap_or_default();
+    let api_secret = std::env::var("KAFKA_REGISTRY_API_SECRET").unwrap_or_default();
+
+    let topic = unique("omnia.live.unframed");
+    create_topic(&topic, 1).await?;
+
+    let mut registry_config = RegistryClientConfig::new(vec![url.clone()]);
+    registry_config.basic_auth = Some((api_key.clone(), Some(api_secret.clone())));
+    let registry = SchemaRegistryClient::new(registry_config);
+    registry
+        .register_schema(
+            &format!("{topic}-value"),
+            &Schema::new(Some("JSON".to_owned()), r#"{"type":"object"}"#.to_owned()),
+            false,
+        )
+        .await
+        .map_err(|e| anyhow!("registering schema: {e:?}"))?;
+
+    let group = unique("omnia-live-unframed");
+    let backend = Client::connect_with(options(
+        1,
+        PartitionerScheme::KafkaJs,
+        Some(ConsumerOptions {
+            topics: vec![topic.clone()],
+            group_id: Some(group),
+        }),
+        Some(RegistryOptions {
+            url,
+            api_key,
+            api_secret,
+            cache_ttl_secs: 3600,
+        }),
+    ))
+    .await?;
+    let client: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
+    let mut subscription = client.subscribe().await?;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+
+    // Bypass the backend producer, which would frame a schema-backed topic.
+    let payload = br#"{"stationId":"42"}"#;
+    let producer: FutureProducer = raw_config().create().context("creating raw producer")?;
+    producer
+        .send(FutureRecord::to(&topic).payload(payload).key("station"), Duration::from_secs(10))
+        .await
+        .map_err(|(error, _)| anyhow!("raw produce: {error}"))?;
+
+    let received = tokio::time::timeout(RECV_TIMEOUT, subscription.next())
+        .await
+        .context("timed out waiting for unframed payload")?
+        .ok_or_else(|| anyhow!("subscription closed"))?;
+    assert_eq!(received.payload, payload, "unframed JSON is delivered unchanged");
+    if let Some(ack) = &received.ack {
+        ack.ack();
+    }
+    Ok(())
+}
+
+struct Held {
+    key: String,
+    payload: Vec<u8>,
+    offset: i64,
+    ack: Arc<dyn Ack>,
+}
+
+fn hold(mut message: Message) -> Result<Held> {
+    let metadata = message.metadata.as_ref().context("message has no metadata")?;
+    let key = metadata.get("key").cloned().context("message has no key")?;
+    let offset =
+        metadata.get("offset").context("message has no offset")?.parse().context("offset")?;
+    let ack = message.ack.take().context("message has no ack token")?;
+    Ok(Held {
+        key,
+        payload: message.payload,
+        offset,
+        ack,
+    })
+}
+
+async fn next_held(subscription: &mut omnia_wasi_messaging::Subscriptions) -> Result<Held> {
+    let message = tokio::time::timeout(RECV_TIMEOUT, subscription.next())
+        .await
+        .context("timed out waiting for a record")?
+        .ok_or_else(|| anyhow!("subscription closed"))?;
+    hold(message)
+}
+
+fn group_offset(group: &str, topic: &str) -> Result<Option<i64>> {
+    use rdkafka::consumer::BaseConsumer;
+    use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+
+    let consumer: BaseConsumer = raw_config()
+        .set("group.id", group)
+        .set("enable.auto.commit", "false")
+        .create()
+        .context("creating offset reader")?;
+    let mut list = TopicPartitionList::new();
+    list.add_partition(topic, 0);
+    let fetched = consumer
+        .committed_offsets(list, Duration::from_secs(10))
+        .context("fetching committed offsets")?;
+    let element = fetched
+        .elements_for_topic(topic)
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no committed offset for {topic}"))?;
+    element.error().context("committed offset")?;
+    Ok(match element.offset() {
+        Offset::Offset(offset) => Some(offset),
+        Offset::Invalid => None,
+        other => return Err(anyhow!("unexpected committed offset {other:?}")),
+    })
+}
+
+async fn wait_offset(group: &str, topic: &str, expected: i64) -> Result<()> {
+    let start = std::time::Instant::now();
+    let mut latest = None;
+    while start.elapsed() < Duration::from_secs(15) {
+        latest = group_offset(group, topic)?;
+        if latest == Some(expected) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(anyhow!("committed offset is {latest:?}, expected {expected}"))
+}
+
+// The in-flight gate and at-least-once commits, with the test playing the
+// host: it calls each record's ack token itself. A delivery that lands
+// before its offset is stored is `tracker`'s unit tests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs a reachable Kafka broker (KAFKA_BROKERS); run with --run-ignored"]
+async fn at_least_once() -> Result<()> {
+    // matches `dispatch::IN_FLIGHT`
+    const BOUND: usize = 64;
+
+    let topic = unique("omnia.live.offsets");
+    create_topic(&topic, 1).await?;
+    let group = unique("omnia-live-offsets");
+    let backend = Client::connect_with(options(
+        1,
+        PartitionerScheme::KafkaJs,
+        Some(ConsumerOptions {
+            topics: vec![topic.clone()],
+            group_id: Some(group.clone()),
+        }),
+        None,
+    ))
+    .await?;
+    let client: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
+    let mut subscription = client.subscribe().await?;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+
+    // 64 distinct keys in flight, a second record for k0 parked behind the
+    // first, and one more record that waits until a slot frees.
+    let mut produced = vec![("k0".to_owned(), "p0".to_owned()), ("k0".to_owned(), "p1".to_owned())];
+    for index in 1..BOUND {
+        produced.push((format!("k{index}"), format!("p{}", index + 1)));
+    }
+    produced.push(("k64".to_owned(), "p65".to_owned()));
+    for (key, payload) in &produced {
+        client.send(topic.clone(), keyed_message(payload, &[("key", key)])).await?;
+    }
+
+    let mut held = Vec::new();
+    for _ in 0..BOUND {
+        held.push(next_held(&mut subscription).await?);
+    }
+    let extra = tokio::time::timeout(Duration::from_secs(1), subscription.next()).await;
+    assert!(extra.is_err(), "the record past the in-flight bound waits for an ack");
+
+    let mut keys = HashMap::<String, usize>::new();
+    for record in &held {
+        *keys.entry(record.key.clone()).or_default() += 1;
+    }
+    assert!(keys.values().all(|count| *count == 1), "at most one record per key: {keys:?}");
+    assert!(!held.iter().any(|record| record.payload == b"p1"));
+
+    let index = held.iter().position(|record| record.payload == b"p0").context("missing p0")?;
+    let first = held.swap_remove(index);
+    assert_eq!(first.offset, 0);
+    first.ack.ack();
+
+    let parked = next_held(&mut subscription).await?;
+    assert_eq!(parked.payload, b"p1", "acking k0 yields the record parked behind it");
+    assert_eq!(parked.key, "k0");
+    held.push(parked);
+
+    let mut acked = 1usize;
+    while acked < produced.len() {
+        if held.is_empty() {
+            held.push(next_held(&mut subscription).await?);
+        }
+        held.pop().expect("a held record").ack.ack();
+        acked += 1;
+    }
+    let next_offset = i64::try_from(produced.len()).expect("produced");
+    wait_offset(&group, &topic, next_offset).await?;
+
+    // Five further records. Hold the second back, ack a later one first, and
+    // publish once more before acking the record that should wait on that send.
+    let phase: Vec<(&str, &str)> =
+        vec![("a", "a0"), ("b", "b0"), ("c", "c0"), ("d", "d0"), ("e", "e0")];
+    for (key, payload) in &phase {
+        client.send(topic.clone(), keyed_message(payload, &[("key", key)])).await?;
+    }
+    let mut phase_held = Vec::new();
+    for _ in 0..phase.len() {
+        phase_held.push(next_held(&mut subscription).await?);
+    }
+    phase_held.sort_by_key(|record| record.offset);
+    assert_eq!(phase_held[0].offset, next_offset);
+
+    phase_held[3].ack.ack();
+    phase_held[0].ack.ack();
+    wait_offset(&group, &topic, phase_held[1].offset).await?;
+
+    phase_held[1].ack.ack();
+    wait_offset(&group, &topic, phase_held[2].offset).await?;
+
+    client.send(topic.clone(), keyed_message("side", &[("key", "side")])).await?;
+    phase_held[2].ack.ack();
+    let tail = phase_held[4].offset;
+    wait_offset(&group, &topic, tail).await?;
+
+    drop(subscription);
+    drop(client);
+    drop(backend);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(group_offset(&group, &topic)?, Some(tail), "shutdown keeps the stored offset");
     Ok(())
 }
 

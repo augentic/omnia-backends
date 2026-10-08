@@ -20,6 +20,7 @@ async fn scenario() {
     merge_policy_resolves().await;
     merge_policy_beats_attributes().await;
     merge_policy_modify_delete().await;
+    merge_policy_binary().await;
     merge_up_to_date().await;
     label_the_checked_out_branch().await;
     pending_kinds().await;
@@ -191,6 +192,40 @@ async fn merge_policy_modify_delete() {
     assert!(merged.commit.is_some(), "the merge sealed");
     assert!(fs::metadata("moddel/keep.txt").is_err(), "the deleting side was kept");
     assert!(WasiVcs.pending(repo).await.expect("pending").is_empty(), "the copy is sealed");
+}
+
+// A blob no text encoding holds: a `union` over it cannot be sealed and leaves
+// the copy on its head with nothing of the attempt behind, and `theirs` lays
+// it byte for byte.
+async fn merge_policy_binary() {
+    let repo = "./binary";
+    let work = "./binary-work";
+    let ours_bytes: Vec<u8> = vec![0, 1, 2, 0xff, 0xfe, b'\n', 0x80];
+    let theirs_bytes: Vec<u8> = vec![0, 1, 3, 0xff, 0xc0, b'\n', 0x81];
+    WasiVcs.init(repo).await.expect("init");
+    fs::write("binary/blob.bin", [0u8, 1, 0xff]).expect("writing the base blob");
+    let base = WasiVcs.commit(repo, "base").await.expect("commit").expect("base");
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    fs::write("binary-work/blob.bin", &theirs_bytes).expect("writing theirs");
+    let theirs = WasiVcs.commit(work, "theirs").await.expect("commit").expect("theirs");
+    fs::write("binary/blob.bin", &ours_bytes).expect("writing ours");
+    let ours = WasiVcs.commit(repo, "ours").await.expect("commit").expect("ours");
+
+    let union = [rule("*.bin", Strategy::Union)];
+    let refused = WasiVcs.merge(repo, &theirs, "merge", &union).await;
+    assert!(matches!(refused, Err(Error::Other(_))), "a binary has no lines to union: {refused:?}");
+    assert_eq!(WasiVcs.head(repo).await.expect("head"), ours, "the head did not move");
+    assert_eq!(WasiVcs.pending(repo).await.expect("pending"), [], "nothing of the attempt is left");
+    assert_eq!(
+        fs::read("binary/blob.bin").expect("the blob"),
+        ours_bytes,
+        "the tree is ours again"
+    );
+
+    let policy = [rule("*.bin", Strategy::Theirs)];
+    let merged = WasiVcs.merge(repo, &theirs, "merge", &policy).await.expect("merge");
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert_eq!(fs::read("binary/blob.bin").expect("the blob"), theirs_bytes, "byte for byte");
 }
 
 // Labelling the branch the working copy sits on moves the branch and leaves the

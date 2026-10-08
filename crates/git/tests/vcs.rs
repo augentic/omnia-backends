@@ -79,6 +79,12 @@ async fn vcs_matrix() {
     assert_eq!(git.git(&at("attributed"), &["show", "HEAD:data.txt"]), "theirs");
     assert_eq!(git.git(&at("attributed"), &["status", "--porcelain"]), "");
     assert_eq!(git.git(&at("moddel"), &["diff", "--name-status", "HEAD^1", "HEAD"]), "D\tkeep.txt");
+    assert_eq!(
+        git.git(&at("binary"), &["rev-parse", "HEAD:blob.bin"]),
+        git.git(&at("binary"), &["rev-parse", "HEAD^2:blob.bin"]),
+        "the merge holds theirs' blob, not a re-encoding of it"
+    );
+    assert_eq!(git.git(&at("binary"), &["status", "--porcelain"]), "");
 
     // labelling the branch the copy sat on left the copy detached on its commit
     assert_eq!(git.git(&at("checked-out"), &["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD");
@@ -184,6 +190,21 @@ async fn vcs_hardening() {
     git.git(&noident, &["config", "--local", "user.name", ""]);
     git.git(&noident, &["config", "--local", "user.email", ""]);
 
+    // a repository whose own insteadOf carries its https remote onto the
+    // local origin, where the protocol rule would then let it through
+    let rewriter = at("rewriter");
+    seed(&git, &rewriter, "a.txt");
+    git.git(&rewriter, &["add", "-A"]);
+    git.git(&rewriter, &["commit", "-qm", "base"]);
+    git.git(&rewriter, &["remote", "add", "evil", "https://example.invalid/x.git"]);
+    let rewrite = format!("url.{}.insteadOf", origin.display());
+    git.git(&rewriter, &["config", "--local", &rewrite, "https://example.invalid/x.git"]);
+    assert_eq!(
+        git.git(&rewriter, &["remote", "get-url", "evil"]),
+        origin.display().to_string(),
+        "git itself would follow the rewrite onto the local origin"
+    );
+
     run(&git, &scratch, test_programs::VCS_HARDENING, vec![]).await;
 
     // nothing the repositories salted ran
@@ -198,6 +219,10 @@ async fn vcs_hardening() {
     assert_eq!(git.git(&origin, &["log", "-1", "--format=%s", "emery/hardened"]), "seal");
     assert!(!noident.join(".git/MERGE_HEAD").exists(), "the failed merge was unwound");
     assert_eq!(git.git(&noident, &["rev-list", "--count", "HEAD"]), "1", "its head did not move");
+
+    // the rewriting repository carried nothing onto the origin
+    let refs = git.git(&origin, &["for-each-ref", "--format=%(refname)"]);
+    assert_eq!(refs, "refs/heads/emery/hardened", "{refs}");
 }
 
 #[tokio::test]

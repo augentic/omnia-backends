@@ -35,9 +35,13 @@ const FORCED: [&str; 6] = [
 const HOST_KEPT: [(&str, &str); 2] =
     [("core.sshcommand", "core.sshCommand"), ("core.askpass", "core.askPass")];
 
-/// The `-c` overrides that hold one repository's operations to host policy.
+/// The `-c` overrides that hold one repository's operations to host policy,
+/// and the URL rewrite the repository set, if any, which no pin can undo.
 #[derive(Debug, Default)]
-pub struct Pins(Vec<String>);
+pub struct Pins {
+    pins: Vec<String>,
+    rewrite: Option<String>,
+}
 
 impl Pins {
     // Read the repository's configuration with its scopes and build the
@@ -47,11 +51,19 @@ impl Pins {
     pub async fn read(client: &Client, at: &Place) -> Result<Self> {
         let args = ["config", "--show-scope", "--list", "-z"];
         let output = client.git(Some(at), args, &[]).await?;
-        let settings = if output.status.success() { parse(&output.stdout) } else { Vec::new() };
+        let settings = if output.status.success() { parse(&output.text()) } else { Vec::new() };
         Ok(Self::build(&settings))
     }
 
     fn build(settings: &[Setting]) -> Self {
+        // a `url.<base>.insteadOf` the repository set is additive config no
+        // `-c` can cancel, and would carry a remote anywhere; it is named for
+        // the transport operations to refuse the repository on
+        let rewrite = settings
+            .iter()
+            .find(|s| s.scope == Scope::Repo && is_rewrite(&s.key))
+            .map(|s| s.key.clone());
+
         let mut pins: Vec<String> = FORCED.iter().map(|pin| (*pin).to_owned()).collect();
 
         // an SSH command or a credential prompt the repository set is replaced
@@ -79,12 +91,18 @@ impl Pins {
             }
         }
 
-        Self(pins)
+        Self { pins, rewrite }
     }
 
     // `-c <pin>` for each override, to lead a subcommand's arguments.
     pub fn args(&self) -> impl Iterator<Item = &str> {
-        self.0.iter().flat_map(|pin| ["-c", pin.as_str()])
+        self.pins.iter().flat_map(|pin| ["-c", pin.as_str()])
+    }
+
+    // The first `url.<base>.insteadOf` or `pushInsteadOf` key the repository
+    // itself set, as git lists it.
+    pub fn rewrite(&self) -> Option<&str> {
+        self.rewrite.as_deref()
     }
 }
 
@@ -162,6 +180,14 @@ fn repo_credential_keys(settings: &[Setting]) -> Vec<String> {
 // `credential.helper` or `credential.<url>.helper`.
 fn is_helper(key: &str) -> bool {
     key.starts_with("credential.") && key.rsplit_once('.').is_some_and(|(_, last)| last == "helper")
+}
+
+// `url.<base>.insteadOf` or `url.<base>.pushInsteadOf`.
+fn is_rewrite(key: &str) -> bool {
+    key.starts_with("url.")
+        && key
+            .rsplit_once('.')
+            .is_some_and(|(_, last)| matches!(last, "insteadof" | "pushinsteadof"))
 }
 
 #[cfg(test)]
@@ -248,6 +274,24 @@ mod tests {
                 .any(|w| w == ["-c", "credential.https://evil.example.helper="]),
             "a per-URL helper the repository set is reset"
         );
+    }
+
+    #[test]
+    fn repo_rewrite_named() {
+        let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0\
+                       local\0url./tmp/m.pushinsteadof\nhttps://github.com/\0";
+        let pins = Pins::build(&parse(listing));
+        assert_eq!(pins.rewrite(), Some("url./tmp/m.pushinsteadof"));
+        assert!(
+            !pins.args().any(|arg| arg.contains("insteadof")),
+            "a rewrite is refused on, never pinned"
+        );
+    }
+
+    #[test]
+    fn host_rewrite_left_alone() {
+        let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0";
+        assert_eq!(Pins::build(&parse(listing)).rewrite(), None);
     }
 
     #[test]

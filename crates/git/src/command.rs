@@ -11,6 +11,7 @@
 
 mod pins;
 
+use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io;
 use std::os::fd::{AsRawFd as _, RawFd};
@@ -35,13 +36,21 @@ const SCRUBBED: [&str; 4] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_
 const FIXED: [(&str, &str); 3] =
     [("GIT_TERMINAL_PROMPT", "0"), ("GIT_EDITOR", ":"), ("GIT_MERGE_AUTOEDIT", "no")];
 
-// What one git process said, both streams read lossily: a path git prints
-// is a WIT string on its way back to the guest.
+// What one git process said: stdout as the bytes git wrote, since a blob
+// read for a merge must round-trip whole, and stderr read lossily, since it
+// is only ever quoted back to the guest.
 #[derive(Debug)]
 pub struct Output {
     pub status: ExitStatus,
-    pub stdout: String,
+    pub stdout: Vec<u8>,
     pub stderr: String,
+}
+
+impl Output {
+    // stdout as text, for a hash, a path, or a listing on its way to the guest.
+    pub fn text(&self) -> Cow<'_, str> {
+        String::from_utf8_lossy(&self.stdout)
+    }
 }
 
 impl Client {
@@ -80,7 +89,7 @@ impl Client {
 
         Ok(Output {
             status: output.status,
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stdout: output.stdout,
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }

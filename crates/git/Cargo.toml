@@ -26,11 +26,11 @@ libc.workspace = true
 omnia.workspace = true
 omnia-wasi-vcs.workspace = true
 process-wrap = { workspace = true, features = ["kill-on-drop", "process-group", "tokio1"] }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["process", "rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
 omnia-test = { workspace = true, features = ["host"] }
-tempfile.workspace = true
 test-programs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

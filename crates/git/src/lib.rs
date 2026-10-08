@@ -41,8 +41,9 @@ impl Client {
         };
         let output = client.git(None, ["--version"], &[]).await?;
         ensure!(output.status.success(), "`git --version` failed: {}", output.stderr.trim());
-        let (major, minor, patch) = vcs::refusal::version(&output.stdout)
-            .with_context(|| format!("unrecognised `git --version`: {}", output.stdout.trim()))?;
+        let reported = output.text();
+        let (major, minor, patch) = vcs::refusal::version(&reported)
+            .with_context(|| format!("unrecognised `git --version`: {}", reported.trim()))?;
         ensure!(
             (major, minor) >= MIN_VERSION,
             "git {major}.{minor}.{patch} is older than {}.{}, the first with `config --show-scope`",

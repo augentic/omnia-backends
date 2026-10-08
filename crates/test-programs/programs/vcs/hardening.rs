@@ -3,25 +3,44 @@
 //! neutralised before it runs. The host lays a repository salted with a
 //! hostile `core.hooksPath`, `core.fsmonitor`, signing program, smudge
 //! filter, and remote receive-pack, a bare origin with its own hostile
-//! hooks, and a repository with no identity to seal a merge; this guest
+//! hooks, a repository with no identity to seal a merge, and one whose own
+//! `insteadOf` would carry an `https` remote onto a local path; this guest
 //! drives the operations that would fire each, and the host asserts no
-//! marker was written and the work still landed.
+//! marker was written, nothing was carried, and the work still landed.
 
 #![cfg(target_arch = "wasm32")]
 
 use std::fs;
 
-use omnia_sdk::vcs::{Vcs as _, WasiVcs};
+use omnia_sdk::vcs::{Error, Vcs as _, WasiVcs};
 
 omnia_sdk::command!(scenario);
 
 const REPO: &str = "./repo";
 const WORK: &str = "./work";
 const NOIDENT: &str = "./noident";
+const REWRITER: &str = "./rewriter";
 
 async fn scenario() {
     repo_config_runs_nothing().await;
     a_failed_merge_leaves_no_merge().await;
+    a_rewriting_repository_is_refused().await;
+}
+
+// The repository's `url.<local>.insteadOf=https://` would turn its `https`
+// remote into a local path, and the protocol rule would follow the rewrite;
+// a repository that rewrites URLs is refused on every transport instead.
+async fn a_rewriting_repository_is_refused() {
+    for result in
+        [WasiVcs.fetch(REWRITER, "evil").await, WasiVcs.push(REWRITER, "evil", "main").await]
+    {
+        match result {
+            Err(Error::Other(message)) => {
+                assert!(message.contains("insteadof"), "the rewrite is named: {message}");
+            }
+            other => panic!("a rewriting repository is refused, not {other:?}"),
+        }
+    }
 }
 
 async fn repo_config_runs_nothing() {

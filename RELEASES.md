@@ -18,13 +18,16 @@ Unreleased
   credential prompt, credential helper, or clean, smudge, or merge driver
   gives way to the operator's own value or to none; every guest string
   follows `--`, one that is empty or option-shaped is `not-found` before
-  any process runs; and a transport runs under `GIT_ALLOW_PROTOCOL` for
-  its kind, a local one with the far side's hooks disabled through the
-  pack command. A merge is held before its commit and the policy applied
-  by the backend from the three commits — over whatever the repository's
-  own attributes made of a path — so nothing of it is written into the
-  repository; a conflict no rule resolves comes back as data with the
-  merge aborted and the tree on its head, and no failed merge stays in
+  any process runs; a transport runs under `GIT_ALLOW_PROTOCOL` for its
+  kind, read from the URL as the host's configuration expands it, a local
+  one with the far side's hooks disabled through the pack command; and a
+  repository that sets a `url.<base>.insteadOf` of its own is refused on
+  every transport. A merge is held before its commit and the policy
+  applied by the backend from the three commits, byte for byte — over
+  whatever the repository's own attributes made of a path — so nothing of
+  it is written into the repository; a `union` over a binary fails the
+  merge; a conflict no rule resolves comes back as data with the merge
+  aborted and the tree on its head, and no failed merge stays in
   progress. A `label` on the branch the working copy sits on detaches the
   copy onto its commit first. A `clone` with a depth passes
   `--no-single-branch`, so a shallow clone still answers every label.

@@ -171,7 +171,9 @@ impl WasiVcsCtx for Client {
         async move {
             vetted(&url)?;
             let repo = Repo::open(&client, &at).await?;
-            let (protocol, pack) = transport(&client, &url, false);
+            repo.unrewritten()?;
+            let address = expand(&repo, &url, false).await;
+            let (protocol, pack) = transport(&client, &address, false);
             let depth = options.depth.map(|depth| depth.to_string());
             let mut args = vec!["clone".to_owned(), "--quiet".to_owned()];
             if let Some(pack) = pack {
@@ -197,7 +199,8 @@ impl WasiVcsCtx for Client {
         async move {
             vetted(&remote)?;
             let repo = Repo::open(&client, &repo).await?;
-            let address = resolve_remote(&repo, &remote, false).await;
+            repo.unrewritten()?;
+            let address = expand(&repo, &remote, false).await;
             let (protocol, pack) = transport(&client, &address, false);
             let mut args = vec!["fetch".to_owned(), "--quiet".to_owned()];
             if let Some(pack) = pack {
@@ -238,7 +241,8 @@ impl WasiVcsCtx for Client {
             vetted(&remote)?;
             vetted(&label)?;
             let repo = Repo::open(&client, &repo).await?;
-            let address = resolve_remote(&repo, &remote, true).await;
+            repo.unrewritten()?;
+            let address = expand(&repo, &remote, true).await;
             let (protocol, pack) = transport(&client, &address, true);
             let refspec = format!("refs/heads/{label}:refs/heads/{label}");
             let mut args = vec!["push".to_owned(), "--quiet".to_owned()];
@@ -268,7 +272,7 @@ impl Client {
         let args = ["rev-parse", "--verify", "--quiet", "--end-of-options", &spec];
         let output = self.git(Some(at), args, &[]).await?;
         if output.status.success() {
-            return Ok(output.stdout.trim().to_owned());
+            return Ok(output.text().trim().to_owned());
         }
         Err(match refusal::classify(&output.stderr) {
             Class::NotARepository => Error::NotARepository,
@@ -323,17 +327,31 @@ impl<'a> Repo<'a> {
         self.client.rev_parse(self.at, revision).await
     }
 
+    // A URL rewrite is the host's configuration to set: one the repository
+    // set is additive config no pin can cancel, so a transport operation
+    // refuses the repository whole rather than carry its remote anywhere.
+    fn unrewritten(&self) -> Result<()> {
+        if let Some(key) = self.pins.rewrite() {
+            let shown = self.shown();
+            let message = format!(
+                "{shown}: the repository sets {key}, and a URL rewrite is the host's to set"
+            );
+            return Err(Error::Other(message).into());
+        }
+        Ok(())
+    }
+
     async fn status(&self) -> Result<Vec<Change>> {
         let args = ["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"];
         let output = self.run(args, &self.shown(), "HEAD").await?;
-        Ok(pending(&output.stdout))
+        Ok(pending(&output.text()))
     }
 
     async fn conflicts(&self) -> Result<Vec<String>> {
         let args =
             ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=U", "-z"];
         let output = self.run(args, &self.shown(), "HEAD").await?;
-        Ok(nul_separated(&output.stdout))
+        Ok(nul_separated(&output.text()))
     }
 
     async fn resolve(&self, rules: &[Rule]) -> Result<Resolution> {
@@ -351,20 +369,29 @@ impl<'a> Repo<'a> {
     // history.
     async fn merge_base(&self) -> Result<Option<String>> {
         let output = self.git(["merge-base", "HEAD", "MERGE_HEAD"], &[]).await?;
-        Ok(output.status.success().then(|| output.stdout.trim().to_owned()))
+        Ok(output.status.success().then(|| output.text().trim().to_owned()))
     }
 
     // The paths the two sides differ on: every path the merge touched, where a
-    // policy rule may apply.
+    // policy rule may apply. A rename is its two paths, each ruled on its own.
     async fn touched(&self) -> Result<Vec<String>> {
-        let args =
-            ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "HEAD", "MERGE_HEAD"];
+        let args = [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "MERGE_HEAD",
+        ];
         let output = self.run(args, &self.shown(), "HEAD").await?;
-        Ok(nul_separated(&output.stdout))
+        Ok(nul_separated(&output.text()))
     }
 
-    // One commit's version of a path, or none when that commit lacks it.
-    async fn show(&self, revision: &str, path: &str) -> Result<Option<String>> {
+    // One commit's version of a path, byte for byte, or none when that commit
+    // lacks it.
+    async fn show(&self, revision: &str, path: &str) -> Result<Option<Vec<u8>>> {
         let output = self.git(["show", &format!("{revision}:{path}")], &[]).await?;
         Ok(output.status.success().then_some(output.stdout))
     }
@@ -379,7 +406,7 @@ impl<'a> Repo<'a> {
     // can move it. An unborn branch cannot be detached and is refused.
     async fn detach_from(&self, name: &str) -> Result<()> {
         let head = self.git(["symbolic-ref", "--quiet", "HEAD"], &[]).await?;
-        if head.stdout.trim() != format!("refs/heads/{name}") {
+        if head.text().trim() != format!("refs/heads/{name}") {
             return Ok(());
         }
         if self.git(["checkout", "--quiet", "--detach"], &[]).await?.status.success() {
@@ -392,12 +419,16 @@ impl<'a> Repo<'a> {
         shown(self.at)
     }
 
+    // Lay a merged path in the working tree, its directory first where the
+    // merge removed one.
     fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        if let Some((parent, _)) = path.rsplit_once('/') {
+            self.at
+                .dir()
+                .create_dir_all(parent)
+                .with_context(|| format!("creating {parent} for the merge of {path}"))?;
+        }
         self.at.dir().write(path, bytes).with_context(|| format!("writing the merge of {path}"))
-    }
-
-    fn remove_temp(&self, name: &str) -> Result<()> {
-        self.at.dir().remove_file(name).with_context(|| format!("removing {name}"))
     }
 }
 
@@ -449,16 +480,24 @@ fn sq(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-// The URL a remote resolves to, for the transport rule; a name git does not
-// know is read as the address the guest gave, which git will refuse in turn.
-async fn resolve_remote(repo: &Repo<'_>, remote: &str, push: bool) -> String {
-    let mut args = vec!["remote", "get-url"];
+// The URL a remote name or address reaches as the host's configuration
+// expands it, for the transport rule: a remote's own URL, else the address
+// rewritten under `url.<base>.insteadOf`, else the address as given. The
+// repository's own rewrites were refused before this, so the expansion is the
+// host's alone.
+async fn expand(repo: &Repo<'_>, remote: &str, push: bool) -> String {
+    let mut named = vec!["remote", "get-url"];
     if push {
-        args.push("--push");
+        named.push("--push");
     }
-    args.extend(["--", remote]);
-    match repo.git(args, &[]).await {
-        Ok(output) if output.status.success() => output.stdout.trim().to_owned(),
+    named.extend(["--", remote]);
+    if let Ok(output) = repo.git(named, &[]).await
+        && output.status.success()
+    {
+        return output.text().trim().to_owned();
+    }
+    match repo.git(["ls-remote", "--get-url", "--", remote], &[]).await {
+        Ok(output) if output.status.success() => output.text().trim().to_owned(),
         _ => remote.to_owned(),
     }
 }

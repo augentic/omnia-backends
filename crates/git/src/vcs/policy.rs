@@ -6,22 +6,22 @@
 //! settle. Every path the two sides both touch is checked against the rules:
 //! a path a rule matches is resolved from the three commits — `ours` the
 //! working copy's side, `theirs` the merged-in side, `union` both, each line
-//! once — whatever git's attributes did to it, and a path still in conflict
-//! that no rule matched abandons the whole merge.
+//! once — whatever git's attributes did to it, byte for byte, and a path
+//! still in conflict that no rule matched abandons the whole merge. Nothing
+//! of the resolution touches the working tree but the resolved path itself.
 
-use anyhow::Result;
+use std::ffi::OsStr;
+use std::io::Write as _;
+
+use anyhow::{Context as _, Result, bail};
 use omnia_wasi_vcs::{Rule, Strategy};
+use tempfile::NamedTempFile;
 
 use super::Repo;
 
-// Where the three sides of a path are read from, and the empty side a union
-// merges against when a commit lacks it.
+// Where the two sides of a path are read from.
 const OURS: &str = "HEAD";
 const THEIRS: &str = "MERGE_HEAD";
-const EMPTY: &str = "/dev/null";
-
-// The temporary files a union is merged through, removed before the commit.
-const UNION: [&str; 3] = [".omnia-union-ours", ".omnia-union-base", ".omnia-union-theirs"];
 
 // Whether the merge can be sealed, or the paths no rule resolved.
 pub enum Resolution {
@@ -63,7 +63,7 @@ async fn apply(repo: &Repo<'_>, path: &str, strategy: Strategy, base: Option<&st
 async fn keep(repo: &Repo<'_>, path: &str, side: &str) -> Result<()> {
     match repo.show(side, path).await? {
         Some(content) => {
-            repo.write(path, content.as_bytes())?;
+            repo.write(path, &content)?;
             repo.run(["add", "--", path], &repo.shown(), path).await?;
         }
         None => {
@@ -74,29 +74,41 @@ async fn keep(repo: &Repo<'_>, path: &str, side: &str) -> Result<()> {
     Ok(())
 }
 
-// Both sides' lines, each once, from a 3-way union of the three commits'
-// versions through `merge-file`, written back and the temporaries removed.
+// Both sides' lines, each once: a 3-way union through `merge-file` over the
+// three commits' versions, laid in the host's temporary directory so nothing
+// of them touches the working tree however the merge ends. A side git cannot
+// merge as lines — a binary — fails the merge rather than seal a guess.
 async fn union(repo: &Repo<'_>, path: &str, base: Option<&str>) -> Result<()> {
-    let [ours, basis, theirs] = UNION;
-    repo.write(ours, repo.show(OURS, path).await?.unwrap_or_default().as_bytes())?;
-    repo.write(theirs, repo.show(THEIRS, path).await?.unwrap_or_default().as_bytes())?;
-    let basis = match base {
-        Some(base) => match repo.show(base, path).await? {
-            Some(content) => {
-                repo.write(basis, content.as_bytes())?;
-                basis
-            }
-            None => EMPTY,
-        },
-        None => EMPTY,
-    };
-    let merged = repo.git(["merge-file", "-p", "--union", ours, basis, theirs], &[]).await?;
-    repo.write(path, merged.stdout.as_bytes())?;
-    for temp in UNION.into_iter().filter(|temp| *temp != EMPTY) {
-        let _ = repo.remove_temp(temp);
+    let ours = side(repo, Some(OURS), path).await?;
+    let basis = side(repo, base, path).await?;
+    let theirs = side(repo, Some(THEIRS), path).await?;
+    let args = [
+        OsStr::new("merge-file"),
+        OsStr::new("-p"),
+        OsStr::new("--union"),
+        ours.path().as_os_str(),
+        basis.path().as_os_str(),
+        theirs.path().as_os_str(),
+    ];
+    let merged = repo.git(args, &[]).await?;
+    if !merged.status.success() {
+        bail!("{}: cannot union {path}: {}", repo.shown(), merged.stderr.trim());
     }
+    repo.write(path, &merged.stdout)?;
     repo.run(["add", "--", path], &repo.shown(), path).await?;
     Ok(())
+}
+
+// One commit's version of the path in a temporary file, empty where the
+// commit lacks it or the sides share no ancestor.
+async fn side(repo: &Repo<'_>, revision: Option<&str>, path: &str) -> Result<NamedTempFile> {
+    let content = match revision {
+        Some(revision) => repo.show(revision, path).await?.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let mut file = NamedTempFile::new().context("creating a merge temporary")?;
+    file.write_all(&content).context("writing a merge temporary")?;
+    Ok(file)
 }
 
 // A glob over root-relative paths, in gitignore's reading: a pattern with no

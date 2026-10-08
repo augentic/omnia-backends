@@ -90,6 +90,7 @@ omnia-wasi-model = "0.37.0"
 omnia-wasi-otel = "0.37.0"
 omnia-wasi-sql = { version = "0.37.0", default-features = false }
 omnia-wasi-vault = "0.37.0"
+omnia-wasi-vcs = "0.37.0"
 
 [patch.crates-io]
 omnia = { git = "https://github.com/augentic/omnia" }
@@ -106,6 +107,7 @@ omnia-wasi-model = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-otel = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-sql = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-vault = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-vcs = { git = "https://github.com/augentic/omnia" }
 
 [profile.release]
 lto = true

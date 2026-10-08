@@ -81,3 +81,28 @@ crate-type = ["cdylib"]
 name = "model_undeclared_tool"
 path = "programs/model/undeclared_tool.rs"
 crate-type = ["cdylib"]
+
+[[example]]
+name = "vcs_hardening"
+path = "programs/vcs/hardening.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "vcs_journey"
+path = "programs/vcs/journey.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "vcs_matrix"
+path = "programs/vcs/matrix.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "vcs_refusals"
+path = "programs/vcs/refusals.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "vcs_transport"
+path = "programs/vcs/transport.rs"
+crate-type = ["cdylib"]

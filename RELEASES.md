@@ -4,6 +4,53 @@ Unreleased
 
 ### Added
 
+- `omnia-git`, the backend for omnia 0.37's `omnia:vcs` interface
+  (`omnia-wasi-vcs`), the one that interface has: every `store`,
+  `workspace`, and `transport` operation is one `git` process over the
+  operator's own binary (`GIT_BINARY`, `git` on `PATH` by default; a git
+  older than 2.26 is refused at connect), run in the directory the runtime
+  opened for the guest's lent location — the child enters the open handle
+  before it executes, so no operation walks a path again — with `GIT_DIR`
+  and its siblings scrubbed from the environment. A lent repository's own
+  configuration is a guest's to write, so each operation is held to host
+  policy on its command line: hooks, the file-system monitor, the
+  alternate-refs command, commit and push signing, and submodule
+  recursion are forced off; the work tree is the place itself, whatever
+  `core.worktree` the repository set, and git's search for the repository
+  stops there (`GIT_CEILING_DIRECTORIES`), so a place with no `.git` of
+  its own is `not-a-repository` rather than a subdirectory of an
+  enclosing checkout; a repository-scoped SSH command,
+  credential prompt, signing program, credential helper, or clean,
+  smudge, or merge driver gives way to the operator's own value or to
+  none, and a repository key in bytes that are not UTF-8, which no pin
+  can name, refuses the operation; every guest string follows `--`, one
+  that is empty or option-shaped is `not-found` before any process runs;
+  every process runs under `GIT_ALLOW_PROTOCOL` and `GIT_NO_LAZY_FETCH`,
+  no protocol and no lazy fetch outside a transport operation, so an
+  object the repository lacks is missing rather than fetched from a
+  promisor remote it names, and a transport under the list for its kind,
+  read from the URL as the host's configuration expands it, and under
+  `LC_ALL=C`, so what git says is the English the typed errors are read
+  from whatever locale the operator's shell exports; the pack command is
+  named on every transport,
+  a local one's holding the far side to no hooks, alternate-refs command,
+  or file-system monitor and to no update of a checked-out branch, and a
+  remote one's git's own, so a `remote.<name>.uploadPack`
+  or `receivePack` the repository set is never what the operator's ssh
+  carries to a host; and a repository that sets how a transport runs — a
+  `url.<base>.insteadOf`, an `http.*` setting beyond the transfer-tuning
+  keys, a `remote.<name>.proxy` — is refused on every transport, the key
+  named. A merge is held before its commit and the policy
+  applied by the backend from the three commits, byte for byte — over
+  whatever the repository's own attributes made of a path — so nothing of
+  it is written into the repository; a `union` over a binary fails the
+  merge; a conflict no rule resolves comes back as data with the merge
+  aborted and the tree on its head, and no failed merge stays in
+  progress. A `label` on the branch the working copy sits on detaches the
+  copy onto its commit first. A `clone` with a depth passes
+  `--no-single-branch`, so a shallow clone still answers every label.
+  What git reports is read into the typed `omnia:vcs` error. Wired as
+  `WasiVcs: omnia_git::Client`.
 - `omnia-cursor`'s `complete` span carries the request's schema name as
   `label` when the format is a schema — the guest's own name for the
   question — so a host log tells one completion from another by what was

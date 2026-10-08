@@ -17,12 +17,16 @@ use omnia_wasi_vcs::Place;
 use crate::Client;
 
 // Keys forced on every operation whatever scope set them: each names a
-// program git would run on a commit, a merge, or a status, and none is
-// wanted from an automated backend. Hooks are reached through `.git/hooks`
-// or `core.hooksPath`, so `/dev/null` sends git to a directory with none.
-const FORCED: [&str; 6] = [
+// program git would run on a commit, a merge, a status, or a fetch, and none
+// is wanted from an automated backend. Hooks are reached through
+// `.git/hooks` or `core.hooksPath`, so `/dev/null` sends git to a directory
+// with none; the alternate-refs command, run by a fetch over a repository
+// with alternates and by the far side of a push, is emptied, since git can
+// run no empty command and skips the alternates' refs instead.
+const FORCED: [&str; 7] = [
     "core.hooksPath=/dev/null",
     "core.fsmonitor=false",
+    "core.alternateRefsCommand=",
     "commit.gpgsign=false",
     "merge.verifySignatures=false",
     "submodule.recurse=false",
@@ -210,6 +214,8 @@ mod tests {
                 "core.hooksPath=/dev/null",
                 "-c",
                 "core.fsmonitor=false",
+                "-c",
+                "core.alternateRefsCommand=",
                 "-c",
                 "commit.gpgsign=false",
                 "-c",

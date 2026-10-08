@@ -1,12 +1,15 @@
 //! The guest half of the containment the backend owes: every program the
 //! repository's own configuration could choose to run on the host is
-//! neutralised before it runs. The host lays a repository salted with a
-//! hostile `core.hooksPath`, `core.fsmonitor`, signing program, smudge
-//! filter, and remote receive-pack, a bare origin with its own hostile
-//! hooks, a repository with no identity to seal a merge, and one whose own
-//! `insteadOf` would carry an `https` remote onto a local path; this guest
-//! drives the operations that would fire each, and the host asserts no
-//! marker was written, nothing was carried, and the work still landed.
+//! neutralised before it runs, and every path it could point git at stays
+//! the place. The host lays a repository salted with a hostile
+//! `core.hooksPath`, `core.fsmonitor`, `core.alternateRefsCommand`,
+//! `core.worktree`, signing program, smudge filter, and remote receive-pack,
+//! a bare origin with its own hostile hooks and alternate-refs command, a
+//! repository with no identity to seal a merge, one whose own `insteadOf`
+//! would carry an `https` remote onto a local path, and a partial clone whose
+//! promisor remote is an `ext::` command; this guest drives the operations
+//! that would fire each, and the host asserts no marker was written, nothing
+//! was carried or read from outside the place, and the work still landed.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -20,11 +23,22 @@ const REPO: &str = "./repo";
 const WORK: &str = "./work";
 const NOIDENT: &str = "./noident";
 const REWRITER: &str = "./rewriter";
+const LAZY: &str = "./lazy";
 
 async fn scenario() {
     repo_config_runs_nothing().await;
     a_failed_merge_leaves_no_merge().await;
     a_rewriting_repository_is_refused().await;
+    a_lazy_fetch_reaches_no_command().await;
+}
+
+// The repository's promisor remote is an `ext::` command, allowed by its own
+// `protocol.ext.allow`; a checkout that needs a blob it lacks fails rather
+// than fetch it through that command.
+async fn a_lazy_fetch_reaches_no_command() {
+    let head = WasiVcs.head(LAZY).await.expect("head");
+    let added = WasiVcs.add(LAZY, "./lazy-copy", &head).await;
+    assert!(added.is_err(), "a blob only the ext remote could supply: {added:?}");
 }
 
 // The repository's `url.<local>.insteadOf=https://` would turn its `https`
@@ -49,16 +63,22 @@ async fn repo_config_runs_nothing() {
     // a working copy checked out of the hostile repository runs no smudge
     WasiVcs.add(REPO, WORK, &head).await.expect("add");
 
-    // a commit runs no hook, fsmonitor, or signing program, and still seals
+    // a commit runs no hook, fsmonitor, or signing program, reads the place
+    // and not the `core.worktree` the repository points elsewhere, and seals
     fs::write("repo/b.txt", "b\n").expect("writing b");
-    assert_eq!(WasiVcs.pending(REPO).await.expect("pending").len(), 1, "fsmonitor saw the change");
+    let pending = WasiVcs.pending(REPO).await.expect("pending");
+    assert_eq!(pending.len(), 1, "one change, in the place: {pending:?}");
+    assert_eq!(pending[0].path, "b.txt");
     let sealed = WasiVcs.commit(REPO, "seal").await.expect("commit").expect("a commit");
     assert_ne!(sealed, head, "the commit landed");
     assert_eq!(WasiVcs.pending(REPO).await.expect("pending"), []);
 
-    // a push runs neither the client's receive-pack nor the origin's hooks
+    // a push runs neither the client's receive-pack nor the origin's hooks or
+    // alternate-refs command, and a fetch runs no alternate-refs command of
+    // the repository's own
     WasiVcs.label(REPO, "emery/hardened", &sealed).await.expect("label");
     WasiVcs.push(REPO, "origin", "emery/hardened").await.expect("push");
+    WasiVcs.fetch(REPO, "origin").await.expect("fetch");
 }
 
 async fn a_failed_merge_leaves_no_merge() {

@@ -113,7 +113,10 @@ impl WasiVcsCtx for Client {
                 return Err(Error::Exists(shown(&at)).into());
             }
             let repo = Repo::open(&client, &at).await?;
-            repo.run(["init", "--quiet"], &repo.shown(), "HEAD").await?;
+            let output = repo.create(["init", "--quiet"], &[]).await?;
+            if !output.status.success() {
+                return Err(refuse(&output, &repo.shown(), "HEAD").into());
+            }
             Ok(())
         }
         .boxed()
@@ -184,7 +187,7 @@ impl WasiVcsCtx for Client {
                 args.extend(["--depth".to_owned(), depth.clone(), "--no-single-branch".to_owned()]);
             }
             args.extend(["--".to_owned(), url.clone(), ".".to_owned()]);
-            let output = repo.git(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
+            let output = repo.create(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
             if !output.status.success() {
                 return Err(refuse(&output, &shown(&at), &url).into());
             }
@@ -297,7 +300,23 @@ impl<'a> Repo<'a> {
         Ok(Self { client, at, pins })
     }
 
+    // Run git for the repository: the work tree is the place itself, since a
+    // `core.worktree` the repository set would point git at any directory on
+    // the host, and the pins lead the arguments.
     async fn git<I, S>(&self, args: I, env: &[(&str, &str)]) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut full = vec![OsString::from("--work-tree=.")];
+        full.extend(self.pins.args().map(OsString::from));
+        full.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
+        self.client.git(Some(self.at), full, env).await
+    }
+
+    // Run git to make the repository at the place: the pins lead, and the
+    // work tree is left to `clone`, which lays it and refuses to be given one.
+    async fn create<I, S>(&self, args: I, env: &[(&str, &str)]) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -466,14 +485,17 @@ fn is_local(address: &str) -> bool {
     }
 }
 
-// `git -c core.hooksPath=/dev/null <operation>` as one `--upload-pack` or
-// `--receive-pack` argument, so the far side — a bare repository as much
-// beneath the mount as the working copy — runs none of its own hooks. git
-// splits the value with shell quoting for a local transport, so the binary
-// is single-quoted.
+// `git -c … <operation>` as one `--upload-pack` or `--receive-pack`
+// argument, so the far side — a bare repository as much beneath the mount as
+// the working copy — runs none of its own hooks and no alternate-refs
+// command. git splits the value with shell quoting for a local transport, so
+// the binary is single-quoted.
 fn wrap(client: &Client, operation: &str) -> String {
     let binary = sq(&client.binary.display().to_string());
-    format!("--{operation}={binary} -c core.hooksPath=/dev/null {operation}")
+    format!(
+        "--{operation}={binary} -c core.hooksPath=/dev/null -c core.alternateRefsCommand= \
+         {operation}"
+    )
 }
 
 fn sq(value: &str) -> String {

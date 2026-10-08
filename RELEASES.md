@@ -13,14 +13,17 @@ Unreleased
   before it executes, so no operation walks a path again — with `GIT_DIR`
   and its siblings scrubbed from the environment. A lent repository's own
   configuration is a guest's to write, so each operation is held to host
-  policy on its command line: hooks, the file-system monitor, signing, and
-  submodule recursion are forced off; a repository-scoped SSH command,
-  credential prompt, credential helper, or clean, smudge, or merge driver
-  gives way to the operator's own value or to none; every guest string
-  follows `--`, one that is empty or option-shaped is `not-found` before
-  any process runs; a transport runs under `GIT_ALLOW_PROTOCOL` for its
-  kind, read from the URL as the host's configuration expands it, a local
-  one with the far side's hooks disabled through the pack command; and a
+  policy on its command line: hooks, the file-system monitor, the
+  alternate-refs command, signing, and submodule recursion are forced
+  off; the work tree is the place itself, whatever `core.worktree` the
+  repository set; a repository-scoped SSH command, credential prompt,
+  credential helper, or clean, smudge, or merge driver gives way to the
+  operator's own value or to none; every guest string follows `--`, one
+  that is empty or option-shaped is `not-found` before any process runs;
+  every process runs under `GIT_ALLOW_PROTOCOL`, `http:https:ssh` by
+  default and the list for a transport's kind, read from the URL as the
+  host's configuration expands it, a local one with the far side's hooks
+  and alternate-refs command disabled through the pack command; and a
   repository that sets a `url.<base>.insteadOf` of its own is refused on
   every transport. A merge is held before its commit and the policy
   applied by the backend from the three commits, byte for byte — over

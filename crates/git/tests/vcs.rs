@@ -8,7 +8,7 @@ mod support;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use omnia::ExitStatus;
 use omnia_test::host::{Backends, Deployment, Scratch, scratch};
@@ -97,6 +97,8 @@ async fn vcs_matrix() {
         "M\ta.txt\nD\tb.txt\nA\tc.txt\nA\tnested/deep/d.txt"
     );
     assert_eq!(git.git(&at("nothing"), &["rev-list", "--count", "HEAD"]), "1");
+    let config = git.git(&at("kinds"), &["config", "--local", "--list"]);
+    assert!(!config.contains("core.worktree"), "init recorded a work tree: {config}");
 
     // the dirty working copy left git's list with its files
     assert!(!at("copies/work").exists());
@@ -128,95 +130,36 @@ async fn vcs_transport() {
 async fn vcs_hardening() {
     let git = Hermetic::new();
     let scratch = scratch();
-    let at = |name: &str| scratch.path().join(name);
-    let markers = at("markers");
-    fs::create_dir_all(&markers).expect("the markers directory");
-
-    // a repository whose own configuration would run a program on the host at
-    // the next checkout, status, commit, or push
-    let repo = at("repo");
-    seed(&git, &repo, "a.txt");
-    fs::write(repo.join(".gitattributes"), "* filter=evil\n").expect("the attributes");
-    git.git(&repo, &["add", "-A"]);
-    git.git(&repo, &["commit", "-qm", "attributes"]);
-    let hooks = at("hostile-hooks");
-    fs::create_dir_all(&hooks).expect("the hooks directory");
-    executable(&hooks.join("pre-commit"), &touch(&markers, "pre-commit"));
-    let fsmonitor = at("fsmonitor");
-    executable(&fsmonitor, &touch(&markers, "fsmonitor"));
-    let gpg = at("gpg");
-    executable(&gpg, &touch(&markers, "gpg"));
-    let smudge = at("smudge");
-    executable(&smudge, &filter(&markers, "smudge"));
-    for (key, value) in [
-        ("core.hooksPath", hooks.display().to_string()),
-        ("core.fsmonitor", fsmonitor.display().to_string()),
-        ("commit.gpgsign", "true".to_owned()),
-        ("gpg.program", gpg.display().to_string()),
-        ("filter.evil.smudge", smudge.display().to_string()),
-        ("filter.evil.clean", smudge.display().to_string()),
-    ] {
-        git.git(&repo, &["config", "--local", key, value.as_str()]);
-    }
-
-    // a bare origin whose receive would run a hook of its own, reached through
-    // a client-side receive-pack the repository also salted
-    let origin = at("origin.git");
-    fs::create_dir_all(&origin).expect("the origin");
-    git.git(&origin, &["init", "--quiet", "--bare"]);
-    let origin_hooks = at("origin-hooks");
-    fs::create_dir_all(&origin_hooks).expect("the origin hooks");
-    executable(&origin_hooks.join("pre-receive"), &blocking(&markers, "pre-receive"));
-    let origin_hooks_path = origin_hooks.display().to_string();
-    git.git(&origin, &["config", "--local", "core.hooksPath", &origin_hooks_path]);
-    let receive_pack = at("receive-pack");
-    executable(&receive_pack, &blocking(&markers, "receive-pack"));
-    let origin_url = format!("file://{}", origin.display());
-    git.git(&repo, &["remote", "add", "origin", &origin_url]);
-    let receive_pack_path = receive_pack.display().to_string();
-    git.git(&repo, &["config", "--local", "remote.origin.receivepack", &receive_pack_path]);
-
-    // a repository with no identity, so a clean merge cannot be sealed
-    let noident = at("noident");
-    seed(&git, &noident, "a.txt");
-    git.git(&noident, &["add", "-A"]);
-    git.git(&noident, &["commit", "-qm", "base"]);
-    git.git(&noident, &["branch", "feature"]);
-    git.git(&noident, &["checkout", "--quiet", "feature"]);
-    fs::write(noident.join("b.txt"), "b\n").expect("writing b");
-    git.git(&noident, &["add", "-A"]);
-    git.git(&noident, &["commit", "-qm", "feature"]);
-    git.git(&noident, &["checkout", "--quiet", "main"]);
-    git.git(&noident, &["config", "--local", "user.name", ""]);
-    git.git(&noident, &["config", "--local", "user.email", ""]);
-
-    // a repository whose own insteadOf carries its https remote onto the
-    // local origin, where the protocol rule would then let it through
-    let rewriter = at("rewriter");
-    seed(&git, &rewriter, "a.txt");
-    git.git(&rewriter, &["add", "-A"]);
-    git.git(&rewriter, &["commit", "-qm", "base"]);
-    git.git(&rewriter, &["remote", "add", "evil", "https://example.invalid/x.git"]);
-    let rewrite = format!("url.{}.insteadOf", origin.display());
-    git.git(&rewriter, &["config", "--local", &rewrite, "https://example.invalid/x.git"]);
-    assert_eq!(
-        git.git(&rewriter, &["remote", "get-url", "evil"]),
-        origin.display().to_string(),
-        "git itself would follow the rewrite onto the local origin"
-    );
+    let salt = Salt::new(&git, scratch.path());
+    let alternates = salt.alternates();
+    let (repo, elsewhere) = salt.hostile_repo(&alternates);
+    let origin = salt.hostile_origin(&repo, &alternates);
+    let noident = salt.identityless();
+    salt.rewriter(&origin);
+    salt.lazy();
 
     run(&git, &scratch, test_programs::VCS_HARDENING, vec![]).await;
 
     // nothing the repositories salted ran
-    let ran: Vec<_> = fs::read_dir(&markers)
+    let ran: Vec<_> = fs::read_dir(&salt.markers)
         .expect("markers")
         .filter_map(Result::ok)
         .map(|e| e.file_name())
         .collect();
     assert!(ran.is_empty(), "a planted program ran: {ran:?}");
 
-    // the commit and the push still landed, and the merge left nothing behind
+    // the commit and the push still landed, the commit holding the place's
+    // change alone and nothing from where core.worktree pointed, and the merge
+    // left nothing behind
     assert_eq!(git.git(&origin, &["log", "-1", "--format=%s", "emery/hardened"]), "seal");
+    assert_eq!(
+        git.git(&origin, &["show", "--format=", "--name-status", "emery/hardened"]),
+        "A\tb.txt"
+    );
+    assert!(
+        elsewhere.join("secret.txt").exists(),
+        "the directory outside the place was left alone"
+    );
     assert!(!noident.join(".git/MERGE_HEAD").exists(), "the failed merge was unwound");
     assert_eq!(git.git(&noident, &["rev-list", "--count", "HEAD"]), "1", "its head did not move");
 
@@ -274,4 +217,159 @@ fn filter(markers: &Path, name: &str) -> String {
 // reached it would fail outright.
 fn blocking(markers: &Path, name: &str) -> String {
     format!("#!/bin/sh\ntouch '{}/{}'\nexit 1\n", markers.display(), name)
+}
+
+// The scratch a hardening scenario is laid in: the oracle git, the root, and
+// the directory every planted program records itself in.
+struct Salt<'a> {
+    git: &'a Hermetic,
+    root: &'a Path,
+    markers: PathBuf,
+}
+
+impl<'a> Salt<'a> {
+    fn new(git: &'a Hermetic, root: &'a Path) -> Self {
+        let markers = root.join("markers");
+        fs::create_dir_all(&markers).expect("the markers directory");
+        Self { git, root, markers }
+    }
+
+    fn at(&self, name: &str) -> PathBuf {
+        self.root.join(name)
+    }
+
+    fn config(&self, repo: &Path, key: &str, value: &str) {
+        self.git.git(repo, &["config", "--local", key, value]);
+    }
+
+    // The command a repository names to list its alternates' refs.
+    fn alternate_refs(&self) -> String {
+        format!("touch {}; echo", self.markers.join("alternate-refs").display())
+    }
+
+    // A sealed repository beside the others, as an alternates line for a
+    // fetch and a receive to have alternate refs to list.
+    fn alternates(&self) -> String {
+        let nested = self.at("nested");
+        seed(self.git, &nested, "n.txt");
+        self.git.git(&nested, &["add", "-A"]);
+        self.git.git(&nested, &["commit", "-qm", "nested"]);
+        format!("{}\n", nested.join(".git/objects").display())
+    }
+
+    // A repository whose own configuration would run a program on the host at
+    // the next checkout, status, commit, fetch, or push, and whose work tree
+    // points at a directory outside the place; with the directory.
+    fn hostile_repo(&self, alternates: &str) -> (PathBuf, PathBuf) {
+        let repo = self.at("repo");
+        seed(self.git, &repo, "a.txt");
+        fs::write(repo.join(".gitattributes"), "* filter=evil\n").expect("the attributes");
+        self.git.git(&repo, &["add", "-A"]);
+        self.git.git(&repo, &["commit", "-qm", "attributes"]);
+        let hooks = self.at("hostile-hooks");
+        fs::create_dir_all(&hooks).expect("the hooks directory");
+        executable(&hooks.join("pre-commit"), &touch(&self.markers, "pre-commit"));
+        let fsmonitor = self.at("fsmonitor");
+        executable(&fsmonitor, &touch(&self.markers, "fsmonitor"));
+        let gpg = self.at("gpg");
+        executable(&gpg, &touch(&self.markers, "gpg"));
+        let smudge = self.at("smudge");
+        executable(&smudge, &filter(&self.markers, "smudge"));
+        let elsewhere = self.at("elsewhere");
+        fs::create_dir_all(&elsewhere).expect("the directory the repository points its tree at");
+        fs::write(elsewhere.join("secret.txt"), "secret\n").expect("a file outside the place");
+        for (key, value) in [
+            ("core.hooksPath", hooks.display().to_string()),
+            ("core.fsmonitor", fsmonitor.display().to_string()),
+            ("core.alternateRefsCommand", self.alternate_refs()),
+            ("core.worktree", elsewhere.display().to_string()),
+            ("commit.gpgsign", "true".to_owned()),
+            ("gpg.program", gpg.display().to_string()),
+            ("filter.evil.smudge", smudge.display().to_string()),
+            ("filter.evil.clean", smudge.display().to_string()),
+        ] {
+            self.config(&repo, key, &value);
+        }
+        fs::create_dir_all(repo.join(".git/objects/info")).expect("the objects info directory");
+        fs::write(repo.join(".git/objects/info/alternates"), alternates).expect("the alternates");
+        (repo, elsewhere)
+    }
+
+    // A bare origin whose receive would run a hook and an alternate-refs
+    // command of its own, reached from `repo` through a client-side
+    // receive-pack the repository also salted.
+    fn hostile_origin(&self, repo: &Path, alternates: &str) -> PathBuf {
+        let origin = self.at("origin.git");
+        fs::create_dir_all(&origin).expect("the origin");
+        self.git.git(&origin, &["init", "--quiet", "--bare"]);
+        let hooks = self.at("origin-hooks");
+        fs::create_dir_all(&hooks).expect("the origin hooks");
+        executable(&hooks.join("pre-receive"), &blocking(&self.markers, "pre-receive"));
+        self.config(&origin, "core.hooksPath", &hooks.display().to_string());
+        self.config(&origin, "core.alternateRefsCommand", &self.alternate_refs());
+        fs::create_dir_all(origin.join("objects/info")).expect("the origin's objects info");
+        fs::write(origin.join("objects/info/alternates"), alternates)
+            .expect("the origin's alternates");
+        let receive_pack = self.at("receive-pack");
+        executable(&receive_pack, &blocking(&self.markers, "receive-pack"));
+        let url = format!("file://{}", origin.display());
+        self.git.git(repo, &["remote", "add", "origin", &url]);
+        self.config(repo, "remote.origin.receivepack", &receive_pack.display().to_string());
+        origin
+    }
+
+    // A repository with no identity, so a clean merge cannot be sealed.
+    fn identityless(&self) -> PathBuf {
+        let noident = self.at("noident");
+        seed(self.git, &noident, "a.txt");
+        self.git.git(&noident, &["add", "-A"]);
+        self.git.git(&noident, &["commit", "-qm", "base"]);
+        self.git.git(&noident, &["branch", "feature"]);
+        self.git.git(&noident, &["checkout", "--quiet", "feature"]);
+        fs::write(noident.join("b.txt"), "b\n").expect("writing b");
+        self.git.git(&noident, &["add", "-A"]);
+        self.git.git(&noident, &["commit", "-qm", "feature"]);
+        self.git.git(&noident, &["checkout", "--quiet", "main"]);
+        self.config(&noident, "user.name", "");
+        self.config(&noident, "user.email", "");
+        noident
+    }
+
+    // A repository whose own insteadOf carries its https remote onto the local
+    // origin, where the protocol rule would then let it through.
+    fn rewriter(&self, origin: &Path) {
+        let rewriter = self.at("rewriter");
+        seed(self.git, &rewriter, "a.txt");
+        self.git.git(&rewriter, &["add", "-A"]);
+        self.git.git(&rewriter, &["commit", "-qm", "base"]);
+        self.git.git(&rewriter, &["remote", "add", "evil", "https://example.invalid/x.git"]);
+        let rewrite = format!("url.{}.insteadOf", origin.display());
+        self.config(&rewriter, &rewrite, "https://example.invalid/x.git");
+        assert_eq!(
+            self.git.git(&rewriter, &["remote", "get-url", "evil"]),
+            origin.display().to_string(),
+            "git itself would follow the rewrite onto the local origin"
+        );
+    }
+
+    // A partial clone whose promisor remote is an ext:: command the repository
+    // allows itself, missing the one blob a checkout needs.
+    fn lazy(&self) {
+        let lazy = self.at("lazy");
+        seed(self.git, &lazy, "a.txt");
+        self.git.git(&lazy, &["add", "-A"]);
+        self.git.git(&lazy, &["commit", "-qm", "base"]);
+        let ext = format!("ext::sh -c touch% {}", self.markers.join("ext").display());
+        for (key, value) in [
+            ("extensions.partialClone", "evil"),
+            ("remote.evil.url", ext.as_str()),
+            ("remote.evil.promisor", "true"),
+            ("protocol.ext.allow", "always"),
+        ] {
+            self.config(&lazy, key, value);
+        }
+        let blob = self.git.git(&lazy, &["rev-parse", "HEAD:a.txt"]);
+        fs::remove_file(lazy.join(format!(".git/objects/{}/{}", &blob[..2], &blob[2..])))
+            .expect("removing the blob");
+    }
 }

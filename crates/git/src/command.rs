@@ -30,11 +30,19 @@ use crate::Client;
 // the guest named.
 const SCRUBBED: [&str; 4] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
-// What an interactive git reads from a terminal, an editor, or a prompt;
-// none is answerable from a guest, so each is closed before git can block
-// on it or run a program to fill it.
-const FIXED: [(&str, &str); 3] =
-    [("GIT_TERMINAL_PROMPT", "0"), ("GIT_EDITOR", ":"), ("GIT_MERGE_AUTOEDIT", "no")];
+// What an interactive git reads from a terminal, an editor, or a prompt —
+// none answerable from a guest, so each is closed before git can block on
+// it or run a program to fill it — and the protocols any process may speak:
+// a lazy fetch from a promisor remote the repository names would otherwise
+// reach an `ext::` command or a remote helper under whatever
+// `protocol.<name>.allow` the repository set. A transport operation names
+// the list for its own kind in `env`, which applies after.
+const FIXED: [(&str, &str); 4] = [
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GIT_EDITOR", ":"),
+    ("GIT_MERGE_AUTOEDIT", "no"),
+    ("GIT_ALLOW_PROTOCOL", "http:https:ssh"),
+];
 
 // What one git process said: stdout as the bytes git wrote, since a blob
 // read for a merge must round-trip whole, and stderr read lossily, since it

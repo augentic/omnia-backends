@@ -24,8 +24,10 @@ Unreleased
   default and the list for a transport's kind, read from the URL as the
   host's configuration expands it, a local one with the far side's hooks
   and alternate-refs command disabled through the pack command; and a
-  repository that sets a `url.<base>.insteadOf` of its own is refused on
-  every transport. A merge is held before its commit and the policy
+  repository that sets how a transport runs — a `url.<base>.insteadOf`,
+  an `http.*` setting beyond the transfer-tuning keys, a
+  `remote.<name>.proxy` — is refused on every transport, the key named.
+  A merge is held before its commit and the policy
   applied by the backend from the three commits, byte for byte — over
   whatever the repository's own attributes made of a path — so nothing of
   it is written into the repository; a `union` over a binary fails the

@@ -174,7 +174,7 @@ impl WasiVcsCtx for Client {
         async move {
             vetted(&url)?;
             let repo = Repo::open(&client, &at).await?;
-            repo.unrewritten()?;
+            repo.transportable()?;
             let address = expand(&repo, &url, false).await;
             let (protocol, pack) = transport(&client, &address, false);
             let depth = options.depth.map(|depth| depth.to_string());
@@ -202,7 +202,7 @@ impl WasiVcsCtx for Client {
         async move {
             vetted(&remote)?;
             let repo = Repo::open(&client, &repo).await?;
-            repo.unrewritten()?;
+            repo.transportable()?;
             let address = expand(&repo, &remote, false).await;
             let (protocol, pack) = transport(&client, &address, false);
             let mut args = vec!["fetch".to_owned(), "--quiet".to_owned()];
@@ -244,7 +244,7 @@ impl WasiVcsCtx for Client {
             vetted(&remote)?;
             vetted(&label)?;
             let repo = Repo::open(&client, &repo).await?;
-            repo.unrewritten()?;
+            repo.transportable()?;
             let address = expand(&repo, &remote, true).await;
             let (protocol, pack) = transport(&client, &address, true);
             let refspec = format!("refs/heads/{label}:refs/heads/{label}");
@@ -346,14 +346,16 @@ impl<'a> Repo<'a> {
         self.client.rev_parse(self.at, revision).await
     }
 
-    // A URL rewrite is the host's configuration to set: one the repository
-    // set is additive config no pin can cancel, so a transport operation
-    // refuses the repository whole rather than carry its remote anywhere.
-    fn unrewritten(&self) -> Result<()> {
-        if let Some(key) = self.pins.rewrite() {
+    // How a transport runs — the URL it reaches, the proxy it crosses, the
+    // TLS it trusts — is the host's configuration to set: a setting the
+    // repository made is config no pin can put back, so a transport operation
+    // refuses the repository whole rather than carry the operator's
+    // credentials anywhere or over anything.
+    fn transportable(&self) -> Result<()> {
+        if let Some(key) = self.pins.shaping() {
             let shown = self.shown();
             let message = format!(
-                "{shown}: the repository sets {key}, and a URL rewrite is the host's to set"
+                "{shown}: the repository sets {key}, and how a transport runs is the host's to set"
             );
             return Err(Error::Other(message).into());
         }
@@ -504,9 +506,9 @@ fn sq(value: &str) -> String {
 
 // The URL a remote name or address reaches as the host's configuration
 // expands it, for the transport rule: a remote's own URL, else the address
-// rewritten under `url.<base>.insteadOf`, else the address as given. The
-// repository's own rewrites were refused before this, so the expansion is the
-// host's alone.
+// rewritten under `url.<base>.insteadOf`, else the address as given. A
+// repository with transport settings of its own was refused before this, so
+// the expansion is the host's alone.
 async fn expand(repo: &Repo<'_>, remote: &str, push: bool) -> String {
     let mut named = vec!["remote", "get-url"];
     if push {

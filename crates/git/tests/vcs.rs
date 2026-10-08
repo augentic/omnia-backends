@@ -136,6 +136,7 @@ async fn vcs_hardening() {
     let origin = salt.hostile_origin(&repo, &alternates);
     let noident = salt.identityless();
     salt.rewriter(&origin);
+    salt.proxied();
     salt.lazy();
 
     run(&git, &scratch, test_programs::VCS_HARDENING, vec![]).await;
@@ -350,6 +351,18 @@ impl<'a> Salt<'a> {
             origin.display().to_string(),
             "git itself would follow the rewrite onto the local origin"
         );
+    }
+
+    // A repository whose own proxy and TLS trust would carry the host's
+    // credentials for its https remote through a connection of its choosing.
+    fn proxied(&self) {
+        let proxied = self.at("proxied");
+        seed(self.git, &proxied, "a.txt");
+        self.git.git(&proxied, &["add", "-A"]);
+        self.git.git(&proxied, &["commit", "-qm", "base"]);
+        self.git.git(&proxied, &["remote", "add", "evil", "https://example.invalid/x.git"]);
+        self.config(&proxied, "http.proxy", "http://127.0.0.1:1");
+        self.config(&proxied, "http.sslVerify", "false");
     }
 
     // A partial clone whose promisor remote is an ext:: command the repository

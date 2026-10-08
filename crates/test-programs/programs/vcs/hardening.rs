@@ -6,8 +6,10 @@
 //! `core.worktree`, signing program, smudge filter, and remote receive-pack,
 //! a bare origin with its own hostile hooks and alternate-refs command, a
 //! repository with no identity to seal a merge, one whose own `insteadOf`
-//! would carry an `https` remote onto a local path, and a partial clone whose
-//! promisor remote is an `ext::` command; this guest drives the operations
+//! would carry an `https` remote onto a local path, one whose own `http.proxy`
+//! and `http.sslVerify` would carry the host's credentials through a proxy of
+//! its choosing, and a partial clone whose promisor remote is an `ext::`
+//! command; this guest drives the operations
 //! that would fire each, and the host asserts no marker was written, nothing
 //! was carried or read from outside the place, and the work still landed.
 
@@ -23,12 +25,13 @@ const REPO: &str = "./repo";
 const WORK: &str = "./work";
 const NOIDENT: &str = "./noident";
 const REWRITER: &str = "./rewriter";
+const PROXIED: &str = "./proxied";
 const LAZY: &str = "./lazy";
 
 async fn scenario() {
     repo_config_runs_nothing().await;
     a_failed_merge_leaves_no_merge().await;
-    a_rewriting_repository_is_refused().await;
+    a_shaping_repository_is_refused().await;
     a_lazy_fetch_reaches_no_command().await;
 }
 
@@ -41,18 +44,21 @@ async fn a_lazy_fetch_reaches_no_command() {
     assert!(added.is_err(), "a blob only the ext remote could supply: {added:?}");
 }
 
-// The repository's `url.<local>.insteadOf=https://` would turn its `https`
-// remote into a local path, and the protocol rule would follow the rewrite;
-// a repository that rewrites URLs is refused on every transport instead.
-async fn a_rewriting_repository_is_refused() {
-    for result in
-        [WasiVcs.fetch(REWRITER, "evil").await, WasiVcs.push(REWRITER, "evil", "main").await]
-    {
-        match result {
-            Err(Error::Other(message)) => {
-                assert!(message.contains("insteadof"), "the rewrite is named: {message}");
+// One repository's `url.<local>.insteadOf=https://` would turn its `https`
+// remote into a local path the protocol rule then lets through; another's
+// `http.proxy` with `http.sslVerify=false` would carry the host's credentials
+// for the real remote through a proxy of its own. A repository that sets how
+// a transport runs is refused on every transport instead, the key named.
+async fn a_shaping_repository_is_refused() {
+    for (repo, key) in [(REWRITER, "insteadof"), (PROXIED, "http.")] {
+        for result in [WasiVcs.fetch(repo, "evil").await, WasiVcs.push(repo, "evil", "main").await]
+        {
+            match result {
+                Err(Error::Other(message)) => {
+                    assert!(message.contains(key), "{key} is named: {message}");
+                }
+                other => panic!("{repo} is refused, not {other:?}"),
             }
-            other => panic!("a rewriting repository is refused, not {other:?}"),
         }
     }
 }

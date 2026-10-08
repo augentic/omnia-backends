@@ -40,11 +40,12 @@ const HOST_KEPT: [(&str, &str); 2] =
     [("core.sshcommand", "core.sshCommand"), ("core.askpass", "core.askPass")];
 
 /// The `-c` overrides that hold one repository's operations to host policy,
-/// and the URL rewrite the repository set, if any, which no pin can undo.
+/// and the first setting the repository made of how a transport runs, if
+/// any, which no pin can undo.
 #[derive(Debug, Default)]
 pub struct Pins {
     pins: Vec<String>,
-    rewrite: Option<String>,
+    shaping: Option<String>,
 }
 
 impl Pins {
@@ -60,12 +61,13 @@ impl Pins {
     }
 
     fn build(settings: &[Setting]) -> Self {
-        // a `url.<base>.insteadOf` the repository set is additive config no
-        // `-c` can cancel, and would carry a remote anywhere; it is named for
-        // the transport operations to refuse the repository on
-        let rewrite = settings
+        // a URL rewrite, an HTTP setting, or a proxy the repository set would
+        // carry the operator's credentials anywhere or over anything, and is
+        // config no `-c` can put back to unset; the first is named for the
+        // transport operations to refuse the repository on
+        let shaping = settings
             .iter()
-            .find(|s| s.scope == Scope::Repo && is_rewrite(&s.key))
+            .find(|s| s.scope == Scope::Repo && is_shaping(&s.key))
             .map(|s| s.key.clone());
 
         let mut pins: Vec<String> = FORCED.iter().map(|pin| (*pin).to_owned()).collect();
@@ -95,7 +97,7 @@ impl Pins {
             }
         }
 
-        Self { pins, rewrite }
+        Self { pins, shaping }
     }
 
     // `-c <pin>` for each override, to lead a subcommand's arguments.
@@ -103,10 +105,10 @@ impl Pins {
         self.pins.iter().flat_map(|pin| ["-c", pin.as_str()])
     }
 
-    // The first `url.<base>.insteadOf` or `pushInsteadOf` key the repository
-    // itself set, as git lists it.
-    pub fn rewrite(&self) -> Option<&str> {
-        self.rewrite.as_deref()
+    // The first key the repository itself set of how a transport runs — a
+    // URL rewrite, an HTTP setting, a proxy — as git lists it.
+    pub fn shaping(&self) -> Option<&str> {
+        self.shaping.as_deref()
     }
 }
 
@@ -186,12 +188,26 @@ fn is_helper(key: &str) -> bool {
     key.starts_with("credential.") && key.rsplit_once('.').is_some_and(|(_, last)| last == "helper")
 }
 
-// `url.<base>.insteadOf` or `url.<base>.pushInsteadOf`.
-fn is_rewrite(key: &str) -> bool {
-    key.starts_with("url.")
-        && key
-            .rsplit_once('.')
-            .is_some_and(|(_, last)| matches!(last, "insteadof" | "pushinsteadof"))
+// The `http.*` keys that size or pace a transfer and shape nothing of where
+// it goes or whom it trusts.
+const TUNING: [&str; 7] = [
+    "postbuffer",
+    "lowspeedlimit",
+    "lowspeedtime",
+    "maxrequests",
+    "minsessions",
+    "useragent",
+    "version",
+];
+
+// `url.<base>.insteadOf` / `pushInsteadOf`; `http.*` and `http.<url>.*`
+// beyond the tuning keys; `remote.<name>.proxy` / `proxyAuthMethod`.
+fn is_shaping(key: &str) -> bool {
+    let Some((named, last)) = key.rsplit_once('.') else { return false };
+    let rewrite = named.starts_with("url.") && matches!(last, "insteadof" | "pushinsteadof");
+    let http = (named == "http" || named.starts_with("http.")) && !TUNING.contains(&last);
+    let proxy = named.starts_with("remote.") && matches!(last, "proxy" | "proxyauthmethod");
+    rewrite || http || proxy
 }
 
 #[cfg(test)]
@@ -287,7 +303,7 @@ mod tests {
         let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0\
                        local\0url./tmp/m.pushinsteadof\nhttps://github.com/\0";
         let pins = Pins::build(&parse(listing));
-        assert_eq!(pins.rewrite(), Some("url./tmp/m.pushinsteadof"));
+        assert_eq!(pins.shaping(), Some("url./tmp/m.pushinsteadof"));
         assert!(
             !pins.args().any(|arg| arg.contains("insteadof")),
             "a rewrite is refused on, never pinned"
@@ -295,9 +311,34 @@ mod tests {
     }
 
     #[test]
-    fn host_rewrite_left_alone() {
-        let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0";
-        assert_eq!(Pins::build(&parse(listing)).rewrite(), None);
+    fn repo_http_named() {
+        for key in [
+            "http.proxy",
+            "http.sslverify",
+            "http.sslcainfo",
+            "http.https://github.com/.sslverify",
+            "http.https://github.com/.proxy",
+            "http.cookiefile",
+            "http.curloptresolve",
+            "remote.origin.proxy",
+        ] {
+            let listing = format!("local\0{key}\nx\0");
+            assert_eq!(Pins::build(&parse(&listing)).shaping(), Some(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn repo_http_tuning_left_alone() {
+        let listing = "local\0http.postbuffer\n524288000\0local\0http.lowspeedlimit\n0\0\
+                       local\0http.https://h/.postbuffer\n1\0";
+        assert_eq!(Pins::build(&parse(listing)).shaping(), None);
+    }
+
+    #[test]
+    fn host_shaping_left_alone() {
+        let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0global\0http.proxy\nhost\0\
+                       system\0http.sslverify\nfalse\0";
+        assert_eq!(Pins::build(&parse(listing)).shaping(), None);
     }
 
     #[test]

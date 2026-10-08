@@ -8,15 +8,17 @@ Unreleased
   (`omnia-wasi-vcs`), the one that interface has: every `store`,
   `workspace`, and `transport` operation is one `git` process over the
   operator's own binary (`GIT_BINARY`, `git` on `PATH` by default; a git
-  older than 2.5 is refused at connect), run at the host path the runtime
-  resolved the guest's lent location to, with `GIT_DIR` and its siblings
-  scrubbed from the environment. A merge policy reaches git as attribute
-  lines in a scratch file named through `core.attributesFile`, so nothing
-  of it is written into the repository; a conflict no rule resolves comes
-  back as data with the merge aborted and the tree on its head. A `clone`
-  with a depth passes `--no-single-branch`, so a shallow clone still
-  answers every label. What git reports is read into the typed
-  `omnia:vcs` error. Wired as `WasiVcs: omnia_git::Client`.
+  older than 2.5 is refused at connect), run in the directory the runtime
+  opened for the guest's lent location — the child enters the open handle
+  before it executes, so no operation walks a path again — with `GIT_DIR`
+  and its siblings scrubbed from the environment. A merge policy reaches
+  git as attribute lines in a scratch file named through
+  `core.attributesFile`, so nothing of it is written into the repository;
+  a conflict no rule resolves comes back as data with the merge aborted
+  and the tree on its head. A `clone` with a depth passes
+  `--no-single-branch`, so a shallow clone still answers every label.
+  What git reports is read into the typed `omnia:vcs` error. Wired as
+  `WasiVcs: omnia_git::Client`.
 - `omnia-cursor`'s `complete` span carries the request's schema name as
   `label` when the format is a schema — the guest's own name for the
   question — so a host log tells one completion from another by what was

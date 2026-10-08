@@ -1,15 +1,21 @@
-//! One `git` process: spawned at a directory with the operator's repository
-//! selection scrubbed from its environment, its output captured whole.
+//! One `git` process: spawned in the place the runtime opened, with the
+//! operator's repository selection scrubbed from its environment, its
+//! output captured whole.
 //!
-//! The process leads a group of its own and is killed when its future is
-//! dropped, so a helper git forks — a credential helper, `ssh`, a merge
-//! driver — never outlives the operation that started it.
+//! The child enters the place's open directory handle before it executes,
+//! so git works where the runtime resolved the guest's location and never
+//! walks a path a guest could redirect meanwhile. The process leads a group
+//! of its own and is killed when its future is dropped, so a helper git
+//! forks — a credential helper, `ssh`, a merge driver — never outlives the
+//! operation that started it.
 
 use std::ffi::OsStr;
-use std::path::Path;
+use std::io;
+use std::os::fd::{AsRawFd as _, RawFd};
 use std::process::{ExitStatus, Stdio};
 
 use anyhow::{Context as _, Result};
+use omnia_wasi_vcs::Place;
 use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessGroup};
 use tokio::process::Command;
 
@@ -30,17 +36,17 @@ pub struct Output {
 }
 
 impl Client {
-    // Run git at `at` — none for a command that reads no repository — and
+    // Run git in `at` — none for a command that reads no repository — and
     // wait for it; a failure here is the spawn's, never git's own exit.
-    pub(crate) async fn git<I, S>(&self, at: Option<&Path>, args: I) -> Result<Output>
+    pub(crate) async fn git<I, S>(&self, at: Option<&Place>, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         let mut command = Command::new(&self.binary);
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        if let Some(at) = at {
-            command.arg("-C").arg(at);
+        if let Some(place) = at {
+            enter(&mut command, place.dir().as_raw_fd());
         }
         command.args(args);
         for var in SCRUBBED {
@@ -62,5 +68,21 @@ impl Client {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+}
+
+// The child's working directory is the open handle itself, entered between
+// `fork` and `exec`: the descriptor is inherited across the fork, the place
+// that owns it is held until `spawn` returns, and `fchdir` is
+// async-signal-safe, so the hook runs nothing a forked child may not.
+#[expect(
+    unsafe_code,
+    reason = "`pre_exec` runs in the forked child; `fchdir` is async-signal-safe"
+)]
+fn enter(command: &mut Command, dir: RawFd) {
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(dir) == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+        });
     }
 }

@@ -86,3 +86,18 @@ crate-type = ["cdylib"]
 name = "vcs_journey"
 path = "programs/vcs/journey.rs"
 crate-type = ["cdylib"]
+
+[[example]]
+name = "vcs_matrix"
+path = "programs/vcs/matrix.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "vcs_refusals"
+path = "programs/vcs/refusals.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "vcs_transport"
+path = "programs/vcs/transport.rs"
+crate-type = ["cdylib"]

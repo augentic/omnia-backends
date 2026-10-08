@@ -11,10 +11,7 @@ pub enum Class {
     Other,
 }
 
-// A location that does not exist holds no repository either: `-C` fails
-// before git looks for one.
-const NOT_A_REPOSITORY: [&str; 3] =
-    ["not a git repository", "must be run in a work tree", "cannot change to"];
+const NOT_A_REPOSITORY: [&str; 2] = ["not a git repository", "must be run in a work tree"];
 
 const EXISTS: [&str; 1] = ["already exists"];
 
@@ -95,7 +92,7 @@ mod tests {
             Class::NotARepository
         );
         assert_eq!(
-            classify("fatal: cannot change to '/tmp/none': No such file or directory"),
+            classify("fatal: this operation must be run in a work tree"),
             Class::NotARepository
         );
         assert_eq!(classify("fatal: '../w3' already exists"), Class::Exists);

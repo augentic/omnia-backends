@@ -1,18 +1,17 @@
-//! `WasiVcsCtx` over git: one process per operation at the host path the
-//! runtime resolved, and what git says read into the typed error.
+//! `WasiVcsCtx` over git: one process per operation, run in the place the
+//! runtime opened, and what git says read into the typed error.
 
 mod policy;
 pub mod refusal;
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path;
 
 use anyhow::{Context as _, Result};
 use futures::FutureExt as _;
 use omnia_wasi_vcs::{
-    Change, ChangeKind, CloneOptions, Error, FutureResult, Merged, Rule, WasiVcsCtx,
+    Change, ChangeKind, CloneOptions, Error, FutureResult, Merged, Place, Rule, WasiVcsCtx,
 };
 
 use self::policy::Policy;
@@ -21,20 +20,20 @@ use crate::Client;
 use crate::command::Output;
 
 impl WasiVcsCtx for Client {
-    fn resolve(&self, repo: PathBuf, revision: String) -> FutureResult<String> {
-        tracing::trace!("resolving {revision} in {}", repo.display());
+    fn resolve(&self, repo: Place, revision: String) -> FutureResult<String> {
+        tracing::trace!("resolving {revision} in {}", repo.path().display());
         let client = self.clone();
         async move { client.rev_parse(&repo, &revision).await }.boxed()
     }
 
-    fn head(&self, at: PathBuf) -> FutureResult<String> {
-        tracing::trace!("reading the head of {}", at.display());
+    fn head(&self, at: Place) -> FutureResult<String> {
+        tracing::trace!("reading the head of {}", at.path().display());
         let client = self.clone();
         async move { client.rev_parse(&at, "HEAD").await }.boxed()
     }
 
-    fn commit(&self, at: PathBuf, message: String) -> FutureResult<Option<String>> {
-        tracing::trace!("committing {}", at.display());
+    fn commit(&self, at: Place, message: String) -> FutureResult<Option<String>> {
+        tracing::trace!("committing {}", at.path().display());
         let client = self.clone();
         async move {
             if client.status(&at).await?.is_empty() {
@@ -48,9 +47,9 @@ impl WasiVcsCtx for Client {
     }
 
     fn merge(
-        &self, at: PathBuf, revision: String, message: String, policy: Vec<Rule>,
+        &self, at: Place, revision: String, message: String, policy: Vec<Rule>,
     ) -> FutureResult<Merged> {
-        tracing::trace!("merging {revision} into {}", at.display());
+        tracing::trace!("merging {revision} into {}", at.path().display());
         let client = self.clone();
         async move {
             let policy = Policy::write(&policy)?;
@@ -79,30 +78,38 @@ impl WasiVcsCtx for Client {
         .boxed()
     }
 
-    fn init(&self, at: PathBuf) -> FutureResult<()> {
-        tracing::trace!("initialising {}", at.display());
+    fn init(&self, at: Place) -> FutureResult<()> {
+        tracing::trace!("initialising {}", at.path().display());
         let client = self.clone();
         async move {
-            if at.join(".git").exists() {
+            // git reinitialises an existing repository and exits clean
+            if at.dir().exists(".git") {
                 return Err(Error::Exists(shown(&at)).into());
             }
-            fs::create_dir_all(&at).with_context(|| format!("creating {}", at.display()))?;
             client.run(&at, ["init", "--quiet"], &shown(&at), "HEAD").await?;
             Ok(())
         }
         .boxed()
     }
 
-    fn add(&self, repo: PathBuf, at: PathBuf, revision: String) -> FutureResult<()> {
-        tracing::trace!("adding a working copy of {} at {}", repo.display(), at.display());
+    fn add(&self, repo: Place, at: Place, revision: String) -> FutureResult<()> {
+        tracing::trace!(
+            "adding a working copy of {} at {}",
+            repo.path().display(),
+            at.path().display()
+        );
         let client = self.clone();
         async move {
-            create_parent(&at)?;
+            // the one path handed to git: a working copy is laid at a path
+            // git records in the repository, which no handle can stand for;
+            // the runtime laid it empty and holds it open meanwhile
+            let destination = path::absolute(at.path())
+                .with_context(|| format!("resolving {}", at.path().display()))?;
             let args = [
                 OsStr::new("worktree"),
                 OsStr::new("add"),
                 OsStr::new("--detach"),
-                at.as_os_str(),
+                destination.as_os_str(),
                 OsStr::new(&revision),
             ];
             client.run(&repo, args, &shown(&at), &revision).await?;
@@ -111,55 +118,36 @@ impl WasiVcsCtx for Client {
         .boxed()
     }
 
-    fn remove(&self, at: PathBuf) -> FutureResult<()> {
-        tracing::trace!("removing the working copy at {}", at.display());
+    fn remove(&self, at: Place) -> FutureResult<()> {
+        tracing::trace!("removing the working copy at {}", at.path().display());
         let client = self.clone();
         async move {
-            // the repository is found from the working copy, so a linked
-            // working copy is removed through the repository that holds it
-            let common =
-                client.run(&at, ["rev-parse", "--git-common-dir"], &shown(&at), "HEAD").await?;
-            let common = at.join(common.stdout.trim());
-            let args = [
-                OsStr::new("--git-dir"),
-                common.as_os_str(),
-                OsStr::new("worktree"),
-                OsStr::new("remove"),
-                OsStr::new("--force"),
-                at.as_os_str(),
-            ];
-            let output = client.git(None, args).await?;
-            if !output.status.success() {
-                return Err(refuse(&output, &shown(&at), &shown(&at)).into());
-            }
+            client
+                .run(&at, ["worktree", "remove", "--force", "."], &shown(&at), &shown(&at))
+                .await?;
             Ok(())
         }
         .boxed()
     }
 
-    fn pending(&self, at: PathBuf) -> FutureResult<Vec<Change>> {
-        tracing::trace!("reading what is pending at {}", at.display());
+    fn pending(&self, at: Place) -> FutureResult<Vec<Change>> {
+        tracing::trace!("reading what is pending at {}", at.path().display());
         let client = self.clone();
         async move { client.status(&at).await }.boxed()
     }
 
-    fn clone_repo(&self, url: String, at: PathBuf, options: CloneOptions) -> FutureResult<()> {
-        tracing::trace!("cloning {url} to {}", at.display());
+    fn clone_repo(&self, url: String, at: Place, options: CloneOptions) -> FutureResult<()> {
+        tracing::trace!("cloning {url} to {}", at.path().display());
         let client = self.clone();
         async move {
-            create_parent(&at)?;
             let depth = options.depth.map(|depth| depth.to_string());
-            let mut args = vec![OsStr::new("clone"), OsStr::new("--quiet")];
+            let mut args = vec!["clone", "--quiet"];
             // depth cuts history, never the labels: git's implied --single-branch would
             if let Some(depth) = &depth {
-                args.extend([
-                    OsStr::new("--depth"),
-                    OsStr::new(depth),
-                    OsStr::new("--no-single-branch"),
-                ]);
+                args.extend(["--depth", depth, "--no-single-branch"]);
             }
-            args.extend([OsStr::new(&url), at.as_os_str()]);
-            let output = client.git(None, args).await?;
+            args.extend([url.as_str(), "."]);
+            let output = client.git(Some(&at), args).await?;
             if !output.status.success() {
                 return Err(refuse(&output, &shown(&at), &url).into());
             }
@@ -168,8 +156,8 @@ impl WasiVcsCtx for Client {
         .boxed()
     }
 
-    fn fetch(&self, repo: PathBuf, remote: String) -> FutureResult<()> {
-        tracing::trace!("fetching {remote} into {}", repo.display());
+    fn fetch(&self, repo: Place, remote: String) -> FutureResult<()> {
+        tracing::trace!("fetching {remote} into {}", repo.path().display());
         let client = self.clone();
         async move {
             client.run(&repo, ["fetch", "--quiet", &remote], &shown(&repo), &remote).await?;
@@ -178,8 +166,8 @@ impl WasiVcsCtx for Client {
         .boxed()
     }
 
-    fn label(&self, repo: PathBuf, name: String, revision: String) -> FutureResult<()> {
-        tracing::trace!("labelling {revision} as {name} in {}", repo.display());
+    fn label(&self, repo: Place, name: String, revision: String) -> FutureResult<()> {
+        tracing::trace!("labelling {revision} as {name} in {}", repo.path().display());
         let client = self.clone();
         async move {
             client.run(&repo, ["branch", "-f", &name, &revision], &shown(&repo), &revision).await?;
@@ -188,8 +176,8 @@ impl WasiVcsCtx for Client {
         .boxed()
     }
 
-    fn push(&self, repo: PathBuf, remote: String, label: String) -> FutureResult<()> {
-        tracing::trace!("pushing {label} to {remote} from {}", repo.display());
+    fn push(&self, repo: Place, remote: String, label: String) -> FutureResult<()> {
+        tracing::trace!("pushing {label} to {remote} from {}", repo.path().display());
         let client = self.clone();
         async move {
             let output = client.git(Some(&repo), ["push", "--quiet", &remote, &label]).await?;
@@ -208,7 +196,7 @@ impl Client {
     // Run git at `at` and hold it to success, else the typed refusal naming
     // `exists` for a location taken and `missing` for what the repository
     // lacks.
-    async fn run<I, S>(&self, at: &Path, args: I, exists: &str, missing: &str) -> Result<Output>
+    async fn run<I, S>(&self, at: &Place, args: I, exists: &str, missing: &str) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -223,7 +211,7 @@ impl Client {
 
     // `--quiet` leaves an unknown revision unsaid, so a failure here is
     // `not-found` unless git names a missing repository.
-    async fn rev_parse(&self, at: &Path, revision: &str) -> Result<String> {
+    async fn rev_parse(&self, at: &Place, revision: &str) -> Result<String> {
         let spec = format!("{revision}^{{commit}}");
         let output = self.git(Some(at), ["rev-parse", "--verify", "--quiet", &spec]).await?;
         if output.status.success() {
@@ -236,13 +224,13 @@ impl Client {
         .into())
     }
 
-    async fn status(&self, at: &Path) -> Result<Vec<Change>> {
+    async fn status(&self, at: &Place) -> Result<Vec<Change>> {
         let args = ["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"];
         let output = self.run(at, args, &shown(at), "HEAD").await?;
         Ok(pending(&output.stdout))
     }
 
-    async fn conflicts(&self, at: &Path) -> Result<Vec<String>> {
+    async fn conflicts(&self, at: &Place) -> Result<Vec<String>> {
         let args = ["diff", "--name-only", "--diff-filter=U", "-z"];
         let output = self.run(at, args, &shown(at), "HEAD").await?;
         Ok(output.stdout.split('\0').filter(|path| !path.is_empty()).map(str::to_owned).collect())
@@ -260,15 +248,8 @@ fn refuse(output: &Output, exists: &str, missing: &str) -> Error {
     }
 }
 
-fn shown(path: &Path) -> String {
-    path.display().to_string()
-}
-
-fn create_parent(at: &Path) -> Result<()> {
-    if let Some(parent) = at.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    Ok(())
+fn shown(place: &Place) -> String {
+    place.path().display().to_string()
 }
 
 // One change per path from `status --porcelain -z`, the index and tree

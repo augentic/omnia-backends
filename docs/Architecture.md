@@ -98,7 +98,7 @@ The two `wasi-model` backends serve `omnia:model/completion` requests and differ
 
 ### Version control
 
-`git` serves `omnia:vcs` — the `store`, `workspace`, and `transport` interfaces — by running the operator's own `git` binary, one process per operation, at the host path the runtime resolved the guest's lent location to. Omnia's lend rule bounds every path to a preopen the guest holds, so a guest reaches no repository it was not granted; `GIT_DIR` and its siblings are scrubbed from each process's environment, so the operator's shell cannot redirect one. A merge policy reaches git as attribute lines in a file beside the tree named through `core.attributesFile`, never written into the repository. Connecting refuses a git older than 2.5, the first with `worktree`. See [`crates/git/README.md`](../crates/git/README.md).
+`git` serves `omnia:vcs` — the `store`, `workspace`, and `transport` interfaces — by running the operator's own `git` binary, one process per operation, in the directory the runtime opened for the guest's lent location: the child enters the open handle before it executes, so git works where the location resolved and never walks a path a guest could redirect meanwhile. Omnia's lend rule bounds every location to a preopen the guest holds, so a guest reaches no repository it was not granted; `GIT_DIR` and its siblings are scrubbed from each process's environment, so the operator's shell cannot redirect one. A merge policy reaches git as attribute lines in a file beside the tree named through `core.attributesFile`, never written into the repository. Connecting refuses a git older than 2.5, the first with `worktree`. See [`crates/git/README.md`](../crates/git/README.md).
 
 ### Registry acquisition
 

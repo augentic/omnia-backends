@@ -22,6 +22,7 @@ all-features = true
 anyhow.workspace = true
 fromenv.workspace = true
 futures.workspace = true
+libc.workspace = true
 omnia.workspace = true
 omnia-wasi-vcs.workspace = true
 process-wrap = { workspace = true, features = ["kill-on-drop", "process-group", "tokio1"] }

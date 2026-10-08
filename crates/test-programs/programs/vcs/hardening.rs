@@ -4,7 +4,9 @@
 //! the place. The host lays a repository salted with a hostile
 //! `core.hooksPath`, `core.fsmonitor`, `core.alternateRefsCommand`,
 //! `core.worktree`, signing program, smudge filter, and remote receive-pack,
-//! a bare origin with its own hostile hooks and alternate-refs command, a
+//! a working copy of its history that would write its checked-out branch on
+//! receive through a filter and monitor of its own, a bare origin with its
+//! own hostile hooks and alternate-refs command, a
 //! repository with no identity to seal a merge, one whose own `insteadOf`
 //! would carry an `https` remote onto a local path, one whose own `http.proxy`
 //! and `http.sslVerify` would carry the host's credentials through a proxy of
@@ -100,6 +102,13 @@ async fn repo_config_runs_nothing() {
     WasiVcs.label(REPO, "emery/hardened", &sealed).await.expect("label");
     WasiVcs.push(REPO, "origin", "emery/hardened").await.expect("push");
     WasiVcs.fetch(REPO, "origin").await.expect("fetch");
+
+    // a push into a working copy lands a branch it has not checked out, and
+    // refuses the one it has rather than write the copy's tree through its
+    // own filters and monitor, as its `receive.denyCurrentBranch` asks
+    WasiVcs.push(REPO, "checked", "emery/hardened").await.expect("push to a working copy");
+    let current = WasiVcs.push(REPO, "checked", "main").await;
+    assert!(matches!(current, Err(Error::Other(_))), "the checked-out branch stays: {current:?}");
 }
 
 async fn a_failed_merge_leaves_no_merge() {

@@ -132,7 +132,8 @@ async fn vcs_hardening() {
     let scratch = scratch();
     let salt = Salt::new(&git, scratch.path());
     let alternates = salt.alternates();
-    let (repo, elsewhere) = salt.hostile_repo(&alternates);
+    let (repo, elsewhere, checked) = salt.hostile_repo(&alternates);
+    salt.checked_out(&checked);
     let origin = salt.hostile_origin(&repo, &alternates);
     let noident = salt.identityless();
     salt.rewriter(&origin);
@@ -162,6 +163,11 @@ async fn vcs_hardening() {
         elsewhere.join("secret.txt").exists(),
         "the directory outside the place was left alone"
     );
+    // the local push landed the label in the working copy and left its
+    // checked-out branch and its tree as they were
+    assert_eq!(git.git(&checked, &["log", "-1", "--format=%s", "emery/hardened"]), "seal");
+    assert_eq!(git.git(&checked, &["rev-list", "--count", "main"]), "1");
+    assert!(!checked.join("b.txt").exists(), "the copy's tree was not written");
     assert!(!noident.join(".git/MERGE_HEAD").exists(), "the failed merge was unwound");
     assert_eq!(git.git(&noident, &["rev-list", "--count", "HEAD"]), "1", "its head did not move");
 
@@ -267,13 +273,19 @@ impl<'a> Salt<'a> {
 
     // A repository whose own configuration would run a program on the host at
     // the next checkout, status, commit, fetch, or push, and whose work tree
-    // points at a directory outside the place; with the directory.
-    fn hostile_repo(&self, alternates: &str) -> (PathBuf, PathBuf) {
+    // points at a directory outside the place; with the directory, and with
+    // a working copy of its history, cloned before the salting, for a local
+    // push to land in.
+    fn hostile_repo(&self, alternates: &str) -> (PathBuf, PathBuf, PathBuf) {
         let repo = self.at("repo");
         seed(self.git, &repo, "a.txt");
         fs::write(repo.join(".gitattributes"), "* filter=evil\n").expect("the attributes");
         self.git.git(&repo, &["add", "-A"]);
         self.git.git(&repo, &["commit", "-qm", "attributes"]);
+        let checked = self.at("checked");
+        let (from, to) = (repo.display().to_string(), checked.display().to_string());
+        self.git.git(self.root, &["clone", "--quiet", &from, &to]);
+        self.git.git(&repo, &["remote", "add", "checked", &to]);
         let hooks = self.at("hostile-hooks");
         fs::create_dir_all(&hooks).expect("the hooks directory");
         executable(&hooks.join("pre-commit"), &touch(&self.markers, "pre-commit"));
@@ -300,7 +312,25 @@ impl<'a> Salt<'a> {
         }
         fs::create_dir_all(repo.join(".git/objects/info")).expect("the objects info directory");
         fs::write(repo.join(".git/objects/info/alternates"), alternates).expect("the alternates");
-        (repo, elsewhere)
+        (repo, elsewhere, checked)
+    }
+
+    // The working copy a local push lands in, whose own configuration would
+    // write its checked-out branch on receive, through a smudge filter and a
+    // file-system monitor of its own.
+    fn checked_out(&self, checked: &Path) {
+        let fsmonitor = self.at("checked-fsmonitor");
+        executable(&fsmonitor, &touch(&self.markers, "checked-fsmonitor"));
+        let smudge = self.at("checked-smudge");
+        executable(&smudge, &filter(&self.markers, "checked-smudge"));
+        for (key, value) in [
+            ("receive.denyCurrentBranch", "updateInstead".to_owned()),
+            ("core.fsmonitor", fsmonitor.display().to_string()),
+            ("filter.evil.smudge", smudge.display().to_string()),
+            ("filter.evil.required", "true".to_owned()),
+        ] {
+            self.config(checked, key, &value);
+        }
     }
 
     // A bare origin whose receive would run a hook and an alternate-refs

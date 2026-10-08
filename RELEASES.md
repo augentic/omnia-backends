@@ -25,8 +25,9 @@ Unreleased
   host's configuration expands it, and under `LC_ALL=C`, so what git
   says is the English the typed errors are read from whatever locale the
   operator's shell exports; the pack command is named on every transport,
-  a local one's with the far side's hooks and alternate-refs command
-  disabled and a remote one's git's own, so a `remote.<name>.uploadPack`
+  a local one's holding the far side to no hooks, alternate-refs command,
+  or file-system monitor and to no update of a checked-out branch, and a
+  remote one's git's own, so a `remote.<name>.uploadPack`
   or `receivePack` the repository set is never what the operator's ssh
   carries to a host; and a repository that sets how a transport runs — a
   `url.<base>.insteadOf`, an `http.*` setting beyond the transfer-tuning

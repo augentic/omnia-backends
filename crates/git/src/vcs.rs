@@ -463,9 +463,8 @@ fn vetted(value: &str) -> Result<()> {
 // the command line so the repository's own `remote.<name>.uploadPack` or
 // `receivePack` — which no `-c` outranks — is never the program the
 // operator's ssh carries to a host: for a local transport, the wrapped
-// command that runs the far side without its hooks, since a bare repository
-// beneath the mount is as much the guest's as the working copy; for a remote
-// one, git's own default.
+// command that holds the far side to `FAR_SIDE`; for a remote one, git's
+// own default.
 fn transport(client: &Client, address: &str, push: bool) -> (&'static str, String) {
     let operation = if push { "receive-pack" } else { "upload-pack" };
     if is_local(address) {
@@ -488,17 +487,30 @@ fn is_local(address: &str) -> bool {
     }
 }
 
+// What the far side of a local transport is held to, since a repository
+// beneath the mount is as much the guest's as the place: no hooks, no
+// alternate-refs command, no file-system monitor, and no update of a branch
+// a working copy has checked out, which `receive.denyCurrentBranch=
+// updateInstead` would write through the copy's own filters.
+const FAR_SIDE: [&str; 4] = [
+    "core.hooksPath=/dev/null",
+    "core.alternateRefsCommand=",
+    "core.fsmonitor=false",
+    "receive.denyCurrentBranch=refuse",
+];
+
 // `git -c … <operation>` as one `--upload-pack` or `--receive-pack`
-// argument, so the far side — a bare repository as much beneath the mount as
-// the working copy — runs none of its own hooks and no alternate-refs
-// command. git splits the value with shell quoting for a local transport, so
-// the binary is single-quoted.
+// argument: the near side's `-c` pins reach no process the far side starts,
+// so its own ride the command. git splits the value with shell quoting for a
+// local transport, so the binary is single-quoted.
 fn wrap(client: &Client, operation: &str) -> String {
     let binary = sq(&client.binary.display().to_string());
-    format!(
-        "--{operation}={binary} -c core.hooksPath=/dev/null -c core.alternateRefsCommand= \
-         {operation}"
-    )
+    let mut pins = String::new();
+    for pin in FAR_SIDE {
+        pins.push_str(" -c ");
+        pins.push_str(pin);
+    }
+    format!("--{operation}={binary}{pins} {operation}")
 }
 
 fn sq(value: &str) -> String {

@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io;
 use std::os::fd::{AsRawFd as _, RawFd};
+use std::path::{self, Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 
 use anyhow::{Context as _, Result};
@@ -81,6 +82,9 @@ impl Client {
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(place) = at {
             enter(&mut command, place.dir().as_raw_fd());
+            if let Some(ceiling) = ceiling(place) {
+                command.env("GIT_CEILING_DIRECTORIES", ceiling);
+            }
         }
         command.args(args);
         for var in SCRUBBED {
@@ -106,6 +110,17 @@ impl Client {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
+}
+
+// Where git's search for the repository stops: the place's parent, so a
+// place holding no `.git` of its own is no repository rather than a
+// subdirectory of whichever ancestor holds one, while a repository rooted in
+// the place, or a working copy whose `.git` file is, resolves as before. Git
+// resolves the entry and the directory the child entered alike before it
+// compares them, so the place's recorded path serves, made absolute as git
+// requires of an entry.
+fn ceiling(place: &Place) -> Option<PathBuf> {
+    path::absolute(place.path()).ok()?.parent().map(Path::to_path_buf)
 }
 
 // The child's working directory is the open handle itself, entered between

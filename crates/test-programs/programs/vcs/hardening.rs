@@ -13,11 +13,13 @@
 //! `http.sslVerify` would carry the host's credentials through a proxy of
 //! its choosing, one naming the pack program the operator's ssh would run on
 //! a far host, a partial clone whose promisor remote is an ssh host under a
-//! pack command of its own, and one naming a clean filter under a key no pin
-//! can spell; this guest drives the operations that would fire each, and
-//! the host asserts no marker was written, nothing was carried or read from
-//! outside the place, the ssh was handed git's own programs and nothing for
-//! the promisor, and the work still landed.
+//! pack command of its own, one naming a clean filter under a key no pin
+//! can spell, and a bare directory inside a sealed repository; this guest
+//! drives the operations that would fire each, and the host asserts no
+//! marker was written, nothing was carried or read from outside the place,
+//! the ssh was handed git's own programs and nothing for the promisor, the
+//! enclosing repository was neither read nor sealed, and the work still
+//! landed.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -35,6 +37,7 @@ const PROXIED: &str = "./proxied";
 const PACKER: &str = "./packer";
 const LAZY: &str = "./lazy";
 const BYTES: &str = "./bytes";
+const INNER: &str = "./outer/inner";
 
 async fn scenario() {
     repo_config_runs_nothing().await;
@@ -43,6 +46,23 @@ async fn scenario() {
     a_repository_names_no_pack_program().await;
     a_lazy_fetch_reaches_no_command().await;
     an_unnameable_key_is_refused().await;
+    an_enclosing_repository_is_not_reached().await;
+}
+
+// The place holds no `.git` of its own and sits inside a repository that
+// does; git's search for one stops at the place, so a guest lent the
+// directory alone neither reads nor seals the repository around it.
+async fn an_enclosing_repository_is_not_reached() {
+    for result in [
+        WasiVcs.head(INNER).await.map(drop),
+        WasiVcs.pending(INNER).await.map(drop),
+        WasiVcs.commit(INNER, "steal").await.map(drop),
+    ] {
+        assert!(
+            matches!(result, Err(Error::NotARepository)),
+            "{INNER} is no repository: {result:?}"
+        );
+    }
 }
 
 // The repository names a clean filter under a subsection that is not UTF-8,

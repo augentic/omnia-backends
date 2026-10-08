@@ -141,6 +141,7 @@ async fn vcs_hardening() {
     let ssh_argv = salt.packer();
     salt.lazy();
     salt.bytes();
+    let outer = salt.enclosing();
 
     run(&git, &scratch, test_programs::VCS_HARDENING, vec![]).await;
 
@@ -185,6 +186,10 @@ async fn vcs_hardening() {
 
     // the repository with the unnameable key sealed nothing
     assert_eq!(git.git(&scratch.path().join("bytes"), &["rev-list", "--count", "HEAD"]), "1");
+
+    // the repository enclosing a lent directory was neither read nor sealed
+    assert_eq!(git.git(&outer, &["rev-list", "--count", "HEAD"]), "1");
+    assert_eq!(git.git(&outer, &["status", "--porcelain"]), "?? inner/");
 }
 
 #[tokio::test]
@@ -454,6 +459,19 @@ impl<'a> Salt<'a> {
         let blob = self.git.git(&lazy, &["rev-parse", "HEAD:a.txt"]);
         fs::remove_file(lazy.join(format!(".git/objects/{}/{}", &blob[..2], &blob[2..])))
             .expect("removing the blob");
+    }
+
+    // A sealed repository with a bare directory inside it, holding a file,
+    // for a guest lent the directory alone to try to read and seal the
+    // repository through; the repository.
+    fn enclosing(&self) -> PathBuf {
+        let outer = self.at("outer");
+        seed(self.git, &outer, "a.txt");
+        self.git.git(&outer, &["add", "-A"]);
+        self.git.git(&outer, &["commit", "-qm", "base"]);
+        fs::create_dir(outer.join("inner")).expect("the inner directory");
+        fs::write(outer.join("inner/c.txt"), "c\n").expect("a file to seal");
+        outer
     }
 
     // A repository naming a clean filter under a subsection that is not

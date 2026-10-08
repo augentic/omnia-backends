@@ -116,9 +116,9 @@ async fn side(repo: &Repo<'_>, revision: Option<&str>, path: &str) -> Result<Nam
 // anchored to the root; `?` and `*` stay within a component, `**/` crosses
 // whole components, and any other `**` crosses anything.
 fn matches(pattern: &str, path: &str) -> bool {
-    let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
     if pattern.contains('/') {
-        glob(pattern.as_bytes(), path.as_bytes())
+        let anchored = pattern.strip_prefix('/').unwrap_or(pattern);
+        glob(anchored.as_bytes(), path.as_bytes())
     } else {
         let name = path.rsplit('/').next().unwrap_or(path);
         glob(pattern.as_bytes(), name.as_bytes())
@@ -248,6 +248,7 @@ mod tests {
         assert!(matches("a?c", "abc"));
         assert!(!matches("a?c", "a/c"), "a question mark stays within a component");
         assert!(matches("/README.md", "README.md"), "a leading slash anchors");
+        assert!(!matches("/README.md", "docs/README.md"), "to the root alone");
     }
 
     // A pattern of many stars against a path of the bytes between them is the

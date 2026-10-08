@@ -16,7 +16,10 @@ Unreleased
   policy on its command line: hooks, the file-system monitor, the
   alternate-refs command, commit and push signing, and submodule
   recursion are forced off; the work tree is the place itself, whatever
-  `core.worktree` the repository set; a repository-scoped SSH command,
+  `core.worktree` the repository set, and git's search for the repository
+  stops there (`GIT_CEILING_DIRECTORIES`), so a place with no `.git` of
+  its own is `not-a-repository` rather than a subdirectory of an
+  enclosing checkout; a repository-scoped SSH command,
   credential prompt, signing program, credential helper, or clean,
   smudge, or merge driver gives way to the operator's own value or to
   none, and a repository key in bytes that are not UTF-8, which no pin

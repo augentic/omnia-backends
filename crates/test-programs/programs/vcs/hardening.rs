@@ -8,10 +8,12 @@
 //! repository with no identity to seal a merge, one whose own `insteadOf`
 //! would carry an `https` remote onto a local path, one whose own `http.proxy`
 //! and `http.sslVerify` would carry the host's credentials through a proxy of
-//! its choosing, and a partial clone whose promisor remote is an `ext::`
-//! command; this guest drives the operations
-//! that would fire each, and the host asserts no marker was written, nothing
-//! was carried or read from outside the place, and the work still landed.
+//! its choosing, one naming the pack program the operator's ssh would run on
+//! a far host, and a partial clone whose promisor remote is an `ext::`
+//! command; this guest drives the operations that would fire each, and the
+//! host asserts no marker was written, nothing was carried or read from
+//! outside the place, the ssh was handed git's own programs, and the work
+//! still landed.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -26,13 +28,26 @@ const WORK: &str = "./work";
 const NOIDENT: &str = "./noident";
 const REWRITER: &str = "./rewriter";
 const PROXIED: &str = "./proxied";
+const PACKER: &str = "./packer";
 const LAZY: &str = "./lazy";
 
 async fn scenario() {
     repo_config_runs_nothing().await;
     a_failed_merge_leaves_no_merge().await;
     a_shaping_repository_is_refused().await;
+    a_repository_names_no_pack_program().await;
     a_lazy_fetch_reaches_no_command().await;
+}
+
+// The repository's `remote.evil.uploadPack` and `receivePack` name what the
+// operator's ssh would run on the far host; the program git sends is pinned
+// on the command line instead, and the operation fails on the host's ssh,
+// which answers nothing.
+async fn a_repository_names_no_pack_program() {
+    for result in [WasiVcs.fetch(PACKER, "evil").await, WasiVcs.push(PACKER, "evil", "main").await]
+    {
+        assert!(matches!(result, Err(Error::Access(_))), "the host's ssh answered: {result:?}");
+    }
 }
 
 // The repository's promisor remote is an `ext::` command, allowed by its own

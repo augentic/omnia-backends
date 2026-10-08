@@ -58,6 +58,22 @@ impl Hermetic {
         Client::connect(self.binary()).await.expect("connecting over the hermetic git")
     }
 
+    /// A setting in the scratch global configuration: the host's, as an operator set it.
+    pub fn host(&self, key: &str, value: &str) {
+        let config = self.root.path().join("gitconfig");
+        let output = Command::new(self.binary())
+            .args(["config", "--file"])
+            .arg(&config)
+            .args([key, value])
+            .output()
+            .expect("running the oracle git");
+        assert!(
+            output.status.success(),
+            "setting {key}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// The oracle: one git over the wrapper, held to success, its stdout trimmed.
     pub fn git(&self, at: &Path, args: &[&str]) -> String {
         let output = Command::new(self.binary())
@@ -89,6 +105,20 @@ impl Hermetic {
         let script = self.path("old-git");
         write_script(&script, &format!("#!/bin/sh\necho 'git version {version}'\n"));
         script
+    }
+
+    /// A current `git` that records `var` from its environment, and the file it records to.
+    pub fn recording(&self, var: &str) -> (PathBuf, PathBuf) {
+        let script = self.path("recording-git");
+        let record = self.path("recorded");
+        write_script(
+            &script,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${{{var}-unset}}\" > '{}'\necho 'git version 2.50.0'\n",
+                record.display()
+            ),
+        );
+        (script, record)
     }
 }
 

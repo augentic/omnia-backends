@@ -137,6 +137,7 @@ async fn vcs_hardening() {
     let noident = salt.identityless();
     salt.rewriter(&origin);
     salt.proxied();
+    let ssh_argv = salt.packer();
     salt.lazy();
 
     run(&git, &scratch, test_programs::VCS_HARDENING, vec![]).await;
@@ -167,6 +168,12 @@ async fn vcs_hardening() {
     // the rewriting repository carried nothing onto the origin
     let refs = git.git(&origin, &["for-each-ref", "--format=%(refname)"]);
     assert_eq!(refs, "refs/heads/emery/hardened", "{refs}");
+
+    // the operator's ssh was handed git's own pack programs, never the
+    // repository's, once for the fetch and once for the push
+    let argv = fs::read_to_string(&ssh_argv).expect("the host's ssh ran");
+    let carried: Vec<_> = argv.lines().filter(|line| line.ends_with("'/x.git'")).collect();
+    assert_eq!(carried, ["git-upload-pack '/x.git'", "git-receive-pack '/x.git'"], "{argv}");
 }
 
 #[tokio::test]
@@ -363,6 +370,31 @@ impl<'a> Salt<'a> {
         self.git.git(&proxied, &["remote", "add", "evil", "https://example.invalid/x.git"]);
         self.config(&proxied, "http.proxy", "http://127.0.0.1:1");
         self.config(&proxied, "http.sslVerify", "false");
+    }
+
+    // A repository naming the program the operator's ssh would carry to the
+    // far host for a fetch and a push, over a host ssh that records what it
+    // was handed and answers nothing; the file the record lands in.
+    fn packer(&self) -> PathBuf {
+        let packer = self.at("packer");
+        seed(self.git, &packer, "a.txt");
+        self.git.git(&packer, &["add", "-A"]);
+        self.git.git(&packer, &["commit", "-qm", "base"]);
+        self.git.git(&packer, &["remote", "add", "evil", "ssh://localhost/x.git"]);
+        for (key, marker) in [
+            ("remote.evil.uploadpack", "ssh-upload-pack"),
+            ("remote.evil.receivepack", "ssh-receive-pack"),
+        ] {
+            self.config(&packer, key, &format!("touch {}", self.markers.join(marker).display()));
+        }
+        let argv = self.git.path("ssh-argv");
+        let ssh = self.git.path("ssh");
+        executable(
+            &ssh,
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nexit 255\n", argv.display()),
+        );
+        self.git.host("core.sshCommand", &ssh.display().to_string());
+        argv
     }
 
     // A partial clone whose promisor remote is an ext:: command the repository

@@ -1,11 +1,24 @@
 //! What `Client::connect` holds the operator's `git` to before any
-//! operation runs: present, and no older than the first with
-//! `config --show-scope`.
+//! operation runs: present, no older than the first with
+//! `config --show-scope`, and speaking the C locale whatever the operator's
+//! shell exports.
 
 mod support;
 
+use std::fs;
+
 use omnia_git::Client;
 use support::Hermetic;
+
+// The refusal classes read what git says in English; `LC_ALL` outranks the
+// `LANG`, `LANGUAGE`, and `LC_MESSAGES` an operator's shell exports.
+#[tokio::test]
+async fn operator_locale() {
+    let git = Hermetic::new();
+    let (script, record) = git.recording("LC_ALL");
+    Client::connect(script).await.expect("a current git");
+    assert_eq!(fs::read_to_string(record).expect("the git recorded its locale"), "C\n");
+}
 
 #[tokio::test]
 async fn version_refused() {

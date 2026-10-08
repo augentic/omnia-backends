@@ -32,16 +32,19 @@ const SCRUBBED: [&str; 4] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_
 
 // What an interactive git reads from a terminal, an editor, or a prompt —
 // none answerable from a guest, so each is closed before git can block on
-// it or run a program to fill it — and the protocols any process may speak:
+// it or run a program to fill it; the protocols any process may speak, since
 // a lazy fetch from a promisor remote the repository names would otherwise
 // reach an `ext::` command or a remote helper under whatever
-// `protocol.<name>.allow` the repository set. A transport operation names
-// the list for its own kind in `env`, which applies after.
-const FIXED: [(&str, &str); 4] = [
+// `protocol.<name>.allow` the repository set, a transport operation naming
+// the list for its own kind in `env`, which applies after; and the C locale,
+// over whatever the operator's shell exports, so what git says is the
+// English the refusal classes read.
+const FIXED: [(&str, &str); 5] = [
     ("GIT_TERMINAL_PROMPT", "0"),
     ("GIT_EDITOR", ":"),
     ("GIT_MERGE_AUTOEDIT", "no"),
     ("GIT_ALLOW_PROTOCOL", "http:https:ssh"),
+    ("LC_ALL", "C"),
 ];
 
 // What one git process said: stdout as the bytes git wrote, since a blob

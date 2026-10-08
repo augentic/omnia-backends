@@ -178,10 +178,7 @@ impl WasiVcsCtx for Client {
             let address = expand(&repo, &url, false).await;
             let (protocol, pack) = transport(&client, &address, false);
             let depth = options.depth.map(|depth| depth.to_string());
-            let mut args = vec!["clone".to_owned(), "--quiet".to_owned()];
-            if let Some(pack) = pack {
-                args.push(pack);
-            }
+            let mut args = vec!["clone".to_owned(), "--quiet".to_owned(), pack];
             // depth cuts history, never the labels: git's implied --single-branch would
             if let Some(depth) = &depth {
                 args.extend(["--depth".to_owned(), depth.clone(), "--no-single-branch".to_owned()]);
@@ -205,11 +202,8 @@ impl WasiVcsCtx for Client {
             repo.transportable()?;
             let address = expand(&repo, &remote, false).await;
             let (protocol, pack) = transport(&client, &address, false);
-            let mut args = vec!["fetch".to_owned(), "--quiet".to_owned()];
-            if let Some(pack) = pack {
-                args.push(pack);
-            }
-            args.extend(["--".to_owned(), remote.clone()]);
+            let args =
+                ["fetch".to_owned(), "--quiet".to_owned(), pack, "--".to_owned(), remote.clone()];
             let output = repo.git(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
             if !output.status.success() {
                 return Err(refuse(&output, &repo.shown(), &remote).into());
@@ -248,11 +242,14 @@ impl WasiVcsCtx for Client {
             let address = expand(&repo, &remote, true).await;
             let (protocol, pack) = transport(&client, &address, true);
             let refspec = format!("refs/heads/{label}:refs/heads/{label}");
-            let mut args = vec!["push".to_owned(), "--quiet".to_owned()];
-            if let Some(pack) = pack {
-                args.push(pack);
-            }
-            args.extend(["--".to_owned(), remote.clone(), refspec]);
+            let args = [
+                "push".to_owned(),
+                "--quiet".to_owned(),
+                pack,
+                "--".to_owned(),
+                remote.clone(),
+                refspec,
+            ];
             let output = repo.git(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
             if !output.status.success() {
                 // the label is what a refspec names; anything else missing is the remote
@@ -462,15 +459,19 @@ fn vetted(value: &str) -> Result<()> {
     Ok(())
 }
 
-// The protocol allow-list and, for a local transport, the wrapped pack
-// command that runs the far side without its hooks: a bare repository beneath
-// the mount is as much the guest's as the working copy.
-fn transport(client: &Client, address: &str, push: bool) -> (&'static str, Option<String>) {
+// The protocol allow-list and the pack command the far side runs, named on
+// the command line so the repository's own `remote.<name>.uploadPack` or
+// `receivePack` — which no `-c` outranks — is never the program the
+// operator's ssh carries to a host: for a local transport, the wrapped
+// command that runs the far side without its hooks, since a bare repository
+// beneath the mount is as much the guest's as the working copy; for a remote
+// one, git's own default.
+fn transport(client: &Client, address: &str, push: bool) -> (&'static str, String) {
     let operation = if push { "receive-pack" } else { "upload-pack" };
     if is_local(address) {
-        ("file", Some(wrap(client, operation)))
+        ("file", wrap(client, operation))
     } else {
-        ("http:https:ssh", None)
+        ("http:https:ssh", format!("--{operation}=git-{operation}"))
     }
 }
 

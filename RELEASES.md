@@ -22,12 +22,16 @@ Unreleased
   that is empty or option-shaped is `not-found` before any process runs;
   every process runs under `GIT_ALLOW_PROTOCOL`, `http:https:ssh` by
   default and the list for a transport's kind, read from the URL as the
-  host's configuration expands it, a local one with the far side's hooks
-  and alternate-refs command disabled through the pack command; and a
-  repository that sets how a transport runs — a `url.<base>.insteadOf`,
-  an `http.*` setting beyond the transfer-tuning keys, a
-  `remote.<name>.proxy` — is refused on every transport, the key named.
-  A merge is held before its commit and the policy
+  host's configuration expands it, and under `LC_ALL=C`, so what git
+  says is the English the typed errors are read from whatever locale the
+  operator's shell exports; the pack command is named on every transport,
+  a local one's with the far side's hooks and alternate-refs command
+  disabled and a remote one's git's own, so a `remote.<name>.uploadPack`
+  or `receivePack` the repository set is never what the operator's ssh
+  carries to a host; and a repository that sets how a transport runs — a
+  `url.<base>.insteadOf`, an `http.*` setting beyond the transfer-tuning
+  keys, a `remote.<name>.proxy` — is refused on every transport, the key
+  named. A merge is held before its commit and the policy
   applied by the backend from the three commits, byte for byte — over
   whatever the repository's own attributes made of a path — so nothing of
   it is written into the repository; a `union` over a binary fails the

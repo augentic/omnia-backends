@@ -5,7 +5,8 @@ use anyhow::{Context, anyhow};
 use futures::future::FutureExt;
 use futures::stream::{self, StreamExt};
 use omnia_wasi_messaging::{
-    Client, FutureResult, Message, Metadata, Reply, RequestOptions, Subscriptions, WasiMessagingCtx,
+    Client, FutureResult, Handler, Message, Metadata, Reply, RequestOptions, WasiMessagingCtx,
+    dispatch,
 };
 
 impl WasiMessagingCtx for crate::Client {
@@ -41,7 +42,9 @@ fn nats_headers(metadata: &Metadata) -> async_nats::HeaderMap {
 }
 
 impl Client for crate::Client {
-    fn subscribe(&self) -> FutureResult<Subscriptions> {
+    // NATS core has no acknowledgement: a message is finished with once the
+    // handler returns, whatever it returned
+    fn consume(&self, handler: Arc<dyn Handler>) -> FutureResult<()> {
         let client = self.clone();
 
         async move {
@@ -49,17 +52,14 @@ impl Client for crate::Client {
                 return Err(anyhow!("No topics specified"));
             };
 
-            let mut subscribers = vec![];
-            for t in &topics {
-                let subscriber = client.inner.subscribe(t.clone()).await?;
-                subscribers.push(subscriber);
+            let mut subscribers = Vec::with_capacity(topics.len());
+            for topic in &topics {
+                subscribers.push(client.inner.subscribe(topic.clone()).await?);
             }
-
             tracing::info!("subscribed to {topics:?} topics");
 
-            // process messages until terminated
             let stream = stream::select_all(subscribers).map(from_nats);
-            Ok(Box::pin(stream) as Subscriptions)
+            dispatch(Box::pin(stream), handler).await
         }
         .boxed()
     }

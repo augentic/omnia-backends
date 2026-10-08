@@ -1,9 +1,10 @@
 # Kafka backend resilience
 
 Twelve defects in the Kafka consume and produce paths, and the eight changes
-that close them. Seven are confined to `omnia-kafka`; one, a few dozen
-lines, is in [augentic/omnia](https://github.com/augentic/omnia). None
-changes the `wasi:messaging` WIT, so no guest is recompiled.
+that close them. Seven are confined to `omnia-kafka`; one, the seam between
+the `wasi:messaging` host and its backend, is in
+[augentic/omnia](https://github.com/augentic/omnia). None changes the
+`wasi:messaging` WIT, so no guest is recompiled.
 
 ## Acceptance criteria
 
@@ -108,9 +109,9 @@ KafkaJS at the end of its fetch cycle, up to about a second later.
 | D7  | Unbounded guest spawning exhausts the pool and drops records | `omnia` server   | `omnia-kafka`, by yielding at most 64    | loss under load   |
 | D8  | No ordering: concurrent guests race on shared state          | `omnia` server   | `omnia-kafka`, by yielding one per key   | stale output      |
 | D9  | At-most-once consumption: failures are treated as consumed   | `messaging.rs`   | `omnia-kafka`                            | silent loss       |
-| D10 | Offsets would commit before the output is durable            | both             | `omnia-kafka`, over the `omnia` ack seam | silent loss       |
+| D10 | Offsets would commit before the output is durable            | both             | `omnia-kafka`, over the `omnia` seam     | silent loss       |
 | D11 | The schema cache serialises every decode on a cold fetch     | `registry.rs`    | `omnia-kafka`                            | stall             |
-| D12 | The guest's returned error is discarded by the host          | `omnia` server   | `omnia`, one line                        | invisible failure |
+| D12 | The guest's returned error is discarded by the host          | `omnia` server   | `omnia`, the handler seam                | invisible failure |
 
 Each defect below is described the same way: what goes wrong, why the code
 does it, and what the effect is.
@@ -238,12 +239,14 @@ policy can tell a successful record from a failed one.
   stays `kafkajs` unless configured. Offset semantics _do_ change for every
   deployment — that is the point of change 8.
 - **`omnia` changes are minimal and Kafka-blind.** The host gains one
-  seam, the ack token, and nothing that encodes a Kafka policy.
-  Concurrency bounds, ordering and offset handling are the backend's, and
-  another backend that needs them does the same on its own side. If a
-  backend floods the pool, that is that backend's problem.
+  seam, `Client::consume` over a `Handler`, and nothing that encodes a
+  Kafka policy. Concurrency bounds, ordering, offset handling and the
+  failure policy are the backend's, and another backend that needs them
+  does the same on its own side. If a backend floods the pool, that is
+  that backend's problem.
 - **A backend with no use for a capability does not implement it.** NATS
-  acquires nothing it has to write.
+  and the in-memory default hand their stream to a shared `dispatch` and
+  write nothing of their own.
 - **CI cannot stand up a broker, a registry, or a guest pool.** Per
   `AGENTS.md`, real-service tests are `#[ignore]`d. Deterministic cores get
   unit tests; everything else is a live test.
@@ -350,7 +353,7 @@ named `release/3.0.0` but its `package.json` says `1.15.0`, nothing passes
 **Outcome.** A guest can read the key, partition, offset and timestamp of
 the record it is handling. A guest that supplies no key produces a genuine
 null key, not an empty one. The backend has something to order on (change
-7) and something to ack by (change 8).
+7) and something to track offsets by (change 8).
 
 **Changes.**
 
@@ -381,8 +384,8 @@ of it (`queue.buffering.max.*`, `linger.ms`, `retries`,
 policy because the caller causing the pressure is the one that hears about
 it.
 
-A fatal consumer error has one correct answer: end the subscription. The
-host then treats a stream that ends as a server error (change 6), the
+A fatal consumer error has one correct answer: end `consume` with it. The
+host treats a `consume` that returns as a server error (change 6), the
 process exits non-zero, and the orchestrator restarts it — the same
 behaviour Node and Java implement in-process, with no in-process restart
 code.
@@ -390,229 +393,234 @@ code.
 **Changes.**
 
 - `send` returns the enqueue error. Count refused publishes
-  (`publish_refused`). Optionally one bounded retry on `QueueFull` alone.
-- `subscribe` matches `KafkaError::MessageConsumptionFatal`, logs it at
-  `error` with the detail from `consumer.client().fatal_error()`, and drops
-  the sender so the stream ends. Non-fatal errors stay `warn` and are
-  skipped as now.
+  (`publish_refused`). One retry on `QueueFull` alone.
+- The record stream matches `KafkaError::MessageConsumptionFatal` and ends
+  with an error carrying the detail from `consumer.client().fatal_error()`,
+  which `consume` returns. Non-fatal errors stay `warn` and are skipped as
+  now.
 - `Client` wraps its handles in an `Arc<Inner>` whose `Drop` flushes the
   producer with a bounded timeout (10 s, as the .NET adapter). The consumer
   drops after it; with auto-commit on, `rd_kafka_consumer_close` commits
   stored offsets.
 
-### 6. Acknowledgement — the one `omnia` change
+### 6. The handler seam — the one `omnia` change
 
 *Closes D12. Enables changes 7 and 8. `omnia`.*
 
-**Outcome.** A backend is told when the host has finished with each
-message. The host loop itself is unchanged: it still spawns a task per
-message, with no bound and no ordering. A backend that wants either
-enforces it on its own side of the seam (change 7 does, for Kafka); a
-backend that does not care gets today's behaviour. A guest's returned
-`Err` is no longer silently discarded.
+**Outcome.** The backend owns the delivery loop. The host hands it a
+`Handler` whose `handle` runs the guest for one message and returns a typed
+outcome; the backend calls it when it chooses and learns what happened as
+the return value. A backend that wants a bound or an order enforces it in
+its own loop (change 7 does, for Kafka); a backend with no such needs
+hands its stream to a shared `dispatch` and gets a task per message, as
+before. A guest's returned `Err` is no longer silently discarded.
 
-**Design.** An optional ack token on `Message`.
+**Design.** Invert the seam: the backend calls the host.
 
-| option | verdict |
-|---|---|
-| `Delivery { message, ack }` as the `Subscriptions` item | changes every backend's `subscribe` |
-| A second trait (`AckConsumer`) plus a defaulted accessor and a second subscription type | works; four new items and a branch in `server::run` for one bit of information |
-| Defaulted `Client::ack(&self, ..)` method | the host must call it on every exit path; a missed path is a stalled partition, and the message has moved into the store table by the time the guest returns |
-| Bounded, ordered dispatch in the host (lanes) | correct and generic, but a larger host change and a Kafka policy decided in `omnia`; the backend can do it itself once it has the token |
-| **`pub ack: Option<Arc<dyn Ack>>` on `Message`** | **chosen** |
+| option                                                          | verdict                                                                                                                                                                                                   |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| An ack token on `Message` (previous draft)                      | the outcome travels back through a side channel the host must fire on every exit path; a missed path is a stalled partition, and "dropped without a call" is a second signal with its own `Drop` protocol |
+| `Delivery { message, ack }` as the `Subscriptions` item         | changes every backend's `subscribe` for the same side channel                                                                                                                                             |
+| Bounded, ordered dispatch in the host (lanes)                   | correct and generic, but a Kafka policy decided in `omnia`                                                                                                                                                |
+| **`Client::consume(handler)` with a typed `Handler::handle`**   | **chosen**: the outcome is the return value, there is no second signal, and the backend's loop is the backend's                                                                                           |
 
-`Message` is `#[non_exhaustive]` so a field is not a breaking change, and it
-already carries a host-side routing concern (`reply`) the guest never sees.
-The token's contract is **call = the guest ran, or there was nothing to
-run; drop without call = the host never ran a guest for it**. The backend
-owns the token type, so it can tell the two apart (`Drop` on its
-implementation) and decide what each means for the offset and for what it
-yields next.
+The pull-stream `subscribe` had the host draining the backend as fast as it
+could and the backend learning nothing. With `consume`, a backend that
+needs to know when a record is done simply awaits the call; a backend that
+does not need to know spawns it and moves on. Nothing on the message
+changes, and nothing is optional.
 
 ```rust
-/// A backend's hook for learning the host is done with a message.
-pub trait Ack: Debug + Send + Sync + 'static {
-    /// The host ran the guest for this message, or had no guest to run.
-    /// Dropping the token without calling this means it did neither.
-    fn ack(&self);
+pub trait Client: Debug + Send + Sync + 'static {
+    /// Deliver every incoming message to `handler` until the transport
+    /// gives up. Returning, `Ok` or `Err`, is fatal to the server.
+    fn consume(&self, handler: Arc<dyn Handler>) -> FutureResult<()>;
+    fn send(&self, topic: String, message: Message) -> FutureResult<()>;
+    fn request(&self, ..) -> FutureResult<Message>;
+}
+
+/// The host's side of the seam: run the guest for one message.
+pub trait Handler: Send + Sync + 'static {
+    fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), HandleError>>;
+}
+
+#[non_exhaustive]
+pub enum HandleError {
+    /// No guest ran: it could not be loaded or instantiated.
+    Unavailable(String),
+    /// The guest ran and returned `Err`.
+    Rejected(types::Error),
+    /// The guest trapped.
+    Trapped(String),
+    /// The guest ran past the deployment's `guest_timeout`.
+    TimedOut(Duration),
 }
 ```
 
-**When the host acks.**
+**What the host returns.**
 
-| outcome of `MessagingHandler::handle` | guest ran? | host                                                           |
-| ------------------------------------- | ---------- | -------------------------------------------------------------- |
-| guest returned `Ok`                   | yes        | ack                                                            |
-| guest returned `Err`                  | yes        | ack; the error is now logged and counted (`processing_errors`) |
-| trap                                  | yes        | ack; logged and counted as today                               |
-| timeout                               | yes        | ack; logged and counted as today                               |
-| no route for topic                    | n/a        | ack (nothing to do)                                            |
-| load or instantiate failure           | no         | token dropped un-acked; logged and counted as today            |
+| outcome of `MessagingHandler::handle` | guest ran? | returns            |
+| ------------------------------------- | ---------- | ------------------ |
+| guest returned `Ok`                   | yes        | `Ok(())`           |
+| guest returned `Err`                  | yes        | `Err(Rejected)`    |
+| trap                                  | yes        | `Err(Trapped)`     |
+| timeout                               | yes        | `Err(TimedOut)`    |
+| no route for topic                    | n/a        | `Ok(())`           |
+| load or instantiate failure           | no         | `Err(Unavailable)` |
 
-If the guest ran, it has had its chance at the record whatever it did with
-it; the host does not retry and does not hold anything back. If no guest
-ran, the host says so by not acking and otherwise behaves as today; what
-to do about it is the backend's decision (change 7).
+Every `Err` is logged and counted (`processing_errors`) once, in `handle`,
+whatever the backend goes on to do with it. What an `Err` means for the
+message is the backend's decision: the in-memory default and NATS are
+finished with it; Kafka's policy is change 7.
 
 **Changes — `omnia`.** All in
-[`crates/wasi-messaging`](https://github.com/augentic/omnia/tree/main/crates/wasi-messaging);
-a few dozen lines in total.
+[`crates/wasi-messaging`](https://github.com/augentic/omnia/tree/main/crates/wasi-messaging)
+and the test harness.
 
-- `src/host/resource.rs`: the `Ack` trait and the `ack` field on `Message`.
-  The existing `Clone, Debug, Default` derives still hold: `Arc` clones,
-  `Ack: Debug`, and the default is `None`. `src/host.rs` re-exports `Ack`
-  beside `Client` and `Message` so a backend can implement it.
-- `src/host/server.rs`, `MessagingHandler::handle`: `let ack =
-message.ack.take();` as the first line, before the message enters the
-  store table. Call it on the no-route return and after the guest call
-  resolves — on the `Ok`, `Err`, trap and timeout arms alike — and let it
-  drop on the load, export-check, push and instantiate failures above the
-  call. The ack lives in `handle`, not the server loop, because only
-  `handle` knows whether a guest ran.
-- Same function, one line: replace `.map(|_| ())` on the guest call with
-  a flatten (`and_then`) so a guest `Err` becomes `handle`'s `Err`. The
-  server loop already logs and counts that as `processing_errors`; no new
-  counter.
-- `server::run`, one line: a subscription stream that ends returns `Err`
-  instead of `Ok(())`. A server's subscription never ends on purpose, and
-  change 5 relies on this to turn a fatal consumer error into a process
-  exit. Today the loop returns `Ok`, the lifecycle treats that as success,
-  and if an HTTP server is also running the process stays up with a dead
-  consumer.
+- `src/host/resource.rs`: `Handler`, `HandleError`, and `Client::consume`
+  in place of `Client::subscribe`. `dispatch(stream, handler)` for a
+  transport with no completion semantics: a `JoinSet` of one `handle` per
+  message, ended by the stream ending or a handler panic. `Ack` is gone.
+- `src/host/server.rs`: `run` connects, calls `consume(Arc::new(handler))`
+  and returns `Err` when it returns, so a consumer that ends takes the
+  process down (change 5 relies on this). `MessagingHandler::handle` is the
+  typed fn above, holding a pool permit sized to `pool_max_instances` for
+  the guest call, logging and counting each `Err` once; `MessagingHandler`
+  implements `Handler`.
+- `MessagingDefault::consume` runs its stream through `dispatch`; its
+  `subscribe` stays as an inherent, synchronous fn the tests read from.
+- `omnia-test`: `Deployment::guest_timeout`, so a suite can pin the
+  `TimedOut` row in milliseconds.
+- `docs/guides/messaging.md`: the failure sentence says the backend decides
+  what a returned `Err` means.
 
-Not changed: the spawn-per-message loop, `MessagingDefault`, the example,
-`Options`.
+**Effect on the other backends.** `omnia-nats` replaces its `subscribe`
+with a `consume` that selects over its per-topic subscribers, maps each
+message, and hands the stream to `dispatch`: the same task per message it
+had under the host loop. The seam is not Kafka-specific: NATS JetStream
+has per-message acks and would await `handle` the same way when that
+backend grows a JetStream consumer.
 
-**Effect on the other backends.** None. `omnia-nats` and `MessagingDefault`
-build messages with `Message::new` and field assignment, so they compile
-as is with `ack = None`, and the host runs them exactly as today: unbounded
-spawning, no ordering. The one visible difference is the stream-end line,
-and neither backend's stream ends while the runtime is alive (NATS
-reconnects transparently; the default's stream ends only when the default
-itself is dropped). The seam is not Kafka-specific: NATS JetStream has
-per-message acks and could implement the same trait when that backend grows
-a JetStream consumer.
-
-### 7. Bounded, ordered yield
+### 7. Bounded, ordered delivery
 
 _Closes D7, D8. `omnia-kafka`._
 
 **Outcome.** At most 64 records are with the host at once, so the guest
 pool is never exhausted by this backend. Records sharing a key reach the
 host one at a time, in offset order. Saturation slows the consumer instead
-of losing records. Other backends are untouched; if one of them floods the
-pool, that is its problem to solve the same way.
+of losing records. A record the guest does not handle ends the consumer;
+the process restarts and replays it. Other backends are untouched; if one
+of them floods the pool, that is its problem to solve the same way.
 
-**Design.** The backend already has a forwarding task between librdkafka
-and the `Subscriptions` stream the host reads. With the ack token it also
-knows when each record it yielded is done. Those two facts are enough to
-gate what it yields:
+**Design.** The backend's `consume` is the loop, and `handle`'s return is
+when a record is done. Three things gate what it pulls and runs:
 
-- Keep a count of records yielded and not yet acked. When it reaches 64,
-  stop pulling from librdkafka until an ack arrives.
-- Keep the set of keys with a record in flight. A record whose key is in
-  the set is parked in a per-key queue instead of being yielded; when the
-  in-flight record for that key acks, the next parked one is yielded in
-  its place. A record with no key is never parked.
-- Cap parked records at 4096 in total as a memory ceiling; at that point
-  stop pulling as well. The cap must never be what binds: librdkafka queues
-  one partition's fetch whole before the next partition's, and on a topic
-  with few distinct keys per partition a fetch is a dozen keys repeated
-  across hundreds of records, so parked outruns in-flight several times
-  over before 64 distinct keys have been seen. Shrink `max.partition.fetch.bytes` from
-  its 1 MiB default to 64 KiB so each partition contributes a short run of
-  keys before the next is queued, and keep the cap well above a few such
-  fetches.
+- A semaphore of 64 **slots**. A record takes a slot to run and returns it
+  when `handle` returns. The loop takes a slot before it pulls, so nothing
+  is pulled that cannot run.
+- A **lane** per key: a FIFO fixed at the pull, under one lock, so two
+  records for a key can never swap. A record behind another for its key
+  waits for it, holding no slot, and takes one when its turn comes. A
+  record with no key never waits.
+- A semaphore of 4096 **backlog** places, one per record pulled and not
+  yet done, in flight or waiting on its key. A memory ceiling for a stream
+  with fewer distinct keys than slots, where the slot bound is never
+  reached and nothing else would stop the pull. It must never be what
+  binds on an ordinary stream: librdkafka queues one partition's fetch
+  whole before the next partition's, and on a topic with few distinct keys
+  per partition a fetch is a dozen keys repeated across hundreds of
+  records. Shrink `max.partition.fetch.bytes` from its 1 MiB default to
+  64 KiB so each partition contributes a short run of keys before the next
+  is queued, and keep the backlog well above a few such fetches.
 
 | option                                                            | verdict                                                                                                              |
 | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | Spawn per record (status quo)                                     | the cause of D7 and D8                                                                                               |
 | Raise `POOL_TOTAL_CORE_INSTANCES`                                 | moves the ceiling; no backpressure                                                                                   |
-| Lanes in the host (previous draft)                                | a larger `omnia` change for a Kafka policy, and a record waits behind unrelated records that hashed to the same lane |
+| Lanes in the host (earlier draft)                                 | a larger `omnia` change for a Kafka policy, and a record waits behind unrelated records that hashed to the same lane |
+| Gate the pull stream on an ack token (previous draft)             | works, but the outcome comes back through a side channel; see change 6                                               |
 | One record at a time per partition (`pause`/`resume`, as Streams) | ordering for free, but 12 in flight for a 12-partition topic                                                         |
-| **Gate in the forwarding task on the ack**                        | **chosen**: no host change beyond the token, waits only behind the same key                                          |
+| **The backend's own loop, awaiting `handle`**                     | **chosen**: no side channel, waits only behind the same key                                                          |
 | The guest pulls from a stream                                     | deferred; see [Deferred](#deferred)                                                                                  |
 
 The two guarantees follow directly. Ordering: a key has at most one record
-with the host, so its records are handled one at a time, and parked
-records leave the queue in the order they arrived, which is offset order
-because a key lives on one partition. Bound: 64 records with the host
-means at most 64 guests instantiated for this backend, against a pool of
-1000 (`POOL_TOTAL_CORE_INSTANCES`) — only a guest taking more than 15 core
-instances per instantiation could exhaust it, and nothing here comes near.
-Neither number is exposed: the bound is fixed by the pool size, and the
-parked cap is a memory bound (a few MiB) sized so that, with 64 KiB
-partition fetches, the in-flight bound is reached first.
+with the host, and its records take their turns in the order they were
+pulled, which is offset order because a key lives on one partition. Bound:
+64 records with the host means at most 64 guests instantiated for this
+backend, against a pool of 1000 (`POOL_TOTAL_CORE_INSTANCES`) — only a
+guest taking more than 15 core instances per instantiation could exhaust
+it, and nothing here comes near. Neither number is exposed: the bound is
+fixed by the pool size, and the backlog is a memory bound (a few MiB)
+sized so that, with 64 KiB partition fetches, the slot bound is reached
+first.
 
-Backpressure is the forwarding task not polling. When it stops,
-`rd_kafka_consumer_poll` stops, librdkafka's prefetch queue fills to its
-own bounds (`queued.min.messages` per partition, `queued.max.messages.kbytes`
-in total), and the fetch stops. Nothing in flight is lost:
-parked and in-flight records are un-acked, and a crash refetches them from
-the committed offset.
+Backpressure is the loop not polling. While it waits for a slot or a
+place, `rd_kafka_consumer_poll` stops, librdkafka's prefetch queue fills
+to its own bounds (`queued.min.messages` per partition,
+`queued.max.messages.kbytes` in total), and the fetch stops. Nothing in
+flight is lost: a record's offset is stored only once it is done, and a
+crash refetches the rest from the committed offset.
 
-**What an ack, or its absence, means here.** The host does one of two
-things with the token: calls `ack()`, or lets it go out of scope. Either
-way the token is eventually destroyed, and the backend owns its type
-(`KafkaAck`), so it can give it a `Drop` implementation. `ack()` sets a
-flag; `Drop` checks it. Flag set: `ack()` already did the work, `Drop`
-does nothing. Flag clear: `ack()` was never called, so `Drop` handles the
-"no guest ran" case below. The host sees none of this; its only job is to
-call `ack()` when a guest ran.
+**What an outcome means here.**
 
-| host did                                  | backend does                                                                                                                     |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| called `ack()`                            | release the slot and the key; mark the record acked in the tracker (change 8); yield the next parked record for that key, if any |
-| dropped the token without calling `ack()` | release the slot and the key; do **not** mark the record; count `unacked_messages`; end the subscription                         |
+| `handle` returned           | backend does                                                                                                           |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `Ok(())`                    | return the slot and the lane; mark the record done in the tracker (change 8)                                           |
+| `Err(_)`, whichever variant | return the slot and the lane; leave the tracker entry, so the partition's resolved offset stops before it; end `consume` |
 
-A token dropped un-acked means the host never ran a guest for the record:
-the component cannot be loaded (which will fail for every record) or an
-instantiation failed (which cannot be pool exhaustion from this backend).
-Ending the subscription makes `server::run` return `Err` (change 6), the
-process exits non-zero, and the restart redelivers from the committed
-offset. That is Streams' `SHUTDOWN_CLIENT`, and `at_schedule_adherence`
-runs it. The instance pool is shared with the other triggers in the
-process, so an HTTP burst could in principle take the last slots and make
-a messaging instantiate fail transiently; that has not been observed, and
-a bounded retry before ending the subscription is the refinement if it
-ever is.
+Ending `consume` makes `server::run` return `Err` (change 6), the process
+exits non-zero, and the restart redelivers the record from the committed
+offset. That is what the Node service does when a handler throws and what
+Streams' `SHUTDOWN_CLIENT` does when a task fails, and `at_schedule_adherence`
+runs it. The alternatives were weighed:
 
-**Timeouts.** A hung guest holds its slot and key for `guest_timeout`,
+| policy for a failed record            | verdict                                                                                                                        |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Skip and count (.NET)                 | at-most-once for exactly the records that failed: D9 again, for `Err`                                                          |
+| Retry in place                        | a record that always fails blocks its partition silently; the consumer looks healthy                                           |
+| Dead-letter topic                     | no legacy service runs one; deferred                                                                                           |
+| **Restart (Node, Java)**              | **chosen**: nothing is lost, and a record that always fails is loud — a crash loop the orchestrator reports and the guest fixes |
+
+A guest that wants to discard a record does so by returning `Ok`, as the
+legacy processor discards an out-of-date position; `Err` is for a record
+it wants to see again. The instance pool is shared with the other triggers
+in the process, so an HTTP burst could in principle take the last slots and
+make a messaging instantiate fail transiently; that has not been observed,
+and a bounded retry of `Unavailable` before ending the consumer is the
+refinement if it ever is.
+
+**Timeouts.** A hung guest holds its slot and lane for `guest_timeout`,
 which already exists (`GUEST_TIMEOUT_MS`, default 30 s, the same cap the
 HTTP and WebSocket servers apply; `Deployment::guest_timeout` overrides it
-per deployment). Keep the default: a hang costs one slot in 64 for 30 s,
-and the forwarding task can be stalled at the bound for at most that long,
-a tenth of `max.poll.interval.ms` (300 s), after which librdkafka would
-leave the group. Only a guest that legitimately runs longer than 30 s per
-record is a reason to raise it, and nothing here does.
+per deployment), and then ends the consumer as `TimedOut`. Keep the
+default: a hang costs one slot in 64 for 30 s, a tenth of
+`max.poll.interval.ms` (300 s), after which librdkafka would leave the
+group. Only a guest that legitimately runs longer than 30 s per record is a
+reason to raise it, and nothing here does.
 
 **Changes — `omnia-kafka`.**
 
-- `dispatch.rs`, beside the `Tracker` in `tracker.rs`: the in-flight count,
-  the in-flight key set, the per-key parked queues, and two `const`s,
-  `IN_FLIGHT: usize = 64` with a `//` tying it to
-  `POOL_TOTAL_CORE_INSTANCES`, and `PARKED: usize = 4096` with a `//`
-  saying why it must sit well above a partition fetch. The forwarding
-  task consults it before yielding and waits on a `Notify` when either
-  bound is hit; `KafkaAck::ack` and `KafkaAck::drop` update it and signal.
-  One `Mutex` covers the count, the key set and the queues: the forwarding
-  task admitting a new record for key _k_ and an ack releasing _k_ and
-  yielding its next parked record race otherwise, and two records for _k_
-  reach the host.
-- The channel to the host (`subscribe`'s `mpsc`) can stay as it is;
-  because the ack path yields the next parked record synchronously, and
-  the bound guarantees at most 64 messages are ever outstanding on it,
-  `try_send` cannot fail. A debug assertion says so.
-- Unit tests over the gate alone: two keys interleaved yield in order with
-  the second key never waiting on the first; a keyless record is never
-  parked; the 65th record waits for an ack; a dozen keys repeated over
-  1200 records park without stopping the pull; a dropped token ends the
-  subscription; and, over gate and tracker together, a parked record holds
-  the resolved offset back (offsets 3 and 6 acked while 5 is parked behind
-  3 stores 3, not 6).
-- Live test: part of `at_least_once` (change 8) — the test receives from
-  `subscribe` without acking and asserts it sees exactly 64 messages and
-  at most one per key, then acks one and sees the next.
+- `consume.rs`, beside the `Tracker` in `tracker.rs`: `run`, the loop,
+  generic over a stream of records so it is tested without a broker;
+  `records`, the stream over a `StreamConsumer` that ends with the fatal
+  error (change 5); `Lanes`, the per-key FIFO as a `oneshot` chain, with a
+  sequence number so a lane is forgotten with its last record; and two
+  `const`s, `IN_FLIGHT: usize = 64` with a `//` tying it to
+  `POOL_TOTAL_CORE_INSTANCES`, and `BACKLOG: usize = 4096` with a `//`
+  saying why it must sit well above a partition fetch. Each record runs in
+  a `JoinSet` task; the first `Err` ends the loop, and dropping the set
+  aborts the rest, whose offsets were never stored.
+- Unit tests over the loop with scripted records and a scripted handler
+  whose outcomes the test decides: two keys interleaved run in order with
+  the second key never waiting on the first; a keyless record never waits;
+  the 65th record waits for a completion; a failed outcome ends the loop
+  with the record named; a revoked partition's waiting record is skipped
+  while the rest proceed; and, over loop and tracker together, a waiting
+  record holds the resolved offset back (offsets 3 and 6 done while 5
+  waits behind 3 stores 3, not 6). Plus `Lanes` alone.
+- Live test: part of `at_least_once` (change 8) — the test, as the
+  handler, receives 64 deliveries and no more, at most one per key, then
+  completes k0's head and sees the record behind it.
 
 ### 8. At-least-once offsets
 
@@ -692,7 +700,7 @@ stored.
 events.
 
 ```rust
-struct Pending { acked: bool, sends_before: u64 }
+struct Pending { done: bool, sends_before: u64 }
 
 struct Tracker {
     // per (topic, partition): offset → state, in offset order
@@ -704,22 +712,25 @@ struct Tracker {
 }
 ```
 
-| event                         | who                | what                                                                                                                                     |
-| ----------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| record pulled from librdkafka | forwarding task    | insert `offset → { acked: false }` **before** the gate decides whether to yield or park it: a parked record must already hold its place, or the resolved offset rolls past it while it waits. Attach a `KafkaAck { tracker, topic, partition, offset }` as `message.ack` when it is yielded |
-| host acks the record          | `KafkaAck::ack`    | set `acked = true`, `sends_before =` the send counter's current value; release the record's slot and key (change 7)                      |
-| host drops the token un-acked | `KafkaAck::drop`   | leave the entry as it is, so the partition's resolved offset stops before it; release the slot and key; end the subscription (change 7)  |
-| broker reports a delivery     | `Tracer::delivery` | advance `delivered` (through `out_of_order` if needed); a `send` that failed to _enqueue_ reports itself here too, or `delivered` stalls |
+| event                         | who                | what                                                                                                                                                                                      |
+| ----------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| record pulled from librdkafka | the loop           | insert `offset → { done: false }` **before** the record joins its lane: a record waiting on its key must already hold its place, or the resolved offset rolls past it while it waits     |
+| `handle` returned `Ok`        | the record's task  | set `done = true`, `sends_before =` the send counter's current value; return the slot and the lane (change 7)                                                                             |
+| `handle` returned `Err`       | the record's task  | leave the entry as it is, so the partition's resolved offset stops before it; return the slot and the lane; end `consume` (change 7)                                                      |
+| broker reports a delivery     | `Tracer::delivery` | advance `delivered` (through `out_of_order` if needed); a `send` that failed to _enqueue_ reports itself here too, or `delivered` stalls                                                  |
 
-After either of the last two events, for each partition: pop records from
-the front while the front is acked and `sends_before <= delivered`; store
-the last offset popped, if any.
+After a record is done or a delivery is reported, for each partition: pop
+records from the front while the front is done and
+`sends_before <= delivered`; store the last offset popped, if any.
 
 On rebalance, a custom `ConsumerContext::pre_rebalance(Revoke)` drops the
-revoked partitions from the map; a late ack for one is ignored. librdkafka
-commits stored offsets on revoke and on close by itself. Guests already
-running for a revoked partition finish and publish; every legacy service
-produces that same duplicate on rebalance.
+revoked partitions from the map. A record of a revoked partition still
+waiting on its key finds the tracker no longer holds it when its turn
+comes, and is skipped: it is redelivered from the committed offset to
+whichever consumer holds the partition now. librdkafka commits stored
+offsets on revoke and on close by itself. Guests already running for a
+revoked partition finish and publish; every legacy service produces that
+same duplicate on rebalance.
 
 **Why not flush the producer instead.** Kafka Streams achieves "published
 before committed" by flushing the producer before each commit, and the
@@ -750,14 +761,14 @@ record. Node replays up to a fetch cycle (~1 s), Java up to 30 s.
 
 - The three settings above; `auto.commit.interval.ms` as
   `KAFKA_COMMIT_INTERVAL_MS` on `ConnectOptions`, default 200. Also
-  `max.partition.fetch.bytes` from 1 MiB to 64 KiB (fixed), for the gate
-  (change 7). Nothing else in librdkafka's consumer config moves:
+  `max.partition.fetch.bytes` from 1 MiB to 64 KiB (fixed), for the
+  backlog (change 7). Nothing else in librdkafka's consumer config moves:
   `queued.min.messages` stays at its default because
   `queued.max.messages.kbytes` (64 MiB) already caps the prefetch.
-- `tracker.rs`: `Tracker` and `KafkaAck`, with unit tests: out-of-order
-  acks store only the resolved offset; a record acked before its sends are
-  delivered stores once they are; a revoked partition's late ack is ignored;
-  an enqueue failure does not stall `delivered`.
+- `tracker.rs`: `Tracker`, with unit tests: out-of-order completions store
+  only the resolved offset; a record done before its sends are delivered
+  stores once they are; a revoked partition drops its records; an enqueue
+  failure does not stall `delivered`.
 - `send` takes a number from the counter and passes it as the record's
   `DeliveryOpaque` (`usize`, which rdkafka accepts directly — no `Box`);
   `Tracer::delivery` reports it to the tracker. The
@@ -766,22 +777,26 @@ record. Node replays up to a fetch cycle (~1 s), Java up to 30 s.
   simplest way, since the producer is created first.
 - `StreamConsumer<Context>` with the rebalance hook.
 - Live test, `tests/live.rs::at_least_once`, in the shape of `keyed_sends`:
-  no guest and no host loop. The test drives `WasiMessagingCtx` directly,
-  playing the host's part by calling each message's `ack` token itself —
-  the token is the backend's whole contract with the host, so this is the
-  backend's boundary. It produces records on a fresh topic, receives them
-  from `subscribe`, acks them out of order, holds one token back un-acked
-  (held, not dropped — a dropped token ends the subscription), publishes
-  through `send` before acking another, and then reads the group's
-  committed offset from an observer consumer (`committed()`). Expected:
-  the commit stops just before the held record, moves past it once it is
-  acked, and a record acked after a `send` commits only after that send is
-  delivered. The same test covers change 7's gate (above). Dropping the
-  client and reading `committed()` again covers the flush-on-shutdown path.
-  That the host calls `ack` on every outcome where a guest ran is omnia's
-  behaviour and is tested there ([Testing the ack
-  seam](#testing-the-ack-seam)); the full chain over a real broker is the
-  `runtime` example with `trip-update`, run by hand.
+  no guest and no host loop. The test drives `WasiMessagingCtx` directly
+  and plays the host's part as the `Handler` passed to `consume` — the
+  handler is the backend's whole contract with the host, so this is the
+  backend's boundary. Each delivery reaches the test with a `oneshot` its
+  outcome goes back through; a delivery the test leaves undecided stays
+  with the handler, as a guest that never returns would. It produces
+  records on a fresh topic, completes them out of order, leaves one
+  undecided, publishes through `send` before completing another, and reads
+  the group's committed offset from an observer consumer (`committed()`).
+  Expected: the commit stops just before the undecided record, moves past
+  it once it is completed, and a record completed after a `send` commits
+  only after that send is delivered. Then it completes one record with
+  `Err(Rejected)` and expects `consume` to return an error naming the
+  record, with the commit stopped before it. The same test covers change
+  7's bound (above). Dropping the client and reading `committed()` again
+  covers the flush-on-shutdown path. That the host returns the right
+  variant for each outcome is omnia's behaviour and is tested there
+  ([Testing the handler seam](#testing-the-handler-seam)); the full chain
+  over a real broker is the `runtime` example with `trip-update`, run by
+  hand.
 
 **The trade.** Replaying vehicle positions republishes stale trip updates,
 and for a realtime feed a stale update can be worse than a missing one. It
@@ -793,27 +808,27 @@ is losing records to infrastructure failures.
 
 With all eight changes in place:
 
-1. **Backend** — librdkafka fetches the record. The forwarding task
-   decodes it (change 1), copies key, partition and offset into metadata
-   (change 4), and registers it in the tracker with an ack token attached
-   (change 8).
-2. **Backend** — if 64 records are already with the host, or another
-   record with this key is, the task waits or parks it; nothing further is
-   fetched while it waits (change 7). Otherwise it yields the record.
-3. **Host** — the server loop spawns a task, which instantiates the guest
-   and calls `handle`, exactly as today. Each `send` the guest makes is
-   numbered and enqueued; an enqueue failure is returned to the guest
-   (changes 5, 8).
-4. **Host** — the handler returns, with `Ok`, `Err`, a trap or a timeout.
-   `handle` calls `ack()` and returns; the server loop logs and counts
-   anything but `Ok`, as today. If no guest ran at all, the token is
-   dropped instead (change 6).
-5. **Backend** — on ack: release the slot and key and yield the next parked
-   record for the key (change 7); mark the record acked, and once the sends
-   issued before that ack are delivered and every earlier record in the
-   partition is done, store the resolved offset (change 8). On a dropped
-   token: end the subscription; the process exits and restarts from the
-   committed offset (change 7).
+1. **Backend** — the loop takes a backlog place and a slot, then pulls the
+   record librdkafka fetched. It registers the offset in the tracker and
+   joins the record to its key's lane (changes 7, 8).
+2. **Backend** — a record at the head of its lane runs at once; one behind
+   another for its key gives its slot back and waits for its turn, then
+   takes a slot again. While no slot or place is free, nothing further is
+   pulled (change 7).
+3. **Backend** — the record's task decodes the payload (change 1), copies
+   key, partition, offset and timestamp into metadata (change 4), and
+   calls the host's `handle` (change 6).
+4. **Host** — `handle` takes a pool permit, instantiates the guest and runs
+   it. Each `send` the guest makes is numbered and enqueued; an enqueue
+   failure is returned to the guest (changes 5, 8). `handle` returns
+   `Ok`, or `Rejected`, `Trapped`, `TimedOut` or `Unavailable`, logging and
+   counting anything but `Ok` (change 6).
+5. **Backend** — the slot and lane are returned, and the next record for
+   the key takes its turn (change 7). On `Ok`: the record is marked done,
+   and once the sends issued before that are delivered and every earlier
+   record in the partition is done, the resolved offset is stored (change
+   8). On any `Err`: `consume` returns it; the process exits and restarts
+   from the committed offset, which stops before the record (change 7).
 6. **librdkafka** — stored offsets are committed every 200 ms.
 
 ## Throughput
@@ -825,8 +840,8 @@ What bounds it:
 |                                          | bounds                                                                     |
 | ---------------------------------------- | -------------------------------------------------------------------------- |
 | 64 in flight (constant)                  | how many guests run at once                                                |
-| 4096 parked (constant)                   | memory ceiling on records waiting behind their key; sized never to bind    |
-| `guest_timeout` (existing, default 30 s) | how long one hung guest holds its slot and its key                         |
+| 4096 backlog (constant)                  | memory ceiling on records pulled and not done; sized never to bind         |
+| `guest_timeout` (existing, default 30 s) | how long one hung guest holds its slot and its lane before the restart     |
 
 Nothing new is exposed: the pool size and `GUEST_TIMEOUT_MS` keep their
 defaults, and the two constants are sized under them.
@@ -852,7 +867,7 @@ measured rather than inferred from these numbers.
 | A record counts as done when           | its handler called `next()`             | `process()` returned and the producer flushed | the handler returned                      | the guest returned and the sends before that are delivered |
 | Out-of-order completion handled        | yes (`lastResolvedOffset`)              | n/a, one at a time                            | no, commits every 200th record regardless | yes (resolved offset)                                      |
 | How often offsets are committed        | once per fetch cycle, ≤ ~1 s            | every 30 s                                    | every 200 records                         | every 200 ms                                               |
-| Handler failed                         | consumer restarts, record replayed      | task restarts, record replayed                | skipped, offset advances                  | acked, counted, offset advances                            |
+| Handler failed                         | consumer restarts, record replayed      | task restarts, record replayed                | skipped, offset advances                  | process exits, record replayed on restart                  |
 | Handler never ran                      | partition stalls until a 5-minute alarm | n/a                                           | n/a                                       | process exits, record replayed on restart                  |
 | Output on the broker before the commit | not checked                             | yes                                           | yes                                       | yes                                                        |
 
@@ -868,12 +883,15 @@ for a guest anyway:
 - **A record can be delivered twice** after a crash or rebalance. The
   `trip-update` guest already discards a position older than the one it
   holds, which covers this; confirm the same for any other guest (change 8).
-- **Returning `Err` is logged and counted, and that is all.** It never
-  causes redelivery, so there is no reason to swallow an error into a log
-  line (changes 6, 8).
-- **The handler's return is the ack.** Work spawned with
+- **Returning `Err` means "deliver this again".** The consumer ends, the
+  process restarts, and the record comes back, so `Err` is for a record
+  the guest wants another go at, and a record it means to discard is
+  discarded with `Ok`. A record that fails every time is a crash loop,
+  which is the point: it is visible, and the fix is in the guest (changes
+  6, 7).
+- **The handler's return is the completion.** Work spawned with
   `wit_bindgen::spawn_local` and not awaited before returning is abandoned,
-  and the record is acknowledged anyway (changes 6, 8). A Kafka guest
+  and the record is marked done anyway (changes 6, 8). A Kafka guest
   awaits its sends before returning.
 
 ## Implementing
@@ -939,7 +957,7 @@ tracing::info!(monotonic_counter.publish_refused = 1, topic = %topic);
 `server.rs` already does this for `message_counter` and
 `processing_errors`, and both stay as they are; `processing_errors` simply
 starts to include the guest's returned `Err` (change 6). The backend adds
-four, in the same form:
+three, in the same form:
 
 | counter              | emitted by                       | counts                                                                             |
 | -------------------- | -------------------------------- | ---------------------------------------------------------------------------------- |
@@ -948,39 +966,36 @@ four, in the same form:
 | `discarded_messages` | `omnia-kafka` decode             | framed payload that failed to decode                                               |
 | `publish_refused`    | `omnia-kafka` `send`             | librdkafka refused to enqueue                                                      |
 | `delivery_failures`  | `omnia-kafka` `Tracer::delivery` | queued message not delivered within `message.timeout.ms`                           |
-| `unacked_messages`   | `omnia-kafka` `KafkaAck::drop`   | token dropped without an ack: the host ran no guest for the record                 |
 
-Two gauges from the gate (`dispatch.rs`), at `trace` level like the
-runtime's pool gauges, emitted whenever either changes:
+Two gauges from the loop (`consume.rs`), at `trace` level like the
+runtime's pool gauges, emitted as each record starts and finishes:
 
 | gauge             | measures                                                                                                      |
 | ----------------- | ------------------------------------------------------------------------------------------------------------- |
 | `kafka_in_flight` | records with the host, out of `IN_FLIGHT`; pinned there under lag means the slot count is the limit           |
-| `kafka_parked`    | records waiting behind a key in flight, out of `PARKED`; climbing while in-flight is low means too few keys |
+| `kafka_parked`    | records pulled and waiting on their key, out of `BACKLOG`; climbing while in-flight is low means too few keys |
 
-### Testing the ack seam
+### Testing the handler seam
 
-The ack is called inside `MessagingHandler::handle`, which omnia's
-`crates/wasi-messaging/tests/messaging.rs` already drives directly with a
+`MessagingHandler::handle` returns the outcome, and omnia's
+`crates/wasi-messaging/tests/messaging.rs` drives it directly with a
 constructed `Message`. So the test for change 6 is in that file's existing
-style, with no server loop and no new guest program: a `RecordingAck`
-(an `AtomicBool`, implementing `Ack`) defined in the test file, attached to
-the `Message`, and checked after `handle` returns. Rows: guest returns `Ok`
-→ acked; guest returns `Err` → acked and `handle` returns `Err`; no route
-for the topic → acked; a message routed to a guest that does not exist →
-`handle` returns `Err` and the token was **not** acked. The `Ok` row uses
-the existing `produce_handle` guest. The `Err` row needs a guest whose
-handler returns `Err`, and none exists (`produce_handle` would *trap* on a
-wrong payload, which is a different row), so one small program is added to
-omnia's `test-programs`: `programs/messaging/handle_err.rs`, returning
-`Err(Error::Other(..))` for every message. That is the only
-`test-programs` change in either repo. The stream-end line in
-`server::run` is one `assert!(run(..).await.is_err())` over a
-`MessagingDefault` dropped before the loop starts.
+style, with no server loop: one row per variant, each a guest program
+under `test_programs::foreach_messaging!`. Guest returns `Ok` →
+`Ok(())` (`produce_handle`); guest returns `Err` →
+`Rejected(Error::Other(..))` (`handle_err`); a wrong payload →
+`Trapped` (`produce_handle` again, which traps on it); a guest that sleeps
+past a 50 ms `Deployment::guest_timeout` → `TimedOut` (`handle_sleep`, the
+one program added for this); no route for the topic → `Ok(())`; a message
+routed to a guest that does not exist → `Unavailable`. `server::run` has
+two rows: a `Client` whose `consume` returns at once fails the server, and
+the in-memory default's own `consume` delivers every message to the guest
+and carries its replies back.
 
-Nothing in `omnia-backends` outside `crates/kafka` changes. The backend's
-unit tests cover the gate and the tracker in isolation; its live test
-stands in for the host by calling the `ack` token itself (changes 7, 8).
+In `omnia-backends`, `omnia-nats` changes only by moving its stream behind
+`consume`. The Kafka backend's unit tests cover the loop, the lanes and
+the tracker with scripted records and a scripted handler; its live test
+plays the host as the `Handler` itself (changes 7, 8).
 
 ### The crate README
 
@@ -1058,11 +1073,11 @@ Within that local work the dependencies are:
 | -------- | ------------- | ------------------------------------------------------------------- | --------------- |
 | any time | `omnia-kafka` | 1–5                                                                 | nothing         |
 | first    | `omnia`       | 6                                                                   | nothing         |
-| after 6  | `omnia-kafka` | 7 and 8, as one piece: the gate, the tracker, then the send counter | the `Ack` token |
+| after 6  | `omnia-kafka` | 7 and 8, as one piece: the loop, the tracker, then the send counter | the handler seam |
 
-7 and 8 are one piece because the gate's dropped-token policy ends the
-subscription, and without the gate an un-acked token from pool exhaustion
-would exit the process under load.
+7 and 8 are one piece because the failure policy ends the consumer on
+`Unavailable`, and without the bound a pool exhausted by this backend
+would end it under ordinary load.
 
 Only once the local gate passes: push the `omnia` branch, switch the patch
 to `branch = "kafka-improvements"`, bump the lock, push `omnia-backends`,
@@ -1080,8 +1095,8 @@ Each item is out of scope now and recorded so it is not rediscovered.
 - Per-topic partition count and partitioner, in place of the global
   `KAFKA_PARTITION_COUNT` and `KAFKA_PARTITIONER` (change 3).
 - An opt-in `send` that waits for delivery (change 5).
-- A bounded retry of a dropped token before ending the subscription, if a
-  transient instantiate failure is ever observed (change 7).
+- A bounded retry of an `Unavailable` outcome before ending the consumer,
+  if a transient instantiate failure is ever observed (change 7).
 - A dead-letter topic for trapped and errored records (change 8).
 - A streaming consumer interface so one guest instance keeps state across
   records; revisit if a guest is measured rebuilding something expensive per

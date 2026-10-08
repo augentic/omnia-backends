@@ -1,5 +1,6 @@
 //! Live tests for the Kafka backend, driven through the `omnia:messaging`
-//! host boundary (`WasiMessagingCtx` + the `Client` producer/consumer proxy).
+//! host boundary: `WasiMessagingCtx` for the client, `Client::send` to
+//! produce, and `Client::consume` with the test playing the host's `Handler`.
 //! A raw `rdkafka` consumer observes landed partitions, wire bytes, and the
 //! group's committed offsets.
 //!
@@ -12,16 +13,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
-use futures::StreamExt;
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
 use omnia::Backend;
 use omnia_kafka::{Client, ConnectOptions, ConsumerOptions, PartitionerScheme, RegistryOptions};
 use omnia_wasi_messaging::{
-    Ack, Client as MessagingClient, Message, Metadata, Subscriptions, WasiMessagingCtx,
+    Client as MessagingClient, HandleError, Handler, Message, Metadata, WasiMessagingCtx,
 };
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::{ClientConfig, Message as _};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 const RECV_TIMEOUT: Duration = Duration::from_mins(1);
 
@@ -108,6 +112,82 @@ fn keyed_message(payload: &str, metadata: &[(&str, &str)]) -> Message {
     message
 }
 
+// The host's side of the seam. Every delivery reaches the test with the
+// sender its outcome goes back through; a delivery the test never decides
+// stays with the handler, as a guest that never returns would.
+struct Recorder(mpsc::UnboundedSender<Delivery>);
+
+struct Delivery {
+    message: Message,
+    outcome: oneshot::Sender<Result<(), HandleError>>,
+}
+
+impl Handler for Recorder {
+    fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), HandleError>> {
+        let (outcome, decided) = oneshot::channel();
+        let _ = self.0.send(Delivery { message, outcome });
+        async move {
+            match decided.await {
+                Ok(outcome) => outcome,
+                Err(_undecided) => std::future::pending().await,
+            }
+        }
+        .boxed()
+    }
+}
+
+impl Delivery {
+    fn metadata(&self, name: &str) -> &str {
+        let metadata = self.message.metadata.as_ref().expect("a record carries metadata");
+        metadata.get(name).unwrap_or_else(|| panic!("a record carries `{name}`"))
+    }
+
+    fn key(&self) -> &str {
+        self.metadata("key")
+    }
+
+    fn offset(&self) -> i64 {
+        self.metadata("offset").parse().expect("offset")
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.message.payload
+    }
+
+    fn complete(self, outcome: Result<(), HandleError>) -> Message {
+        self.outcome.send(outcome).expect("the consumer is waiting on this record");
+        self.message
+    }
+}
+
+// A running `consume` over a `Recorder`. The backend consumer starts from
+// the latest offset, so `start` returns once it is assigned and a caller
+// can produce.
+struct Consuming {
+    deliveries: mpsc::UnboundedReceiver<Delivery>,
+    task: JoinHandle<Result<()>>,
+}
+
+impl Consuming {
+    async fn start(client: &Arc<dyn MessagingClient>) -> Self {
+        let (recorder, deliveries) = mpsc::unbounded_channel();
+        let task = tokio::spawn(client.consume(Arc::new(Recorder(recorder))));
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        Self { deliveries, task }
+    }
+
+    async fn next(&mut self) -> Result<Delivery> {
+        tokio::time::timeout(RECV_TIMEOUT, self.deliveries.recv())
+            .await
+            .context("timed out waiting for a record")?
+            .context("the consumer ended")
+    }
+
+    async fn nothing(&mut self, within: Duration) -> bool {
+        tokio::time::timeout(within, self.deliveries.recv()).await.is_err()
+    }
+}
+
 // Keys and expected partitions come from the `KafkaJS` murmur2 vectors pinned
 // in `partitioner.rs` (partition count 12); the broker landing them there
 // proves `send` routes through the custom partitioner, not librdkafka's.
@@ -165,11 +245,10 @@ async fn assert_keyed_sends(scheme: PartitionerScheme, cases: Vec<Case>) -> Resu
 }
 
 // A boundary client over a fresh single-partition topic whose value subject
-// carries a permissive JSON schema, already subscribed: the backend consumer
-// starts from the latest offset, so it is assigned before a caller produces.
+// carries a permissive JSON schema, already consuming.
 struct RegistrySubscriber {
     client: Arc<dyn MessagingClient>,
-    subscription: Subscriptions,
+    consuming: Consuming,
     topic: String,
     schema_id: i32,
 }
@@ -224,28 +303,24 @@ impl RegistrySubscriber {
         };
         let backend = Client::connect_with(options).await?;
         let client: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
-        let subscription = client.subscribe().await?;
-        tokio::time::sleep(Duration::from_secs(8)).await;
+        let consuming = Consuming::start(&client).await;
 
         Ok(Self {
             client,
-            subscription,
+            consuming,
             topic,
             schema_id,
         })
     }
 
     async fn next(&mut self) -> Result<Message> {
-        tokio::time::timeout(RECV_TIMEOUT, self.subscription.next())
-            .await
-            .context("timed out waiting for boundary message")?
-            .ok_or_else(|| anyhow!("subscription closed"))
+        Ok(self.consuming.next().await?.complete(Ok(())))
     }
 }
 
 // Registers a JSON schema, sends through the boundary, and asserts both the
 // Confluent wire layout on the raw bytes (magic byte + schema id + payload)
-// and that the boundary subscriber hands back the decoded payload.
+// and that the boundary consumer hands back the decoded payload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs Kafka + Schema Registry (KAFKA_BROKERS, KAFKA_REGISTRY_URL); run with --run-ignored"]
 async fn registry_wire_format() -> Result<()> {
@@ -270,13 +345,10 @@ async fn registry_wire_format() -> Result<()> {
     assert_eq!(wire_id, subscriber.schema_id, "schema id in wire header");
     assert_eq!(&bytes[5..], payload, "payload follows the header");
 
-    // The boundary subscriber strips the header on the way back out.
+    // The boundary consumer strips the header on the way back out.
     let received = subscriber.next().await?;
     assert_eq!(received.payload, payload, "decoded payload round-trips");
     assert_eq!(received.topic, topic, "topic round-trips");
-    if let Some(ack) = &received.ack {
-        ack.ack();
-    }
     Ok(())
 }
 
@@ -327,8 +399,7 @@ async fn registry_unframed_payload() -> Result<()> {
     ))
     .await?;
     let client: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
-    let mut subscription = client.subscribe().await?;
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    let mut consuming = Consuming::start(&client).await;
 
     // Bypass the backend producer, which would frame a schema-backed topic.
     let payload = br#"{"stationId":"42"}"#;
@@ -338,44 +409,9 @@ async fn registry_unframed_payload() -> Result<()> {
         .await
         .map_err(|(error, _)| anyhow!("raw produce: {error}"))?;
 
-    let received = tokio::time::timeout(RECV_TIMEOUT, subscription.next())
-        .await
-        .context("timed out waiting for unframed payload")?
-        .ok_or_else(|| anyhow!("subscription closed"))?;
+    let received = consuming.next().await?.complete(Ok(()));
     assert_eq!(received.payload, payload, "unframed JSON is delivered unchanged");
-    if let Some(ack) = &received.ack {
-        ack.ack();
-    }
     Ok(())
-}
-
-struct Held {
-    key: String,
-    payload: Vec<u8>,
-    offset: i64,
-    ack: Arc<dyn Ack>,
-}
-
-fn hold(mut message: Message) -> Result<Held> {
-    let metadata = message.metadata.as_ref().context("message has no metadata")?;
-    let key = metadata.get("key").cloned().context("message has no key")?;
-    let offset =
-        metadata.get("offset").context("message has no offset")?.parse().context("offset")?;
-    let ack = message.ack.take().context("message has no ack token")?;
-    Ok(Held {
-        key,
-        payload: message.payload,
-        offset,
-        ack,
-    })
-}
-
-async fn next_held(subscription: &mut omnia_wasi_messaging::Subscriptions) -> Result<Held> {
-    let message = tokio::time::timeout(RECV_TIMEOUT, subscription.next())
-        .await
-        .context("timed out waiting for a record")?
-        .ok_or_else(|| anyhow!("subscription closed"))?;
-    hold(message)
 }
 
 fn group_offset(group: &str, topic: &str) -> Result<Option<i64>> {
@@ -418,13 +454,13 @@ async fn wait_offset(group: &str, topic: &str, expected: i64) -> Result<()> {
     Err(anyhow!("committed offset is {latest:?}, expected {expected}"))
 }
 
-// The in-flight gate and at-least-once commits, with the test playing the
-// host: it calls each record's ack token itself. A delivery that lands
-// before its offset is stored is `tracker`'s unit tests.
+// The in-flight bound, per-key order, and at-least-once commits, with the
+// test playing the host: it decides each record's outcome itself. A delivery
+// report that lands before its offset is stored is `tracker`'s unit tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable Kafka broker (KAFKA_BROKERS); run with --run-ignored"]
 async fn at_least_once() -> Result<()> {
-    // matches `dispatch::IN_FLIGHT`
+    // matches `consume::IN_FLIGHT`
     const BOUND: usize = 64;
 
     let topic = unique("omnia.live.offsets");
@@ -441,10 +477,9 @@ async fn at_least_once() -> Result<()> {
     ))
     .await?;
     let client: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
-    let mut subscription = client.subscribe().await?;
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    let mut consuming = Consuming::start(&client).await;
 
-    // 64 distinct keys in flight, a second record for k0 parked behind the
+    // 64 distinct keys in flight, a second record for k0 waiting behind the
     // first, and one more record that waits until a slot frees.
     let mut produced = vec![("k0".to_owned(), "p0".to_owned()), ("k0".to_owned(), "p1".to_owned())];
     for index in 1..BOUND {
@@ -457,41 +492,44 @@ async fn at_least_once() -> Result<()> {
 
     let mut held = Vec::new();
     for _ in 0..BOUND {
-        held.push(next_held(&mut subscription).await?);
+        held.push(consuming.next().await?);
     }
-    let extra = tokio::time::timeout(Duration::from_secs(1), subscription.next()).await;
-    assert!(extra.is_err(), "the record past the in-flight bound waits for an ack");
+    assert!(
+        consuming.nothing(Duration::from_secs(1)).await,
+        "the record past the in-flight bound waits for a completion"
+    );
 
-    let mut keys = HashMap::<String, usize>::new();
+    let mut keys = HashMap::<&str, usize>::new();
     for record in &held {
-        *keys.entry(record.key.clone()).or_default() += 1;
+        *keys.entry(record.key()).or_default() += 1;
     }
     assert!(keys.values().all(|count| *count == 1), "at most one record per key: {keys:?}");
-    assert!(!held.iter().any(|record| record.payload == b"p1"));
+    assert!(!held.iter().any(|record| record.payload() == b"p1"));
 
-    let index = held.iter().position(|record| record.payload == b"p0").context("missing p0")?;
+    // completing k0's head frees p1 behind it; a second completion frees a
+    // slot for the record past the bound
+    let index = held.iter().position(|record| record.payload() == b"p0").context("missing p0")?;
     let first = held.swap_remove(index);
-    assert_eq!(first.offset, 0);
-    first.ack.ack();
+    assert_eq!(first.offset(), 0);
+    first.complete(Ok(()));
+    held.pop().expect("a held record").complete(Ok(()));
 
-    let parked = next_held(&mut subscription).await?;
-    assert_eq!(parked.payload, b"p1", "acking k0 yields the record parked behind it");
-    assert_eq!(parked.key, "k0");
-    held.push(parked);
+    let mut freed = [consuming.next().await?, consuming.next().await?];
+    freed.sort_by_key(Delivery::offset);
+    assert_eq!(freed[0].payload(), b"p1", "k0's second record follows its first");
+    assert_eq!(freed[0].key(), "k0");
+    assert_eq!(freed[1].payload(), b"p65", "the record past the bound takes the freed slot");
+    held.extend(freed);
 
-    let mut acked = 1usize;
-    while acked < produced.len() {
-        if held.is_empty() {
-            held.push(next_held(&mut subscription).await?);
-        }
-        held.pop().expect("a held record").ack.ack();
-        acked += 1;
+    for record in held {
+        record.complete(Ok(()));
     }
     let next_offset = i64::try_from(produced.len()).expect("produced");
     wait_offset(&group, &topic, next_offset).await?;
 
-    // Five further records. Hold the second back, ack a later one first, and
-    // publish once more before acking the record that should wait on that send.
+    // Five further records. Hold the second back, complete a later one first,
+    // and publish once more before completing the record that should wait on
+    // that send.
     let phase: Vec<(&str, &str)> =
         vec![("a", "a0"), ("b", "b0"), ("c", "c0"), ("d", "d0"), ("e", "e0")];
     for (key, payload) in &phase {
@@ -499,24 +537,47 @@ async fn at_least_once() -> Result<()> {
     }
     let mut phase_held = Vec::new();
     for _ in 0..phase.len() {
-        phase_held.push(next_held(&mut subscription).await?);
+        phase_held.push(consuming.next().await?);
     }
-    phase_held.sort_by_key(|record| record.offset);
-    assert_eq!(phase_held[0].offset, next_offset);
+    phase_held.sort_by_key(Delivery::offset);
+    assert_eq!(phase_held[0].offset(), next_offset);
+    let [a0, b0, c0, d0, e0] = phase_held.try_into().ok().context("five records")?;
+    let (offset_b, offset_c, offset_e) = (b0.offset(), c0.offset(), e0.offset());
 
-    phase_held[3].ack.ack();
-    phase_held[0].ack.ack();
-    wait_offset(&group, &topic, phase_held[1].offset).await?;
+    d0.complete(Ok(()));
+    a0.complete(Ok(()));
+    wait_offset(&group, &topic, offset_b).await?;
 
-    phase_held[1].ack.ack();
-    wait_offset(&group, &topic, phase_held[2].offset).await?;
+    b0.complete(Ok(()));
+    wait_offset(&group, &topic, offset_c).await?;
 
     client.send(topic.clone(), keyed_message("side", &[("key", "side")])).await?;
-    phase_held[2].ack.ack();
-    let tail = phase_held[4].offset;
+    let side = consuming.next().await?;
+    assert_eq!(side.key(), "side");
+    c0.complete(Ok(()));
+    wait_offset(&group, &topic, offset_e).await?;
+
+    e0.complete(Ok(()));
+    wait_offset(&group, &topic, side.offset()).await?;
+    let tail = side.offset() + 1;
+    side.complete(Ok(()));
     wait_offset(&group, &topic, tail).await?;
 
-    drop(subscription);
+    // a record the guest rejects ends the consumer with its offset uncommitted
+    client.send(topic.clone(), keyed_message("f0", &[("key", "f")])).await?;
+    let rejected = consuming.next().await?;
+    assert_eq!(rejected.offset(), tail);
+    rejected.complete(Err(HandleError::Rejected(omnia_wasi_messaging::Error::Other(
+        "rejected f".to_owned(),
+    ))));
+    let ended = (&mut consuming.task).await.context("the consume task joins")?;
+    let error = ended.expect_err("a rejected record ends the consumer");
+    assert!(
+        format!("{error:#}").contains(&format!("{topic}[0]@{tail}")),
+        "unexpected error: {error:#}"
+    );
+    assert!(consuming.nothing(Duration::from_millis(100)).await);
+
     drop(client);
     drop(backend);
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -525,7 +586,7 @@ async fn at_least_once() -> Result<()> {
 }
 
 // A message framed under a schema id other than the topic's latest, as a
-// producer still on an earlier version writes, reaches the subscriber with
+// producer still on an earlier version writes, reaches the consumer with
 // its header stripped: the mismatch is logged, never a dropped message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs Kafka + Schema Registry (KAFKA_BROKERS, KAFKA_REGISTRY_URL); run with --run-ignored"]

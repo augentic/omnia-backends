@@ -92,20 +92,20 @@ omnia-wasi-sql = { version = "0.37.0", default-features = false }
 omnia-wasi-vault = "0.37.0"
 
 [patch.crates-io]
-omnia = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-core = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-plugin = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-sdk = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-test = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-wasi-docstore = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-wasi-identity = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-wasi-messaging = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-wasi-model = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-wasi-otel = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-wasi-sql = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
-omnia-wasi-vault = { git = "https://github.com/augentic/omnia", branch = "kafka-improvements" }
+omnia = { path = "../omnia/crates/omnia" }
+omnia-core = { path = "../omnia/crates/omnia-core" }
+omnia-plugin = { path = "../omnia/crates/omnia-plugin" }
+omnia-sdk = { path = "../omnia/crates/omnia-sdk" }
+omnia-test = { path = "../omnia/crates/omnia-test" }
+omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
+omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
+omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }
+omnia-wasi-keyvalue = { path = "../omnia/crates/wasi-keyvalue" }
+omnia-wasi-messaging = { path = "../omnia/crates/wasi-messaging" }
+omnia-wasi-model = { path = "../omnia/crates/wasi-model" }
+omnia-wasi-otel = { path = "../omnia/crates/wasi-otel" }
+omnia-wasi-sql = { path = "../omnia/crates/wasi-sql" }
+omnia-wasi-vault = { path = "../omnia/crates/wasi-vault" }
 
 [profile.release]
 lto = true

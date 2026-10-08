@@ -35,15 +35,15 @@ Each record reaches the guest with `metadata` carrying `key`, `partition`, `offs
 
 ### Offsets
 
-Delivery is at-least-once. A record's offset is eligible to commit once the guest's handler has returned — with `Ok`, with `Err`, by trapping, or by timing out — and every message the guest sent before returning has been acknowledged by the broker. Offsets are committed every `KAFKA_COMMIT_INTERVAL_MS`, so a crash or redeploy replays at most that much input plus the records still waiting on a broker acknowledgement; guests must tolerate seeing a record twice. A returned `Err` does not cause redelivery; it is logged and counted.
+Delivery is at-least-once. A record's offset is eligible to commit once the guest's handler has returned `Ok` and every message the guest sent before returning has been acknowledged by the broker. Offsets are committed every `KAFKA_COMMIT_INTERVAL_MS`, so a crash or redeploy replays at most that much input plus the records still waiting on a broker acknowledgement; guests must tolerate seeing a record twice.
 
 ### Producing
 
-`send` returns once librdkafka has queued the message; an `Err` means it was refused (queue full, too large, invalid partition) and nothing was sent. Delivery happens in the background with librdkafka's retries, up to 120 s; a message that cannot be delivered in that time is logged with its key and counted, and the record that produced it is still committed. A message with no `metadata["key"]` is sent with a null key. `metadata["partition"]` takes precedence over the partitioner.
+`send` returns once librdkafka has queued the message; an `Err` means it was refused (queue full, too large, invalid partition) and nothing was sent. Delivery happens in the background with librdkafka's retries, up to 120 s; a message that cannot be delivered in that time is logged with its key and counted, and the record that produced it is still committed. A message with no `metadata["key"]` is sent with a null key. `metadata["partition"]` takes precedence over the partitioner. `request` is not supported and returns an error.
 
 ### Failure and shutdown
 
-A fatal consumer error (librdkafka has given up on the consumer) ends the subscription and the process exits non-zero for the orchestrator to restart; so does a record for which the host could not load or instantiate a guest, since every record would fail the same way. Transient errors are logged and retried by librdkafka. On shutdown the producer is flushed for up to 10 s and the consumer commits what it has stored.
+A record the guest does not handle — its handler returned `Err`, trapped, or timed out, or the host could not load or instantiate a guest for it — ends the consumer, and the process exits non-zero for the orchestrator to restart. The record's offset was never stored, so the restart redelivers it, and everything after it, from the committed offset; a record that fails every time blocks its partition until the guest is fixed. A fatal consumer error (librdkafka has given up on the consumer) ends the consumer the same way. Transient errors are logged and retried by librdkafka. On shutdown the producer is flushed for up to 10 s and the consumer commits what it has stored.
 
 ### Counters
 
@@ -52,7 +52,6 @@ A fatal consumer error (librdkafka has given up on the consumer) ends the subscr
 | `discarded_messages` | Framed payload that failed to decode |
 | `publish_refused` | librdkafka refused to enqueue |
 | `delivery_failures` | Queued message not delivered within 120 s |
-| `unacked_messages` | Token dropped without an ack: the host ran no guest for the record |
 
 ### Gauges
 
@@ -61,7 +60,7 @@ Emitted at `trace` level, like the runtime's pool gauges, whenever either change
 | Gauge | Measures |
 |-------|----------|
 | `kafka_in_flight` | Records with the host, out of 64. Pinned at 64 under lag: the slot count is the limit |
-| `kafka_parked` | Records waiting behind a key already in flight, out of 4096. Climbing while `kafka_in_flight` is low: fewer distinct keys than slots |
+| `kafka_parked` | Records pulled and waiting behind a key already in flight, out of a 4096-record backlog. Climbing while `kafka_in_flight` is low: fewer distinct keys than slots |
 
 ## Usage
 
@@ -92,14 +91,16 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging` boundary against a
-real broker: keyed sends must land on the partitions the configured
-partitioner predicts, under both the `kafkajs` and `java` schemes, and (when a
-Schema Registry is reachable) framed sends must carry the Confluent wire
-format and decode back through `subscribe`, while an unframed payload on a
-topic that has a schema is delivered unchanged and a message framed under a
-schema id other than the topic's latest still decodes (the mismatch is only
-logged). `at_least_once` acks received messages in various orders and checks
-what is yielded and what is committed. The tests are `#[ignore]`d so they
+real broker, with the test playing the host's `Handler`: keyed sends must
+land on the partitions the configured partitioner predicts, under both the
+`kafkajs` and `java` schemes, and (when a Schema Registry is reachable)
+framed sends must carry the Confluent wire format and decode back through
+`consume`, while an unframed payload on a topic that has a schema is
+delivered unchanged and a message framed under a schema id other than the
+topic's latest still decodes (the mismatch is only logged). `at_least_once`
+completes delivered records in various orders and checks what is delivered
+and what is committed, then fails one record and checks that the consumer
+ends with the commit stopped before it. The tests are `#[ignore]`d so they
 never run in CI; run them explicitly:
 
 ```bash

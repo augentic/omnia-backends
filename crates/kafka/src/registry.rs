@@ -19,7 +19,7 @@ type SchemaMap = HashMap<String, Option<(i32, Value)>>;
 
 #[derive(Clone)]
 pub struct Registry {
-    client: Option<SchemaRegistryClient>,
+    client: SchemaRegistryClient,
     schemas: Arc<Mutex<SchemaMap>>,
     // topics that have already logged an unframed payload
     unframed: Arc<StdMutex<HashSet<String>>>,
@@ -34,14 +34,14 @@ impl Registry {
         let mut config = RegistryConfig::new(vec![options.url.clone()]);
         config.basic_auth = Some((options.api_key, Some(options.api_secret)));
 
-        let sr_client = Self {
-            client: Some(SchemaRegistryClient::new(config)),
+        let registry = Self {
+            client: SchemaRegistryClient::new(config),
             schemas: Arc::new(Mutex::new(HashMap::new())),
             unframed: Arc::new(StdMutex::new(HashSet::new())),
         };
-        sr_client.start_cache_cleaner(options.cache_ttl_secs);
+        registry.start_cache_cleaner(options.cache_ttl_secs);
 
-        sr_client
+        registry
     }
 
     // Validate `buffer` against the topic's schema and frame it with the wire
@@ -49,33 +49,28 @@ impl Registry {
     // the payload does not validate: a send is never failed here.
     #[instrument(skip(self, buffer))]
     pub async fn encode(&self, topic: &str, buffer: Vec<u8>) -> Vec<u8> {
-        if self.client.is_some() {
-            match self.get_schema(topic).await {
-                Ok(Some((id, schema))) => {
-                    let payload: Value = match serde_json::from_slice(&buffer) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            tracing::debug!("invalid JSON on {topic}: {e:?}");
-                            return buffer;
-                        }
-                    };
-
-                    if let Err(e) = Self::validate(&schema, &payload) {
-                        tracing::debug!("JSON validation failed on {topic}: {e}");
-                        return buffer;
-                    }
-
-                    Payload::encode(id, buffer)
-                }
-                Ok(None) => buffer,
-                Err(e) => {
-                    tracing::debug!("failed to fetch schema for topic {topic}: {e}");
-                    buffer
-                }
+        let (id, schema) = match self.get_schema(topic).await {
+            Ok(Some(schema)) => schema,
+            Ok(None) => return buffer,
+            Err(e) => {
+                tracing::debug!("failed to fetch schema for topic {topic}: {e}");
+                return buffer;
             }
-        } else {
-            buffer
+        };
+
+        let payload: Value = match serde_json::from_slice(&buffer) {
+            Ok(payload) => payload,
+            Err(e) => {
+                tracing::debug!("invalid JSON on {topic}: {e:?}");
+                return buffer;
+            }
+        };
+        if let Err(e) = validate(&schema, &payload) {
+            tracing::debug!("JSON validation failed on {topic}: {e}");
+            return buffer;
         }
+
+        Payload::encode(id, buffer)
     }
 
     // Unwrap a Confluent-framed payload and validate it. Anything else —
@@ -85,10 +80,6 @@ impl Registry {
     // another schema is logged and still decoded.
     #[instrument(skip(self, buffer))]
     pub async fn decode(&self, topic: &str, buffer: &[u8]) -> Vec<u8> {
-        if self.client.is_none() {
-            return buffer.to_vec();
-        }
-
         let Some((id, schema)) = (match self.get_schema(topic).await {
             Ok(schema) => schema,
             Err(e) => {
@@ -119,7 +110,7 @@ impl Registry {
             }
         };
 
-        if let Err(e) = Self::validate(&schema, &payload) {
+        if let Err(e) = validate(&schema, &payload) {
             tracing::debug!("schema validation failed on {topic}: {e}");
             tracing::info!(monotonic_counter.discarded_messages = 1, topic = %topic);
             return buffer.to_vec();
@@ -140,11 +131,6 @@ impl Registry {
         }
     }
 
-    pub fn validate(schema: &Value, payload: &Value) -> Result<(), String> {
-        validate(schema, payload).map_err(|e| format!("Validation error: {e}"))?;
-        Ok(())
-    }
-
     async fn get_schema(&self, topic: &str) -> Result<Option<(i32, Value)>> {
         {
             let schemas = self.schemas.lock().await;
@@ -160,10 +146,8 @@ impl Registry {
     }
 
     async fn fetch_schema(&self, topic: &str) -> Result<Option<(i32, Value)>> {
-        let sr =
-            self.client.as_ref().ok_or_else(|| anyhow!("No schema registry client available"))?;
         let subject = format!("{topic}-value");
-        let schema_response = match sr.get_latest_version(&subject, None).await {
+        let schema_response = match self.client.get_latest_version(&subject, None).await {
             Ok(schema) => schema,
             Err(SchemaRegistryError::ResponseError(error))
                 if error.status == StatusCode::NOT_FOUND =>

@@ -1,13 +1,14 @@
 #![doc = include_str!("../README.md")]
 
-mod dispatch;
+mod consume;
 mod messaging;
 mod partitioner;
 mod registry;
 mod tracker;
 
 use std::fmt::{self, Debug};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,10 +17,9 @@ use rand::random_range;
 use rdkafka::consumer::Consumer;
 use rdkafka::producer::{DeliveryResult, Producer, ProducerContext, ThreadedProducer};
 use rdkafka::{ClientConfig, ClientContext, Message as _};
-use tokio::task::JoinHandle;
 use tracing::instrument;
 
-use crate::dispatch::{KafkaConsumer, KafkaContext, Shared};
+use crate::consume::{KafkaConsumer, KafkaContext, Shared};
 use crate::partitioner::Partitioner;
 use crate::registry::Registry;
 
@@ -40,13 +40,15 @@ pub struct Client {
     inner: Arc<Inner>,
 }
 
+// Fields drop in order: the producer flushes first, so a delivery report can
+// still store an offset before the consumer's close commits what is stored.
 struct Inner {
     producer: ThreadedProducer<Tracer>,
     partitioner: Partitioner,
     registry: Option<Registry>,
     shared: Arc<Shared>,
-    forwarder: Mutex<Option<JoinHandle<()>>>,
     consumer: Option<Arc<KafkaConsumer>>,
+    consuming: AtomicBool,
 }
 
 impl Debug for Client {
@@ -59,10 +61,6 @@ impl Drop for Inner {
     fn drop(&mut self) {
         if let Err(error) = self.producer.flush(PRODUCER_FLUSH) {
             tracing::warn!("producer flush on shutdown: {error}");
-        }
-        self.shared.stop();
-        if let Some(task) = self.forwarder.get_mut().expect("forwarder").take() {
-            task.abort();
         }
     }
 }
@@ -95,9 +93,9 @@ impl Backend for Client {
             config.set("auto.commit.interval.ms", options.commit_interval_ms.to_string());
             // librdkafka queues a partition's fetch whole before the next
             // partition's. At the 1 MiB default one partition's few repeated
-            // keys fill the gate's parked queues before any other partition is
-            // seen; at 64 KiB each contributes a short run and the keys
-            // interleave. A record larger than this is still fetched whole.
+            // keys fill the backlog before any other partition is seen; at
+            // 64 KiB each contributes a short run and the keys interleave. A
+            // record larger than this is still fetched whole.
             config.set("max.partition.fetch.bytes", "65536");
 
             let consumer: KafkaConsumer = config
@@ -121,8 +119,8 @@ impl Backend for Client {
                 partitioner,
                 registry,
                 shared,
-                forwarder: Mutex::new(None),
                 consumer,
+                consuming: AtomicBool::new(false),
             }),
         })
     }

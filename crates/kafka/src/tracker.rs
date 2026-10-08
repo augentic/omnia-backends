@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 // One record the host has been given, or that is waiting on an earlier
-// record in its partition. `sends_before` is meaningful once `acked` is set:
+// record in its partition. `sends_before` is meaningful once `done` is set:
 // every produce numbered below it has to be delivered before the record is
-// done.
+// resolved.
 struct Pending {
-    acked: bool,
+    done: bool,
     sends_before: u64,
 }
 
@@ -19,7 +19,7 @@ pub struct Tracker {
     // every send numbered below this has a delivery report
     delivered: u64,
     out_of_order: BTreeSet<u64>,
-    // partitions revoked and not yet reassigned; a late ack for one is ignored
+    // partitions revoked and not yet reassigned; a record of one is dropped
     revoked: HashSet<(String, i32)>,
     stored: HashMap<(String, i32), i64>,
 }
@@ -33,20 +33,28 @@ impl Tracker {
         self.partitions.entry(key).or_default().insert(
             offset,
             Pending {
-                acked: false,
+                done: false,
                 sends_before: 0,
             },
         );
     }
 
-    pub fn ack(
+    // Whether the record is still this consumer's to deliver. A revoke
+    // between the pull and the delivery drops it.
+    pub fn holds(&self, topic: &str, partition: i32, offset: i64) -> bool {
+        self.partitions
+            .get(&(topic.to_owned(), partition))
+            .is_some_and(|pending| pending.contains_key(&offset))
+    }
+
+    pub fn done(
         &mut self, topic: &str, partition: i32, offset: i64, sends_before: u64,
     ) -> Vec<(String, i32, i64)> {
         let key = (topic.to_owned(), partition);
         if let Some(pending) = self.partitions.get_mut(&key)
             && let Some(state) = pending.get_mut(&offset)
         {
-            state.acked = true;
+            state.done = true;
             state.sends_before = sends_before;
         }
         self.resolve()
@@ -98,7 +106,7 @@ impl Tracker {
                 };
                 let mut last = None;
                 while let Some((&offset, state)) = pending.first_key_value() {
-                    if state.acked && state.sends_before <= self.delivered {
+                    if state.done && state.sends_before <= self.delivered {
                         last = Some(offset);
                         pending.pop_first();
                     } else {
@@ -120,45 +128,55 @@ impl Tracker {
 }
 
 // Resolved offsets when records finish out of order, with no broker. The
-// gate is `dispatch`'s tests; a real group commit is `tests/live.rs`.
+// loop over it is `consume`'s tests; a real group commit is `tests/live.rs`.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn out_of_order_acks_store_the_resolved_offset() {
+    fn out_of_order_completions_store_the_resolved_offset() {
         let mut tracker = Tracker::default();
         tracker.insert("t", 3, 100);
         tracker.insert("t", 3, 101);
         tracker.insert("t", 3, 102);
 
-        assert_eq!(tracker.ack("t", 3, 101, 0), []);
-        assert_eq!(tracker.stored.get(&("t".to_owned(), 3)), None);
+        assert_eq!(tracker.done("t", 3, 101, 0), []);
+        assert_eq!(tracker.stored_offset("t", 3), None);
 
-        let stored = tracker.ack("t", 3, 100, 0);
+        let stored = tracker.done("t", 3, 100, 0);
         assert_eq!(stored, vec![("t".to_owned(), 3, 101)]);
 
-        let stored = tracker.ack("t", 3, 102, 0);
+        let stored = tracker.done("t", 3, 102, 0);
         assert_eq!(stored, vec![("t".to_owned(), 3, 102)]);
     }
 
     #[test]
-    fn record_acked_before_its_sends_are_delivered() {
+    fn record_done_before_its_sends_are_delivered() {
         let mut tracker = Tracker::default();
         tracker.insert("t", 0, 7);
-        assert_eq!(tracker.ack("t", 0, 7, 2), []);
+        assert_eq!(tracker.done("t", 0, 7, 2), []);
 
         assert_eq!(tracker.note_delivered(0), []);
         assert_eq!(tracker.note_delivered(1), vec![("t".to_owned(), 0, 7)]);
     }
 
     #[test]
-    fn revoked_partition_ignores_a_late_ack() {
+    fn revoked_partition_drops_its_records() {
         let mut tracker = Tracker::default();
         tracker.insert("t", 1, 5);
+        assert!(tracker.holds("t", 1, 5));
+
         tracker.revoke("t", 1);
-        assert_eq!(tracker.ack("t", 1, 5, 0), []);
+        assert!(!tracker.holds("t", 1, 5));
+        assert_eq!(tracker.done("t", 1, 5, 0), []);
         assert!(tracker.stored.is_empty());
+
+        // a record pulled before the reassignment is still dropped
+        tracker.insert("t", 1, 6);
+        assert!(!tracker.holds("t", 1, 6));
+        tracker.assign("t", 1);
+        tracker.insert("t", 1, 7);
+        assert!(tracker.holds("t", 1, 7));
     }
 
     #[test]
@@ -172,6 +190,6 @@ mod tests {
         assert_eq!(tracker.delivered, 2);
 
         tracker.insert("t", 0, 10);
-        assert_eq!(tracker.ack("t", 0, 10, 2), vec![("t".to_owned(), 0, 10)]);
+        assert_eq!(tracker.done("t", 0, 10, 2), vec![("t".to_owned(), 0, 10)]);
     }
 }

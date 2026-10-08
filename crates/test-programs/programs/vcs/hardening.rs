@@ -3,19 +3,21 @@
 //! neutralised before it runs, and every path it could point git at stays
 //! the place. The host lays a repository salted with a hostile
 //! `core.hooksPath`, `core.fsmonitor`, `core.alternateRefsCommand`,
-//! `core.worktree`, signing program, smudge filter, and remote receive-pack,
-//! a working copy of its history that would write its checked-out branch on
-//! receive through a filter and monitor of its own, a bare origin with its
-//! own hostile hooks and alternate-refs command, a
-//! repository with no identity to seal a merge, one whose own `insteadOf`
-//! would carry an `https` remote onto a local path, one whose own `http.proxy`
-//! and `http.sslVerify` would carry the host's credentials through a proxy of
+//! `core.worktree`, commit and push signing, signing program, smudge
+//! filter, and remote receive-pack, a working copy of its history that
+//! would write its checked-out branch on receive through a filter and
+//! monitor of its own, a bare origin with its own hostile hooks and
+//! alternate-refs command that asks for a signed push, a repository with no
+//! identity to seal a merge, one whose own `insteadOf` would carry an
+//! `https` remote onto a local path, one whose own `http.proxy` and
+//! `http.sslVerify` would carry the host's credentials through a proxy of
 //! its choosing, one naming the pack program the operator's ssh would run on
-//! a far host, and a partial clone whose promisor remote is an `ext::`
-//! command; this guest drives the operations that would fire each, and the
-//! host asserts no marker was written, nothing was carried or read from
-//! outside the place, the ssh was handed git's own programs, and the work
-//! still landed.
+//! a far host, a partial clone whose promisor remote is an ssh host under a
+//! pack command of its own, and one naming a clean filter under a key no pin
+//! can spell; this guest drives the operations that would fire each, and
+//! the host asserts no marker was written, nothing was carried or read from
+//! outside the place, the ssh was handed git's own programs and nothing for
+//! the promisor, and the work still landed.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -32,6 +34,7 @@ const REWRITER: &str = "./rewriter";
 const PROXIED: &str = "./proxied";
 const PACKER: &str = "./packer";
 const LAZY: &str = "./lazy";
+const BYTES: &str = "./bytes";
 
 async fn scenario() {
     repo_config_runs_nothing().await;
@@ -39,6 +42,17 @@ async fn scenario() {
     a_shaping_repository_is_refused().await;
     a_repository_names_no_pack_program().await;
     a_lazy_fetch_reaches_no_command().await;
+    an_unnameable_key_is_refused().await;
+}
+
+// The repository names a clean filter under a subsection that is not UTF-8,
+// which a pin spelled as text cannot name; the operation is refused rather
+// than run it over the change.
+async fn an_unnameable_key_is_refused() {
+    match WasiVcs.commit(BYTES, "seal").await {
+        Err(Error::Other(message)) => assert!(message.contains("UTF-8"), "{message}"),
+        other => panic!("{BYTES} is refused, not {other:?}"),
+    }
 }
 
 // The repository's `remote.evil.uploadPack` and `receivePack` name what the
@@ -52,13 +66,13 @@ async fn a_repository_names_no_pack_program() {
     }
 }
 
-// The repository's promisor remote is an `ext::` command, allowed by its own
-// `protocol.ext.allow`; a checkout that needs a blob it lacks fails rather
-// than fetch it through that command.
+// The repository's promisor remote is an ssh host, and the pack command the
+// operator's ssh would carry there is the repository's own; a checkout that
+// needs a blob it lacks fails rather than fetch it, so the ssh never runs.
 async fn a_lazy_fetch_reaches_no_command() {
     let head = WasiVcs.head(LAZY).await.expect("head");
     let added = WasiVcs.add(LAZY, "./lazy-copy", &head).await;
-    assert!(added.is_err(), "a blob only the ext remote could supply: {added:?}");
+    assert!(added.is_err(), "a blob only the promisor could supply: {added:?}");
 }
 
 // One repository's `url.<local>.insteadOf=https://` would turn its `https`
@@ -97,8 +111,8 @@ async fn repo_config_runs_nothing() {
     assert_eq!(WasiVcs.pending(REPO).await.expect("pending"), []);
 
     // a push runs neither the client's receive-pack nor the origin's hooks or
-    // alternate-refs command, and a fetch runs no alternate-refs command of
-    // the repository's own
+    // alternate-refs command, signs no certificate the origin asks for, and a
+    // fetch runs no alternate-refs command of the repository's own
     WasiVcs.label(REPO, "emery/hardened", &sealed).await.expect("label");
     WasiVcs.push(REPO, "origin", "emery/hardened").await.expect("push");
     WasiVcs.fetch(REPO, "origin").await.expect("fetch");

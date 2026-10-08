@@ -7,27 +7,29 @@
 //! host the moment the next operation touched the tree. Each such key is
 //! pinned on the command line, where git reads it last and the repository
 //! cannot reach: a fixed set is forced off, and the keys an operator carries
-//! for real — an SSH command, a credential prompt, a credential helper — are
-//! kept from the host's own configuration (system, global, or this command
-//! line) and dropped from the repository's.
+//! for real — an SSH command, a credential prompt, a credential helper, a
+//! signing program — are kept from the host's own configuration (system,
+//! global, or this command line) and dropped from the repository's. A key
+//! the repository spells in bytes a pin cannot name refuses the operation.
 
 use anyhow::Result;
-use omnia_wasi_vcs::Place;
+use omnia_wasi_vcs::{Error, Place};
 
 use crate::Client;
 
 // Keys forced on every operation whatever scope set them: each names a
-// program git would run on a commit, a merge, a status, or a fetch, and none
-// is wanted from an automated backend. Hooks are reached through
+// program git would run on a commit, a merge, a status, a fetch, or a push,
+// and none is wanted from an automated backend. Hooks are reached through
 // `.git/hooks` or `core.hooksPath`, so `/dev/null` sends git to a directory
 // with none; the alternate-refs command, run by a fetch over a repository
 // with alternates and by the far side of a push, is emptied, since git can
 // run no empty command and skips the alternates' refs instead.
-const FORCED: [&str; 7] = [
+const FORCED: [&str; 8] = [
     "core.hooksPath=/dev/null",
     "core.fsmonitor=false",
     "core.alternateRefsCommand=",
     "commit.gpgsign=false",
+    "push.gpgsign=false",
     "merge.verifySignatures=false",
     "submodule.recurse=false",
     "fetch.recurseSubmodules=no",
@@ -35,9 +37,16 @@ const FORCED: [&str; 7] = [
 
 // Keys naming one program the host may carry for real, as git lowercases
 // them in a listing and as they are pinned: the repository's value gives way
-// to the host's, or to none.
-const HOST_KEPT: [(&str, &str); 2] =
-    [("core.sshcommand", "core.sshCommand"), ("core.askpass", "core.askPass")];
+// to the host's, or to none. Nothing here signs, so a signing program is
+// pinned for whatever path to one a later git may add.
+const HOST_KEPT: [(&str, &str); 6] = [
+    ("core.sshcommand", "core.sshCommand"),
+    ("core.askpass", "core.askPass"),
+    ("gpg.program", "gpg.program"),
+    ("gpg.openpgp.program", "gpg.openpgp.program"),
+    ("gpg.x509.program", "gpg.x509.program"),
+    ("gpg.ssh.program", "gpg.ssh.program"),
+];
 
 /// The `-c` overrides that hold one repository's operations to host policy,
 /// and the first setting the repository made of how a transport runs, if
@@ -56,7 +65,16 @@ impl Pins {
     pub async fn read(client: &Client, at: &Place) -> Result<Self> {
         let args = ["config", "--show-scope", "--list", "-z"];
         let output = client.git(Some(at), args, &[]).await?;
-        let settings = if output.status.success() { parse(&output.text()) } else { Vec::new() };
+        if !output.status.success() {
+            return Ok(Self::build(&[]));
+        }
+        let settings = parse(&output.stdout).map_err(|key| {
+            let shown = at.path().display();
+            let message = format!(
+                "{shown}: the repository sets {key}, which is not UTF-8 and no pin can name"
+            );
+            Error::Other(message)
+        })?;
         Ok(Self::build(&settings))
     }
 
@@ -115,12 +133,13 @@ impl Pins {
 // Where a setting came from, cut to the one distinction that matters: the
 // host's policy, which an operator owns, or the repository's, which a guest
 // does.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scope {
     Host,
     Repo,
 }
 
+#[derive(Debug)]
 struct Setting {
     scope: Scope,
     key: String,
@@ -129,22 +148,33 @@ struct Setting {
 
 // `config --show-scope --list -z` is `<scope>\0<key>\n<value>\0` per setting;
 // a key holds no newline and a value holds no NUL, so the first `\n` splits
-// the pair and the trailing NUL ends the list.
-fn parse(listing: &str) -> Vec<Setting> {
-    let mut tokens = listing.split('\0');
+// the pair and the trailing NUL ends the list. A pin names a key as text, so
+// a repository key in any other bytes — a subsection git lets hold anything
+// but a newline — is the error, spelled as text reads it, since a pin that
+// cannot name it would leave the program it points at running; host keys and
+// every value read lossily, as only a host value is ever pinned back.
+fn parse(listing: &[u8]) -> Result<Vec<Setting>, String> {
+    let mut tokens = listing.split(|&byte| byte == 0);
     let mut settings = Vec::new();
     while let (Some(scope), Some(pair)) = (tokens.next(), tokens.next()) {
         if scope.is_empty() {
             break;
         }
-        let (key, value) = pair.split_once('\n').unwrap_or((pair, ""));
+        let scope = if matches!(scope, b"local" | b"worktree") { Scope::Repo } else { Scope::Host };
+        let split = pair.iter().position(|&byte| byte == b'\n').unwrap_or(pair.len());
+        let (key, value) = (&pair[..split], pair.get(split + 1..).unwrap_or_default());
+        let key = match str::from_utf8(key) {
+            Ok(key) => key.to_owned(),
+            Err(_) if scope == Scope::Repo => return Err(String::from_utf8_lossy(key).into_owned()),
+            Err(_) => String::from_utf8_lossy(key).into_owned(),
+        };
         settings.push(Setting {
-            scope: if matches!(scope, "local" | "worktree") { Scope::Repo } else { Scope::Host },
-            key: key.to_owned(),
-            value: value.to_owned(),
+            scope,
+            key,
+            value: String::from_utf8_lossy(value).into_owned(),
         });
     }
-    settings
+    Ok(settings)
 }
 
 fn repo_set(settings: &[Setting], key: &str) -> bool {
@@ -212,12 +242,15 @@ fn is_shaping(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pins, parse};
+    use super::{Pins, Setting, parse};
+
+    fn settings(listing: &str) -> Vec<Setting> {
+        parse(listing.as_bytes()).expect("a listing in UTF-8")
+    }
 
     // the forced pins, then whatever the settings add
     fn pins(listing: &str) -> Vec<String> {
-        let settings = parse(listing);
-        Pins::build(&settings).args().map(str::to_owned).collect::<Vec<_>>()
+        Pins::build(&settings(listing)).args().map(str::to_owned).collect::<Vec<_>>()
     }
 
     #[test]
@@ -234,6 +267,8 @@ mod tests {
                 "core.alternateRefsCommand=",
                 "-c",
                 "commit.gpgsign=false",
+                "-c",
+                "push.gpgsign=false",
                 "-c",
                 "merge.verifySignatures=false",
                 "-c",
@@ -261,6 +296,15 @@ mod tests {
     fn repo_askpass_emptied() {
         let listing = "local\0core.askpass\n/tmp/evil\0";
         assert!(pins(listing).windows(2).any(|w| w == ["-c", "core.askPass="]));
+    }
+
+    #[test]
+    fn repo_signers_take_the_host_value_or_empty() {
+        let listing = "global\0gpg.program\nhostgpg\0local\0gpg.program\n/tmp/evil\0\
+                       local\0gpg.ssh.program\n/tmp/evil\0";
+        let pins = pins(listing);
+        assert!(pins.windows(2).any(|w| w == ["-c", "gpg.program=hostgpg"]));
+        assert!(pins.windows(2).any(|w| w == ["-c", "gpg.ssh.program="]));
     }
 
     #[test]
@@ -302,7 +346,7 @@ mod tests {
     fn repo_rewrite_named() {
         let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0\
                        local\0url./tmp/m.pushinsteadof\nhttps://github.com/\0";
-        let pins = Pins::build(&parse(listing));
+        let pins = Pins::build(&settings(listing));
         assert_eq!(pins.shaping(), Some("url./tmp/m.pushinsteadof"));
         assert!(
             !pins.args().any(|arg| arg.contains("insteadof")),
@@ -323,7 +367,7 @@ mod tests {
             "remote.origin.proxy",
         ] {
             let listing = format!("local\0{key}\nx\0");
-            assert_eq!(Pins::build(&parse(&listing)).shaping(), Some(key), "{key}");
+            assert_eq!(Pins::build(&settings(&listing)).shaping(), Some(key), "{key}");
         }
     }
 
@@ -331,20 +375,34 @@ mod tests {
     fn repo_http_tuning_left_alone() {
         let listing = "local\0http.postbuffer\n524288000\0local\0http.lowspeedlimit\n0\0\
                        local\0http.https://h/.postbuffer\n1\0";
-        assert_eq!(Pins::build(&parse(listing)).shaping(), None);
+        assert_eq!(Pins::build(&settings(listing)).shaping(), None);
     }
 
     #[test]
     fn host_shaping_left_alone() {
         let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0global\0http.proxy\nhost\0\
                        system\0http.sslverify\nfalse\0";
-        assert_eq!(Pins::build(&parse(listing)).shaping(), None);
+        assert_eq!(Pins::build(&settings(listing)).shaping(), None);
     }
 
     #[test]
     fn empty_value_setting() {
         let listing = "local\0foo.bar\n\0global\0user.name\nT\0";
         // the empty value parses without eating the next setting
-        assert_eq!(parse(listing).len(), 2);
+        assert_eq!(settings(listing).len(), 2);
+    }
+
+    #[test]
+    fn repo_key_not_utf8() {
+        let listing = b"local\0filter.\xff.clean\ntouch pwned\0";
+        assert_eq!(parse(listing).expect_err("unnameable"), "filter.\u{FFFD}.clean");
+    }
+
+    #[test]
+    fn host_key_and_values_read_lossily() {
+        let listing = b"global\0filter.\xff.clean\nx\0local\0user.name\n\xff\0";
+        let settings = parse(listing).expect("the host's key and a value are the operator's");
+        assert_eq!(settings.len(), 2);
+        assert_eq!(settings[1].value, "\u{FFFD}");
     }
 }

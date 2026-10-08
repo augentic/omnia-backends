@@ -140,6 +140,7 @@ async fn vcs_hardening() {
     salt.proxied();
     let ssh_argv = salt.packer();
     salt.lazy();
+    salt.bytes();
 
     run(&git, &scratch, test_programs::VCS_HARDENING, vec![]).await;
 
@@ -176,10 +177,14 @@ async fn vcs_hardening() {
     assert_eq!(refs, "refs/heads/emery/hardened", "{refs}");
 
     // the operator's ssh was handed git's own pack programs, never the
-    // repository's, once for the fetch and once for the push
+    // repository's, once for the fetch and once for the push, and nothing at
+    // all for the partial clone's promisor
     let argv = fs::read_to_string(&ssh_argv).expect("the host's ssh ran");
-    let carried: Vec<_> = argv.lines().filter(|line| line.ends_with("'/x.git'")).collect();
+    let carried: Vec<_> = argv.lines().filter(|line| line.ends_with(".git'")).collect();
     assert_eq!(carried, ["git-upload-pack '/x.git'", "git-receive-pack '/x.git'"], "{argv}");
+
+    // the repository with the unnameable key sealed nothing
+    assert_eq!(git.git(&scratch.path().join("bytes"), &["rev-list", "--count", "HEAD"]), "1");
 }
 
 #[tokio::test]
@@ -304,6 +309,7 @@ impl<'a> Salt<'a> {
             ("core.alternateRefsCommand", self.alternate_refs()),
             ("core.worktree", elsewhere.display().to_string()),
             ("commit.gpgsign", "true".to_owned()),
+            ("push.gpgSign", "true".to_owned()),
             ("gpg.program", gpg.display().to_string()),
             ("filter.evil.smudge", smudge.display().to_string()),
             ("filter.evil.clean", smudge.display().to_string()),
@@ -334,8 +340,9 @@ impl<'a> Salt<'a> {
     }
 
     // A bare origin whose receive would run a hook and an alternate-refs
-    // command of its own, reached from `repo` through a client-side
-    // receive-pack the repository also salted.
+    // command of its own and asks for a signed push certificate, reached
+    // from `repo` through a client-side receive-pack the repository also
+    // salted.
     fn hostile_origin(&self, repo: &Path, alternates: &str) -> PathBuf {
         let origin = self.at("origin.git");
         fs::create_dir_all(&origin).expect("the origin");
@@ -345,6 +352,7 @@ impl<'a> Salt<'a> {
         executable(&hooks.join("pre-receive"), &blocking(&self.markers, "pre-receive"));
         self.config(&origin, "core.hooksPath", &hooks.display().to_string());
         self.config(&origin, "core.alternateRefsCommand", &self.alternate_refs());
+        self.config(&origin, "receive.certNonceSeed", "seed");
         fs::create_dir_all(origin.join("objects/info")).expect("the origin's objects info");
         fs::write(origin.join("objects/info/alternates"), alternates)
             .expect("the origin's alternates");
@@ -427,24 +435,44 @@ impl<'a> Salt<'a> {
         argv
     }
 
-    // A partial clone whose promisor remote is an ext:: command the repository
-    // allows itself, missing the one blob a checkout needs.
+    // A partial clone whose promisor remote is an ssh host, under a pack
+    // command of the repository's own, missing the one blob a checkout needs.
     fn lazy(&self) {
         let lazy = self.at("lazy");
         seed(self.git, &lazy, "a.txt");
         self.git.git(&lazy, &["add", "-A"]);
         self.git.git(&lazy, &["commit", "-qm", "base"]);
-        let ext = format!("ext::sh -c touch% {}", self.markers.join("ext").display());
+        let pack = format!("touch {}", self.markers.join("lazy-upload-pack").display());
         for (key, value) in [
             ("extensions.partialClone", "evil"),
-            ("remote.evil.url", ext.as_str()),
+            ("remote.evil.url", "ssh://localhost/lazy.git"),
             ("remote.evil.promisor", "true"),
-            ("protocol.ext.allow", "always"),
+            ("remote.evil.uploadpack", pack.as_str()),
         ] {
             self.config(&lazy, key, value);
         }
         let blob = self.git.git(&lazy, &["rev-parse", "HEAD:a.txt"]);
         fs::remove_file(lazy.join(format!(".git/objects/{}/{}", &blob[..2], &blob[2..])))
             .expect("removing the blob");
+    }
+
+    // A repository naming a clean filter under a subsection that is not
+    // UTF-8, which no pin spelled as text can name, with a change for a
+    // commit to run it over.
+    fn bytes(&self) {
+        let bytes = self.at("bytes");
+        seed(self.git, &bytes, "a.txt");
+        self.git.git(&bytes, &["add", "-A"]);
+        self.git.git(&bytes, &["commit", "-qm", "base"]);
+        let clean = self.at("bytes-clean");
+        executable(&clean, &filter(&self.markers, "bytes-clean"));
+        let mut planted = b"[filter \"\xff\"]\n\tclean = ".to_vec();
+        planted.extend_from_slice(clean.display().to_string().as_bytes());
+        planted.push(b'\n');
+        let config = fs::read(bytes.join(".git/config")).expect("the config");
+        fs::write(bytes.join(".git/config"), [config, planted].concat())
+            .expect("planting the filter");
+        fs::write(bytes.join(".gitattributes"), b"* filter=\xff\n").expect("the attributes");
+        fs::write(bytes.join("b.txt"), "b\n").expect("a change to filter");
     }
 }

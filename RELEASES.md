@@ -14,17 +14,22 @@ Unreleased
   and its siblings scrubbed from the environment. A lent repository's own
   configuration is a guest's to write, so each operation is held to host
   policy on its command line: hooks, the file-system monitor, the
-  alternate-refs command, signing, and submodule recursion are forced
-  off; the work tree is the place itself, whatever `core.worktree` the
-  repository set; a repository-scoped SSH command, credential prompt,
-  credential helper, or clean, smudge, or merge driver gives way to the
-  operator's own value or to none; every guest string follows `--`, one
+  alternate-refs command, commit and push signing, and submodule
+  recursion are forced off; the work tree is the place itself, whatever
+  `core.worktree` the repository set; a repository-scoped SSH command,
+  credential prompt, signing program, credential helper, or clean,
+  smudge, or merge driver gives way to the operator's own value or to
+  none, and a repository key in bytes that are not UTF-8, which no pin
+  can name, refuses the operation; every guest string follows `--`, one
   that is empty or option-shaped is `not-found` before any process runs;
-  every process runs under `GIT_ALLOW_PROTOCOL`, `http:https:ssh` by
-  default and the list for a transport's kind, read from the URL as the
-  host's configuration expands it, and under `LC_ALL=C`, so what git
-  says is the English the typed errors are read from whatever locale the
-  operator's shell exports; the pack command is named on every transport,
+  every process runs under `GIT_ALLOW_PROTOCOL` and `GIT_NO_LAZY_FETCH`,
+  no protocol and no lazy fetch outside a transport operation, so an
+  object the repository lacks is missing rather than fetched from a
+  promisor remote it names, and a transport under the list for its kind,
+  read from the URL as the host's configuration expands it, and under
+  `LC_ALL=C`, so what git says is the English the typed errors are read
+  from whatever locale the operator's shell exports; the pack command is
+  named on every transport,
   a local one's holding the far side to no hooks, alternate-refs command,
   or file-system monitor and to no update of a checked-out branch, and a
   remote one's git's own, so a `remote.<name>.uploadPack`

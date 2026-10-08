@@ -32,18 +32,20 @@ const SCRUBBED: [&str; 4] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_
 
 // What an interactive git reads from a terminal, an editor, or a prompt —
 // none answerable from a guest, so each is closed before git can block on
-// it or run a program to fill it; the protocols any process may speak, since
-// a lazy fetch from a promisor remote the repository names would otherwise
-// reach an `ext::` command or a remote helper under whatever
-// `protocol.<name>.allow` the repository set, a transport operation naming
-// the list for its own kind in `env`, which applies after; and the C locale,
+// it or run a program to fill it; no protocol and no lazy fetch, so an
+// object the repository lacks is missing rather than fetched from a promisor
+// remote it names, over the URL, proxy, and pack command it chose, whatever
+// `protocol.<name>.allow` it set — a transport operation names the list for
+// its own kind in `env`, which applies after, and a git before 2.45 reads
+// no `GIT_NO_LAZY_FETCH`, which the empty list covers; and the C locale,
 // over whatever the operator's shell exports, so what git says is the
 // English the refusal classes read.
-const FIXED: [(&str, &str); 5] = [
+const FIXED: [(&str, &str); 6] = [
     ("GIT_TERMINAL_PROMPT", "0"),
     ("GIT_EDITOR", ":"),
     ("GIT_MERGE_AUTOEDIT", "no"),
-    ("GIT_ALLOW_PROTOCOL", "http:https:ssh"),
+    ("GIT_ALLOW_PROTOCOL", ""),
+    ("GIT_NO_LAZY_FETCH", "1"),
     ("LC_ALL", "C"),
 ];
 

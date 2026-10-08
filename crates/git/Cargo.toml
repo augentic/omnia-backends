@@ -1,0 +1,35 @@
+[package]
+name = "omnia-git"
+description = "Git version-control backend (the omnia:vcs boundary) over the operator's git binary"
+readme = "README.md"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+anyhow.workspace = true
+fromenv.workspace = true
+futures.workspace = true
+omnia.workspace = true
+omnia-wasi-vcs.workspace = true
+process-wrap = { workspace = true, features = ["kill-on-drop", "process-group", "tokio1"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["process", "rt"] }
+tracing.workspace = true
+
+[dev-dependencies]
+omnia-test = { workspace = true, features = ["host"] }
+test-programs.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

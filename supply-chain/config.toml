@@ -55,6 +55,9 @@ audit-as-crates-io = false
 [policy.omnia-genai]
 audit-as-crates-io = false
 
+[policy.omnia-git]
+audit-as-crates-io = false
+
 [policy.omnia-guest-macros]
 audit-as-crates-io = false
 
@@ -277,10 +280,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.bytecount]]
 version = "0.6.9"
-criteria = "safe-to-deploy"
-
-[[exemptions.camino]]
-version = "1.2.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.cargo-platform]]
@@ -644,10 +643,6 @@ version = "0.3.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures-channel]]
-version = "0.3.34"
-criteria = "safe-to-deploy"
-
-[[exemptions.futures-core]]
 version = "0.3.34"
 criteria = "safe-to-deploy"
 
@@ -1119,10 +1114,6 @@ criteria = "safe-to-deploy"
 version = "1.0.10"
 criteria = "safe-to-deploy"
 
-[[exemptions.pastey]]
-version = "0.2.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.pbkdf2]]
 version = "0.13.0"
 criteria = "safe-to-deploy"
@@ -1157,10 +1148,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pkcs8]]
 version = "0.10.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.pkg-config]]
-version = "0.3.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.portable-atomic]]
@@ -1641,10 +1628,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tracing-attributes]]
 version = "0.1.31"
-criteria = "safe-to-deploy"
-
-[[exemptions.tracing-core]]
-version = "0.1.36"
 criteria = "safe-to-deploy"
 
 [[exemptions.tracing-opentelemetry]]

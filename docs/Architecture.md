@@ -10,7 +10,8 @@ Omnia is organized into three layers; this repository is the top one:
 ┌─────────────────────────────────────────────────────────────────┐
 │  Layer 3: Backends (this repo)                                  │
 │  Concrete connections to external services                      │
-│  redis, kafka, nats, postgres, mongodb, azure-*, genai, cursor  │
+│  redis, kafka, nats, postgres, mongodb, azure-*, genai, cursor, │
+│  git                                                            │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 2: WASI Interfaces (omnia: crates/wasi-*)                │
 │  Abstract service capabilities defined by WIT interfaces        │
@@ -80,8 +81,9 @@ impl WasiKeyValueCtx for Client {
 | `opentelemetry` | OTEL Collector          | otel                                    |
 | `genai`         | LLM provider APIs       | model                                   |
 | `cursor`        | `cursor-sdk-bridge`     | model                                   |
+| `git`           | `git`                   | vcs                                     |
 
-No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; those use Omnia's in-tree defaults.
+No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; those use Omnia's in-tree defaults. `wasi-vcs` has no in-tree default, so `git` is the one backend a deployment serving it names.
 
 ### Package store
 
@@ -93,6 +95,10 @@ The two `wasi-model` backends serve `omnia:model/completion` requests and differ
 
 - **`genai`** calls provider APIs (OpenAI, Anthropic, Gemini, Groq, Ollama, ...) in-process via the [`genai`](https://crates.io/crates/genai) SDK, advertising the request's declared function tools — plus the host-injected `read`/`list` workspace tools when the guest lent a workspace — and driving the bounded session tool loop: `read`/`list` execute host-side through the `ToolHost` workspace capability, every other call goes through `ToolHost::call_tool`. Provider API keys are read from the environment at call time. MCP tool grants are rejected — use `cursor` for those.
 - **`cursor`** spawns one [`cursor-sdk-bridge`](https://github.com/cursor/sdk-bridge) process per live agent — one bridge-managed agent per completion, at most `CURSOR_MAX_AGENTS` at once, each process closed after its completion so a crash costs that completion alone — running an agentic session inside the workspace the guest granted (or a private empty directory, tools-only, when none is lent). Guest-declared function tools are declared as SDK custom tools; the bridge calls them back on the backend's loopback `CallCustomTool` server, which routes into the session through `ToolHost::call_tool`. MCP server grants pass inline as the agent's `mcp_servers`. Requires `cursor-sdk-bridge` on `PATH` and `CURSOR_API_KEY`.
+
+### Version control
+
+`git` serves `omnia:vcs` — the `store`, `workspace`, and `transport` interfaces — by running the operator's own `git` binary, one process per operation, at the host path the runtime resolved the guest's lent location to. Omnia's lend rule bounds every path to a preopen the guest holds, so a guest reaches no repository it was not granted; `GIT_DIR` and its siblings are scrubbed from each process's environment, so the operator's shell cannot redirect one. A merge policy reaches git as attribute lines in a file beside the tree named through `core.attributesFile`, never written into the repository. Connecting refuses a git older than 2.5, the first with `worktree`. See [`crates/git/README.md`](../crates/git/README.md).
 
 ### Registry acquisition
 

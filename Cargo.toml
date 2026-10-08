@@ -90,22 +90,26 @@ omnia-wasi-model = "0.37.0"
 omnia-wasi-otel = "0.37.0"
 omnia-wasi-sql = { version = "0.37.0", default-features = false }
 omnia-wasi-vault = "0.37.0"
+omnia-wasi-vcs = "0.37.0"
 
+# Pinned to omnia's `wasi-vcs` branch until augentic/omnia#345 merges; then
+# drop every `branch` and re-lock against `main`.
 [patch.crates-io]
-omnia = { git = "https://github.com/augentic/omnia" }
-omnia-core = { git = "https://github.com/augentic/omnia" }
-omnia-plugin = { git = "https://github.com/augentic/omnia" }
-omnia-sdk = { git = "https://github.com/augentic/omnia" }
-omnia-test = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-docstore = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-identity = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-messaging = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-model = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-otel = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-sql = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-vault = { git = "https://github.com/augentic/omnia" }
+omnia = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-core = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-plugin = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-sdk = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-test = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-wasi-docstore = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-wasi-identity = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-wasi-messaging = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-wasi-model = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-wasi-otel = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-wasi-sql = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-wasi-vault = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
+omnia-wasi-vcs = { git = "https://github.com/augentic/omnia", branch = "wasi-vcs" }
 
 [profile.release]
 lto = true

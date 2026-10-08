@@ -14,6 +14,7 @@ MSRV: Rust 1.99. Each release line pairs with a specific omnia line — the curr
 | [`omnia-azure-vault`](crates/azure-vault)     | `wasi-vault`                                        | Azure Key Vault                |
 | [`omnia-cursor`](crates/cursor)               | `wasi-model`                                        | `cursor-sdk-bridge`            |
 | [`omnia-genai`](crates/genai)                 | `wasi-model`                                        | LLM provider APIs (OpenAI, Anthropic, Gemini, ...) |
+| [`omnia-git`](crates/git)                     | `wasi-vcs`                                          | `git`                          |
 | [`omnia-kafka`](crates/kafka)                 | `wasi-messaging`                                    | Apache Kafka                   |
 | [`omnia-mongodb`](crates/mongodb)             | `wasi-blobstore`                                    | MongoDB                        |
 | [`omnia-nats`](crates/nats)                   | `wasi-messaging`, `wasi-keyvalue`, `wasi-blobstore` | NATS / JetStream               |

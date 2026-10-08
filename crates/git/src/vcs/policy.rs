@@ -113,7 +113,8 @@ async fn side(repo: &Repo<'_>, revision: Option<&str>, path: &str) -> Result<Nam
 
 // A glob over root-relative paths, in gitignore's reading: a pattern with no
 // slash matches the path's final component at any depth, one with a slash is
-// anchored to the root; `?` and `*` stay within a component and `**` crosses.
+// anchored to the root; `?` and `*` stay within a component, `**/` crosses
+// whole components, and any other `**` crosses anything.
 fn matches(pattern: &str, path: &str) -> bool {
     let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
     if pattern.contains('/') {
@@ -124,21 +125,106 @@ fn matches(pattern: &str, path: &str) -> bool {
     }
 }
 
-fn glob(pattern: &[u8], text: &[u8]) -> bool {
-    if let Some(rest) = pattern.strip_prefix(b"**") {
-        let rest = rest.strip_prefix(b"/").unwrap_or(rest);
-        return (0..=text.len()).any(|cut| glob(rest, &text[cut..]));
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Token {
+    Byte(u8),
+    One,
+    Star,
+    Dirs,
+    All,
+}
+
+impl Token {
+    const fn wild(self) -> bool {
+        matches!(self, Self::Star | Self::Dirs | Self::All)
     }
-    match (pattern.first(), text.first()) {
-        (None, None) => true,
-        (Some(b'*'), _) => {
-            glob(&pattern[1..], text)
-                || matches!(text.first(), Some(&byte) if byte != b'/') && glob(pattern, &text[1..])
+
+    const fn needs_byte(self) -> bool {
+        matches!(self, Self::Byte(_) | Self::One)
+    }
+}
+
+// The pattern as tokens. Adjacent wildcards fold — two of a kind into one,
+// any beside `**` into `**` — so a run of them is at most `**/*`, and the
+// token count is bounded by the bytes the path must supply.
+fn tokens(pattern: &[u8]) -> Vec<Token> {
+    let mut tokens: Vec<Token> = Vec::new();
+    let mut rest = pattern;
+    while let Some((&byte, after)) = rest.split_first() {
+        let (token, after) = match byte {
+            b'*' if after.first() == Some(&b'*') => after[1..]
+                .strip_prefix(b"/")
+                .map_or_else(|| (Token::All, &after[1..]), |after| (Token::Dirs, after)),
+            b'*' => (Token::Star, after),
+            b'?' => (Token::One, after),
+            byte => (Token::Byte(byte), after),
+        };
+        rest = after;
+        match tokens.last_mut() {
+            Some(last) if last.wild() && token.wild() => {
+                if *last == Token::All || token == Token::All {
+                    *last = Token::All;
+                } else if *last != token {
+                    tokens.push(token);
+                }
+            }
+            _ => tokens.push(token),
         }
-        (Some(b'?'), Some(&byte)) => byte != b'/' && glob(&pattern[1..], &text[1..]),
-        (Some(&want), Some(&byte)) if want == byte => glob(&pattern[1..], &text[1..]),
-        _ => false,
     }
+    tokens
+}
+
+// Whether `pattern` matches `text` whole, by a table of which prefixes of
+// each match: one row per token over every cut of the text, so a pattern of
+// many stars costs its length times the text's and never backtracks.
+fn glob(pattern: &[u8], text: &[u8]) -> bool {
+    let tokens = tokens(pattern);
+    if tokens.iter().filter(|token| token.needs_byte()).count() > text.len() {
+        return false;
+    }
+
+    // row[j] holds once the tokens so far match text[..j]
+    let mut row = vec![false; text.len() + 1];
+    let mut next = vec![false; text.len() + 1];
+    row[0] = true;
+    for token in tokens {
+        next.fill(false);
+        match token {
+            Token::Byte(want) => {
+                for (j, &byte) in text.iter().enumerate() {
+                    next[j + 1] = row[j] && byte == want;
+                }
+            }
+            Token::One => {
+                for (j, &byte) in text.iter().enumerate() {
+                    next[j + 1] = row[j] && byte != b'/';
+                }
+            }
+            Token::Star => {
+                next[0] = row[0];
+                for (j, &byte) in text.iter().enumerate() {
+                    next[j + 1] = row[j + 1] || (next[j] && byte != b'/');
+                }
+            }
+            Token::All => {
+                next[0] = row[0];
+                for j in 0..text.len() {
+                    next[j + 1] = row[j + 1] || next[j];
+                }
+            }
+            Token::Dirs => {
+                // a component ending at j is swallowed once any earlier cut matched
+                let mut open = row[0];
+                next[0] = row[0];
+                for (j, &byte) in text.iter().enumerate() {
+                    next[j + 1] = row[j + 1] || (open && byte == b'/');
+                    open |= row[j + 1];
+                }
+            }
+        }
+        std::mem::swap(&mut row, &mut next);
+    }
+    row[text.len()]
 }
 
 #[cfg(test)]
@@ -156,6 +242,25 @@ mod tests {
         assert!(matches("src/*.ts", "src/main.ts"));
         assert!(!matches("src/*.ts", "src/sub/main.ts"), "a star stays within a component");
         assert!(matches("src/**/main.ts", "src/a/b/main.ts"), "a double star crosses");
+        assert!(matches("src/**/main.ts", "src/main.ts"), "or crosses nothing");
+        assert!(!matches("**/main.ts", "a/bmain.ts"), "and crosses whole components");
+        assert!(matches("src/**", "src/a/b.ts"), "a trailing double star takes all beneath");
+        assert!(matches("a?c", "abc"));
+        assert!(!matches("a?c", "a/c"), "a question mark stays within a component");
         assert!(matches("/README.md", "README.md"), "a leading slash anchors");
+    }
+
+    // A pattern of many stars against a path of the bytes between them is the
+    // backtracking matcher's worst case; the table costs the product of their
+    // lengths, and a pattern longer than the path can supply is refused in the
+    // pattern's length.
+    #[test]
+    fn glob_stars() {
+        let pattern = format!("{}b", "*a".repeat(64));
+        assert!(!matches(&pattern, &"a".repeat(256)));
+        assert!(matches(&pattern, &format!("{}b", "a".repeat(256))));
+        assert!(!matches(&"?".repeat(1 << 20), "a/b/c"));
+        assert!(!matches(&"**/".repeat(1 << 18), "a/b/c"), "folded to one crossing");
+        assert!(matches(&format!("{}c", "**/".repeat(1 << 18)), "a/b/c"));
     }
 }

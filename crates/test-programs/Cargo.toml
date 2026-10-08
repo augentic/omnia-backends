@@ -83,6 +83,11 @@ path = "programs/model/undeclared_tool.rs"
 crate-type = ["cdylib"]
 
 [[example]]
+name = "vcs_hardening"
+path = "programs/vcs/hardening.rs"
+crate-type = ["cdylib"]
+
+[[example]]
 name = "vcs_journey"
 path = "programs/vcs/journey.rs"
 crate-type = ["cdylib"]

@@ -18,7 +18,10 @@ async fn scenario() {
     init_commit_add_merge().await;
     merge_conflict_without_rule().await;
     merge_policy_resolves().await;
+    merge_policy_beats_attributes().await;
+    merge_policy_modify_delete().await;
     merge_up_to_date().await;
+    label_the_checked_out_branch().await;
     pending_kinds().await;
     commit_nothing().await;
     remove_dirty_worktree().await;
@@ -143,6 +146,63 @@ async fn merge_policy_resolves() {
     assert_eq!(read("policy/a.txt"), "a work\n", "theirs takes the merged-in side");
     assert_eq!(read("policy/list.txt"), "base\nrepo\nwork\n", "union keeps both");
     assert_eq!(WasiVcs.pending(repo).await.expect("pending"), []);
+}
+
+// A repository's own `merge=union` attribute would auto-resolve the path with
+// no conflict to act on; the guest's policy is resolved from the commits and
+// wins regardless.
+async fn merge_policy_beats_attributes() {
+    let repo = "./attributed";
+    let work = "./attributed-work";
+    WasiVcs.init(repo).await.expect("init");
+    write("attributed/.gitattributes", "data.txt merge=union\n");
+    write("attributed/data.txt", "base\n");
+    let base = WasiVcs.commit(repo, "base").await.expect("commit").expect("base");
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    write("attributed-work/data.txt", "theirs\n");
+    let theirs = WasiVcs.commit(work, "theirs").await.expect("commit").expect("theirs");
+    write("attributed/data.txt", "ours\n");
+    WasiVcs.commit(repo, "ours").await.expect("commit").expect("ours");
+
+    let policy = [rule("data.txt", Strategy::Theirs)];
+    let merged = WasiVcs.merge(repo, &theirs, "merge", &policy).await.expect("merge");
+    assert_eq!(merged.conflicts, Vec::<String>::new());
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert_eq!(read("attributed/data.txt"), "theirs\n", "the policy beat the attribute");
+}
+
+// One side edited the path and the other deleted it: keeping the deleting side
+// removes the path.
+async fn merge_policy_modify_delete() {
+    let repo = "./moddel";
+    let work = "./moddel-work";
+    WasiVcs.init(repo).await.expect("init");
+    write("moddel/keep.txt", "base\n");
+    let base = WasiVcs.commit(repo, "base").await.expect("commit").expect("base");
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    fs::remove_file("moddel-work/keep.txt").expect("delete on the merged-in side");
+    let theirs = WasiVcs.commit(work, "delete").await.expect("commit").expect("delete");
+    write("moddel/keep.txt", "ours\n");
+    WasiVcs.commit(repo, "edit").await.expect("commit").expect("edit");
+
+    let policy = [rule("keep.txt", Strategy::Theirs)];
+    let merged = WasiVcs.merge(repo, &theirs, "merge", &policy).await.expect("merge");
+    assert_eq!(merged.conflicts, Vec::<String>::new());
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert!(fs::metadata("moddel/keep.txt").is_err(), "the deleting side was kept");
+    assert!(WasiVcs.pending(repo).await.expect("pending").is_empty(), "the copy is sealed");
+}
+
+// Labelling the branch the working copy sits on moves the branch and leaves the
+// copy on its sealed commit.
+async fn label_the_checked_out_branch() {
+    let repo = "./checked-out";
+    let first = seeded(repo).await;
+    write("checked-out/b.txt", "b\n");
+    let second = WasiVcs.commit(repo, "second").await.expect("commit").expect("second");
+    WasiVcs.label(repo, "main", &first).await.expect("label the branch HEAD is on");
+    assert_eq!(WasiVcs.resolve(repo, "main").await.expect("resolve"), first, "main moved");
+    assert_eq!(WasiVcs.head(repo).await.expect("head"), second, "the working copy stayed");
 }
 
 async fn merge_up_to_date() {

@@ -1,116 +1,149 @@
-//! A merge policy as git reads it: attribute lines in a file beside the
-//! tree, named on the merge command line through `core.attributesFile`.
+//! Resolving a merge by the guest's policy, from the commit trees rather than
+//! git's own attribute machinery — which a repository pre-empts with a
+//! `.gitattributes` or an `info/attributes` of its own.
 //!
-//! Nothing is written into the repository — a tracked `.gitattributes` would
-//! show up in `pending`, and `info/attributes` is the operator's — so a
-//! policy lives exactly as long as its merge. `union` is git's own driver;
-//! `ours` and `theirs` are declared beside the file as drivers that keep one
-//! side whole.
+//! The merge runs held before its commit, so the index is the backend's to
+//! settle. Every path the two sides both touch is checked against the rules:
+//! a path a rule matches is resolved from the three commits — `ours` the
+//! working copy's side, `theirs` the merged-in side, `union` both, each line
+//! once — whatever git's attributes did to it, and a path still in conflict
+//! that no rule matched abandons the whole merge.
 
-use std::io::Write as _;
-
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use omnia_wasi_vcs::{Rule, Strategy};
-use tempfile::NamedTempFile;
 
-const OURS: &str = "omnia-ours";
-const THEIRS: &str = "omnia-theirs";
+use super::Repo;
 
-// The policy's file, kept open until the merge has run.
-#[derive(Debug)]
-pub struct Policy {
-    attributes: Option<NamedTempFile>,
+// Where the three sides of a path are read from, and the empty side a union
+// merges against when a commit lacks it.
+const OURS: &str = "HEAD";
+const THEIRS: &str = "MERGE_HEAD";
+const EMPTY: &str = "/dev/null";
+
+// The temporary files a union is merged through, removed before the commit.
+const UNION: [&str; 3] = [".omnia-union-ours", ".omnia-union-base", ".omnia-union-theirs"];
+
+// Whether the merge can be sealed, or the paths no rule resolved.
+pub enum Resolution {
+    Complete,
+    Unresolved(Vec<String>),
 }
 
-impl Policy {
-    pub fn write(rules: &[Rule]) -> Result<Self> {
-        if rules.is_empty() {
-            return Ok(Self { attributes: None });
+pub async fn resolve(repo: &Repo<'_>, rules: &[Rule]) -> Result<Resolution> {
+    let base = repo.merge_base().await?;
+    for path in repo.touched().await? {
+        if let Some(strategy) = rule_for(&path, rules) {
+            apply(repo, &path, strategy, base.as_deref()).await?;
         }
-        let mut file = NamedTempFile::with_prefix("omnia-git-policy-")
-            .context("creating the merge policy file")?;
-        for rule in rules {
-            writeln!(file, "{} merge={}", pattern(&rule.paths), driver(rule.strategy))
-                .context("writing the merge policy")?;
-        }
-        file.flush().context("writing the merge policy")?;
-        Ok(Self {
-            attributes: Some(file),
-        })
     }
-
-    // The `-c` settings that put the policy on one merge's command line.
-    pub fn args(&self) -> Vec<String> {
-        let Some(file) = &self.attributes else {
-            return Vec::new();
-        };
-        vec![
-            "-c".to_owned(),
-            format!("core.attributesFile={}", file.path().display()),
-            "-c".to_owned(),
-            format!("merge.{OURS}.driver=true"),
-            "-c".to_owned(),
-            format!("merge.{THEIRS}.driver=cp %B %A"),
-        ]
-    }
-}
-
-const fn driver(strategy: Strategy) -> &'static str {
-    match strategy {
-        Strategy::Union => "union",
-        Strategy::Ours => OURS,
-        Strategy::Theirs => THEIRS,
-    }
-}
-
-// gitattributes reads a quoted pattern where the glob holds whitespace
-fn pattern(paths: &str) -> String {
-    if paths.chars().any(char::is_whitespace) {
-        format!("\"{}\"", paths.replace('\\', "\\\\").replace('"', "\\\""))
+    // what a rule resolved is staged; a conflict still unmerged is a path no
+    // rule matched
+    let unresolved = repo.conflicts().await?;
+    if unresolved.is_empty() {
+        Ok(Resolution::Complete)
     } else {
-        paths.to_owned()
+        Ok(Resolution::Unresolved(unresolved))
+    }
+}
+
+fn rule_for(path: &str, rules: &[Rule]) -> Option<Strategy> {
+    rules.iter().find(|rule| matches(&rule.paths, path)).map(|rule| rule.strategy)
+}
+
+async fn apply(repo: &Repo<'_>, path: &str, strategy: Strategy, base: Option<&str>) -> Result<()> {
+    match strategy {
+        Strategy::Ours => keep(repo, path, OURS).await,
+        Strategy::Theirs => keep(repo, path, THEIRS).await,
+        Strategy::Union => union(repo, path, base).await,
+    }
+}
+
+// The kept side laid whole over the path, or the path removed where that side
+// deleted it.
+async fn keep(repo: &Repo<'_>, path: &str, side: &str) -> Result<()> {
+    match repo.show(side, path).await? {
+        Some(content) => {
+            repo.write(path, content.as_bytes())?;
+            repo.run(["add", "--", path], &repo.shown(), path).await?;
+        }
+        None => {
+            repo.run(["rm", "--quiet", "--ignore-unmatch", "--", path], &repo.shown(), path)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+// Both sides' lines, each once, from a 3-way union of the three commits'
+// versions through `merge-file`, written back and the temporaries removed.
+async fn union(repo: &Repo<'_>, path: &str, base: Option<&str>) -> Result<()> {
+    let [ours, basis, theirs] = UNION;
+    repo.write(ours, repo.show(OURS, path).await?.unwrap_or_default().as_bytes())?;
+    repo.write(theirs, repo.show(THEIRS, path).await?.unwrap_or_default().as_bytes())?;
+    let basis = match base {
+        Some(base) => match repo.show(base, path).await? {
+            Some(content) => {
+                repo.write(basis, content.as_bytes())?;
+                basis
+            }
+            None => EMPTY,
+        },
+        None => EMPTY,
+    };
+    let merged = repo.git(["merge-file", "-p", "--union", ours, basis, theirs], &[]).await?;
+    repo.write(path, merged.stdout.as_bytes())?;
+    for temp in UNION.into_iter().filter(|temp| *temp != EMPTY) {
+        let _ = repo.remove_temp(temp);
+    }
+    repo.run(["add", "--", path], &repo.shown(), path).await?;
+    Ok(())
+}
+
+// A glob over root-relative paths, in gitignore's reading: a pattern with no
+// slash matches the path's final component at any depth, one with a slash is
+// anchored to the root; `?` and `*` stay within a component and `**` crosses.
+fn matches(pattern: &str, path: &str) -> bool {
+    let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
+    if pattern.contains('/') {
+        glob(pattern.as_bytes(), path.as_bytes())
+    } else {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        glob(pattern.as_bytes(), name.as_bytes())
+    }
+}
+
+fn glob(pattern: &[u8], text: &[u8]) -> bool {
+    if let Some(rest) = pattern.strip_prefix(b"**") {
+        let rest = rest.strip_prefix(b"/").unwrap_or(rest);
+        return (0..=text.len()).any(|cut| glob(rest, &text[cut..]));
+    }
+    match (pattern.first(), text.first()) {
+        (None, None) => true,
+        (Some(b'*'), _) => {
+            glob(&pattern[1..], text)
+                || matches!(text.first(), Some(&byte) if byte != b'/') && glob(pattern, &text[1..])
+        }
+        (Some(b'?'), Some(&byte)) => byte != b'/' && glob(&pattern[1..], &text[1..]),
+        (Some(&want), Some(&byte)) if want == byte => glob(&pattern[1..], &text[1..]),
+        _ => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use omnia_wasi_vcs::{Rule, Strategy};
-
-    use super::Policy;
-
-    fn rule(paths: &str, strategy: Strategy) -> Rule {
-        Rule {
-            paths: paths.to_owned(),
-            strategy,
-        }
-    }
+    use super::matches;
 
     #[test]
-    fn empty_policy() {
-        let policy = Policy::write(&[]).unwrap();
-        assert_eq!(policy.args(), Vec::<String>::new());
-    }
-
-    #[test]
-    fn attribute_lines() {
-        let policy = Policy::write(&[
-            rule("*.lock", Strategy::Ours),
-            rule("src/index.ts", Strategy::Union),
-            rule("docs/release notes.md", Strategy::Theirs),
-        ])
-        .unwrap();
-        let args = policy.args();
-        assert_eq!(args.len(), 6);
-        let file = args[1].strip_prefix("core.attributesFile=").unwrap();
-        assert_eq!(
-            fs::read_to_string(file).unwrap(),
-            "*.lock merge=omnia-ours\n\
-             src/index.ts merge=union\n\
-             \"docs/release notes.md\" merge=omnia-theirs\n"
-        );
-        assert_eq!(args[3], "merge.omnia-ours.driver=true");
-        assert_eq!(args[5], "merge.omnia-theirs.driver=cp %B %A");
+    fn globs() {
+        assert!(matches("*.lock", "Cargo.lock"));
+        assert!(matches("*.lock", "deep/nested/Cargo.lock"), "a bare name matches at any depth");
+        assert!(matches("a.txt", "a.txt"));
+        assert!(matches("list.txt", "list.txt"));
+        assert!(matches("src/index.ts", "src/index.ts"), "a slashed pattern is anchored");
+        assert!(!matches("src/index.ts", "lib/src/index.ts"), "and not matched elsewhere");
+        assert!(matches("src/*.ts", "src/main.ts"));
+        assert!(!matches("src/*.ts", "src/sub/main.ts"), "a star stays within a component");
+        assert!(matches("src/**/main.ts", "src/a/b/main.ts"), "a double star crosses");
+        assert!(matches("/README.md", "README.md"), "a leading slash anchors");
     }
 }

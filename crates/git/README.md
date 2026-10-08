@@ -6,22 +6,34 @@ Git backend for the `omnia:vcs` interface ([`omnia-wasi-vcs`](https://github.com
 
 | Interface | Operation | What runs |
 | --------- | --------- | --------- |
-| `store` | `resolve` | `rev-parse --verify <revision>^{commit}` |
+| `store` | `resolve` | `rev-parse --verify --end-of-options <revision>^{commit}` |
 | `store` | `head` | `rev-parse --verify HEAD^{commit}`; an unborn branch is `not-found` |
 | `store` | `commit` | `status --porcelain`, then `add -A` and `commit -m`; nothing pending answers no commit |
-| `store` | `merge` | `merge --no-ff -m` under the policy, the conflicts no rule resolved read back and the merge aborted |
+| `store` | `merge` | `merge --no-ff --no-commit`, the policy applied from the three commits, then `commit --no-edit`; a conflict no rule resolves is read back and the merge aborted |
 | `workspace` | `init` | `init` in the place; a repository already there is `exists` |
-| `workspace` | `add` | `worktree add --detach <at> <revision>` in the repository, `<at>` the destination's absolute path |
+| `workspace` | `add` | `worktree add --detach -- <at> <revision>` in the repository, `<at>` the destination's absolute path |
 | `workspace` | `remove` | `worktree remove --force .` in the working copy; pending changes go with it |
 | `workspace` | `pending` | `status --porcelain -z --no-renames --untracked-files=all`, each path once |
-| `transport` | `clone` | `clone [--depth <n> --no-single-branch] <url> .` in the place; a depth cuts history, never the labels |
-| `transport` | `fetch` | `fetch <remote>` |
-| `transport` | `label` | `branch -f <name> <revision>` |
-| `transport` | `push` | `push <remote> <label>` |
+| `transport` | `clone` | `clone [--depth <n> --no-single-branch] -- <url> .` in the place; a depth cuts history, never the labels |
+| `transport` | `fetch` | `fetch -- <remote>` |
+| `transport` | `label` | `branch -f -- <name> <revision>`, the working copy detached onto its commit first when it sits on that branch |
+| `transport` | `push` | `push -- <remote> refs/heads/<label>:refs/heads/<label>` |
 
-A merge policy reaches git as attribute lines in a file beside the tree, named through `core.attributesFile` on the merge command line alone, with `union` as git's own driver and `ours` / `theirs` as drivers declared the same way: nothing is written into the repository, so a policy never shows up in `pending` and never outlives its merge.
+A merge is held before its commit, and the policy is the backend's to apply rather than git's: every path the two sides differ on that a rule matches is resolved from the commits themselves — `ours` the working copy's side, `theirs` the merged-in side, `union` both sides' lines each once through `merge-file` — and staged over whatever git's own attributes made of it, so a repository's `.gitattributes` or `info/attributes` never decides a path the policy names. A conflict no rule matched abandons the merge: the paths come back as data, `merge --abort` puts the working copy on its head, and nothing of a failed merge stays in progress for a later commit to finish. Nothing of a policy is written into the repository, so it never shows up in `pending`.
 
-Each process runs with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, and `GIT_INDEX_FILE` removed from the inherited environment, so the operator's shell cannot point an operation at another repository; their configuration, credential helpers, and SSH agent apply as they would at a prompt. What git reports is read into the typed `omnia:vcs` error — `not-a-repository` (a place holding no repository), `exists`, `not-found`, `access` — and anything else reaches the guest as `other` with git's own words. A location that does not exist is the runtime's refusal, before any git runs.
+What git reports is read into the typed `omnia:vcs` error — `not-a-repository` (a place holding no repository), `exists`, `not-found`, `access` — and anything else reaches the guest as `other` with git's own words. A location that does not exist is the runtime's refusal, before any git runs.
+
+## Trust
+
+A lent repository is the guest's to write, so its configuration is not the operator's: `.git/config`, `.git/hooks`, and `.gitattributes` are files a guest may have laid, and git reads them by default. Every operation is held to host policy instead:
+
+- Hooks, the file-system monitor, commit signing, signature verification, and submodule recursion are off on every command line (`core.hooksPath=/dev/null`, `core.fsmonitor=false`, `commit.gpgsign=false`, `merge.verifySignatures=false`, `submodule.recurse=false`, `fetch.recurseSubmodules=no`), whichever scope set them.
+- A repository-scoped `core.sshCommand`, `core.askPass`, `credential.helper`, `credential.<url>.helper`, `filter.<name>.clean` / `smudge` / `process`, or `merge.<name>.driver` is read from `config --show-scope` before the operation and pinned to the operator's own value — the system, global, or environment one — or to nothing where the operator set none, so the SSH, prompt, and credential programs that run are the host's as at a prompt, never a lent repository's.
+- Every guest string — a revision, a label, a remote, a URL — reaches git after `--`, and one that is empty or that git would read as an option (a leading `-`) is `not-found` before any process runs.
+- A transport is held to its kind. A local address (`file://`, or a path with no `scheme:` before its first `/`) runs under `GIT_ALLOW_PROTOCOL=file` with the far side's hooks disabled through the pack command (`--upload-pack` / `--receive-pack` naming `git -c core.hooksPath=/dev/null`); any other runs under `GIT_ALLOW_PROTOCOL=http:https:ssh`. A repository's `url.<base>.insteadOf` cannot rewrite a remote onto a local path, an `ext::` command, or a remote helper.
+- `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, and `GIT_INDEX_FILE` are removed from the inherited environment, so the operator's shell cannot point an operation at another repository; terminal prompts, editors, and merge-message editing are off.
+
+What stays with the operator: a repository's `.gitattributes` still selects a filter or diff driver by name where the operator declared one in their own configuration, so such a driver runs over the lent tree as it would at a prompt; and a local address names any repository the host's git can read, as the runtime's lend rule bounds the place an operation runs in but not where a clone or fetch reads from. A deployment that lends a working copy it does not trust controls what it lays under `.git` and `.gitattributes`.
 
 ## Configuration
 
@@ -29,7 +41,7 @@ Each process runs with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, and `GIT_IN
 | -------- | ------- | ------- |
 | `GIT_BINARY` | `git` | The git to run, a name on `PATH` or a path |
 
-Connecting runs `git --version` once and refuses a git older than 2.5, the first with `worktree`, or one that does not run, so a deployment fails at startup rather than at its first operation.
+Connecting runs `git --version` once and refuses a git older than 2.26, the first with `config --show-scope`, or one that does not run, so a deployment fails at startup rather than at its first operation.
 
 ## Usage
 

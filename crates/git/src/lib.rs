@@ -9,8 +9,9 @@ use anyhow::{Context as _, Result, ensure};
 use omnia::Backend;
 use tracing::instrument;
 
-/// The oldest git the backend runs over: `worktree` arrived in 2.5.
-pub const MIN_VERSION: (u32, u32) = (2, 5);
+/// The oldest git the backend runs over: `config --show-scope`, which the
+/// host-policy pins are read through, arrived in 2.26.
+pub const MIN_VERSION: (u32, u32) = (2, 26);
 
 /// Git backend for `omnia:vcs`: one `git` process per operation.
 #[derive(Debug, Clone)]
@@ -38,13 +39,13 @@ impl Client {
         let client = Self {
             binary: binary.into(),
         };
-        let output = client.git(None, ["--version"]).await?;
+        let output = client.git(None, ["--version"], &[]).await?;
         ensure!(output.status.success(), "`git --version` failed: {}", output.stderr.trim());
         let (major, minor, patch) = vcs::refusal::version(&output.stdout)
             .with_context(|| format!("unrecognised `git --version`: {}", output.stdout.trim()))?;
         ensure!(
             (major, minor) >= MIN_VERSION,
-            "git {major}.{minor}.{patch} is older than {}.{}, the first with `worktree`",
+            "git {major}.{minor}.{patch} is older than {}.{}, the first with `config --show-scope`",
             MIN_VERSION.0,
             MIN_VERSION.1
         );

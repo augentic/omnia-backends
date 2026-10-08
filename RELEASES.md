@@ -8,14 +8,25 @@ Unreleased
   (`omnia-wasi-vcs`), the one that interface has: every `store`,
   `workspace`, and `transport` operation is one `git` process over the
   operator's own binary (`GIT_BINARY`, `git` on `PATH` by default; a git
-  older than 2.5 is refused at connect), run in the directory the runtime
+  older than 2.26 is refused at connect), run in the directory the runtime
   opened for the guest's lent location — the child enters the open handle
   before it executes, so no operation walks a path again — with `GIT_DIR`
-  and its siblings scrubbed from the environment. A merge policy reaches
-  git as attribute lines in a scratch file named through
-  `core.attributesFile`, so nothing of it is written into the repository;
-  a conflict no rule resolves comes back as data with the merge aborted
-  and the tree on its head. A `clone` with a depth passes
+  and its siblings scrubbed from the environment. A lent repository's own
+  configuration is a guest's to write, so each operation is held to host
+  policy on its command line: hooks, the file-system monitor, signing, and
+  submodule recursion are forced off; a repository-scoped SSH command,
+  credential prompt, credential helper, or clean, smudge, or merge driver
+  gives way to the operator's own value or to none; every guest string
+  follows `--`, one that is empty or option-shaped is `not-found` before
+  any process runs; and a transport runs under `GIT_ALLOW_PROTOCOL` for
+  its kind, a local one with the far side's hooks disabled through the
+  pack command. A merge is held before its commit and the policy applied
+  by the backend from the three commits — over whatever the repository's
+  own attributes made of a path — so nothing of it is written into the
+  repository; a conflict no rule resolves comes back as data with the
+  merge aborted and the tree on its head, and no failed merge stays in
+  progress. A `label` on the branch the working copy sits on detaches the
+  copy onto its commit first. A `clone` with a depth passes
   `--no-single-branch`, so a shallow clone still answers every label.
   What git reports is read into the typed `omnia:vcs` error. Wired as
   `WasiVcs: omnia_git::Client`.

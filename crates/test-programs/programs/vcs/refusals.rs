@@ -79,4 +79,18 @@ async fn scenario() {
     assert_eq!(WasiVcs.push(REPO, "nope", "main").await, Err(not_found("nope")));
     WasiVcs.clone_repo(url, "./clone", WHOLE).await.expect("clone");
     assert_eq!(WasiVcs.push("./clone", "origin", "nolabel").await, Err(not_found("nolabel")));
+
+    // a guest string git would read as an option, or the empty one it reads
+    // as a default, is nothing the repository knows — refused before any git
+    assert_eq!(WasiVcs.resolve(REPO, "").await, Err(not_found("")));
+    assert_eq!(WasiVcs.resolve(REPO, "-x").await, Err(not_found("-x")));
+    assert_eq!(WasiVcs.merge(REPO, "", "m", &[]).await, Err(not_found("")));
+    assert_eq!(WasiVcs.add(REPO, "./dashed", "-x").await, Err(not_found("-x")));
+    assert_eq!(WasiVcs.label(REPO, "-b", &first).await, Err(not_found("-b")));
+    assert_eq!(WasiVcs.fetch(REPO, "--upload-pack=sh").await, Err(not_found("--upload-pack=sh")));
+    assert_eq!(
+        WasiVcs.push(REPO, "--receive-pack=sh", "main").await,
+        Err(not_found("--receive-pack=sh"))
+    );
+    assert_eq!(WasiVcs.clone_repo("-x", "./dash-clone", WHOLE).await, Err(not_found("-x")));
 }

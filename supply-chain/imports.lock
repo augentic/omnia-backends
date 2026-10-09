@@ -638,8 +638,8 @@ user-login = "Darksonn"
 user-name = "Alice Ryhl"
 
 [[publisher.tokio-util]]
-version = "0.7.19"
-when = "2026-07-21"
+version = "0.7.20"
+when = "2026-10-09"
 user-id = 6741
 user-login = "Darksonn"
 user-name = "Alice Ryhl"
@@ -652,15 +652,15 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.toml_edit]]
-version = "0.25.16+spec-1.1.0"
-when = "2026-10-08"
+version = "0.25.17+spec-1.1.0"
+when = "2026-10-09"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.toml_parser]]
-version = "1.1.4+spec-1.1.0"
-when = "2026-10-08"
+version = "1.1.5+spec-1.1.0"
+when = "2026-10-09"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"

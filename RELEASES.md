@@ -46,18 +46,20 @@ Unreleased
   it is written into the repository; a `union` over a binary fails the
   merge; a conflict no rule resolves comes back as data with the merge
   aborted and the tree on its head, and no failed merge stays in
-  progress; a merge the policy sealed carries the message as given, the
-  `# Conflicts:` hint git appends stripped. `log` is `git log
+  progress; a merge the policy sealed carries the message as given, its
+  own `#` lines included and the `# Conflicts:` hint git appends never
+  part of it. `log` is `git log
   --first-parent` over `<base>..<revision>`, both resolved first and
   either unknown `not-found`: the chain newest first, the base left out,
   a merge one entry and the side it brought in none, each entry the
   commit's id and its message as sealed. `descends` is `merge-base
   --is-ancestor` over the two resolved commits, read by exit status. A
   `label` on the branch the working copy sits on detaches the copy onto
-  its commit first, and `labelled` reads it back as
+  its commit first, and `labelled` reads it back as the exact ref
   `refs/heads/<name>` alone, so a tag or a remote-tracking ref of the
   same spelling, which git resolves a bare name to first, is never the
-  label. A `push` is never forced: a rejection the remote's branch has
+  label, and nor is a commit a `~`, `^`, or `@{}` in the name would walk
+  to. A `push` is never forced: a rejection the remote's branch has
   moved past is the typed `diverged`, naming the label. A `clone` with a
   depth passes `--no-single-branch`, so a shallow clone still answers
   every label. What git reports is read into the typed `omnia:vcs`

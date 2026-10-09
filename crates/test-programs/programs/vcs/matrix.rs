@@ -147,12 +147,14 @@ async fn merge_policy_resolves() {
     write("policy/list.txt", "base\nrepo\n");
     WasiVcs.commit(repo, "repo").await.expect("commit").expect("repo");
 
+    // a message git would read as commentary alone is the message all the same
     let policy = [
         rule("*.lock", Strategy::Ours),
         rule("a.txt", Strategy::Theirs),
         rule("list.txt", Strategy::Union),
     ];
-    let merged = WasiVcs.merge(repo, &theirs, "merge under policy", &policy).await.expect("merge");
+    let merged =
+        WasiVcs.merge(repo, &theirs, "# merge under policy", &policy).await.expect("merge");
     assert_eq!(merged.conflicts, Vec::<String>::new());
     assert!(merged.commit.is_some());
     assert_eq!(read("policy/Cargo.lock"), "lock repo\n", "ours keeps the working copy's side");
@@ -186,8 +188,8 @@ async fn merge_policy_beats_attributes() {
 
 // The chain over a base follows first parents alone, newest first, so a
 // merge is one entry and the side it brought in none; the base is left out,
-// and a message is read back as it was sealed, a conflict the policy
-// resolved leaving no hint of itself in it.
+// and a message is read back as it was sealed, its own `#` line kept and a
+// conflict the policy resolved leaving no hint of itself in it.
 async fn log_over_base() {
     let repo = "./logged";
     let work = "./logged-work";
@@ -199,7 +201,7 @@ async fn log_over_base() {
     WasiVcs.label(repo, "slice", &side).await.expect("label");
     write("logged/a.txt", "ours\n");
     let ours = WasiVcs.commit(repo, "ours").await.expect("commit").expect("ours");
-    let message = "merge slice\n\nSlice: SLICE-001\nWave: 1";
+    let message = "merge slice\n\n# notes\nSlice: SLICE-001\nWave: 1";
     let policy = [rule("a.txt", Strategy::Theirs)];
     let merged = WasiVcs.merge(repo, "slice", message, &policy).await.expect("merge");
     let merge = merged.commit.expect("the policy sealed the merge");
@@ -251,7 +253,8 @@ async fn log_over_base() {
 }
 
 // Ancestry is a question of the graph, a commit its own ancestor and the
-// reversed pair none; a label is read back from the branch `label` wrote.
+// reversed pair none; a label is read back from the branch `label` wrote,
+// by its name alone, never by what git's revision syntax would make of it.
 async fn descends_and_labelled() {
     let repo = "./lineage";
     let work = "./lineage-work";
@@ -275,6 +278,13 @@ async fn descends_and_labelled() {
         Err(Error::NotFound("nope".to_owned())),
         "a label the repository lacks, named as given"
     );
+    for name in ["slice~1", "slice^", "slice@{0}"] {
+        assert_eq!(
+            WasiVcs.labelled(repo, name).await,
+            Err(Error::NotFound(name.to_owned())),
+            "a name that walks from a label is no label"
+        );
+    }
 }
 
 // The host laid a tag of the branch's name at another commit, which the

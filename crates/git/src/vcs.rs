@@ -80,7 +80,7 @@ impl WasiVcsCtx for Client {
             let head = repo.rev_parse(&revision).await?;
             // held before the commit, so the index is the backend's to settle
             // by policy rather than git's attributes
-            let args = ["merge", "--no-ff", "--no-commit", "-m", &message, "--", &head];
+            let args = ["merge", "--no-ff", "--no-commit", "--", &head];
             let output = repo.git(args, &[]).await?;
             if !repo.merging().await? {
                 // nothing to merge — an ancestor — or a merge that never
@@ -110,10 +110,11 @@ impl WasiVcsCtx for Client {
                     return Err(error);
                 }
             }
-            // `strip` drops the `# Conflicts:` hint git appends to the message
-            // of a merge it left in conflict, so the commit carries the
-            // message as given
-            let args = ["commit", "--quiet", "--no-edit", "--cleanup=strip"];
+            // the message on the command line, never read from `MERGE_MSG`:
+            // that carries the `# Conflicts:` hint git appends to a merge it
+            // left in conflict, and stripping it would strip the message's
+            // own `#` lines too, to nothing where it has no others
+            let args = ["commit", "--quiet", "-m", &message];
             if let Err(error) = repo.run(args, &repo.shown(), "HEAD").await {
                 repo.abort().await;
                 return Err(error);
@@ -280,14 +281,22 @@ impl WasiVcsCtx for Client {
         let client = self.clone();
         async move {
             vetted(&name)?;
-            // the full ref, so a tag or a remote's branch of the same
-            // spelling, which a bare name resolves to first, is never it
-            client.rev_parse(&repo, &format!("refs/heads/{name}")).await.map_err(
-                |error| match error.downcast_ref::<Error>() {
-                    Some(Error::NotFound(_)) => Error::NotFound(name.clone()).into(),
-                    _ => error,
-                },
-            )
+            // the exact ref path, which `--verify` reads as a name and never
+            // as revision syntax: a tag or a remote's branch of the same
+            // spelling, which a bare name resolves to first, is never it, and
+            // nor is the commit a `~`, `^`, or `@{}` in the name would walk
+            // to; a branch holds a commit, so there is nothing to peel
+            let full = format!("refs/heads/{name}");
+            let args = ["show-ref", "--verify", "--hash", "--", &full];
+            let output = client.git(Some(&repo), args, &[]).await?;
+            if output.status.success() {
+                return Ok(output.text().trim().to_owned());
+            }
+            Err(match refusal::classify(&output.stderr) {
+                Class::NotARepository => Error::NotARepository,
+                _ => Error::NotFound(name),
+            }
+            .into())
         }
         .boxed()
     }

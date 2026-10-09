@@ -84,8 +84,10 @@ async fn vcs_matrix() {
     let parents = git.git(&at("repo"), &["rev-list", "--parents", "-1", "HEAD"]);
     assert_eq!(parents.split_whitespace().count(), 3, "{parents}");
 
-    // a policy leaves nothing of itself in the tree
+    // a policy leaves nothing of itself in the tree, and seals a message that
+    // is commentary to git whole
     assert_eq!(git.git(&at("policy"), &["status", "--porcelain"]), "");
+    assert_eq!(git.git(&at("policy"), &["log", "-1", "--format=%B"]), "# merge under policy");
 
     // the policy's side is what the merge commit holds, over the repository's
     // own `merge=union` attribute, and the sealed tree is clean of temporaries
@@ -100,14 +102,14 @@ async fn vcs_matrix() {
     assert_eq!(git.git(&at("binary"), &["status", "--porcelain"]), "");
 
     // the log the guest read is git's own first-parent chain, and the merge
-    // the policy sealed carries the message as given
+    // the policy sealed carries the message as given, `#` line and all
     assert_eq!(
         git.git(&at("logged"), &["log", "--first-parent", "--format=%s"]),
         "after\nmerge slice\nours\na"
     );
     assert_eq!(
         git.git(&at("logged"), &["log", "-1", "--format=%B", "HEAD~1"]),
-        "merge slice\n\nSlice: SLICE-001\nWave: 1"
+        "merge slice\n\n# notes\nSlice: SLICE-001\nWave: 1"
     );
 
     // the label the guest read back is the branch, under the tag git prefers

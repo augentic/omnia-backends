@@ -1,10 +1,12 @@
 //! What git refuses, read into the typed error, from a guest: an unknown
 //! revision is `not-found`, a plain directory is `not-a-repository`, a
 //! place already holding a repository or files is `exists`, a remote that
-//! does not exist is `not-found` where one nothing answers is `access`, and
-//! what git alone can say stays `other`. The operator arguments are the
-//! origin's `file://` URL, a `file://` URL nothing holds, and a URL nothing
-//! answers; the host asserts the repository came through untouched.
+//! does not exist is `not-found` where one nothing answers is `access`, a
+//! push the remote's label has moved past is `diverged`, and what git alone
+//! can say stays `other`. The operator arguments are the origin's `file://`
+//! URL, a `file://` URL nothing holds, and a URL nothing answers; the host
+//! asserts the repository came through untouched and the origin's label
+//! unforced.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -93,4 +95,21 @@ async fn scenario() {
         Err(not_found("--receive-pack=sh"))
     );
     assert_eq!(WasiVcs.clone_repo("-x", "./dash-clone", WHOLE).await, Err(not_found("-x")));
+
+    // two clones label one name at commits of their own: the second's push
+    // is refused while the remote's tip is unknown to it, and again once
+    // fetched, since the label is behind the remote's either way
+    WasiVcs.clone_repo(url, "./clone-a", WHOLE).await.expect("clone a");
+    WasiVcs.clone_repo(url, "./clone-b", WHOLE).await.expect("clone b");
+    fs::write("clone-a/a.txt", "a\n").expect("writing a's file");
+    let ours = WasiVcs.commit("./clone-a", "a's").await.expect("commit").expect("a's commit");
+    WasiVcs.label("./clone-a", "emery/x", &ours).await.expect("label a");
+    WasiVcs.push("./clone-a", "origin", "emery/x").await.expect("push a");
+    fs::write("clone-b/b.txt", "b\n").expect("writing b's file");
+    let theirs = WasiVcs.commit("./clone-b", "b's").await.expect("commit").expect("b's commit");
+    WasiVcs.label("./clone-b", "emery/x", &theirs).await.expect("label b");
+    let diverged = Err(Error::Diverged("emery/x".to_owned()));
+    assert_eq!(WasiVcs.push("./clone-b", "origin", "emery/x").await, diverged, "fetch first");
+    WasiVcs.fetch("./clone-b", "origin").await.expect("fetch");
+    assert_eq!(WasiVcs.push("./clone-b", "origin", "emery/x").await, diverged, "non-fast-forward");
 }

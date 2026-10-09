@@ -7,9 +7,11 @@ Git backend for the `omnia:vcs` interface ([`omnia-wasi-vcs`](https://github.com
 | Interface | Operation | What runs |
 | --------- | --------- | --------- |
 | `store` | `resolve` | `rev-parse --verify --end-of-options <revision>^{commit}` |
+| `store` | `descends` | `merge-base --is-ancestor <ancestor> <descendant>`, both resolved first and either unknown `not-found`; read by exit status, 0 true and 1 false |
 | `store` | `head` | `rev-parse --verify HEAD^{commit}`; an unborn branch is `not-found` |
 | `store` | `commit` | `status --porcelain`, then `add -A` and `commit -m`; nothing pending answers no commit |
-| `store` | `merge` | `merge --no-ff --no-commit`, the policy applied from the three commits, then `commit --no-edit`; a conflict no rule resolves is read back and the merge aborted |
+| `store` | `merge` | `merge --no-ff --no-commit`, the policy applied from the three commits, then `commit --no-edit --cleanup=strip`, so the commit carries the message as given; a conflict no rule resolves is read back and the merge aborted |
+| `store` | `log` | `log --first-parent -z --format=%H%x1f%B <base>..<revision>`, both resolved first; newest first, the base left out, a merge one entry |
 | `workspace` | `init` | `init` in the place; a repository already there is `exists` |
 | `workspace` | `add` | `worktree add --detach -- <at> <revision>` in the repository, `<at>` the destination's absolute path |
 | `workspace` | `remove` | `worktree remove --force .` in the working copy; pending changes go with it |
@@ -17,11 +19,12 @@ Git backend for the `omnia:vcs` interface ([`omnia-wasi-vcs`](https://github.com
 | `transport` | `clone` | `clone [--depth <n> --no-single-branch] -- <url> .` in the place; a depth cuts history, never the labels |
 | `transport` | `fetch` | `fetch -- <remote>` |
 | `transport` | `label` | `branch -f -- <name> <revision>`, the working copy detached onto its commit first when it sits on that branch |
-| `transport` | `push` | `push -- <remote> refs/heads/<label>:refs/heads/<label>` |
+| `transport` | `labelled` | `rev-parse --verify --end-of-options refs/heads/<name>^{commit}`: the branch alone, never the tag or remote-tracking ref a bare name resolves to first; a branch the repository lacks is `not-found` naming it |
+| `transport` | `push` | `push -- <remote> refs/heads/<label>:refs/heads/<label>`, never forced; a rejection the remote's branch has moved past (`non-fast-forward`, `fetch first`, `stale info`) is `diverged` naming the label |
 
 A merge is held before its commit, and the policy is the backend's to apply rather than git's: every path the two sides differ on that a rule matches is resolved from the commits themselves, byte for byte — `ours` the working copy's side, `theirs` the merged-in side, `union` both sides' lines each once through `merge-file` over files in the host's temporary directory — and staged over whatever git's own attributes made of it, so a repository's `.gitattributes` or `info/attributes` never decides a path the policy names. A `union` over a path git cannot merge as lines, a binary, fails the merge rather than seal a guess. A conflict no rule matched abandons the merge: the paths come back as data, `merge --abort` puts the working copy on its head, and nothing of a failed merge stays in progress for a later commit to finish. Nothing of a policy touches the working tree but the resolved paths, so it never shows up in `pending`.
 
-What git reports is read into the typed `omnia:vcs` error — `not-a-repository` (a place holding no repository), `exists`, `not-found`, `access` — and anything else reaches the guest as `other` with git's own words. A location that does not exist is the runtime's refusal, before any git runs.
+What git reports is read into the typed `omnia:vcs` error — `not-a-repository` (a place holding no repository), `exists`, `not-found`, `access`, `diverged` (a push alone) — and anything else reaches the guest as `other` with git's own words. A location that does not exist is the runtime's refusal, as `not-a-repository`, before any git runs.
 
 ## Trust
 

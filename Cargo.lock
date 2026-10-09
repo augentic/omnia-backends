@@ -3895,6 +3895,7 @@ dependencies = [
  "omnia-wasi-messaging",
  "rand 0.10.3",
  "rdkafka",
+ "reqwest 0.13.5",
  "schema-registry-client",
  "serde",
  "serde_json",

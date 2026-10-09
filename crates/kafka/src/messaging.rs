@@ -48,7 +48,17 @@ impl Client for crate::Client {
 
         async move {
             let payload = match &client.inner.registry {
-                Some(registry) => registry.encode(&topic, message.payload).await,
+                Some(registry) => match registry.encode(&topic, message.payload).await {
+                    Ok(payload) => payload,
+                    Err(rejection) => {
+                        tracing::info!(
+                            monotonic_counter.publish_refused = 1,
+                            topic = %topic,
+                            reason = rejection.reason()
+                        );
+                        return Err(anyhow!("send to {topic} refused: {rejection}"));
+                    }
+                },
                 None => message.payload,
             };
             let metadata = message.metadata.unwrap_or_default();
@@ -73,7 +83,7 @@ impl Client for crate::Client {
             if let Err(error) = queued {
                 // no delivery callback fires for a record that never queued
                 client.inner.shared.note_delivered(id);
-                tracing::info!(monotonic_counter.publish_refused = 1, topic = %topic);
+                tracing::info!(monotonic_counter.publish_refused = 1, topic = %topic, reason = "refused");
                 return Err(anyhow!(error));
             }
             Ok(())

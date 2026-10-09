@@ -81,7 +81,7 @@ impl Backend for Client {
             .context("issue creating producer")?;
 
         let partitioner = Partitioner::new(options.partition_count, options.partitioner);
-        let registry = options.registry.map(Registry::new);
+        let registry = options.registry.map(Registry::new).transpose()?;
 
         let consumer = if let Some(consumer_options) = options.consumer {
             let group_id = consumer_options.group_id.as_deref().unwrap_or(DEFAULT_GROUP);
@@ -189,9 +189,6 @@ mod config {
         /// Schema Registry API secret.
         #[env(from = "KAFKA_REGISTRY_API_SECRET")]
         pub api_secret: String,
-        /// Schema cache TTL in seconds.
-        #[env(from = "KAFKA_REGISTRY_CACHE_TTL", default = "3600")]
-        pub cache_ttl_secs: u64,
     }
 
     #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]

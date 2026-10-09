@@ -29,6 +29,7 @@ omnia.workspace = true
 omnia-wasi-messaging.workspace = true
 rand = "0.10.3"
 rdkafka = { version = "0.39.0", features = ["cmake-build", "curl", "ssl-vendored", "tokio"] }
+reqwest.workspace = true
 schema-registry-client = "0.4.2"
 serde_json.workspace = true
 tokio.workspace = true

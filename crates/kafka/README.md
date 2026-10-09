@@ -25,13 +25,23 @@ MSRV: Rust 1.99
 | `KAFKA_REGISTRY_URL` | no | | Schema Registry URL |
 | `KAFKA_REGISTRY_API_KEY` | no | | Schema Registry API key |
 | `KAFKA_REGISTRY_API_SECRET` | no | | Schema Registry API secret |
-| `KAFKA_REGISTRY_CACHE_TTL` | no | `3600` | Schema cache TTL in seconds |
 
 ## Behaviour
 
 ### Consuming
 
-Each record reaches the guest with `metadata` carrying `key`, `partition`, `offset`, `timestamp` and the record's headers. A payload on a topic with a registered schema is unwrapped and validated when it carries the Confluent wire-format header (first byte `0x00`), and passed through untouched when it does not. At most 64 records are being handled at once. Records sharing a key are handled one at a time in offset order; records with different keys run concurrently.
+Each record reaches the guest with `metadata` carrying `key`, `partition`, `offset`, `timestamp` and the record's headers. At most 64 records are being handled at once. Records sharing a key are handled one at a time in offset order; records with different keys run concurrently.
+
+With a registry configured, a payload that carries the Confluent wire-format header (first byte `0x00`, then a big-endian schema id) is unwrapped and validated against the schema its header names, fetched by id and kept for the life of the process. A payload without the header is passed through untouched, with one `warn` per topic. A framed record the guest must not see is dropped without running a guest, logged at `error`, counted as `discarded_messages` with a `reason`, and committed past:
+
+| `reason` | When |
+|----------|------|
+| `registry_unavailable` | The registry could not be reached or timed out (5 s per request, two retries for a transport failure), or answered with an error other than 404 (not retried) |
+| `unknown_schema` | The registry has no schema under the header's id (404) |
+| `invalid_schema` | The registry's schema is not JSON, or is not a JSON Schema the backend can compile |
+| `invalid_payload` | The payload is not JSON, or fails its schema |
+
+Records needing the same schema wait on one fetch. A fetch that fails is logged once with the registry's status and body, fails every record waiting on it, and is not cached: the next record with that id fetches again. Because decoding is decided by the header alone, a topic whose payloads are binary and can start with `0x00` must not be consumed with a registry configured.
 
 ### Offsets
 
@@ -39,7 +49,18 @@ Delivery is at-least-once. A record's offset is eligible to commit once the gues
 
 ### Producing
 
-`send` returns once librdkafka has queued the message; an `Err` means it was refused (queue full, too large, invalid partition) and nothing was sent. Delivery happens in the background with librdkafka's retries, up to 120 s; a message that cannot be delivered in that time is logged with its key and counted, and the record that produced it is still committed. A message with no `metadata["key"]` is sent with a null key. `metadata["partition"]` takes precedence over the partitioner. `request` is not supported and returns an error.
+`send` returns once librdkafka has queued the message; an `Err` means nothing was sent, and is counted as `publish_refused` with a `reason`. Delivery happens in the background with librdkafka's retries, up to 120 s; a message that cannot be delivered in that time is logged with its key and counted, and the record that produced it is still committed. A message with no `metadata["key"]` is sent with a null key. `metadata["partition"]` takes precedence over the partitioner. `request` is not supported and returns an error.
+
+With a registry configured, the first send to a topic looks up the latest schema under `<topic>-value` and keeps the answer for the life of the process, so a new schema version is picked up on restart. A topic with no subject (404) sends unframed, with one `warn`. Otherwise the payload is validated and framed, or refused:
+
+| `reason` | When |
+|----------|------|
+| `refused` | librdkafka would not queue it: queue full after one retry, too large, invalid partition |
+| `registry_unavailable` | The registry could not be reached, timed out, or answered with an error other than 404; not cached, so the next send asks again |
+| `invalid_schema` | The subject's schema is not JSON, or is not a JSON Schema the backend can compile |
+| `invalid_payload` | The payload is not JSON, or fails the topic's schema; logged at `error` with the validation errors |
+
+A guest that passes the error up ends the consumer (below). A guest that handles it and returns `Ok` has its record committed.
 
 ### Failure and shutdown
 
@@ -47,11 +68,11 @@ A record the guest does not handle — its handler returned `Err`, trapped, or t
 
 ### Counters
 
-| Counter | Counts |
-|---------|--------|
-| `discarded_messages` | Framed payload that failed to decode |
-| `publish_refused` | librdkafka refused to enqueue |
-| `delivery_failures` | Queued message not delivered within 120 s |
+| Counter | Attributes | Counts |
+|---------|------------|--------|
+| `discarded_messages` | `topic`, `reason` | A record dropped without running a guest |
+| `publish_refused` | `topic`, `reason` | A send that returned `Err` to the guest |
+| `delivery_failures` | `key` | Queued message not delivered within 120 s |
 
 ### Gauges
 
@@ -95,13 +116,14 @@ real broker, with the test playing the host's `Handler`: keyed sends must
 land on the partitions the configured partitioner predicts, under both the
 `kafkajs` and `java` schemes, and (when a Schema Registry is reachable)
 framed sends must carry the Confluent wire format and decode back through
-`consume`, while an unframed payload on a topic that has a schema is
-delivered unchanged and a message framed under a schema id other than the
-topic's latest still decodes (the mismatch is only logged). `at_least_once`
-completes delivered records in various orders and checks what is delivered
-and what is committed, then fails one record and checks that the consumer
-ends with the commit stopped before it. The tests are `#[ignore]`d so they
-never run in CI; run them explicitly:
+`consume`, a record framed under an id the registry does not have is
+dropped and committed past, an unframed payload on a topic that has a
+schema is delivered unchanged, and a record is validated against the schema
+its header names rather than the subject's latest (one failing its own
+schema is dropped). `at_least_once` completes delivered records in various
+orders and checks what is delivered and what is committed, then fails one
+record and checks that the consumer ends with the commit stopped before it.
+The tests are `#[ignore]`d so they never run in CI; run them explicitly:
 
 ```bash
 # One container provides both the broker and a schema registry:

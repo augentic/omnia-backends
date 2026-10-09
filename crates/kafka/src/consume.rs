@@ -269,22 +269,44 @@ impl Delivery {
 
     // `Ok` for a record of a partition revoked while it waited: it is
     // redelivered from the committed offset, to whichever consumer holds
-    // the partition now.
+    // the partition now. `Ok` too for a record no guest could read: it is
+    // dropped, logged, counted, and committed past.
     async fn handle(&self, record: &OwnedMessage) -> Result<(), HandleError> {
         if !self.shared.holds(record) {
             return Ok(());
         }
         let raw = record.payload().unwrap_or_default();
         let payload = match &self.registry {
-            Some(registry) => registry.decode(record.topic(), raw).await,
+            Some(registry) => match registry.decode(record.topic(), raw).await {
+                Ok(payload) => payload,
+                Err(rejection) => {
+                    tracing::error!(
+                        "record {}[{}]@{} dropped: {rejection}",
+                        record.topic(),
+                        record.partition(),
+                        record.offset()
+                    );
+                    tracing::info!(
+                        monotonic_counter.discarded_messages = 1,
+                        topic = record.topic(),
+                        reason = rejection.reason()
+                    );
+                    self.done(record);
+                    return Ok(());
+                }
+            },
             None => raw.to_vec(),
         };
         self.handler.handle(message(record, payload)).await?;
-        // every send numbered below this went out before the guest returned;
-        // the offset waits on them all
+        self.done(record);
+        Ok(())
+    }
+
+    // Every send numbered below the counter went out before the guest
+    // returned; the offset waits on them all.
+    fn done(&self, record: &OwnedMessage) {
         let sends_before = self.shared.sends.load(Ordering::Acquire);
         self.shared.done(record, sends_before);
-        Ok(())
     }
 
     // `kafka_in_flight` pinned at `IN_FLIGHT` under lag means the slot count

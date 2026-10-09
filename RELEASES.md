@@ -59,7 +59,9 @@ Unreleased
   `refs/heads/<name>` alone, so a tag or a remote-tracking ref of the
   same spelling, which git resolves a bare name to first, is never the
   label, and nor is a commit a `~`, `^`, or `@{}` in the name would walk
-  to. A `push` is never forced: a rejection the remote's branch has
+  to; `fetched` reads a remote's label as the exact ref
+  `refs/remotes/<remote>/<name>` the same way, so a guest never spells
+  `origin/<name>` itself. A `push` is never forced: a rejection the remote's branch has
   moved past is the typed `diverged`, naming the label. A `clone` with a
   depth passes `--no-single-branch`, so a shallow clone still answers
   every label. What git reports is read into the typed `omnia:vcs`

@@ -46,6 +46,7 @@ let client = Client::connect_with(ConnectOptions {
     inactivity_secs: 120,
     model: "composer-2".into(),
     max_agents: 2,
+    max_tool_calls: 128,
 }).await?;
 ```
 
@@ -60,6 +61,7 @@ A full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor).
 | `CURSOR_TIMEOUT_SECS` | `600` | Absolute wall-clock cap on one agent run |
 | `CURSOR_INACTIVITY_SECS` | `120` | Cancel a run whose stream has gone silent while waiting on the bridge |
 | `CURSOR_MAX_AGENTS` | `8` | Agents live at once, each on its own worker; further completions queue |
+| `CURSOR_MAX_TOOL_CALLS` | `128` | Guest tool calls one completion may make before it ends as `budget-exhausted` |
 
 Workers inherit the host's environment (minus the `GIT_*` identity variables), so `CURSOR_SDK_BRIDGE_LOG` passes straight through and the worker's RPC log lands in this crate's DEBUG output.
 
@@ -69,7 +71,7 @@ The request's `generation` controls (temperature, max tokens, …) are ignored: 
 
 **Workspace.** The guest lends a working tree through `grants.workspace`; the agent runs there with a read-only toolset (`read`, `glob`, `grep`, `ls`, plus `mcp`). No shell, edit, or delete. Without a lent workspace the agent runs in a private empty directory with every built-in tool disabled, so function-tool-only completions still work. `read` takes absolute paths, so staying inside the tree is the prompt's to ask, not the toolset's to enforce.
 
-**Tools.** Guest-declared function tools become SDK custom tools at `CreateAgent`. When the agent calls one, the worker POSTs to this crate's loopback callback endpoint, which routes it into the session via `ToolHost::call_tool` under the host's name check, budget, size cap, and per-call timeout. `Tool::Mcp` grants pass inline as `mcp_servers`; the grant's `tools` allowlist is advisory.
+**Tools.** Guest-declared function tools become SDK custom tools at `CreateAgent`. When the agent calls one, the worker POSTs to this crate's loopback callback endpoint, which routes it into the session via `ToolHost::call_tool` under the host's name check, budget, size cap, and per-call timeout. The budget is this backend's: `CURSOR_MAX_TOOL_CALLS` guest tool calls a completion, answered through `WasiModelCtx::limits`, in place of the host's default of 32, since an agent that lays a tree one file a call runs past that long before its wall-clock cap. `Tool::Mcp` grants pass inline as `mcp_servers`; the grant's `tools` allowlist is advisory.
 
 **Format and check.** `format` reaches the agent as a final-answer instruction — steering only. With `check`, the answer is offered through `ToolHost::check`: `Ok` ends the completion, `Err(correction)` sends the correction as the next prompt on the same agent (its cache stays warm). Two rounds are allowed; a second rejection fails with the typed `budget-exhausted`.
 

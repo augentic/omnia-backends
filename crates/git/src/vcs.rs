@@ -301,6 +301,30 @@ impl WasiVcsCtx for Client {
         .boxed()
     }
 
+    fn fetched(&self, repo: Place, remote: String, name: String) -> FutureResult<String> {
+        tracing::trace!("reading {remote}'s label {name} in {}", repo.path().display());
+        let client = self.clone();
+        async move {
+            vetted(&remote)?;
+            vetted(&name)?;
+            // the exact remote-tracking ref, read as `labelled` reads the
+            // branch; what is missing is the remote when the repository has
+            // none of that name, else the label
+            let full = format!("refs/remotes/{remote}/{name}");
+            let args = ["show-ref", "--verify", "--hash", "--", &full];
+            let output = client.git(Some(&repo), args, &[]).await?;
+            if output.status.success() {
+                return Ok(output.text().trim().to_owned());
+            }
+            if refusal::classify(&output.stderr) == Class::NotARepository {
+                return Err(Error::NotARepository.into());
+            }
+            let known = client.git(Some(&repo), ["remote", "get-url", "--", &remote], &[]).await?;
+            Err(Error::NotFound(if known.status.success() { name } else { remote }).into())
+        }
+        .boxed()
+    }
+
     fn push(&self, repo: Place, remote: String, label: String) -> FutureResult<()> {
         tracing::trace!("pushing {label} to {remote} from {}", repo.path().display());
         let client = self.clone();

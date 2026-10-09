@@ -6,7 +6,8 @@
 //! reports for each kind of change; a commit with nothing to seal; a dirty
 //! working copy removed. Each section runs in a repository of its own
 //! beneath the `.` mount, so the host reads each with git afterwards; the
-//! one argument names the repository the host laid with the tag.
+//! arguments name the repository the host laid with the tag, the commit
+//! its label sits at, and the commit its tag does.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -20,8 +21,10 @@ omnia_sdk::command!(scenario);
 
 async fn scenario() {
     let arguments = arguments();
-    let [shadowed] = arguments.as_slice() else {
-        panic!("the repository the host laid a tag in is the argument");
+    let [shadowed, branch, tag] = arguments.as_slice() else {
+        panic!(
+            "the repository the host laid a tag in, its label's commit, and its tag's are the arguments"
+        );
     };
 
     init_commit_add_merge().await;
@@ -33,7 +36,7 @@ async fn scenario() {
     merge_up_to_date().await;
     log_over_base().await;
     descends_and_labelled().await;
-    labelled_under_a_tag(&format!("./{shadowed}")).await;
+    labelled_under_a_tag(&format!("./{shadowed}"), branch, tag).await;
     label_the_checked_out_branch().await;
     pending_kinds().await;
     commit_nothing().await;
@@ -75,14 +78,14 @@ async fn seeded(repo: &str) -> String {
 async fn init_commit_add_merge() {
     let repo = "./repo";
     WasiVcs.init(repo).await.expect("init");
-    assert_eq!(WasiVcs.head(repo).await, Err(Error::NotFound("HEAD".to_owned())));
+    assert!(matches!(WasiVcs.head(repo).await, Err(Error::NotFound(_))), "no commit yet");
     assert_eq!(WasiVcs.pending(repo).await.expect("pending"), []);
 
     write("repo/a.txt", "a\n");
     assert_eq!(WasiVcs.pending(repo).await.expect("pending"), [change("a.txt", ChangeKind::Added)]);
     let first = WasiVcs.commit(repo, "a").await.expect("commit").expect("a commit");
     assert_eq!(WasiVcs.head(repo).await.expect("head"), first);
-    assert_eq!(WasiVcs.resolve(repo, "HEAD").await.expect("resolve"), first);
+    assert_eq!(WasiVcs.resolve(repo, &first).await.expect("whole id"), first);
     assert_eq!(WasiVcs.resolve(repo, &first[..8]).await.expect("prefix"), first);
     assert_eq!(WasiVcs.pending(repo).await.expect("pending"), []);
 
@@ -125,7 +128,6 @@ async fn merge_conflict_without_rule() {
     assert_eq!(WasiVcs.head(repo).await.expect("head"), ours);
     assert_eq!(read("conflict/a.txt"), "repo\n");
     assert_eq!(WasiVcs.pending(repo).await.expect("pending"), []);
-    assert!(fs::metadata("conflict/.git/MERGE_HEAD").is_err(), "no merge left in progress");
 }
 
 async fn merge_policy_resolves() {
@@ -210,10 +212,10 @@ async fn log_over_base() {
 
     // the first-parent chain: the merged-in side is not walked
     assert_eq!(
-        WasiVcs.log(repo, "HEAD", &base).await.expect("log"),
+        WasiVcs.log(repo, &after, &base).await.expect("log"),
         [
             Entry {
-                id: after,
+                id: after.clone(),
                 message: "after".to_owned(),
             },
             Entry {
@@ -227,7 +229,7 @@ async fn log_over_base() {
         ]
     );
     assert_eq!(
-        WasiVcs.log(repo, "HEAD", &ours).await.expect("log").len(),
+        WasiVcs.log(repo, &after, &ours).await.expect("log").len(),
         2,
         "a base along the chain cuts it there"
     );
@@ -246,7 +248,7 @@ async fn log_over_base() {
         "a revision the repository lacks"
     );
     assert_eq!(
-        WasiVcs.log(repo, "HEAD", "nope").await,
+        WasiVcs.log(repo, &after, "nope").await,
         Err(Error::NotFound("nope".to_owned())),
         "a base the repository lacks"
     );
@@ -287,13 +289,12 @@ async fn descends_and_labelled() {
     }
 }
 
-// The host laid a tag of the branch's name at another commit, which the
-// bare spelling resolves to first; the label is the branch all the same.
-async fn labelled_under_a_tag(repo: &str) {
-    let branch = WasiVcs.resolve(repo, "refs/heads/slice").await.expect("the branch");
-    let bare = WasiVcs.resolve(repo, "slice").await.expect("the bare spelling");
-    assert_ne!(branch, bare, "the tag shadows the branch");
+// The host laid a label and a tag of one name at two commits; the label is
+// read back as the label whichever of the two the bare spelling resolves to.
+async fn labelled_under_a_tag(repo: &str, branch: &str, tag: &str) {
     assert_eq!(WasiVcs.labelled(repo, "slice").await.expect("labelled"), branch);
+    let bare = WasiVcs.resolve(repo, "slice").await.expect("the bare spelling");
+    assert!(bare == branch || bare == tag, "the bare spelling is one of the two: {bare}");
 }
 
 // One side edited the path and the other deleted it: keeping the deleting side

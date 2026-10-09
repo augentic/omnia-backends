@@ -51,7 +51,7 @@ async fn scenario() {
 
     // store
     assert_eq!(WasiVcs.resolve(REPO, "nope").await, Err(not_found("nope")));
-    assert_eq!(WasiVcs.resolve(ELSEWHERE, "HEAD").await, Err(Error::NotARepository));
+    assert_eq!(WasiVcs.resolve(ELSEWHERE, "main").await, Err(Error::NotARepository));
     assert_eq!(WasiVcs.head(ELSEWHERE).await, Err(Error::NotARepository));
     assert_eq!(WasiVcs.commit(ELSEWHERE, "x").await, Err(Error::NotARepository));
     assert_eq!(WasiVcs.merge(REPO, "nope", "x", &[]).await, Err(not_found("nope")));
@@ -79,8 +79,11 @@ async fn scenario() {
     assert_eq!(WasiVcs.fetch(REPO, "nope").await, Err(not_found("nope")));
     assert_eq!(WasiVcs.label(REPO, "lbl", "nope").await, Err(not_found("nope")));
     assert_eq!(WasiVcs.push(REPO, "nope", "main").await, Err(not_found("nope")));
+    assert_eq!(WasiVcs.fetched(REPO, "nope", "main").await, Err(not_found("nope")));
+    assert_eq!(WasiVcs.fetched(ELSEWHERE, "origin", "main").await, Err(Error::NotARepository));
     WasiVcs.clone_repo(url, "./clone", WHOLE).await.expect("clone");
     assert_eq!(WasiVcs.push("./clone", "origin", "nolabel").await, Err(not_found("nolabel")));
+    assert_eq!(WasiVcs.fetched("./clone", "origin", "nolabel").await, Err(not_found("nolabel")));
 
     // a guest string git would read as an option, or the empty one it reads
     // as a default, is nothing the repository knows — refused before any git
@@ -90,6 +93,7 @@ async fn scenario() {
     assert_eq!(WasiVcs.add(REPO, "./dashed", "-x").await, Err(not_found("-x")));
     assert_eq!(WasiVcs.label(REPO, "-b", &first).await, Err(not_found("-b")));
     assert_eq!(WasiVcs.fetch(REPO, "--upload-pack=sh").await, Err(not_found("--upload-pack=sh")));
+    assert_eq!(WasiVcs.fetched(REPO, "origin", "-x").await, Err(not_found("-x")));
     assert_eq!(
         WasiVcs.push(REPO, "--receive-pack=sh", "main").await,
         Err(not_found("--receive-pack=sh"))

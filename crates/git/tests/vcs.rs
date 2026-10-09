@@ -76,13 +76,19 @@ async fn vcs_matrix() {
     git.git(&shadowed, &["add", "-A"]);
     git.git(&shadowed, &["commit", "-qm", "second"]);
     git.git(&shadowed, &["tag", "slice"]);
+    let branch = git.git(&shadowed, &["rev-parse", "refs/heads/slice"]);
+    let tag = git.git(&shadowed, &["rev-parse", "refs/tags/slice"]);
 
-    run(&git, &scratch, test_programs::VCS_MATRIX, vec!["shadowed".to_owned()]).await;
+    let arguments = vec!["shadowed".to_owned(), branch.clone(), tag.clone()];
+    run(&git, &scratch, test_programs::VCS_MATRIX, arguments).await;
 
     // the merge by label is one commit over both parents
     assert_eq!(git.git(&at("repo"), &["log", "--first-parent", "--format=%s"]), "merge feature\na");
     let parents = git.git(&at("repo"), &["rev-list", "--parents", "-1", "HEAD"]);
     assert_eq!(parents.split_whitespace().count(), 3, "{parents}");
+
+    // the conflicted merge was unwound, nothing of it left in progress
+    assert!(!at("conflict/.git/MERGE_HEAD").exists(), "a merge was left in progress");
 
     // a policy leaves nothing of itself in the tree, and seals a message that
     // is commentary to git whole
@@ -113,8 +119,14 @@ async fn vcs_matrix() {
     );
 
     // the label the guest read back is the branch, under the tag git prefers
-    assert_eq!(git.git(&shadowed, &["log", "-1", "--format=%s", "refs/heads/slice"]), "first");
-    assert_eq!(git.git(&shadowed, &["log", "-1", "--format=%s", "refs/tags/slice"]), "second");
+    assert_ne!(branch, tag);
+    assert_eq!(git.git(&shadowed, &["log", "-1", "--format=%s", &branch]), "first");
+    assert_eq!(git.git(&shadowed, &["log", "-1", "--format=%s", &tag]), "second");
+    assert_eq!(
+        git.git(&shadowed, &["rev-parse", "slice"]),
+        tag,
+        "git resolves the bare name to the tag"
+    );
 
     // labelling the branch the copy sat on left the copy detached on its commit
     assert_eq!(git.git(&at("checked-out"), &["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD");

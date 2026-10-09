@@ -63,16 +63,31 @@ async fn vcs_journey() {
 async fn vcs_matrix() {
     let git = Hermetic::new();
     let scratch = scratch();
-    run(&git, &scratch, test_programs::VCS_MATRIX, vec![]).await;
     let at = |name: &str| scratch.path().join(name);
+
+    // a branch and a tag of one name at two commits, which the guest cannot
+    // lay itself since the boundary makes no tags
+    let shadowed = at("shadowed");
+    seed(&git, &shadowed, "a.txt");
+    git.git(&shadowed, &["add", "-A"]);
+    git.git(&shadowed, &["commit", "-qm", "first"]);
+    git.git(&shadowed, &["branch", "slice"]);
+    fs::write(shadowed.join("b.txt"), "b\n").expect("a second file");
+    git.git(&shadowed, &["add", "-A"]);
+    git.git(&shadowed, &["commit", "-qm", "second"]);
+    git.git(&shadowed, &["tag", "slice"]);
+
+    run(&git, &scratch, test_programs::VCS_MATRIX, vec!["shadowed".to_owned()]).await;
 
     // the merge by label is one commit over both parents
     assert_eq!(git.git(&at("repo"), &["log", "--first-parent", "--format=%s"]), "merge feature\na");
     let parents = git.git(&at("repo"), &["rev-list", "--parents", "-1", "HEAD"]);
     assert_eq!(parents.split_whitespace().count(), 3, "{parents}");
 
-    // a policy leaves nothing of itself in the tree
+    // a policy leaves nothing of itself in the tree, and seals a message that
+    // is commentary to git whole
     assert_eq!(git.git(&at("policy"), &["status", "--porcelain"]), "");
+    assert_eq!(git.git(&at("policy"), &["log", "-1", "--format=%B"]), "# merge under policy");
 
     // the policy's side is what the merge commit holds, over the repository's
     // own `merge=union` attribute, and the sealed tree is clean of temporaries
@@ -85,6 +100,21 @@ async fn vcs_matrix() {
         "the merge holds theirs' blob, not a re-encoding of it"
     );
     assert_eq!(git.git(&at("binary"), &["status", "--porcelain"]), "");
+
+    // the log the guest read is git's own first-parent chain, and the merge
+    // the policy sealed carries the message as given, `#` line and all
+    assert_eq!(
+        git.git(&at("logged"), &["log", "--first-parent", "--format=%s"]),
+        "after\nmerge slice\nours\na"
+    );
+    assert_eq!(
+        git.git(&at("logged"), &["log", "-1", "--format=%B", "HEAD~1"]),
+        "merge slice\n\n# notes\nSlice: SLICE-001\nWave: 1"
+    );
+
+    // the label the guest read back is the branch, under the tag git prefers
+    assert_eq!(git.git(&shadowed, &["log", "-1", "--format=%s", "refs/heads/slice"]), "first");
+    assert_eq!(git.git(&shadowed, &["log", "-1", "--format=%s", "refs/tags/slice"]), "second");
 
     // labelling the branch the copy sat on left the copy detached on its commit
     assert_eq!(git.git(&at("checked-out"), &["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD");
@@ -195,7 +225,7 @@ async fn vcs_hardening() {
 #[tokio::test]
 async fn vcs_refusals() {
     let git = Hermetic::new();
-    let (_, url) = git.bare("origin.git");
+    let (origin, url) = git.bare("origin.git");
     let missing = format!("file://{}", git.path("missing.git").display());
     let unanswered = "https://127.0.0.1:1/x.git".to_owned();
     let scratch = scratch();
@@ -211,6 +241,14 @@ async fn vcs_refusals() {
     // a clone that failed left the place the runtime laid for it empty
     let left = fs::read_dir(at("clone-missing")).expect("the place was laid").count();
     assert_eq!(left, 0);
+
+    // the origin's label is the first clone's, the second's refused twice
+    // and never forced over it
+    assert_eq!(
+        git.git(&origin, &["rev-parse", "emery/x"]),
+        git.git(&at("clone-a"), &["rev-parse", "HEAD"])
+    );
+    assert_eq!(git.git(&origin, &["log", "-1", "--format=%s", "emery/x"]), "a's");
 }
 
 // A repository at `repo` with one uncommitted file, for a suite to salt and

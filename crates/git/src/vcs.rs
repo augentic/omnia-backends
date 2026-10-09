@@ -13,7 +13,7 @@ use std::path;
 use anyhow::{Context as _, Result};
 use futures::FutureExt as _;
 use omnia_wasi_vcs::{
-    Change, ChangeKind, CloneOptions, Error, FutureResult, Merged, Place, Rule, WasiVcsCtx,
+    Change, ChangeKind, CloneOptions, Entry, Error, FutureResult, Merged, Place, Rule, WasiVcsCtx,
 };
 
 use self::policy::Resolution;
@@ -26,6 +26,26 @@ impl WasiVcsCtx for Client {
         tracing::trace!("resolving {revision} in {}", repo.path().display());
         let client = self.clone();
         async move { client.rev_parse(&repo, &revision).await }.boxed()
+    }
+
+    fn descends(&self, repo: Place, ancestor: String, descendant: String) -> FutureResult<bool> {
+        tracing::trace!("asking whether {descendant} descends from {ancestor}");
+        let client = self.clone();
+        async move {
+            let repo = Repo::open(&client, &repo).await?;
+            let ancestor = repo.rev_parse(&ancestor).await?;
+            let descendant = repo.rev_parse(&descendant).await?;
+            // `--is-ancestor` answers by exit status alone, 1 writing
+            // nothing, so the status is read rather than the stderr
+            let args = ["merge-base", "--is-ancestor", &ancestor, &descendant];
+            let output = repo.git(args, &[]).await?;
+            match output.status.code() {
+                Some(0) => Ok(true),
+                Some(1) => Ok(false),
+                _ => Err(refuse(&output, &repo.shown(), &descendant, None).into()),
+            }
+        }
+        .boxed()
     }
 
     fn head(&self, at: Place) -> FutureResult<String> {
@@ -60,7 +80,7 @@ impl WasiVcsCtx for Client {
             let head = repo.rev_parse(&revision).await?;
             // held before the commit, so the index is the backend's to settle
             // by policy rather than git's attributes
-            let args = ["merge", "--no-ff", "--no-commit", "-m", &message, "--", &head];
+            let args = ["merge", "--no-ff", "--no-commit", "--", &head];
             let output = repo.git(args, &[]).await?;
             if !repo.merging().await? {
                 // nothing to merge — an ancestor — or a merge that never
@@ -71,7 +91,7 @@ impl WasiVcsCtx for Client {
                         conflicts: Vec::new(),
                     });
                 }
-                return Err(refuse(&output, &repo.shown(), &revision).into());
+                return Err(refuse(&output, &repo.shown(), &revision, None).into());
             }
 
             // resolve what the policy covers; an unresolved conflict, or a step
@@ -90,9 +110,12 @@ impl WasiVcsCtx for Client {
                     return Err(error);
                 }
             }
-            if let Err(error) =
-                repo.run(["commit", "--quiet", "--no-edit"], &repo.shown(), "HEAD").await
-            {
+            // the message on the command line, never read from `MERGE_MSG`:
+            // that carries the `# Conflicts:` hint git appends to a merge it
+            // left in conflict, and stripping it would strip the message's
+            // own `#` lines too, to nothing where it has no others
+            let args = ["commit", "--quiet", "-m", &message];
+            if let Err(error) = repo.run(args, &repo.shown(), "HEAD").await {
                 repo.abort().await;
                 return Err(error);
             }
@@ -100,6 +123,28 @@ impl WasiVcsCtx for Client {
                 commit: Some(repo.rev_parse("HEAD").await?),
                 conflicts: Vec::new(),
             })
+        }
+        .boxed()
+    }
+
+    fn log(&self, repo: Place, revision: String, base: String) -> FutureResult<Vec<Entry>> {
+        tracing::trace!("reading {base}..{revision} in {}", repo.path().display());
+        let client = self.clone();
+        async move {
+            let repo = Repo::open(&client, &repo).await?;
+            let range =
+                format!("{}..{}", repo.rev_parse(&base).await?, repo.rev_parse(&revision).await?);
+            let args = [
+                "log",
+                "--first-parent",
+                "-z",
+                "--no-show-signature",
+                "--format=%H%x1f%B",
+                "--end-of-options",
+                &range,
+            ];
+            let output = repo.run(args, &repo.shown(), &revision).await?;
+            Ok(entries(&output.text()))
         }
         .boxed()
     }
@@ -115,7 +160,7 @@ impl WasiVcsCtx for Client {
             let repo = Repo::open(&client, &at).await?;
             let output = repo.create(["init", "--quiet"], &[]).await?;
             if !output.status.success() {
-                return Err(refuse(&output, &repo.shown(), "HEAD").into());
+                return Err(refuse(&output, &repo.shown(), "HEAD", None).into());
             }
             Ok(())
         }
@@ -186,7 +231,7 @@ impl WasiVcsCtx for Client {
             args.extend(["--".to_owned(), url.clone(), ".".to_owned()]);
             let output = repo.create(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
             if !output.status.success() {
-                return Err(refuse(&output, &shown(&at), &url).into());
+                return Err(refuse(&output, &shown(&at), &url, None).into());
             }
             Ok(())
         }
@@ -206,7 +251,7 @@ impl WasiVcsCtx for Client {
                 ["fetch".to_owned(), "--quiet".to_owned(), pack, "--".to_owned(), remote.clone()];
             let output = repo.git(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
             if !output.status.success() {
-                return Err(refuse(&output, &repo.shown(), &remote).into());
+                return Err(refuse(&output, &repo.shown(), &remote, None).into());
             }
             Ok(())
         }
@@ -227,6 +272,31 @@ impl WasiVcsCtx for Client {
             repo.detach_from(&name).await?;
             repo.run(["branch", "-f", "--", &name, &head], &repo.shown(), &revision).await?;
             Ok(())
+        }
+        .boxed()
+    }
+
+    fn labelled(&self, repo: Place, name: String) -> FutureResult<String> {
+        tracing::trace!("reading the label {name} in {}", repo.path().display());
+        let client = self.clone();
+        async move {
+            vetted(&name)?;
+            // the exact ref path, which `--verify` reads as a name and never
+            // as revision syntax: a tag or a remote's branch of the same
+            // spelling, which a bare name resolves to first, is never it, and
+            // nor is the commit a `~`, `^`, or `@{}` in the name would walk
+            // to; a branch holds a commit, so there is nothing to peel
+            let full = format!("refs/heads/{name}");
+            let args = ["show-ref", "--verify", "--hash", "--", &full];
+            let output = client.git(Some(&repo), args, &[]).await?;
+            if output.status.success() {
+                return Ok(output.text().trim().to_owned());
+            }
+            Err(match refusal::classify(&output.stderr) {
+                Class::NotARepository => Error::NotARepository,
+                _ => Error::NotFound(name),
+            }
+            .into())
         }
         .boxed()
     }
@@ -254,7 +324,7 @@ impl WasiVcsCtx for Client {
             if !output.status.success() {
                 // the label is what a refspec names; anything else missing is the remote
                 let missing = if output.stderr.contains("src refspec") { &label } else { &remote };
-                return Err(refuse(&output, &repo.shown(), missing).into());
+                return Err(refuse(&output, &repo.shown(), missing, Some(&label)).into());
             }
             Ok(())
         }
@@ -335,7 +405,7 @@ impl<'a> Repo<'a> {
         if output.status.success() {
             Ok(output)
         } else {
-            Err(refuse(&output, exists, missing).into())
+            Err(refuse(&output, exists, missing, None).into())
         }
     }
 
@@ -539,14 +609,19 @@ async fn expand(repo: &Repo<'_>, remote: &str, push: bool) -> String {
     }
 }
 
-fn refuse(output: &Output, exists: &str, missing: &str) -> Error {
+// The typed refusal for a failed process: `exists` names a location taken,
+// `missing` what the repository lacks, and `label` the one a push sent,
+// which is what a rejected push is `diverged` over; an operation that
+// pushes nothing passes `None` and is never typed so, whatever git said.
+fn refuse(output: &Output, exists: &str, missing: &str, label: Option<&str>) -> Error {
     let detail = output.stderr.trim().to_owned();
-    match refusal::classify(&output.stderr) {
-        Class::NotARepository => Error::NotARepository,
-        Class::Exists => Error::Exists(exists.to_owned()),
-        Class::NotFound => Error::NotFound(missing.to_owned()),
-        Class::Access => Error::Access(detail),
-        Class::Other => Error::Other(detail),
+    match (refusal::classify(&output.stderr), label) {
+        (Class::NotARepository, _) => Error::NotARepository,
+        (Class::Exists, _) => Error::Exists(exists.to_owned()),
+        (Class::NotFound, _) => Error::NotFound(missing.to_owned()),
+        (Class::Access, _) => Error::Access(detail),
+        (Class::Diverged, Some(label)) => Error::Diverged(label.to_owned()),
+        (Class::Diverged | Class::Other, None) | (Class::Other, Some(_)) => Error::Other(detail),
     }
 }
 
@@ -557,6 +632,19 @@ fn shown(place: &Place) -> String {
 // Non-empty entries of a `-z` list, each `\0`-terminated.
 fn nul_separated(output: &str) -> Vec<String> {
     output.split('\0').filter(|entry| !entry.is_empty()).map(str::to_owned).collect()
+}
+
+// One entry per `-z` record of `log --format=%H%x1f%B`: the id, then the
+// message as sealed, without the newline git ends a message with.
+fn entries(output: &str) -> Vec<Entry> {
+    nul_separated(output)
+        .iter()
+        .filter_map(|record| record.split_once('\x1f'))
+        .map(|(id, message)| Entry {
+            id: id.to_owned(),
+            message: message.trim_end_matches('\n').to_owned(),
+        })
+        .collect()
 }
 
 // One change per path from `status --porcelain -z`, the index and tree
@@ -595,10 +683,14 @@ const fn kind(index: char, tree: char) -> Option<ChangeKind> {
 mod tests {
     use omnia_wasi_vcs::ChangeKind;
 
-    use super::{is_local, pending};
+    use super::{entries, is_local, pending};
 
     fn kinds(porcelain: &str) -> Vec<(String, ChangeKind)> {
         pending(porcelain).into_iter().map(|change| (change.path, change.kind)).collect()
+    }
+
+    fn logged(output: &str) -> Vec<(String, String)> {
+        entries(output).into_iter().map(|entry| (entry.id, entry.message)).collect()
     }
 
     #[test]
@@ -623,6 +715,19 @@ mod tests {
         assert_eq!(kinds("D  a.txt\0?? a.txt\0"), [("a.txt".to_owned(), ChangeKind::Modified)]);
         assert_eq!(kinds("AD a.txt\0"), []);
         assert_eq!(kinds(""), []);
+    }
+
+    #[test]
+    fn log_records() {
+        let output = "aa11\x1fmerge slice\n\nSlice: SLICE-001\n\0bb22\x1fours\n\0";
+        assert_eq!(
+            logged(output),
+            [
+                ("aa11".to_owned(), "merge slice\n\nSlice: SLICE-001".to_owned()),
+                ("bb22".to_owned(), "ours".to_owned()),
+            ]
+        );
+        assert_eq!(logged(""), []);
     }
 
     #[test]

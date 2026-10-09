@@ -1,20 +1,29 @@
 //! The store and workspace operations over git, from a guest: a repository
 //! initialised, read, committed, copied, labelled, and merged back; a merge
-//! that conflicts and one resolved under a policy; what `pending` reports
-//! for each kind of change; a commit with nothing to seal; a dirty working
-//! copy removed. Each section runs in a repository of its own beneath the
-//! `.` mount, so the host reads each with git afterwards.
+//! that conflicts and one resolved under a policy; the log over a base;
+//! whether one commit descends from another, and a label read back as the
+//! branch alone where the host laid a tag of its name; what `pending`
+//! reports for each kind of change; a commit with nothing to seal; a dirty
+//! working copy removed. Each section runs in a repository of its own
+//! beneath the `.` mount, so the host reads each with git afterwards; the
+//! one argument names the repository the host laid with the tag.
 
 #![cfg(target_arch = "wasm32")]
 
 use std::fs;
 use std::path::Path;
 
-use omnia_sdk::vcs::{Change, ChangeKind, Error, Rule, Strategy, Vcs as _, WasiVcs};
+use omnia_sdk::vcs::{Change, ChangeKind, Entry, Error, Rule, Strategy, Vcs as _, WasiVcs};
+use test_programs::arguments;
 
 omnia_sdk::command!(scenario);
 
 async fn scenario() {
+    let arguments = arguments();
+    let [shadowed] = arguments.as_slice() else {
+        panic!("the repository the host laid a tag in is the argument");
+    };
+
     init_commit_add_merge().await;
     merge_conflict_without_rule().await;
     merge_policy_resolves().await;
@@ -22,6 +31,9 @@ async fn scenario() {
     merge_policy_modify_delete().await;
     merge_policy_binary().await;
     merge_up_to_date().await;
+    log_over_base().await;
+    descends_and_labelled().await;
+    labelled_under_a_tag(&format!("./{shadowed}")).await;
     label_the_checked_out_branch().await;
     pending_kinds().await;
     commit_nothing().await;
@@ -135,12 +147,14 @@ async fn merge_policy_resolves() {
     write("policy/list.txt", "base\nrepo\n");
     WasiVcs.commit(repo, "repo").await.expect("commit").expect("repo");
 
+    // a message git would read as commentary alone is the message all the same
     let policy = [
         rule("*.lock", Strategy::Ours),
         rule("a.txt", Strategy::Theirs),
         rule("list.txt", Strategy::Union),
     ];
-    let merged = WasiVcs.merge(repo, &theirs, "merge under policy", &policy).await.expect("merge");
+    let merged =
+        WasiVcs.merge(repo, &theirs, "# merge under policy", &policy).await.expect("merge");
     assert_eq!(merged.conflicts, Vec::<String>::new());
     assert!(merged.commit.is_some());
     assert_eq!(read("policy/Cargo.lock"), "lock repo\n", "ours keeps the working copy's side");
@@ -170,6 +184,116 @@ async fn merge_policy_beats_attributes() {
     assert_eq!(merged.conflicts, Vec::<String>::new());
     assert!(merged.commit.is_some(), "the merge sealed");
     assert_eq!(read("attributed/data.txt"), "theirs\n", "the policy beat the attribute");
+}
+
+// The chain over a base follows first parents alone, newest first, so a
+// merge is one entry and the side it brought in none; the base is left out,
+// and a message is read back as it was sealed, its own `#` line kept and a
+// conflict the policy resolved leaving no hint of itself in it.
+async fn log_over_base() {
+    let repo = "./logged";
+    let work = "./logged-work";
+    let base = seeded(repo).await;
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    write("logged-work/a.txt", "theirs\n");
+    write("logged-work/b.txt", "b\n");
+    let side = WasiVcs.commit(work, "side").await.expect("commit").expect("side");
+    WasiVcs.label(repo, "slice", &side).await.expect("label");
+    write("logged/a.txt", "ours\n");
+    let ours = WasiVcs.commit(repo, "ours").await.expect("commit").expect("ours");
+    let message = "merge slice\n\n# notes\nSlice: SLICE-001\nWave: 1";
+    let policy = [rule("a.txt", Strategy::Theirs)];
+    let merged = WasiVcs.merge(repo, "slice", message, &policy).await.expect("merge");
+    let merge = merged.commit.expect("the policy sealed the merge");
+    write("logged/c.txt", "c\n");
+    let after = WasiVcs.commit(repo, "after").await.expect("commit").expect("after");
+
+    // the first-parent chain: the merged-in side is not walked
+    assert_eq!(
+        WasiVcs.log(repo, "HEAD", &base).await.expect("log"),
+        [
+            Entry {
+                id: after,
+                message: "after".to_owned(),
+            },
+            Entry {
+                id: merge.clone(),
+                message: message.to_owned(),
+            },
+            Entry {
+                id: ours.clone(),
+                message: "ours".to_owned(),
+            },
+        ]
+    );
+    assert_eq!(
+        WasiVcs.log(repo, "HEAD", &ours).await.expect("log").len(),
+        2,
+        "a base along the chain cuts it there"
+    );
+    assert_eq!(
+        WasiVcs.log(repo, &merge, &ours).await.expect("log"),
+        [Entry {
+            id: merge,
+            message: message.to_owned(),
+        }],
+        "a merge counts once, its message whole"
+    );
+    assert_eq!(WasiVcs.log(repo, &base, &base).await.expect("log"), [], "nothing over itself");
+    assert_eq!(
+        WasiVcs.log(repo, "nope", &base).await,
+        Err(Error::NotFound("nope".to_owned())),
+        "a revision the repository lacks"
+    );
+    assert_eq!(
+        WasiVcs.log(repo, "HEAD", "nope").await,
+        Err(Error::NotFound("nope".to_owned())),
+        "a base the repository lacks"
+    );
+}
+
+// Ancestry is a question of the graph, a commit its own ancestor and the
+// reversed pair none; a label is read back from the branch `label` wrote,
+// by its name alone, never by what git's revision syntax would make of it.
+async fn descends_and_labelled() {
+    let repo = "./lineage";
+    let work = "./lineage-work";
+    let base = seeded(repo).await;
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    write("lineage-work/b.txt", "b\n");
+    let side = WasiVcs.commit(work, "side").await.expect("commit").expect("side");
+    WasiVcs.label(repo, "slice", &side).await.expect("label");
+
+    assert!(WasiVcs.descends(repo, &base, &side).await.expect("descends"));
+    assert!(WasiVcs.descends(repo, &base, &base).await.expect("descends"), "itself included");
+    assert!(!WasiVcs.descends(repo, &side, &base).await.expect("descends"), "the reversed pair");
+    assert_eq!(
+        WasiVcs.descends(repo, "nope", &base).await,
+        Err(Error::NotFound("nope".to_owned())),
+        "an endpoint the repository lacks"
+    );
+    assert_eq!(WasiVcs.labelled(repo, "slice").await.expect("labelled"), side);
+    assert_eq!(
+        WasiVcs.labelled(repo, "nope").await,
+        Err(Error::NotFound("nope".to_owned())),
+        "a label the repository lacks, named as given"
+    );
+    for name in ["slice~1", "slice^", "slice@{0}"] {
+        assert_eq!(
+            WasiVcs.labelled(repo, name).await,
+            Err(Error::NotFound(name.to_owned())),
+            "a name that walks from a label is no label"
+        );
+    }
+}
+
+// The host laid a tag of the branch's name at another commit, which the
+// bare spelling resolves to first; the label is the branch all the same.
+async fn labelled_under_a_tag(repo: &str) {
+    let branch = WasiVcs.resolve(repo, "refs/heads/slice").await.expect("the branch");
+    let bare = WasiVcs.resolve(repo, "slice").await.expect("the bare spelling");
+    assert_ne!(branch, bare, "the tag shadows the branch");
+    assert_eq!(WasiVcs.labelled(repo, "slice").await.expect("labelled"), branch);
 }
 
 // One side edited the path and the other deleted it: keeping the deleting side

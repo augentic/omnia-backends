@@ -33,6 +33,9 @@ const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 // `worker.rs`'s bound on binding `sdk.v1` over the ready line.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+// A bound's timer starts a round trip before the fake records the arrival, so a
+// span measured between the fake's own timestamps can fall this far short of it.
+const TRIP: Duration = Duration::from_millis(50);
 
 fn with_window(window: Duration, max_agents: usize) -> ConnectOptions {
     ConnectOptions {
@@ -692,7 +695,8 @@ async fn hang_on_teardown() {
     assert!(waited < TEARDOWN_TIMEOUT, "the answer arrived {waited:?} after CloseAgent");
     let deleted = log.saw(Rpc::DeleteAgent)[0].at();
     let held = deleted.duration_since(closed).unwrap_or_default();
-    assert!(held >= TEARDOWN_TIMEOUT, "DeleteAgent followed {held:?} after CloseAgent");
+    let bound = TEARDOWN_TIMEOUT.saturating_sub(TRIP);
+    assert!(held >= bound, "DeleteAgent followed {held:?} after CloseAgent");
 }
 
 #[tokio::test]
@@ -712,9 +716,7 @@ async fn hang_on_shutdown() {
     assert_eq!(worker.last_rpc(), Some(Rpc::Shutdown));
     let asked = worker.saw(Rpc::Shutdown)[0].at();
     let held = gone.duration_since(asked).unwrap_or_default();
-
-    // the bound's timer starts a round trip before the fake records the arrival
-    let bound = SHUTDOWN_TIMEOUT.saturating_sub(Duration::from_millis(50));
+    let bound = SHUTDOWN_TIMEOUT.saturating_sub(TRIP);
     assert!(held >= bound, "the process was gone {held:?} after Shutdown");
     await_forked_gone(worker).await;
 }

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub use agent::Deadlines;
 use agent::{Attempt, Unanswered};
 use anyhow::anyhow;
-use omnia_wasi_model::{Answer, Format, FutureResult, Request, ToolHost, WasiModelCtx};
+use omnia_wasi_model::{Answer, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx};
 use options::Turn;
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
@@ -55,6 +55,13 @@ impl WasiModelCtx for Client {
             }
             .instrument(span),
         )
+    }
+
+    fn limits(&self) -> Limits {
+        Limits {
+            max_tool_calls: self.max_tool_calls,
+            ..Limits::default()
+        }
     }
 }
 

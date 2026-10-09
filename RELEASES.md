@@ -117,6 +117,14 @@ Unreleased
   the agent's `cwd` relative to it, so the eighty characters go on the
   part that tells one file from another rather than on the lent tree's
   absolute path; the transcript keeps the path as the agent spelled it.
+- `omnia-cursor` owns the guest tool-call budget: `ConnectOptions`
+  gains `max_tool_calls` (`CURSOR_MAX_TOOL_CALLS`, default `128`; zero
+  refused at connect), answered to the host through
+  `WasiModelCtx::limits` in place of `wasi-model`'s default of 32, with
+  the result-size cap and the per-call timeout left the host's. An agent
+  that lays a tree one file a tool call ran past 32 before its wall-clock
+  cap; the cap on the run is `CURSOR_TIMEOUT_SECS`, and the call budget
+  now sits beside it as a knob of the same backend.
 
 ### Changed
 

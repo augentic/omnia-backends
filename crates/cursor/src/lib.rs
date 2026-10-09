@@ -29,6 +29,7 @@ pub struct Client {
     model: String,
     api_key: Option<String>,
     pool: Arc<Pool>,
+    max_tool_calls: u32,
 }
 
 impl std::fmt::Debug for Client {
@@ -37,6 +38,7 @@ impl std::fmt::Debug for Client {
             .field("deadlines", &self.deadlines)
             .field("model", &self.model)
             .field("max_agents", &self.pool.max_agents())
+            .field("max_tool_calls", &self.max_tool_calls)
             .finish_non_exhaustive()
     }
 }
@@ -50,6 +52,7 @@ impl Backend for Client {
         ensure!(options.timeout_secs > 0, "timeout_secs must be greater than 0");
         ensure!(options.inactivity_secs > 0, "inactivity_secs must be greater than 0");
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");
+        ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
 
         let pool = Pool::connect(options.max_agents).await?;
         Ok(Self {
@@ -60,6 +63,7 @@ impl Backend for Client {
             model: options.model,
             api_key,
             pool: Arc::new(pool),
+            max_tool_calls: options.max_tool_calls,
         })
     }
 }
@@ -94,6 +98,10 @@ mod config {
         /// Maximum agents live at once.
         #[env(from = "CURSOR_MAX_AGENTS", default = "8")]
         pub max_agents: usize,
+        /// Guest tool calls one completion may make before it is ended as
+        /// `budget-exhausted`; the host's default is 32.
+        #[env(from = "CURSOR_MAX_TOOL_CALLS", default = "128")]
+        pub max_tool_calls: u32,
     }
 }
 pub use config::ConnectOptions;

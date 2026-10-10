@@ -71,9 +71,16 @@ pub async fn run_guest_over(wasm: &str, args: &[&str], client: &Client, mount: O
 /// The `expect_error` guest: the completion fails and its detail carries
 /// `needle`; `flags` are its further arguments (`tools`, `without:<text>`).
 pub async fn expect_error(needle: &str, flags: &[&str], client: &Client) {
+    expect_error_over(needle, flags, client, None).await;
+}
+
+/// The `expect_error` guest lending `mount` as its `.`, with `lend` among its flags.
+pub async fn expect_error_over(
+    needle: &str, flags: &[&str], client: &Client, mount: Option<Mount>,
+) {
     let mut args = vec![needle];
     args.extend_from_slice(flags);
-    run_guest(test_programs::MODEL_EXPECT_ERROR, &args, client).await;
+    run_guest_over(test_programs::MODEL_EXPECT_ERROR, &args, client, mount).await;
 }
 
 /// Wait for every spawned process to be reaped: the pool whole again, since a

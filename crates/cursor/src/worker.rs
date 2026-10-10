@@ -16,7 +16,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, bail};
 use discovery::Discovery;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessGroup};
 use tempfile::TempDir;
@@ -28,6 +28,7 @@ use tokio::time::{Instant, timeout};
 use tracing::{Instrument as _, Span};
 
 use crate::endpoint::Registration;
+use crate::git::Pins;
 use crate::protocol::Rpc;
 use crate::{Failure, elapsed_ms, lock};
 
@@ -84,34 +85,16 @@ impl Worker {
         "NODE_EXTRA_CA_CERTS",
         "NODE_USE_SYSTEM_CA",
     ];
-    // Config git reads above a repository's own and any file it includes,
-    // carried in every worker's environment: the bridge runs git in a lent
-    // tree outside the shell's sandbox, and so runs no hook and no fsmonitor
-    // program the tree names. A shell command's git inherits the same.
-    const GIT_CONFIG: &[(&str, &str)] =
-        &[("core.hooksPath", "/dev/null"), ("core.fsmonitor", "false")];
-    // The first git that reads `GIT_CONFIG_COUNT`; older ones ignore it.
-    const GIT_MIN: (u32, u32) = (2, 31);
     // The entries of `ENV` whose value is a URL, which may carry credentials
     // the bridge needs and a shell command would print.
     const PROXIES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];
 
     // What a worker, and any git asked how a worker's git would answer, is
-    // spawned with: the allowlisted host variables, then the git pins.
-    pub fn environment() -> impl Iterator<Item = (OsString, OsString)> {
-        let host = std::env::vars_os().filter(|(name, _)| Self::passes(name));
-        let count = Self::GIT_CONFIG.len().to_string();
-        let pins = Self::GIT_CONFIG.iter().enumerate().flat_map(|(index, (key, value))| {
-            [
-                (format!("GIT_CONFIG_KEY_{index}"), (*key).to_owned()),
-                (format!("GIT_CONFIG_VALUE_{index}"), (*value).to_owned()),
-            ]
-        });
-        host.chain(
-            std::iter::once(("GIT_CONFIG_COUNT".to_owned(), count))
-                .chain(pins)
-                .map(|(name, value)| (name.into(), value.into())),
-        )
+    // spawned with: the allowlisted host variables, then the git pins. The
+    // bridge runs git in a lent tree outside the shell's sandbox, and hands
+    // its whole environment to each shell command, so both read the pins.
+    pub fn environment(pins: &Pins) -> impl Iterator<Item = (OsString, OsString)> {
+        std::env::vars_os().filter(|(name, _)| Self::passes(name)).chain(pins.variables())
     }
 
     // Refuse an environment whose proxy URLs carry credentials: the bridge
@@ -129,33 +112,9 @@ impl Worker {
         Ok(())
     }
 
-    // Refuse a host whose git would ignore the pins, so a lend with the
-    // shell never runs on a tree's hooks unnoticed.
-    pub async fn check_git() -> Result<()> {
-        let output = Command::new("git")
-            .arg("--version")
-            .env_clear()
-            .envs(Self::environment())
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .context("running `git --version`; shell_roots needs git on PATH")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let version = git_version(&stdout)
-            .with_context(|| format!("unrecognised `git --version` output: {}", stdout.trim()))?;
-        let (major, minor) = Self::GIT_MIN;
-        ensure!(
-            version >= Self::GIT_MIN,
-            "shell_roots needs git {major}.{minor} or later, which reads the hook and fsmonitor \
-             pins; found {}",
-            stdout.trim()
-        );
-        Ok(())
-    }
-
     // The handshake is left to `Spawned::handshake`, so a pool lease can
     // occupy the slot first.
-    pub fn spawn(callback: &Registration) -> Result<Spawned> {
+    pub fn spawn(callback: &Registration, pins: &Pins) -> Result<Spawned> {
         let state_root = tempfile::Builder::new()
             .prefix("omnia-cursor-")
             .tempdir()
@@ -167,7 +126,7 @@ impl Worker {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env_clear()
-            .envs(Self::environment())
+            .envs(Self::environment(pins))
             .env("CURSOR_SDK_CLIENT_LANGUAGE", "rust")
             .arg("--state-root")
             .arg(state_root.path())
@@ -556,30 +515,12 @@ fn has_userinfo(url: &str) -> bool {
     rest.split(['/', '?', '#']).next().is_some_and(|authority| authority.contains('@'))
 }
 
-// The major and minor of a `git --version` line, whatever follows them.
-fn git_version(output: &str) -> Option<(u32, u32)> {
-    let version = output.trim().strip_prefix("git version ")?;
-    let mut parts = version.split(['.', ' ', '-']).map(str::parse::<u32>);
-    Some((parts.next()?.ok()?, parts.next()?.ok()?))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{TAIL_LINES, Tail, Worker, git_version};
+    use super::{TAIL_LINES, Tail, Worker};
 
     fn vars(vars: &[(&str, &str)]) -> Vec<(String, String)> {
         vars.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect()
-    }
-
-    #[test]
-    fn git_versions() {
-        assert_eq!(git_version("git version 2.50.1 (Apple Git-155)\n"), Some((2, 50)));
-        assert_eq!(git_version("git version 2.31.0"), Some((2, 31)));
-        assert_eq!(git_version("git version 2.30.2\n"), Some((2, 30)));
-        assert_eq!(git_version("git version 3.0.0-rc1"), Some((3, 0)));
-        assert_eq!(git_version("git: command not found"), None);
-        assert_eq!(git_version(""), None);
-        assert!((2, 30) < Worker::GIT_MIN && (3, 0) >= Worker::GIT_MIN);
     }
 
     #[test]

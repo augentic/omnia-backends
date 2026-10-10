@@ -100,7 +100,7 @@ impl Agent {
         } = attempt;
 
         let mut completion = Completion::from(&turn);
-        let Turn { agent, prompt } = turn;
+        let Turn { agent, prompt, .. } = turn;
         let AgentSpec {
             options,
             operation,

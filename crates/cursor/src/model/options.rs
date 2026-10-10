@@ -4,23 +4,19 @@
 //! format's final-answer instruction and a hint naming the granted MCP
 //! servers.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt as _;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::process::Command;
 
+use crate::git::{Confinement, Pins};
 use crate::protocol::{
     AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
     ModelSelection, SandboxOptions, ToolList,
 };
-use crate::worker::Worker;
 
 // The built-in tools a lent workspace grants: the read-only four and the
 // custom-tool channel. `edit` and `delete` are withheld, so the tree is
@@ -59,11 +55,12 @@ enum Tools {
     Shell,
 }
 
-// Everything one completion derives from the request: the agent to create
-// and the prompt to send it.
+// Everything one completion derives from the request: the agent to create,
+// the prompt to send it, and the git pins its worker is spawned under.
 pub struct Turn {
     pub agent: AgentSpec,
     pub prompt: Prompt,
+    pub pins: Pins,
 }
 
 pub struct Prompt {
@@ -98,6 +95,7 @@ impl Turn {
         let options = agent_options(request, roots, tools, defaults)?;
         let text = with_mcp_hint(&request.mcp_servers(), request.to_string());
         let text = with_tree_hint(workspace.hinted()?, text);
+        let pins = workspace.pins();
         Ok(Self {
             agent: AgentSpec {
                 options,
@@ -109,6 +107,7 @@ impl Turn {
                 format: request.format.clone(),
                 check: request.check,
             },
+            pins,
         })
     }
 }
@@ -125,7 +124,7 @@ impl Turn {
 pub enum Workspace {
     Private(TempDir),
     Lent(PathBuf),
-    Shell { tree: PathBuf, cwd: PathBuf, _policy: TempDir },
+    Shell { tree: PathBuf, cwd: PathBuf, _policy: TempDir, pins: Pins },
 }
 
 impl Workspace {
@@ -143,23 +142,25 @@ impl Workspace {
             return Ok(Self::Lent(tree));
         }
 
-        let includes = config_includes(&tree).await?;
         let policy = private("omnia-cursor-policy-")?;
         let cwd = tokio::fs::canonicalize(policy.path())
             .await
             .with_context(|| format!("canonicalizing {}", policy.path().display()))?;
+        let confinement = Confinement::read(&tree, &cwd).await?;
+        let frozen: Vec<&str> =
+            confinement.frozen.iter().map(|path| utf8(path)).collect::<Result<_>>()?;
         let path = cwd.join(SANDBOX_POLICY);
         tokio::fs::create_dir_all(path.parent().expect("the policy has a parent"))
             .await
             .with_context(|| format!("creating {}", path.display()))?;
-        let policy_json = sandbox_policy(utf8(&cwd)?, utf8(&tree)?, &includes);
-        tokio::fs::write(&path, policy_json.to_string())
+        tokio::fs::write(&path, sandbox_policy(utf8(&tree)?, &frozen).to_string())
             .await
             .with_context(|| format!("writing {}", path.display()))?;
         Ok(Self::Shell {
             tree,
             cwd,
             _policy: policy,
+            pins: confinement.pins,
         })
     }
 
@@ -197,6 +198,15 @@ impl Workspace {
             Self::Private(_) | Self::Lent(_) => Ok(None),
         }
     }
+
+    // The git pins the worker is spawned under: those the lent repository
+    // calls for, or the forced set alone.
+    fn pins(&self) -> Pins {
+        match self {
+            Self::Shell { pins, .. } => pins.clone(),
+            Self::Private(_) | Self::Lent(_) => Pins::forced(),
+        }
+    }
 }
 
 // `tempfile` has no async API; one `mkdir` under the temp root is not worth
@@ -214,88 +224,23 @@ fn utf8(path: &Path) -> Result<&str> {
     path.to_str().with_context(|| format!("invalid workspace path {}", path.display()))
 }
 
-// The policy the shell's `cwd` carries: the tree is a write path; read-only
-// within it are `.git`, so no command alters the repository or what git
-// reads from it, and every config file git includes from the tree, so none
-// gains a hook, filter or diff command the bridge's own git would run; and
-// the `cwd` is read-only in full. The sandbox's writable root is the `cwd`,
-// and the bridge reads this file again for every command, so the directory
-// is held read-only by its own policy rather than by the protection of
-// `.cursor` the bridge adds only where it finds a git checkout. The network
-// is left to the operator's own policy.
-fn sandbox_policy(cwd: &str, tree: &str, includes: &[String]) -> Value {
-    let protected: Vec<String> = [cwd.to_owned(), format!("{tree}/.git")]
-        .into_iter()
-        .chain(includes.iter().cloned())
-        .collect();
+// The policy the shell's `cwd` carries: the tree is a write path, and
+// `frozen` — the `cwd` itself, the repository, and every file git reads
+// config from — is read-only, within the tree or without. The bridge turns
+// each read-only path into the write-protection mapping it hands the
+// sandbox helper, the same that guards its own `.cursor/*.json`, and the
+// helper denies a create, write, rename, link or unlink at a protected
+// path inside a write path, resolving links first. The sandbox's writable
+// root is the `cwd`, and the bridge reads this file again for every
+// command, so the directory is held read-only by its own policy rather
+// than by the protection of `.cursor` the bridge adds only where it finds
+// a git checkout. The network is left to the operator's own policy.
+fn sandbox_policy(tree: &str, frozen: &[&str]) -> Value {
     json!({
         "type": "workspace_readwrite",
         "additionalReadwritePaths": [tree],
-        "additionalReadonlyPaths": protected,
+        "additionalReadonlyPaths": frozen,
     })
-}
-
-// The config files git reads from inside `tree` besides those under
-// `.git`: an `include.path` in the repository's config names one, and git
-// resolves the path, its conditions and its own includes. Asked of git in
-// the worker's environment, so the answer is the one the bridge's git acts
-// on; where git cannot read the tree, the lend fails rather than guess.
-async fn config_includes(tree: &Path) -> Result<Vec<String>> {
-    // git names a repository's files relative to its top level, which may
-    // lie above a lend of one of its subdirectories; outside a repository
-    // every file it names is absolute
-    let toplevel = git(tree, &["rev-parse", "--show-toplevel"]).await?;
-    let toplevel = toplevel
-        .status
-        .success()
-        .then(|| PathBuf::from(OsStr::from_bytes(toplevel.stdout.trim_ascii_end())));
-    let base = toplevel.as_deref().unwrap_or(tree);
-
-    let output = git(tree, &["config", "--list", "--show-origin", "-z"]).await?;
-    if !output.status.success() {
-        bail!(
-            "listing git config in {} failed: {}",
-            tree.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    // keep the files under the tree, outside `.git`
-    let dot_git = tree.join(".git");
-    let mut includes = BTreeSet::new();
-    for origin in config_origins(&output.stdout) {
-        let path = base.join(origin);
-        let path = tokio::fs::canonicalize(&path)
-            .await
-            .with_context(|| format!("resolving {}, a config file git read", path.display()))?;
-        if path.starts_with(tree) && !path.starts_with(&dot_git) {
-            includes.insert(utf8(&path)?.to_owned());
-        }
-    }
-    Ok(includes.into_iter().collect())
-}
-
-// Git in `tree`, as the worker runs it.
-async fn git(tree: &Path, args: &[&str]) -> Result<Output> {
-    Command::new("git")
-        .args(args)
-        .current_dir(tree)
-        .env_clear()
-        .envs(Worker::environment())
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .with_context(|| format!("running `git {}` in {}", args.join(" "), tree.display()))
-}
-
-// The `file:` origins of `git config --list --show-origin -z` output, which
-// alternates an origin and a `key\nvalue`, each NUL-terminated.
-fn config_origins(output: &[u8]) -> impl Iterator<Item = &Path> {
-    output
-        .split(|byte| *byte == 0)
-        .step_by(2)
-        .filter_map(|origin| origin.strip_prefix(b"file:"))
-        .map(|path| Path::new(OsStr::from_bytes(path)))
 }
 
 // Whether the canonical `path` is at or beneath one of `roots`, each
@@ -406,8 +351,6 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
 // MCP and model mapping is accepted by `tests/live.rs`.
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};
     use serde_json::json;
 
@@ -472,29 +415,15 @@ mod tests {
 
     #[test]
     fn shell_policy() {
-        let includes = roots(&["/work/tree/.gitconfig"]);
+        let frozen = ["/tmp/policy", "/work/tree/.git", "/work/tree/.gitconfig"];
         assert_eq!(
-            sandbox_policy("/tmp/policy", "/work/tree", &includes),
+            sandbox_policy("/work/tree", &frozen),
             json!({
                 "type": "workspace_readwrite",
                 "additionalReadwritePaths": ["/work/tree"],
                 "additionalReadonlyPaths": ["/tmp/policy", "/work/tree/.git", "/work/tree/.gitconfig"],
             })
         );
-    }
-
-    #[test]
-    fn config_origins() {
-        let output = b"file:.git/config\0core.bare\nfalse\0\
-                       file:.git/../.gitconfig\0diff.x.command\n/bin/echo a\nb\0\
-                       command line:\0core.hookspath\n/dev/null\0\
-                       file:/home/u/.gitconfig\0user.name\nu\0";
-        let origins: Vec<&Path> = super::config_origins(output).collect();
-        assert_eq!(
-            origins,
-            [".git/config", ".git/../.gitconfig", "/home/u/.gitconfig"].map(Path::new)
-        );
-        assert_eq!(super::config_origins(b"").count(), 0);
     }
 
     #[test]

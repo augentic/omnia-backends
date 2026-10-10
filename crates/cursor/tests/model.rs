@@ -12,7 +12,8 @@ use omnia_test::host::{Scratch, scratch};
 use serde_json::json;
 use support::fake_bridge::{self, Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
 use support::harness::{
-    await_gone, connect, options, run_guest, run_guest_over, sole_agent, spawning,
+    await_gone, connect, expect_error_over, options, run_guest, run_guest_over, sole_agent,
+    spawning,
 };
 
 // A guest program without a matching test here fails to compile.
@@ -23,6 +24,14 @@ test_programs::foreach_model!();
 // verbatim.
 const PASS: &str = r#"{"findings":[],"verdict":"pass"}"#;
 const FAIL: &str = r#"{"findings":["x"],"verdict":"fail"}"#;
+
+// The git config every worker's environment pins, in order, before whatever
+// a lent repository's own configuration calls for.
+const FORCED_PINS: [[&str; 2]; 3] = [
+    ["core.hooksPath", "/dev/null"],
+    ["core.fsmonitor", "false"],
+    ["core.alternateRefsCommand", ""],
+];
 
 #[tokio::test]
 async fn model_echo_text() {
@@ -58,12 +67,8 @@ async fn model_echo_text() {
 
     // and carries, above any repository's config, the pins under which the
     // git the worker runs in a lent tree executes nothing the tree names
-    assert_eq!(
-        created.arg["git"],
-        json!({ "core.hooksPath": "/dev/null", "core.fsmonitor": "false" }),
-        "{}",
-        created.arg
-    );
+    assert_eq!(created.arg["git"], json!(FORCED_PINS), "{}", created.arg);
+    assert!(created.arg["ceilings"].is_null(), "{}", created.arg);
 
     // nothing lent: every built-in tool off, and no sandbox asked for
     assert_eq!(created.arg["tools"], json!([]));
@@ -128,6 +133,11 @@ async fn lent_shell() {
     assert!(policy.get("networkPolicy").is_none(), "{policy}");
     assert!(!Path::new(&cwd).exists(), "the policy directory went with the agent");
 
+    // a tree in no repository calls for no pin of its own, and no git of
+    // the worker's looks above it, or above the cwd, for one
+    assert_eq!(created.arg["git"], json!(FORCED_PINS), "{}", created.arg);
+    assert_eq!(created.arg["ceilings"], json!(ceilings(&[&tree, cwd])), "{}", created.arg);
+
     // the agent is not started in the tree, so the prompt names it, and
     // every command's `cd`
     let prompt = log.saw(Rpc::Send)[0].text("text");
@@ -137,21 +147,15 @@ async fn lent_shell() {
 }
 
 // A lend of one subdirectory of a repository whose config includes a file
-// inside that subdirectory: the bridge's own git reads it, outside the
-// shell's sandbox, so the shell may not write it, any more than `.git`.
+// inside that subdirectory, defining a filter: the bridge's own git reads
+// both, outside the shell's sandbox, so the repository and the file are
+// held still and the filter is pinned off for every git of the worker's.
 #[tokio::test]
 async fn lent_with_config_include() {
     let fake = Spawnable::new(&Config::echo());
     let repo = scratch();
-    for dir in [".git/objects", ".git/refs", "sub"] {
-        std::fs::create_dir_all(repo.path().join(dir)).expect("the repository");
-    }
-    repo.write(".git/HEAD", "ref: refs/heads/main\n");
-    repo.write(
-        ".git/config",
-        "[core]\n\trepositoryformatversion = 0\n[include]\n\tpath = ../sub/.gitconfig\n",
-    );
-    repo.write("sub/.gitconfig", "[diff \"x\"]\n\tcommand = /bin/echo\n");
+    skeleton(&repo, "[include]\n\tpath = ../sub/.gitconfig\n");
+    repo.write("sub/.gitconfig", "[filter \"x\"]\n\tclean = /bin/cat\n\trequired = true\n");
     let mut lend = repo.mount(true);
     lend.path = repo.path().join("sub");
     let client = connect(ConnectOptions {
@@ -164,14 +168,130 @@ async fn lent_with_config_include() {
 
     let log = fake.log();
     let created = log.saw(Rpc::CreateAgent)[0];
-    let tree = format!("{}/sub", tree(&repo));
+    let repo = tree(&repo);
+    let tree = format!("{repo}/sub");
+    let cwd = created.text("cwd");
     let policy = &created.arg["policy"];
     assert_eq!(policy["additionalReadwritePaths"], json!([tree]), "{policy}");
     assert_eq!(
         policy["additionalReadonlyPaths"],
-        json!([created.text("cwd"), format!("{tree}/.git"), format!("{tree}/.gitconfig")]),
+        json!([cwd, format!("{tree}/.git"), format!("{repo}/.git"), format!("{tree}/.gitconfig")]),
         "{policy}"
     );
+    let mut pins = json!(FORCED_PINS);
+    pins.as_array_mut()
+        .expect("pairs")
+        .extend([json!(["filter.x.clean", ""]), json!(["filter.x.required", "false"])]);
+    assert_eq!(created.arg["git"], pins, "{}", created.arg);
+    assert_eq!(created.arg["ceilings"], json!(ceilings(&[&repo, cwd])), "{}", created.arg);
+}
+
+// Config includes git would open at a path the shell could otherwise
+// supply: one whose target does not exist yet, and one through a symbolic
+// link. Each is held as named and as resolved.
+#[tokio::test]
+async fn lent_with_include_targets() {
+    let fake = Spawnable::new(&Config::echo());
+    let lent = scratch();
+    skeleton(&lent, "[include]\n\tpath = ../missing.gitconfig\n\tpath = ../link.gitconfig\n");
+    lent.write("real.gitconfig", "[user]\n\tname = x\n");
+    std::os::unix::fs::symlink("real.gitconfig", lent.path().join("link.gitconfig"))
+        .expect("the link");
+    let client = connect(ConnectOptions {
+        shell_roots: vec![lent.path().to_path_buf()],
+        ..options(1)
+    })
+    .await;
+    run_guest_over(test_programs::MODEL_LENT_WORKSPACE, &[], &client, Some(lent.mount(true))).await;
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let created = log.saw(Rpc::CreateAgent)[0];
+    let tree = tree(&lent);
+    let policy = &created.arg["policy"];
+    assert_eq!(
+        policy["additionalReadonlyPaths"],
+        json!([
+            created.text("cwd"),
+            format!("{tree}/.git"),
+            format!("{tree}/link.gitconfig"),
+            format!("{tree}/missing.gitconfig"),
+            format!("{tree}/real.gitconfig"),
+        ]),
+        "{policy}"
+    );
+}
+
+// A repository setting a program `git diff` runs in place of its own is
+// refused the shell: emptying the key would end every diff, and leaving it
+// would run the tree's program outside the sandbox.
+#[tokio::test]
+async fn lent_with_external_diff() {
+    let fake = Spawnable::new(&Config::echo());
+    let lent = scratch();
+    skeleton(&lent, "[diff]\n\texternal = /bin/echo\n");
+    let client = connect(ConnectOptions {
+        shell_roots: vec![lent.path().to_path_buf()],
+        ..options(1)
+    })
+    .await;
+    expect_error_over("sets diff.external", &["lend"], &client, Some(lent.mount(true))).await;
+    assert!(fake.log().processes().is_empty(), "refused before any worker was spawned");
+}
+
+// A repository with a submodule is refused the shell: the bridge's status
+// and diff run git in the submodule, on configuration nothing here reads.
+#[tokio::test]
+async fn lent_with_submodule() {
+    let fake = Spawnable::new(&Config::echo());
+    let lent = scratch();
+    git(lent.path(), &["init", "-q"]);
+    git(
+        lent.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,4b825dc642cb6eb9a060e54bf8d69288fbee4904,vendored",
+        ],
+    );
+    let client = connect(ConnectOptions {
+        shell_roots: vec![lent.path().to_path_buf()],
+        ..options(1)
+    })
+    .await;
+    expect_error_over("has submodules", &["lend"], &client, Some(lent.mount(true))).await;
+    assert!(fake.log().processes().is_empty(), "refused before any worker was spawned");
+}
+
+// A repository git finds at `root` without a working copy of git: a `HEAD`,
+// empty object and ref stores, and a config holding `body`.
+fn skeleton(root: &Scratch, body: &str) {
+    for dir in [".git/objects", ".git/refs", "sub"] {
+        std::fs::create_dir_all(root.path().join(dir)).expect("the repository");
+    }
+    root.write(".git/HEAD", "ref: refs/heads/main\n");
+    root.write(".git/config", format!("[core]\n\trepositoryformatversion = 0\n{body}"));
+}
+
+// One git command in `dir`, under the host's config alone.
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {args:?} in {}", dir.display());
+}
+
+// The directories no git of the worker's looks above: the parents of the
+// repository, or of a tree in none, and of the cwd, as the environment
+// lists them.
+fn ceilings(of: &[&str]) -> Vec<String> {
+    let parents: std::collections::BTreeSet<&Path> =
+        of.iter().filter_map(|path| Path::new(path).parent()).collect();
+    parents.into_iter().map(|path| path.to_str().expect("UTF-8").to_owned()).collect()
 }
 
 #[tokio::test]

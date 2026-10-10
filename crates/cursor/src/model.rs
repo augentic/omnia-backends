@@ -83,7 +83,7 @@ impl Client {
         let turn = Turn::prepare(request, tool_host.local_path(), defaults)
             .await
             .map_err(Unanswered::settled)?;
-        let lease = self.pool.lease().await.map_err(Unanswered::settled)?;
+        let lease = self.pool.lease(&turn.pins).await.map_err(Unanswered::settled)?;
 
         Attempt {
             lease,

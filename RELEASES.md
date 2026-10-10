@@ -150,10 +150,12 @@ Unreleased
   whose policy admits the tree as a write path, holds the directory
   itself read-only so no command rewrites the policy, and says nothing
   of the network; whatever the tree says of its own confinement is never
-  read. Read-only within the tree are its `.git` and every config file
-  git includes from inside the tree, asked of git itself, since the
-  bridge runs git in the tree outside the sandbox: no command alters the
-  repository or gives it a hook, filter or diff command. The tree rides
+  read. The bridge runs git in the tree outside the sandbox, so the
+  sandbox holds still everything that git reads config from — the tree's
+  `.git`, the repository's own directories where they lie elsewhere, and
+  every file its config includes, each at the path git opens and at the
+  path the kernel resolves it to, present or not — asked of git itself,
+  so a lend whose config git cannot read fails rather than guess. The tree rides
   beside the working directory as a workspace root for the read-only
   tools, and since the sandbox starts every command in the working
   directory, the prompt opens by naming the tree and the `cd` each
@@ -176,12 +178,24 @@ Unreleased
   credentials of a backend sharing the host process reach a worker or a
   shell child it runs; and since the bridge hands its whole environment
   to each shell command, a proxy URL carrying credentials is refused at
-  connect once `shell_roots` is set. Every worker's environment pins
-  `core.hooksPath=/dev/null` and `core.fsmonitor=false` as command-line
-  git config, above a repository's own and anything it includes, so the
-  git the bridge runs in a lent tree executes no hook and no fsmonitor
-  program the tree names; `shell_roots` requires the git 2.31 that reads
-  the pins, checked at connect.
+  connect once `shell_roots` is set. Every worker's environment carries
+  command-line git config, which git reads above a repository's own and
+  anything it includes, so the git the bridge runs in a lent tree
+  executes nothing the tree names: `core.hooksPath=/dev/null`,
+  `core.fsmonitor=false` and `core.alternateRefsCommand=` on every
+  worker, and on one serving a shell-bearing lend whatever its
+  repository's configuration calls for, read before any git runs in it —
+  an SSH command, a credential prompt or a signing program the
+  repository set gives way to the host's own or to none, a clean, smudge
+  or merge driver it defined is emptied and no longer required, a
+  credential helper it added is reset and the host's re-added — with
+  `GIT_CEILING_DIRECTORIES` keeping every git of the worker's from
+  looking above the repository, or above a tree or working directory in
+  none, for one the shell might write. A repository setting
+  `diff.external` or a diff driver's `command` or `textconv`, one
+  spelling a key no pin can name, and one with submodules, whose own
+  repositories nothing reads, are refused the shell. `shell_roots`
+  requires the git 2.31 that reads the pins, checked at connect.
 
 ### Changed
 

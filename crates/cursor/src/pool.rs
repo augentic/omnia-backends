@@ -17,6 +17,7 @@ use tokio::time::Instant;
 
 use crate::elapsed_ms;
 use crate::endpoint::{Attached, Endpoint, Registration};
+use crate::git::Pins;
 use crate::worker::Worker;
 
 #[derive(Debug)]
@@ -37,8 +38,9 @@ impl Pool {
         })
     }
 
-    // Wait for a slot, in arrival order, then for the worker to run on.
-    pub async fn lease(&self) -> Result<Lease> {
+    // Wait for a slot, in arrival order, then for the worker to run on,
+    // spawned under `pins`.
+    pub async fn lease(&self, pins: &Pins) -> Result<Lease> {
         let queued = Instant::now();
         let permit =
             Arc::clone(&self.permits).acquire_owned().await.context("the agent pool is closed")?;
@@ -49,7 +51,7 @@ impl Pool {
         }
 
         let registration = Arc::new(self.endpoint.register()?);
-        let spawned = Worker::spawn(&registration)?;
+        let spawned = Worker::spawn(&registration, pins)?;
 
         // slot and token are held until the process is gone, however the lease ends
         let exited = spawned.exited();

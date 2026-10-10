@@ -277,6 +277,7 @@ impl Server {
             "apiKeyPresent": !api_key.is_empty(),
             "env": environment(),
             "git": git_config(),
+            "ceilings": git_ceilings(),
             "model": options["model"]["id"],
             "customTools": keys(&options["local"]["customTools"]),
             "mcpServers": keys(&options["mcpServers"]),
@@ -710,17 +711,24 @@ fn environment() -> Vec<String> {
 }
 
 // The git config the environment carries above any repository's, as git
-// reads it: `GIT_CONFIG_COUNT` pairs of `GIT_CONFIG_KEY_n` and `_VALUE_n`.
+// reads it: `GIT_CONFIG_COUNT` pairs of `GIT_CONFIG_KEY_n` and `_VALUE_n`,
+// in order, since a key reset and then re-added appears twice.
 fn git_config() -> Value {
     let count = std::env::var("GIT_CONFIG_COUNT").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
-    let pairs: serde_json::Map<String, Value> = (0..count)
+    let pairs: Vec<Value> = (0..count)
         .filter_map(|index| {
             let key = std::env::var(format!("GIT_CONFIG_KEY_{index}")).ok()?;
             let value = std::env::var(format!("GIT_CONFIG_VALUE_{index}")).ok()?;
-            Some((key, Value::String(value)))
+            Some(json!([key, value]))
         })
         .collect();
-    Value::Object(pairs)
+    Value::Array(pairs)
+}
+
+// The directories past which no git of ours looks for a repository.
+fn git_ceilings() -> Value {
+    std::env::var_os("GIT_CEILING_DIRECTORIES")
+        .map_or(Value::Null, |value| json!(std::env::split_paths(&value).collect::<Vec<_>>()))
 }
 
 fn gen_token() -> String {

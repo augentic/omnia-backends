@@ -37,6 +37,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
+const BIN: &str = "cursor-sdk-bridge";
 
 // A spawned `cursor-sdk-bridge` process this client watches, with `sdk.v1`
 // bound on it. Dropping it asks the worker to go.
@@ -114,17 +115,15 @@ impl Worker {
         Supervisor::spawn(child, state_root)
     }
 
-    const BIN: &str = "cursor-sdk-bridge";
-
     // HACK: resolved here rather than left to `exec`, since std spawns a bare
     // program name through `fork` once the child's environment carries its
     // own PATH, and a path keeps the far cheaper `posix_spawn`.
     fn locate() -> Result<PathBuf> {
         let path = std::env::var_os("PATH").unwrap_or_default();
         std::env::split_paths(&path)
-            .map(|dir| dir.join(Self::BIN))
+            .map(|dir| dir.join(BIN))
             .find(|bin| bin.is_file())
-            .ok_or_else(|| anyhow!("`{}` is not on PATH", Self::BIN))
+            .ok_or_else(|| anyhow!("`{BIN}` is not on PATH"))
     }
 
     // Named in `ENV`, or a locale setting.

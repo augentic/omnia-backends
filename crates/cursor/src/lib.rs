@@ -30,7 +30,7 @@ pub struct Client {
     api_key: Option<String>,
     pool: Arc<Pool>,
     max_tool_calls: u32,
-    sandbox: bool,
+    shell: bool,
 }
 
 impl std::fmt::Debug for Client {
@@ -40,7 +40,7 @@ impl std::fmt::Debug for Client {
             .field("model", &self.model)
             .field("max_agents", &self.pool.max_agents())
             .field("max_tool_calls", &self.max_tool_calls)
-            .field("sandbox", &self.sandbox)
+            .field("shell", &self.shell)
             .finish_non_exhaustive()
     }
 }
@@ -66,7 +66,7 @@ impl Backend for Client {
             api_key,
             pool: Arc::new(pool),
             max_tool_calls: options.max_tool_calls,
-            sandbox: options.sandbox,
+            shell: options.shell,
         })
     }
 }
@@ -105,10 +105,10 @@ mod config {
         /// `budget-exhausted`; the host's default is 32.
         #[env(from = "CURSOR_MAX_TOOL_CALLS", default = "128")]
         pub max_tool_calls: u32,
-        /// Whether a lent workspace runs under the bridge's sandbox: writes
-        /// confined to the tree and the network closed.
-        #[env(from = "CURSOR_SANDBOX", default = "false")]
-        pub sandbox: bool,
+        /// Whether a lent workspace grants the agent a shell, run under the
+        /// bridge's sandbox: writes confined to the tree, the network closed.
+        #[env(from = "CURSOR_SHELL", default = "false")]
+        pub shell: bool,
     }
 }
 pub use config::ConnectOptions;

@@ -34,6 +34,7 @@ async fn scenario() {
     merge_policy_modify_delete().await;
     merge_policy_delete_modify().await;
     merge_policy_one_sided().await;
+    merge_policy_rename().await;
     merge_policy_binary().await;
     merge_up_to_date().await;
     log_over_base().await;
@@ -362,6 +363,49 @@ async fn merge_policy_one_sided() {
     assert_eq!(read("onesided/theirs-only.txt"), "theirs\n", "the merged-in side's addition stays");
     assert_eq!(read("onesided/ours-only.txt"), "ours\n", "the working copy's addition stays");
     assert!(WasiVcs.pending(repo).await.expect("pending").is_empty(), "the copy is sealed");
+}
+
+// a repository whose working copy edited `old.txt` while the merged-in side
+// renamed it to `new.txt`, and the merged-in commit
+async fn renamed(repo: &str, work: &str) -> String {
+    WasiVcs.init(repo).await.expect("init");
+    write(&format!("{repo}/old.txt"), "base\n");
+    let base = WasiVcs.commit(repo, "base").await.expect("commit").expect("base");
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    fs::rename(format!("{work}/old.txt"), format!("{work}/new.txt")).expect("rename on their side");
+    let theirs = WasiVcs.commit(work, "rename").await.expect("commit").expect("rename");
+    write(&format!("{repo}/old.txt"), "ours\n");
+    WasiVcs.commit(repo, "edit").await.expect("commit").expect("edit");
+    theirs
+}
+
+// The merged-in side renamed a path the working copy edited, so git carries
+// the edit to the new name: a rule over both names keeps one side whole,
+// `ours` the old name with its bytes and `theirs` the new name with its, not
+// the old name restored beside git's blend of the new.
+async fn merge_policy_rename() {
+    let theirs = renamed("./renamed", "./renamed-work").await;
+    let policy = [rule("*.txt", Strategy::Ours)];
+    let merged = WasiVcs.merge("./renamed", &theirs, "merge", &policy).await.expect("merge");
+    assert_eq!(merged.conflicts, Vec::<String>::new());
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert_eq!(read("renamed/old.txt"), "ours\n");
+    assert!(fs::metadata("renamed/new.txt").is_err(), "the new name was kept beside the old");
+    assert!(WasiVcs.pending("./renamed").await.expect("pending").is_empty(), "the copy is sealed");
+
+    let theirs = renamed("./renamed-theirs", "./renamed-theirs-work").await;
+    let policy = [rule("*.txt", Strategy::Theirs)];
+    let merged = WasiVcs.merge("./renamed-theirs", &theirs, "merge", &policy).await.expect("merge");
+    assert_eq!(merged.conflicts, Vec::<String>::new());
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert_eq!(
+        read("renamed-theirs/new.txt"),
+        "base\n",
+        "git's blend stood where theirs' bytes go"
+    );
+    assert!(fs::metadata("renamed-theirs/old.txt").is_err(), "the old name stayed");
+    let pending = WasiVcs.pending("./renamed-theirs").await.expect("pending");
+    assert!(pending.is_empty(), "the copy is sealed");
 }
 
 // A blob no text encoding holds: a `union` over it cannot be sealed and leaves

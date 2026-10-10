@@ -486,31 +486,32 @@ impl<'a> Repo<'a> {
 
     // The paths both sides changed since their common ancestor, where a
     // policy rule may apply; a path one side alone changed is git's clean
-    // merge and no rule's, whatever the rule would lay there. Without an
-    // ancestor, every path the two sides differ on. A rename is its two
-    // paths, each ruled on its own.
+    // merge and no rule's, whatever the rule would lay there. A rename is
+    // its two paths, each ruled on its own, and followed as the merge
+    // follows it: the other side's change to the old path is a change to the
+    // new one too. Without an ancestor, every path the two sides differ on.
     async fn touched(&self, base: Option<&str>) -> Result<Vec<String>> {
         let Some(base) = base else {
-            return self.changed("HEAD", "MERGE_HEAD").await;
+            return Ok(self.changed("HEAD", "MERGE_HEAD").await?.paths);
         };
         let ours = self.changed(base, "HEAD").await?;
         let theirs = self.changed(base, "MERGE_HEAD").await?;
-        Ok(theirs.into_iter().filter(|path| ours.contains(path)).collect())
+        Ok(ours.shared(&theirs))
     }
 
-    async fn changed(&self, from: &str, to: &str) -> Result<Vec<String>> {
+    async fn changed(&self, from: &str, to: &str) -> Result<Changes> {
         let args = [
             "diff",
             "--no-ext-diff",
             "--no-textconv",
-            "--no-renames",
-            "--name-only",
+            "--find-renames",
+            "--name-status",
             "-z",
             from,
             to,
         ];
         let output = self.run(args, &self.shown(), "HEAD").await?;
-        Ok(nul_separated(&output.text()))
+        Ok(changes(&output.text()))
     }
 
     // One commit's version of a path, byte for byte, or none when that commit
@@ -715,11 +716,63 @@ const fn kind(index: char, tree: char) -> Option<ChangeKind> {
     }
 }
 
+// One side's changes since the merge base: every path it changed, a rename
+// as both of its paths, and the renames themselves.
+struct Changes {
+    paths: Vec<String>,
+    renames: Vec<(String, String)>,
+}
+
+impl Changes {
+    // The paths both sides changed, the renames followed: where one side
+    // renamed a path the other changed, the new path is theirs both too,
+    // since the merge carries that change to it.
+    fn shared(&self, other: &Self) -> Vec<String> {
+        let mut shared: Vec<String> =
+            self.paths.iter().filter(|path| other.paths.contains(path)).cloned().collect();
+        let followed = self
+            .renames
+            .iter()
+            .filter(|(old, _)| other.paths.contains(old))
+            .chain(other.renames.iter().filter(|(old, _)| self.paths.contains(old)))
+            .map(|(_, new)| new);
+        for new in followed {
+            if !shared.contains(new) {
+                shared.push(new.clone());
+            }
+        }
+        shared
+    }
+}
+
+// The `-z` records of `diff --name-status --find-renames`: a status and its
+// path, or for a rename the old path and the new.
+fn changes(output: &str) -> Changes {
+    let mut changes = Changes {
+        paths: Vec::new(),
+        renames: Vec::new(),
+    };
+    let mut fields = output.split('\0');
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        if status.starts_with('R') {
+            let Some(new) = fields.next() else {
+                break;
+            };
+            changes.paths.push(path.to_owned());
+            changes.paths.push(new.to_owned());
+            changes.renames.push((path.to_owned(), new.to_owned()));
+        } else {
+            changes.paths.push(path.to_owned());
+        }
+    }
+    changes
+}
+
 #[cfg(test)]
 mod tests {
     use omnia_wasi_vcs::ChangeKind;
 
-    use super::{entries, is_local, pending};
+    use super::{changes, entries, is_local, pending};
 
     fn kinds(porcelain: &str) -> Vec<(String, ChangeKind)> {
         pending(porcelain).into_iter().map(|change| (change.path, change.kind)).collect()
@@ -764,6 +817,17 @@ mod tests {
             ]
         );
         assert_eq!(logged(""), []);
+    }
+
+    #[test]
+    fn name_status_records() {
+        let ours = changes("M\0old.txt\0A\0ours.txt\0");
+        let theirs = changes("R100\0old.txt\0new.txt\0A\0theirs.txt\0");
+        assert_eq!(theirs.paths, ["old.txt", "new.txt", "theirs.txt"]);
+        assert_eq!(theirs.renames, [("old.txt".to_owned(), "new.txt".to_owned())]);
+        assert_eq!(ours.shared(&theirs), ["old.txt", "new.txt"]);
+        assert_eq!(theirs.shared(&ours), ["old.txt", "new.txt"]);
+        assert_eq!(changes("").paths, Vec::<String>::new());
     }
 
     #[test]

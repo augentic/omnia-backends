@@ -127,21 +127,26 @@ Unreleased
   that lays a tree one file a tool call ran past 32 before its wall-clock
   cap; the cap on the run is `CURSOR_TIMEOUT_SECS`, and the call budget
   now sits beside it as a knob of the same backend.
-- `omnia-cursor` grants `shell` on a lent workspace, beside the read-only
-  tools and the custom-tool channel, so an agent runs the checks its
-  prompt names — a compiler, a test runner — in the tree it was lent
+- `omnia-cursor` can grant `shell` on a lent workspace, beside the
+  read-only tools and the custom-tool channel, so an agent runs the checks
+  its prompt names — a compiler, a test runner — in the tree it was lent
   rather than reading the tree and guessing what they would say; `edit`
-  and `delete` stay withheld. The bridge bounds each command by the
-  timeout the agent's call names (30 s when it names none), so the
-  inactivity window stands down while a shell command runs, as it does
-  while the model composes: a long check the agent asked for is no longer
-  cut short at `CURSOR_INACTIVITY_SECS` by a limit it could not see, and
-  the absolute cap alone bounds it. `ConnectOptions` gains `sandbox`
-  (`CURSOR_SANDBOX`, default `false`): on, a lent run asks the bridge for
-  its sandbox — writes confined to the tree, the network closed — which
-  needs Cursor's sandbox binary and refuses the completion where it is
-  missing; off, nothing is sent, so an operator's own
-  `~/.cursor/sandbox.json` applies as before.
+  and `delete` stay withheld. The grant is the operator's, not the lend's:
+  `ConnectOptions` gains `shell` (`CURSOR_SHELL`, default `false`), and a
+  lend without it keeps the read-only tools alone, since a lend is a
+  preopen rather than a trust decision and a shell runs as the worker's
+  user. On, every shell-bearing run asks the bridge for its sandbox —
+  writes confined to the tree, the network closed — which needs Cursor's
+  sandbox binary and refuses the completion where it is missing, so a
+  command a prompt names, or a file in the tree injects, runs confined or
+  not at all. The bridge bounds each command by the timeout the agent's
+  call names (30 s when it names none), so the inactivity window stands
+  down while a shell command runs, as it does while the model composes: a
+  long check the agent asked for is no longer cut short at
+  `CURSOR_INACTIVITY_SECS` by a limit it could not see, and the absolute
+  cap alone bounds it. Workers are spawned without `CURSOR_API_KEY` in
+  their environment, which every RPC carries explicitly, so no shell
+  child inherits it.
 
 ### Changed
 
@@ -254,7 +259,13 @@ Unreleased
   — was removed from the merge as the side that lacked it, and the
   removal itself refused, since git had staged the addition cleanly and
   `rm` drops staged content only under `--force`, which it now carries.
-  Without a common ancestor every differing path is still ruled.
+  A rename one side made is followed as the merge follows it: the other
+  side's change to the old path counts as a change to the new, so a rule
+  over both names keeps one side whole — `ours` the old name with its
+  bytes, `theirs` the new with its — where the new name had looked like a
+  one-sided addition and stayed as git blended it, beside the old name a
+  rule restored. Without a common ancestor every differing path is still
+  ruled.
 
 ### Removed
 

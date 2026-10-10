@@ -64,8 +64,12 @@ impl Worker {
             .args(["--tool-callback-url", callback.url()])
             .args(["--tool-callback-auth-token", callback.token()]);
 
-        // drop git identity, so agent does not point at the host repository
-        for var in &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"] {
+        // drop git identity, so the agent does not point at the host
+        // repository, and the key, which every RPC carries explicitly, so no
+        // shell child the agent runs inherits it
+        for var in
+            &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "CURSOR_API_KEY"]
+        {
             command.env_remove(var);
         }
 

@@ -46,6 +46,10 @@ async fn model_echo_text() {
     assert_eq!(deleted.arg["apiKeyPresent"], true);
     assert_eq!(deleted.arg["apiKeyMatchesCreate"], true);
 
+    // the key reaches the worker on the wire alone, never in an environment
+    // a shell child would inherit
+    assert_eq!(created.arg["apiKeyInEnv"], false, "{}", created.arg);
+
     // nothing lent: every built-in tool off, and no sandbox asked for
     assert_eq!(created.arg["tools"], json!([]));
     assert!(created.arg["sandbox"].is_null(), "{}", created.arg);
@@ -63,13 +67,32 @@ async fn model_lent_workspace() {
     let (_, sequence) = sole_agent(&log);
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
 
-    // the lent tree is the agent's cwd, with the shell among its tools and
-    // the sandbox left to the operator's own policy
+    // the lent tree is the agent's cwd, with the read-only tools alone: a
+    // lend is a preopen, not a grant of the host's shell
     let created = log.saw(Rpc::CreateAgent)[0];
     let cwd = std::fs::canonicalize(lent.path()).expect("the scratch root");
     assert_eq!(created.text("cwd"), cwd.to_str().expect("a UTF-8 path"));
-    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read", "shell"]));
+    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read"]));
     assert!(created.arg["sandbox"].is_null(), "{}", created.arg);
+}
+
+#[tokio::test]
+async fn lent_shell() {
+    let fake = Spawnable::new(&Config::echo());
+    let client = connect(ConnectOptions {
+        shell: true,
+        ..options(1)
+    })
+    .await;
+    let lent = scratch();
+    run_guest_over(test_programs::MODEL_LENT_WORKSPACE, &[], &client, Some(lent.mount(true))).await;
+    await_gone(&fake).await;
+
+    // the operator's knob adds the shell, and the bridge's sandbox with it
+    let log = fake.log();
+    let created = log.saw(Rpc::CreateAgent)[0];
+    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read", "shell"]));
+    assert_eq!(created.arg["sandbox"], true, "{}", created.arg);
 }
 
 #[tokio::test]

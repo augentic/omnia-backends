@@ -16,19 +16,25 @@ use crate::protocol::{
     ModelSelection, SandboxOptions, ToolList,
 };
 
-// The built-in tools a lent workspace grants: the read-only four, the
-// custom-tool channel, and the shell, which the bridge bounds by each
-// command's own timeout. `edit` and `delete` are withheld, so the tree is
-// written through the guest's tools or the shell alone.
-const LENT_TOOLS: [&str; 6] = ["glob", "grep", "ls", "mcp", "read", "shell"];
+// The built-in tools a lent workspace grants: the read-only four and the
+// custom-tool channel. `edit` and `delete` are withheld, so the tree is
+// written through the guest's tools alone.
+const LENT_TOOLS: [&str; 5] = ["glob", "grep", "ls", "mcp", "read"];
+
+// The tool the operator's `shell` knob adds to a lend, which the bridge
+// bounds by each command's own timeout. It runs as the worker's user, so it
+// is never granted without the bridge's sandbox: a lend is a preopen, not a
+// trust decision, and a prompt the tree itself injects would otherwise
+// name a command the host runs.
+const SHELL_TOOL: &str = "shell";
 
 // What the deployment fixes for every completion: the model a request
-// leaves unset, the key, and whether the bridge sandboxes a lent run.
+// leaves unset, the key, and whether a lent run gets the sandboxed shell.
 #[derive(Clone, Copy)]
 pub struct Defaults<'a> {
     pub model: &'a str,
     pub api_key: &'a str,
-    pub sandbox: bool,
+    pub shell: bool,
 }
 
 // Everything one completion derives from the request: the agent to create
@@ -165,8 +171,12 @@ fn agent_options(
     }
 
     let model = request.model.as_deref().unwrap_or(defaults.model).to_owned();
-    let names =
+    let shell = lent && defaults.shell;
+    let mut names: Vec<String> =
         if lent { LENT_TOOLS.iter().map(ToString::to_string).collect() } else { Vec::new() };
+    if shell {
+        names.push(SHELL_TOOL.to_owned());
+    }
 
     Ok(AgentOptions {
         model: ModelSelection { id: model },
@@ -174,7 +184,7 @@ fn agent_options(
         local: LocalAgentOptions {
             cwd: vec![cwd.to_owned()],
             source: lent.then(|| "SETTING_SOURCE_PROJECT".to_owned()),
-            sandbox_options: (lent && defaults.sandbox).then_some(SandboxOptions { enabled: true }),
+            sandbox_options: shell.then_some(SandboxOptions { enabled: true }),
             custom_tools,
         },
         mcp_servers,
@@ -218,7 +228,7 @@ mod tests {
     const DEFAULTS: Defaults<'static> = Defaults {
         model: "auto",
         api_key: "test-key",
-        sandbox: false,
+        shell: false,
     };
 
     #[test]
@@ -231,16 +241,12 @@ mod tests {
                 "grep".to_string(),
                 "ls".to_string(),
                 "mcp".to_string(),
-                "read".to_string(),
-                "shell".to_string()
+                "read".to_string()
             ]),
-            "a lent workspace grants the read-only tools, the custom-tool channel, and the shell"
+            "a lent workspace grants the read-only tools and the custom-tool channel"
         );
         assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
-        assert!(
-            options.local.sandbox_options.is_none(),
-            "the operator's own sandbox policy applies"
-        );
+        assert!(options.local.sandbox_options.is_none(), "nothing runs that needs confining");
         assert_eq!(options.api_key, "test-key");
 
         let options = agent_options(&request(), "/private", false, DEFAULTS).unwrap();
@@ -249,16 +255,32 @@ mod tests {
     }
 
     #[test]
-    fn sandboxed_lend() {
-        let sandboxed = Defaults {
-            sandbox: true,
+    fn shell_lend() {
+        let shell = Defaults {
+            shell: true,
             ..DEFAULTS
         };
-        let options = agent_options(&request(), "/workspace", true, sandboxed).unwrap();
-        assert!(options.local.sandbox_options.as_ref().is_some_and(|sandbox| sandbox.enabled));
+        let options = agent_options(&request(), "/workspace", true, shell).unwrap();
+        assert_eq!(
+            options.tools.as_ref().map(|t| t.names.clone()),
+            Some(vec![
+                "glob".to_string(),
+                "grep".to_string(),
+                "ls".to_string(),
+                "mcp".to_string(),
+                "read".to_string(),
+                "shell".to_string()
+            ]),
+            "the shell joins the read-only tools"
+        );
+        assert!(
+            options.local.sandbox_options.as_ref().is_some_and(|sandbox| sandbox.enabled),
+            "and never without the sandbox"
+        );
 
-        // nothing to confine without a lent tree
-        let options = agent_options(&request(), "/private", false, sandboxed).unwrap();
+        // no shell to confine without a lent tree
+        let options = agent_options(&request(), "/private", false, shell).unwrap();
+        assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
         assert!(options.local.sandbox_options.is_none());
     }
 

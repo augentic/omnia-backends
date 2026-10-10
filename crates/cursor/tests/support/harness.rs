@@ -32,7 +32,7 @@ pub fn options(max_agents: usize) -> ConnectOptions {
         inactivity_secs: 10,
         max_agents,
         max_tool_calls: 32,
-        sandbox: false,
+        shell: false,
     }
 }
 

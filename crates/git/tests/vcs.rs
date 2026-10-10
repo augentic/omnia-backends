@@ -113,6 +113,12 @@ async fn vcs_matrix() {
         "A\tours-only.txt"
     );
     assert_eq!(git.git(&at("onesided"), &["status", "--porcelain"]), "");
+
+    // a rename followed: the sealed tree is the kept side's, whole
+    assert_eq!(git.git(&at("renamed"), &["diff", "--name-status", "HEAD^1", "HEAD"]), "");
+    assert_eq!(git.git(&at("renamed-theirs"), &["diff", "--name-status", "HEAD^2", "HEAD"]), "");
+    assert_eq!(git.git(&at("renamed"), &["status", "--porcelain"]), "");
+    assert_eq!(git.git(&at("renamed-theirs"), &["status", "--porcelain"]), "");
     assert_eq!(
         git.git(&at("binary"), &["rev-parse", "HEAD:blob.bin"]),
         git.git(&at("binary"), &["rev-parse", "HEAD^2:blob.bin"]),

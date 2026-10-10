@@ -273,6 +273,7 @@ impl Server {
         let arg = json!({
             "cwd": options["local"]["cwd"][0],
             "apiKeyPresent": !api_key.is_empty(),
+            "apiKeyInEnv": std::env::var_os("CURSOR_API_KEY").is_some(),
             "model": options["model"]["id"],
             "customTools": keys(&options["local"]["customTools"]),
             "mcpServers": keys(&options["mcpServers"]),

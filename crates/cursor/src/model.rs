@@ -78,7 +78,7 @@ impl Client {
         let defaults = Defaults {
             model: &self.model,
             api_key,
-            sandbox: self.sandbox,
+            shell: self.shell,
         };
         let turn = Turn::prepare(request, tool_host.local_path(), defaults)
             .await

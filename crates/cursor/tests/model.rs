@@ -5,13 +5,14 @@
 
 mod support;
 
+use std::path::Path;
+
 use omnia_cursor::ConnectOptions;
-use omnia_test::host::scratch;
+use omnia_test::host::{Scratch, scratch};
 use serde_json::json;
 use support::fake_bridge::{self, Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
 use support::harness::{
-    STARTUP, await_gone, connect, expect_error_over, options, run_guest, run_guest_over,
-    sole_agent, spawning,
+    await_gone, connect, options, run_guest, run_guest_over, sole_agent, spawning,
 };
 
 // A guest program without a matching test here fails to compile.
@@ -75,8 +76,10 @@ async fn model_lent_workspace() {
     // the lent tree is the agent's cwd, with the read-only tools alone: a
     // lend is a preopen, not a grant of the host's shell
     let created = log.saw(Rpc::CreateAgent)[0];
-    let cwd = std::fs::canonicalize(lent.path()).expect("the scratch root");
-    assert_eq!(created.text("cwd"), cwd.to_str().expect("a UTF-8 path"));
+    let tree = tree(&lent);
+    assert_eq!(created.text("cwd"), tree);
+    assert_eq!(created.arg["roots"], json!([tree]));
+    assert!(created.arg["policy"].is_null(), "{}", created.arg);
     assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read"]));
     assert!(created.arg["sandbox"].is_null(), "{}", created.arg);
 }
@@ -99,6 +102,26 @@ async fn lent_shell() {
     let created = log.saw(Rpc::CreateAgent)[0];
     assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read", "shell"]));
     assert_eq!(created.arg["sandbox"], true, "{}", created.arg);
+
+    // the agent's cwd is a private directory of the backend's, the tree
+    // beside it: the bridge reads every command's sandbox policy from the
+    // cwd alone, and the one there admits the tree as a write path, its
+    // git hooks and config kept read-only, the network left the operator's
+    let tree = tree(&lent);
+    let cwd = created.text("cwd");
+    assert_ne!(cwd, tree, "{}", created.arg);
+    assert_eq!(created.arg["roots"], json!([cwd, tree]));
+    let policy = &created.arg["policy"];
+    assert_eq!(policy["type"], "workspace_readwrite", "{policy}");
+    assert_eq!(policy["additionalReadwritePaths"], json!([tree]), "{policy}");
+    assert_eq!(policy["additionalReadonlyPaths"][0], format!("{tree}/.git/hooks"), "{policy}");
+    assert!(policy.get("networkPolicy").is_none(), "{policy}");
+    assert!(!Path::new(&cwd).exists(), "the policy directory went with the agent");
+
+    // the agent is not started in the tree, so the prompt names it
+    let prompt = log.saw(Rpc::Send)[0].text("text");
+    assert!(prompt.starts_with(&format!("The project is `{tree}`.")), "{prompt}");
+    assert!(prompt.contains("\n\nhi\n"), "the guest's message follows: {prompt}");
 }
 
 #[tokio::test]
@@ -118,15 +141,18 @@ async fn lent_outside_shell_roots() {
     // keeps the read-only tools
     let log = fake.log();
     let created = log.saw(Rpc::CreateAgent)[0];
+    assert_eq!(created.text("cwd"), tree(&lent));
     assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read"]));
     assert!(created.arg["sandbox"].is_null(), "{}", created.arg);
 }
 
-// The bridge folds a tree's own `.cursor/sandbox.json` into every shell
-// command's sandbox policy, so a lend carrying one is refused the shell
-// outright rather than confined on the tree's terms.
+// A tree's own `.cursor/sandbox.json` is the guest's to write, before the
+// run and during it, and the bridge folds the one in the agent's cwd into
+// every command's policy: the cwd is never the tree, so a lend carrying one
+// gets the shell on the backend's terms, and what the tree says of its own
+// confinement is never read.
 #[tokio::test]
-async fn lent_sandbox_policy() {
+async fn lent_carrying_sandbox_policy() {
     let fake = Spawnable::new(&Config::echo());
     let lent = scratch();
     std::fs::create_dir(lent.path().join(".cursor")).expect("the tree's .cursor");
@@ -140,56 +166,21 @@ async fn lent_sandbox_policy() {
         ..options(1)
     })
     .await;
-    expect_error_over("carries `.cursor/sandbox.json`", &["lend"], &client, Some(lent.mount(true)))
-        .await;
-
-    // refused before any worker was asked for
-    assert!(fake.log().processes().is_empty(), "{}", fake.log().summary());
-}
-
-// The tree is the guest's to write for as long as the run lasts, so the
-// check is not one-shot: a policy that appears with a shell command in
-// flight ends the run, cancelled, before the bridge can read it for the next.
-#[tokio::test]
-async fn lent_sandbox_policy_mid_run() {
-    let fake = Spawnable::new(&Config::started("shell", json!({ "command": "cargo test" })));
-    let lent = scratch();
-    let client = connect(ConnectOptions {
-        shell_roots: vec![lent.path().to_path_buf()],
-        ..options(1)
-    })
-    .await;
-    let guest = tokio::spawn({
-        let client = client.clone();
-        let mount = lent.mount(true);
-        async move {
-            expect_error_over("carries `.cursor/sandbox.json`", &["lend"], &client, Some(mount))
-                .await;
-        }
-    });
-
-    // the shell command is running when the policy lands
-    fake_bridge::poll(|| fake.log().count(Rpc::Send) == 1, STARTUP, "the run to open").await;
-    std::fs::create_dir(lent.path().join(".cursor")).expect("the tree's .cursor");
-    std::fs::write(lent.path().join(".cursor/sandbox.json"), r#"{"type":"insecure_none"}"#)
-        .expect("the tree's sandbox policy");
-    guest.await.expect("the guest task joins");
+    run_guest_over(test_programs::MODEL_LENT_WORKSPACE, &[], &client, Some(lent.mount(true))).await;
     await_gone(&fake).await;
 
     let log = fake.log();
-    let (_, sequence) = sole_agent(&log);
-    assert_eq!(
-        sequence,
-        [
-            Rpc::CreateAgent,
-            Rpc::Send,
-            Rpc::CancelRun,
-            Rpc::GetUsage,
-            Rpc::CloseAgent,
-            Rpc::DeleteAgent
-        ],
-        "the run in flight was cancelled"
-    );
+    let created = log.saw(Rpc::CreateAgent)[0];
+    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read", "shell"]));
+    let policy = &created.arg["policy"];
+    assert_eq!(policy["additionalReadwritePaths"], json!([tree(&lent)]), "{policy}");
+    assert!(policy.get("networkPolicy").is_none(), "the tree's policy: {policy}");
+}
+
+// The canonical lent tree, as the agent is told of it.
+fn tree(lent: &Scratch) -> String {
+    let tree = std::fs::canonicalize(lent.path()).expect("the scratch root");
+    tree.to_str().expect("a UTF-8 path").to_owned()
 }
 
 #[tokio::test]

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -272,6 +272,8 @@ impl Server {
         let api_key = options["apiKey"].as_str().unwrap_or_default();
         let arg = json!({
             "cwd": options["local"]["cwd"][0],
+            "roots": options["local"]["cwd"],
+            "policy": sandbox_policy(&options["local"]["cwd"][0]),
             "apiKeyPresent": !api_key.is_empty(),
             "env": environment(),
             "model": options["model"]["id"],
@@ -686,6 +688,15 @@ fn kill_self() -> ! {
 
 fn keys(object: &Value) -> Vec<String> {
     object.as_object().map(|map| map.keys().cloned().collect()).unwrap_or_default()
+}
+
+// The sandbox policy the real bridge reads into every shell command's, from
+// the agent's `cwd` alone; `null` where the directory carries none.
+fn sandbox_policy(cwd: &Value) -> Value {
+    cwd.as_str()
+        .and_then(|cwd| std::fs::read(Path::new(cwd).join(".cursor/sandbox.json")).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or(Value::Null)
 }
 
 // The names in our environment, never the values: what the client let

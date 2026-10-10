@@ -141,14 +141,19 @@ Unreleased
   confined to the tree, the network closed — which needs Cursor's sandbox
   binary and refuses the completion where it is missing, so a command a
   prompt names, or a file in the tree injects, runs confined or not at
-  all. The bridge also folds a tree's own `.cursor/sandbox.json` into
-  every command's policy, adding its write paths and network allows to
-  the operator's, so a lend under a root that carries one fails the
-  completion rather than running on the tree's terms, and the check
-  holds for as long as the run lasts, since the tree is the guest's to
-  write meanwhile: a policy that appears mid-run ends the run, cancelled
-  with the command in flight, before the bridge reads it for the next;
-  and the lent tree's `.cursor/` is never a setting source (the `source` once sent at
+  all. The bridge reads every command's sandbox policy from the agent's
+  working directory alone, folding that directory's
+  `.cursor/sandbox.json` into the operator's, and a lent tree is the
+  guest's to write for as long as the run lasts, so a shell-bearing
+  agent is not started in the tree: its working directory is a private
+  one of the backend's, created for the completion and removed with it,
+  whose policy admits the tree as a write path, keeps the tree's
+  `.git/hooks`, `.git/config` and the like read-only as the bridge would
+  have, and says nothing of the network; whatever the tree says of its
+  own confinement is never read. The tree rides beside the working
+  directory as a workspace root for the read-only tools, and the prompt
+  opens by naming it as the project to work in. The lent tree's
+  `.cursor/` is never a setting source (the `source` once sent at
   `CreateAgent` named no field of the bridge's and is gone), so its
   rules, hooks and MCP servers stay out of the agent. The bridge bounds
   each command by the timeout the agent's
@@ -164,7 +169,9 @@ Unreleased
   README lists them) rather than the host's whole environment, so neither
   `CURSOR_API_KEY`, which every RPC carries explicitly, nor the
   credentials of a backend sharing the host process reach a worker or a
-  shell child it runs.
+  shell child it runs; and since the bridge hands its whole environment
+  to each shell command, a proxy URL carrying credentials is refused at
+  connect once `shell_roots` is set.
 
 ### Changed
 

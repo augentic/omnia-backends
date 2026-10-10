@@ -59,6 +59,12 @@ impl Backend for Client {
         for root in &options.shell_roots {
             ensure!(root.is_absolute(), "shell_roots entry {} is not absolute", root.display());
         }
+        if !options.shell_roots.is_empty() {
+            let vars = env::vars_os().filter_map(|(name, value)| {
+                Some((name.into_string().ok()?, value.into_string().ok()?))
+            });
+            worker::Worker::check_proxies(vars)?;
+        }
 
         let pool = Pool::connect(options.max_agents).await?;
         Ok(Self {

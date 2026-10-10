@@ -84,6 +84,24 @@ impl Worker {
         "NODE_EXTRA_CA_CERTS",
         "NODE_USE_SYSTEM_CA",
     ];
+    // The entries of `ENV` whose value is a URL, which may carry credentials
+    // the bridge needs and a shell command would print.
+    const PROXIES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];
+
+    // Refuse an environment whose proxy URLs carry credentials: the bridge
+    // hands its whole environment to each shell command, so where lends get
+    // the shell, the proxy is unauthenticated or there is none.
+    pub fn check_proxies(vars: impl IntoIterator<Item = (String, String)>) -> Result<()> {
+        for (name, value) in vars {
+            if Self::PROXIES.contains(&name.as_str()) && has_userinfo(&value) {
+                bail!(
+                    "{name} carries credentials, which a shell command would print into a tool \
+                     result; with shell_roots set, use a proxy without them"
+                );
+            }
+        }
+        Ok(())
+    }
 
     // The handshake is left to `Spawned::handshake`, so a pool lease can
     // occupy the slot first.
@@ -481,9 +499,45 @@ fn drain_stdout(stdout: ChildStdout) {
     );
 }
 
+// Whether a proxy URL names a user, with or without a scheme: the
+// authority runs from after any `://` to the first `/`, `?` or `#`.
+fn has_userinfo(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().is_some_and(|authority| authority.contains('@'))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TAIL_LINES, Tail};
+    use super::{TAIL_LINES, Tail, Worker};
+
+    fn vars(vars: &[(&str, &str)]) -> Vec<(String, String)> {
+        vars.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect()
+    }
+
+    #[test]
+    fn proxy_credentials() {
+        Worker::check_proxies(vars(&[
+            ("HTTPS_PROXY", "http://proxy.example:3128"),
+            ("http_proxy", "proxy.example:3128"),
+            ("NO_PROXY", "localhost,127.0.0.1"),
+            ("HTTP_PROXY", "http://proxy.example/path?token=a@b#c@d"),
+            ("UNRELATED", "http://user:secret@elsewhere"),
+        ]))
+        .expect("proxies without credentials pass");
+
+        for (name, value) in [
+            ("HTTPS_PROXY", "http://user:secret@proxy.example:3128"),
+            ("http_proxy", "user:secret@proxy.example:3128"),
+            ("HTTP_PROXY", "http://user@proxy.example"),
+        ] {
+            let error = Worker::check_proxies(vars(&[(name, value)])).expect_err(value);
+            assert!(
+                error.to_string().starts_with(&format!("{name} carries credentials")),
+                "{error}"
+            );
+            assert!(!error.to_string().contains("secret"), "never repeated: {error}");
+        }
+    }
 
     #[test]
     fn tail_bounded() {

@@ -5,12 +5,12 @@
 //! servers.
 
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use omnia_wasi_model::{Format, Mcp, Request, Tool};
-use serde_json::Value;
+use serde_json::{Value, json};
+use tempfile::TempDir;
 
 use crate::protocol::{
     AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
@@ -29,9 +29,17 @@ const LENT_TOOLS: [&str; 5] = ["glob", "grep", "ls", "mcp", "read"];
 // otherwise name a command the host runs.
 const SHELL_TOOL: &str = "shell";
 
-// The file the bridge folds into the sandbox policy of every shell command
-// run in a tree: its write paths and network allows join the operator's.
+// The file the bridge reads, from the agent's `cwd` alone, into the sandbox
+// policy of every shell command: its write paths and network allows join
+// the operator's.
 const SANDBOX_POLICY: &str = ".cursor/sandbox.json";
+
+// What the bridge's sandbox keeps a shell from writing in the tree it runs
+// commands in, kept for a tree that reaches the sandbox as a write path
+// instead: the bridge runs `git` in the tree itself, and a hook or a config
+// a command planted would run as the worker's user.
+const GIT_PROTECTED: [&str; 5] =
+    [".git/hooks", ".git/config", ".git/config.worktree", ".git/info/attributes", ".git/commondir"];
 
 // What the deployment fixes for every completion: the model a request
 // leaves unset, the key, and the host trees whose lends get the sandboxed
@@ -67,13 +75,11 @@ pub struct Prompt {
 }
 
 // The agent one completion creates: the `CreateAgent` options, the pin
-// every later call on the agent repeats, the workspace they point into, and
-// the watch a shell-bearing run keeps on it.
+// every later call on the agent repeats, and the workspace they point into.
 pub struct AgentSpec {
     pub options: AgentOptions,
     pub operation: AgentOperationOptions,
     pub workspace: Workspace,
-    pub guard: Option<Guard>,
 }
 
 impl Turn {
@@ -84,22 +90,21 @@ impl Turn {
             tracing::debug!("request.generation is ignored (CreateAgent has no sampling controls)");
         }
 
-        let workspace = Workspace::new(lent).await?;
-        let cwd = workspace.cwd()?;
-        let tools = workspace.tools(defaults.shell_roots).await?;
-        let guard = (tools == Tools::Shell).then(|| workspace.guard());
-        let options = agent_options(request, &cwd, tools, defaults)?;
+        let workspace = Workspace::new(lent, defaults.shell_roots).await?;
+        let roots = workspace.roots()?;
+        let tools = workspace.tools();
         let operation = AgentOperationOptions {
-            cwd,
+            cwd: roots[0].clone(),
             api_key: defaults.api_key.to_owned(),
         };
+        let options = agent_options(request, roots, tools, defaults)?;
         let text = with_mcp_hint(&request.mcp_servers(), request.to_string());
+        let text = with_tree_hint(workspace.hinted()?, text);
         Ok(Self {
             agent: AgentSpec {
                 options,
                 operation,
                 workspace,
-                guard,
             },
             prompt: Prompt {
                 text,
@@ -110,98 +115,108 @@ impl Turn {
     }
 }
 
-// The agent's working directory: the lent tree, or a private empty one for
-// references-only completions.
+// The agent's working directory and the tree it works in: one and the same
+// for a read-only lend and for the private empty directory of a
+// references-only completion, two for a lend that gets the shell. The
+// bridge reads the sandbox policy of every shell command from the agent's
+// `cwd`, and a lent tree is the guest's to write for as long as the run
+// lasts, so the shell's `cwd` is a private directory carrying the policy
+// that admits the tree as a write path, and whatever the tree says of its
+// own confinement is never read.
 pub enum Workspace {
+    Private(TempDir),
     Lent(PathBuf),
-    Private(tempfile::TempDir),
+    Shell { tree: PathBuf, policy: TempDir },
 }
 
 impl Workspace {
-    async fn new(lent: Option<&Path>) -> Result<Self> {
-        match lent {
-            Some(path) => {
-                tokio::fs::create_dir_all(path)
-                    .await
-                    .with_context(|| format!("creating {}", path.display()))?;
-                let path = tokio::fs::canonicalize(path)
-                    .await
-                    .with_context(|| format!("canonicalizing {}", path.display()))?;
-                Ok(Self::Lent(path))
-            }
-            // `tempfile` has no async API; one `mkdir` under the temp root
-            // is not worth a blocking thread
-            None => Ok(Self::Private(
-                tempfile::Builder::new()
-                    .prefix("omnia-cursor-cwd-")
-                    .tempdir()
-                    .context("creating a private workspace")?,
-            )),
-        }
-    }
-
-    fn path(&self) -> &Path {
-        match self {
-            Self::Lent(path) => path,
-            Self::Private(dir) => dir.path(),
-        }
-    }
-
-    // The wire carries the path as a string, so one that is not UTF-8 cannot
-    // name the workspace to the worker.
-    fn cwd(&self) -> Result<String> {
-        let path = self.path();
-        path.to_str()
-            .map(ToOwned::to_owned)
-            .with_context(|| format!("invalid workspace path {}", path.display()))
-    }
-
-    // A lend under one of the roots gets the shell unless the tree carries
-    // its own sandbox policy, which the bridge would honour: a tree may not
-    // set its own confinement. Checked here rather than left to the bridge,
-    // which merges the file without a word.
-    async fn tools(&self, shell_roots: &[PathBuf]) -> Result<Tools> {
-        let Self::Lent(path) = self else {
-            return Ok(Tools::None);
+    async fn new(lent: Option<&Path>, shell_roots: &[PathBuf]) -> Result<Self> {
+        let Some(path) = lent else {
+            return Ok(Self::Private(private("omnia-cursor-cwd-")?));
         };
-        if !under(path, shell_roots).await {
-            return Ok(Tools::ReadOnly);
+        tokio::fs::create_dir_all(path)
+            .await
+            .with_context(|| format!("creating {}", path.display()))?;
+        let tree = tokio::fs::canonicalize(path)
+            .await
+            .with_context(|| format!("canonicalizing {}", path.display()))?;
+        if !under(&tree, shell_roots).await {
+            return Ok(Self::Lent(tree));
         }
-        self.guard().check()?;
-        Ok(Tools::Shell)
+
+        let policy = private("omnia-cursor-policy-")?;
+        let path = policy.path().join(SANDBOX_POLICY);
+        tokio::fs::create_dir_all(path.parent().expect("the policy has a parent"))
+            .await
+            .with_context(|| format!("creating {}", path.display()))?;
+        tokio::fs::write(&path, sandbox_policy(utf8(&tree)?).to_string())
+            .await
+            .with_context(|| format!("writing {}", path.display()))?;
+        Ok(Self::Shell { tree, policy })
     }
 
-    fn guard(&self) -> Guard {
-        Guard {
-            tree: self.path().to_path_buf(),
+    // The directory the agent works in, shown to the model and in the logs.
+    pub fn tree(&self) -> &Path {
+        match self {
+            Self::Private(dir) => dir.path(),
+            Self::Lent(tree) | Self::Shell { tree, .. } => tree,
+        }
+    }
+
+    const fn tools(&self) -> Tools {
+        match self {
+            Self::Private(_) => Tools::None,
+            Self::Lent(_) => Tools::ReadOnly,
+            Self::Shell { .. } => Tools::Shell,
+        }
+    }
+
+    // The agent's `cwd` list: its working directory first, then the tree
+    // where that is not the tree itself.
+    fn roots(&self) -> Result<Vec<String>> {
+        let mut roots = vec![];
+        if let Self::Shell { policy, .. } = self {
+            roots.push(utf8(policy.path())?.to_owned());
+        }
+        roots.push(utf8(self.tree())?.to_owned());
+        Ok(roots)
+    }
+
+    // The tree the prompt must name, since the agent is not started in it.
+    fn hinted(&self) -> Result<Option<&str>> {
+        match self {
+            Self::Shell { tree, .. } => utf8(tree).map(Some),
+            Self::Private(_) | Self::Lent(_) => Ok(None),
         }
     }
 }
 
-// The watch a shell-bearing run keeps on its tree's sandbox policy. The
-// bridge reads the file afresh for every command, and the tree is the
-// guest's to write for as long as the run lasts, so the check at the lend
-// is the first of many: a policy that appears mid-run ends the run before
-// the bridge reads it for the next command.
-pub struct Guard {
-    tree: PathBuf,
+// `tempfile` has no async API; one `mkdir` under the temp root is not worth
+// a blocking thread.
+fn private(prefix: &str) -> Result<TempDir> {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .with_context(|| format!("creating a private {prefix}* directory"))
 }
 
-impl Guard {
-    // One `lstat`, cheap enough for every frame and tick; anything at the
-    // path refuses, whatever it is.
-    pub fn check(&self) -> Result<()> {
-        let policy = self.tree.join(SANDBOX_POLICY);
-        match std::fs::symlink_metadata(&policy) {
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-            Ok(_) => bail!(
-                "lent workspace {} carries `{SANDBOX_POLICY}`, which the shell's sandbox would \
-                 honour",
-                self.tree.display()
-            ),
-            Err(error) => Err(error).with_context(|| format!("checking {}", policy.display())),
-        }
-    }
+// The wire carries a path as a string, so one that is not UTF-8 cannot
+// name the workspace to the worker.
+fn utf8(path: &Path) -> Result<&str> {
+    path.to_str().with_context(|| format!("invalid workspace path {}", path.display()))
+}
+
+// The policy the shell's `cwd` carries: the tree is a write path, with what
+// the bridge would have protected in it had it been the `cwd` kept
+// read-only. The network is left to the operator's own policy.
+fn sandbox_policy(tree: &str) -> Value {
+    let protected: Vec<String> =
+        GIT_PROTECTED.iter().map(|protected| format!("{tree}/{protected}")).collect();
+    json!({
+        "type": "workspace_readwrite",
+        "additionalReadwritePaths": [tree],
+        "additionalReadonlyPaths": protected,
+    })
 }
 
 // Whether the canonical `path` is at or beneath one of `roots`, each
@@ -217,7 +232,7 @@ async fn under(path: &Path, roots: &[PathBuf]) -> bool {
 }
 
 fn agent_options(
-    request: &Request, cwd: &str, tools: Tools, defaults: Defaults<'_>,
+    request: &Request, roots: Vec<String>, tools: Tools, defaults: Defaults<'_>,
 ) -> Result<AgentOptions> {
     let mut custom_tools = BTreeMap::new();
     let mut mcp_servers = BTreeMap::new();
@@ -260,13 +275,26 @@ fn agent_options(
         model: ModelSelection { id: model },
         api_key: defaults.api_key.to_owned(),
         local: LocalAgentOptions {
-            cwd: vec![cwd.to_owned()],
+            cwd: roots,
             sandbox_options: shell.then_some(SandboxOptions { enabled: true }),
             custom_tools,
         },
         mcp_servers,
         tools: Some(ToolList { names }),
     })
+}
+
+// Prepend the tree an agent not started in it is to work in, so its
+// commands, reads and searches go there rather than into its empty `cwd`.
+fn with_tree_hint(tree: Option<&str>, prompt: String) -> String {
+    match tree {
+        Some(tree) => format!(
+            "The project is `{tree}`. Work there: run every command with it as the working \
+             directory, and read and search there. The directory you were started in holds \
+             nothing of the project.\n\n{prompt}"
+        ),
+        None => prompt,
+    }
 }
 
 // Prepend a hint naming the granted MCP servers and tool allowlist, so the
@@ -294,13 +322,14 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
     )
 }
 
-// The lent/private workspace wire distinction; tool, MCP and model mapping
-// is accepted by `tests/live.rs`.
+// The lent/private workspace wire distinction and the shell's policy; tool,
+// MCP and model mapping is accepted by `tests/live.rs`.
 #[cfg(test)]
 mod tests {
     use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};
+    use serde_json::json;
 
-    use super::{Defaults, Tools, agent_options, with_mcp_hint};
+    use super::{Defaults, Tools, agent_options, sandbox_policy, with_mcp_hint, with_tree_hint};
 
     const DEFAULTS: Defaults<'static> = Defaults {
         model: "auto",
@@ -308,9 +337,14 @@ mod tests {
         shell_roots: &[],
     };
 
+    fn roots(roots: &[&str]) -> Vec<String> {
+        roots.iter().map(ToString::to_string).collect()
+    }
+
     #[test]
     fn workspace_shapes() {
-        let options = agent_options(&request(), "/workspace", Tools::ReadOnly, DEFAULTS).unwrap();
+        let options =
+            agent_options(&request(), roots(&["/workspace"]), Tools::ReadOnly, DEFAULTS).unwrap();
         assert_eq!(
             options.tools.as_ref().map(|t| t.names.clone()),
             Some(vec![
@@ -325,13 +359,16 @@ mod tests {
         assert!(options.local.sandbox_options.is_none(), "nothing runs that needs confining");
         assert_eq!(options.api_key, "test-key");
 
-        let options = agent_options(&request(), "/private", Tools::None, DEFAULTS).unwrap();
+        let options =
+            agent_options(&request(), roots(&["/private"]), Tools::None, DEFAULTS).unwrap();
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
     }
 
     #[test]
     fn shell_lend() {
-        let options = agent_options(&request(), "/workspace", Tools::Shell, DEFAULTS).unwrap();
+        let options =
+            agent_options(&request(), roots(&["/policy", "/workspace"]), Tools::Shell, DEFAULTS)
+                .unwrap();
         assert_eq!(
             options.tools.as_ref().map(|t| t.names.clone()),
             Some(vec![
@@ -348,6 +385,33 @@ mod tests {
             options.local.sandbox_options.as_ref().is_some_and(|sandbox| sandbox.enabled),
             "and never without the sandbox"
         );
+        assert_eq!(options.local.cwd, roots(&["/policy", "/workspace"]));
+    }
+
+    #[test]
+    fn shell_policy() {
+        assert_eq!(
+            sandbox_policy("/work/tree"),
+            json!({
+                "type": "workspace_readwrite",
+                "additionalReadwritePaths": ["/work/tree"],
+                "additionalReadonlyPaths": [
+                    "/work/tree/.git/hooks",
+                    "/work/tree/.git/config",
+                    "/work/tree/.git/config.worktree",
+                    "/work/tree/.git/info/attributes",
+                    "/work/tree/.git/commondir",
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn tree_hint() {
+        assert_eq!(with_tree_hint(None, "hello".to_owned()), "hello");
+        let hinted = with_tree_hint(Some("/work/tree"), "hello".to_owned());
+        assert!(hinted.starts_with("The project is `/work/tree`."), "{hinted}");
+        assert!(hinted.ends_with("\n\nhello"), "{hinted}");
     }
 
     #[test]
@@ -384,7 +448,7 @@ mod tests {
             tools: vec![],
             url: "http://127.0.0.1:9/mcp".to_owned(),
         })];
-        let options = agent_options(&request, "/private", Tools::None, DEFAULTS).unwrap();
+        let options = agent_options(&request, roots(&["/private"]), Tools::None, DEFAULTS).unwrap();
         assert!(options.mcp_servers.contains_key("docs"));
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
     }

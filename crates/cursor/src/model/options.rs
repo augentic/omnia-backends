@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 
 use anyhow::{Context as _, Result, bail};
 use omnia_wasi_model::{Format, Mcp, Request, Tool};
@@ -241,15 +241,17 @@ fn sandbox_policy(cwd: &str, tree: &str, includes: &[String]) -> Value {
 // the worker's environment, so the answer is the one the bridge's git acts
 // on; where git cannot read the tree, the lend fails rather than guess.
 async fn config_includes(tree: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["config", "--list", "--show-origin", "-z"])
-        .current_dir(tree)
-        .env_clear()
-        .envs(Worker::environment())
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .with_context(|| format!("listing git config in {}", tree.display()))?;
+    // git names a repository's files relative to its top level, which may
+    // lie above a lend of one of its subdirectories; outside a repository
+    // every file it names is absolute
+    let toplevel = git(tree, &["rev-parse", "--show-toplevel"]).await?;
+    let toplevel = toplevel
+        .status
+        .success()
+        .then(|| PathBuf::from(OsStr::from_bytes(toplevel.stdout.trim_ascii_end())));
+    let base = toplevel.as_deref().unwrap_or(tree);
+
+    let output = git(tree, &["config", "--list", "--show-origin", "-z"]).await?;
     if !output.status.success() {
         bail!(
             "listing git config in {} failed: {}",
@@ -258,18 +260,32 @@ async fn config_includes(tree: &Path) -> Result<Vec<String>> {
         );
     }
 
-    // keep the files under the tree, as git names them, outside `.git`
+    // keep the files under the tree, outside `.git`
     let dot_git = tree.join(".git");
     let mut includes = BTreeSet::new();
     for origin in config_origins(&output.stdout) {
-        let Ok(path) = tokio::fs::canonicalize(tree.join(origin)).await else {
-            continue;
-        };
+        let path = base.join(origin);
+        let path = tokio::fs::canonicalize(&path)
+            .await
+            .with_context(|| format!("resolving {}, a config file git read", path.display()))?;
         if path.starts_with(tree) && !path.starts_with(&dot_git) {
             includes.insert(utf8(&path)?.to_owned());
         }
     }
     Ok(includes.into_iter().collect())
+}
+
+// Git in `tree`, as the worker runs it.
+async fn git(tree: &Path, args: &[&str]) -> Result<Output> {
+    Command::new("git")
+        .args(args)
+        .current_dir(tree)
+        .env_clear()
+        .envs(Worker::environment())
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .with_context(|| format!("running `git {}` in {}", args.join(" "), tree.display()))
 }
 
 // The `file:` origins of `git config --list --show-origin -z` output, which

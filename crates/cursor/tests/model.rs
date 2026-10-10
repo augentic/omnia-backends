@@ -136,36 +136,37 @@ async fn lent_shell() {
     assert!(prompt.contains("\n\nhi\n"), "the guest's message follows: {prompt}");
 }
 
-// A repository whose config includes a file inside the tree: the bridge's
-// own git reads it, outside the shell's sandbox, so the shell may not write
-// it, any more than `.git` itself.
+// A lend of one subdirectory of a repository whose config includes a file
+// inside that subdirectory: the bridge's own git reads it, outside the
+// shell's sandbox, so the shell may not write it, any more than `.git`.
 #[tokio::test]
 async fn lent_with_config_include() {
     let fake = Spawnable::new(&Config::echo());
-    let lent = scratch();
-    for dir in [".git/objects", ".git/refs"] {
-        std::fs::create_dir_all(lent.path().join(dir)).expect("the repository");
+    let repo = scratch();
+    for dir in [".git/objects", ".git/refs", "sub"] {
+        std::fs::create_dir_all(repo.path().join(dir)).expect("the repository");
     }
-    std::fs::write(lent.path().join(".git/HEAD"), "ref: refs/heads/main\n").expect("HEAD");
-    std::fs::write(
-        lent.path().join(".git/config"),
-        "[core]\n\trepositoryformatversion = 0\n[include]\n\tpath = ../.gitconfig\n",
-    )
-    .expect("the repository's config");
-    std::fs::write(lent.path().join(".gitconfig"), "[diff \"x\"]\n\tcommand = /bin/echo\n")
-        .expect("the included file");
+    repo.write(".git/HEAD", "ref: refs/heads/main\n");
+    repo.write(
+        ".git/config",
+        "[core]\n\trepositoryformatversion = 0\n[include]\n\tpath = ../sub/.gitconfig\n",
+    );
+    repo.write("sub/.gitconfig", "[diff \"x\"]\n\tcommand = /bin/echo\n");
+    let mut lend = repo.mount(true);
+    lend.path = repo.path().join("sub");
     let client = connect(ConnectOptions {
-        shell_roots: vec![lent.path().to_path_buf()],
+        shell_roots: vec![repo.path().to_path_buf()],
         ..options(1)
     })
     .await;
-    run_guest_over(test_programs::MODEL_LENT_WORKSPACE, &[], &client, Some(lent.mount(true))).await;
+    run_guest_over(test_programs::MODEL_LENT_WORKSPACE, &[], &client, Some(lend)).await;
     await_gone(&fake).await;
 
     let log = fake.log();
     let created = log.saw(Rpc::CreateAgent)[0];
-    let tree = tree(&lent);
+    let tree = format!("{}/sub", tree(&repo));
     let policy = &created.arg["policy"];
+    assert_eq!(policy["additionalReadwritePaths"], json!([tree]), "{policy}");
     assert_eq!(
         policy["additionalReadonlyPaths"],
         json!([created.text("cwd"), format!("{tree}/.git"), format!("{tree}/.gitconfig")]),

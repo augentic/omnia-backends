@@ -105,8 +105,9 @@ async fn lent_shell() {
 
     // the agent's cwd is a private directory of the backend's, the tree
     // beside it: the bridge reads every command's sandbox policy from the
-    // cwd alone, and the one there admits the tree as a write path, its
-    // git hooks and config kept read-only, the network left the operator's
+    // cwd alone, and the one there admits the tree as a write path, with
+    // the cwd itself and the tree's git hooks and config read-only, the
+    // network left the operator's
     let tree = tree(&lent);
     let cwd = created.text("cwd");
     assert_ne!(cwd, tree, "{}", created.arg);
@@ -114,7 +115,8 @@ async fn lent_shell() {
     let policy = &created.arg["policy"];
     assert_eq!(policy["type"], "workspace_readwrite", "{policy}");
     assert_eq!(policy["additionalReadwritePaths"], json!([tree]), "{policy}");
-    assert_eq!(policy["additionalReadonlyPaths"][0], format!("{tree}/.git/hooks"), "{policy}");
+    assert_eq!(policy["additionalReadonlyPaths"][0], cwd, "no command rewrites it: {policy}");
+    assert_eq!(policy["additionalReadonlyPaths"][1], format!("{tree}/.git/hooks"), "{policy}");
     assert!(policy.get("networkPolicy").is_none(), "{policy}");
     assert!(!Path::new(&cwd).exists(), "the policy directory went with the agent");
 

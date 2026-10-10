@@ -149,7 +149,8 @@ Unreleased
   one of the backend's, created for the completion and removed with it,
   whose policy admits the tree as a write path, keeps the tree's
   `.git/hooks`, `.git/config` and the like read-only as the bridge would
-  have, and says nothing of the network; whatever the tree says of its
+  have, holds the directory itself read-only so no command rewrites the
+  policy, and says nothing of the network; whatever the tree says of its
   own confinement is never read. The tree rides beside the working
   directory as a workspace root for the read-only tools, and the prompt
   opens by naming it as the project to work in. The lent tree's

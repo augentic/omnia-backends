@@ -121,12 +121,13 @@ impl Turn {
 // bridge reads the sandbox policy of every shell command from the agent's
 // `cwd`, and a lent tree is the guest's to write for as long as the run
 // lasts, so the shell's `cwd` is a private directory carrying the policy
-// that admits the tree as a write path, and whatever the tree says of its
-// own confinement is never read.
+// that admits the tree as a write path and keeps the directory itself
+// read-only; whatever the tree says of its own confinement is never read,
+// and no command rewrites what the directory says.
 pub enum Workspace {
     Private(TempDir),
     Lent(PathBuf),
-    Shell { tree: PathBuf, policy: TempDir },
+    Shell { tree: PathBuf, cwd: PathBuf, _policy: TempDir },
 }
 
 impl Workspace {
@@ -145,14 +146,21 @@ impl Workspace {
         }
 
         let policy = private("omnia-cursor-policy-")?;
-        let path = policy.path().join(SANDBOX_POLICY);
+        let cwd = tokio::fs::canonicalize(policy.path())
+            .await
+            .with_context(|| format!("canonicalizing {}", policy.path().display()))?;
+        let path = cwd.join(SANDBOX_POLICY);
         tokio::fs::create_dir_all(path.parent().expect("the policy has a parent"))
             .await
             .with_context(|| format!("creating {}", path.display()))?;
-        tokio::fs::write(&path, sandbox_policy(utf8(&tree)?).to_string())
+        tokio::fs::write(&path, sandbox_policy(utf8(&cwd)?, utf8(&tree)?).to_string())
             .await
             .with_context(|| format!("writing {}", path.display()))?;
-        Ok(Self::Shell { tree, policy })
+        Ok(Self::Shell {
+            tree,
+            cwd,
+            _policy: policy,
+        })
     }
 
     // The directory the agent works in, shown to the model and in the logs.
@@ -175,8 +183,8 @@ impl Workspace {
     // where that is not the tree itself.
     fn roots(&self) -> Result<Vec<String>> {
         let mut roots = vec![];
-        if let Self::Shell { policy, .. } = self {
-            roots.push(utf8(policy.path())?.to_owned());
+        if let Self::Shell { cwd, .. } = self {
+            roots.push(utf8(cwd)?.to_owned());
         }
         roots.push(utf8(self.tree())?.to_owned());
         Ok(roots)
@@ -208,10 +216,15 @@ fn utf8(path: &Path) -> Result<&str> {
 
 // The policy the shell's `cwd` carries: the tree is a write path, with what
 // the bridge would have protected in it had it been the `cwd` kept
-// read-only. The network is left to the operator's own policy.
-fn sandbox_policy(tree: &str) -> Value {
-    let protected: Vec<String> =
-        GIT_PROTECTED.iter().map(|protected| format!("{tree}/{protected}")).collect();
+// read-only, and the `cwd` is read-only in full. The sandbox's writable
+// root is the `cwd`, and the bridge reads this file again for every
+// command, so the directory is held read-only by its own policy rather
+// than by the protection of `.cursor` the bridge adds only where it finds
+// a git checkout. The network is left to the operator's own policy.
+fn sandbox_policy(cwd: &str, tree: &str) -> Value {
+    let protected: Vec<String> = std::iter::once(cwd.to_owned())
+        .chain(GIT_PROTECTED.iter().map(|protected| format!("{tree}/{protected}")))
+        .collect();
     json!({
         "type": "workspace_readwrite",
         "additionalReadwritePaths": [tree],
@@ -391,11 +404,12 @@ mod tests {
     #[test]
     fn shell_policy() {
         assert_eq!(
-            sandbox_policy("/work/tree"),
+            sandbox_policy("/tmp/policy", "/work/tree"),
             json!({
                 "type": "workspace_readwrite",
                 "additionalReadwritePaths": ["/work/tree"],
                 "additionalReadonlyPaths": [
+                    "/tmp/policy",
                     "/work/tree/.git/hooks",
                     "/work/tree/.git/config",
                     "/work/tree/.git/config.worktree",

@@ -62,6 +62,7 @@ A full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor).
 | `CURSOR_INACTIVITY_SECS` | `120` | Cancel a run whose stream has gone silent while waiting on the bridge |
 | `CURSOR_MAX_AGENTS` | `8` | Agents live at once, each on its own worker; further completions queue |
 | `CURSOR_MAX_TOOL_CALLS` | `128` | Guest tool calls one completion may make before it ends as `budget-exhausted` |
+| `CURSOR_SANDBOX` | `false` | Run a lent workspace under the bridge's sandbox: writes confined to the tree, network closed; needs Cursor's sandbox binary |
 
 Workers inherit the host's environment (minus the `GIT_*` identity variables), so `CURSOR_SDK_BRIDGE_LOG` passes straight through and the worker's RPC log lands in this crate's DEBUG output.
 
@@ -69,7 +70,7 @@ The request's `generation` controls (temperature, max tokens, …) are ignored: 
 
 ## How a completion runs
 
-**Workspace.** The guest lends a working tree through `grants.workspace`; the agent runs there with a read-only toolset (`read`, `glob`, `grep`, `ls`, plus `mcp`). No shell, edit, or delete. Without a lent workspace the agent runs in a private empty directory with every built-in tool disabled, so function-tool-only completions still work. `read` takes absolute paths, so staying inside the tree is the prompt's to ask, not the toolset's to enforce.
+**Workspace.** The guest lends a working tree through `grants.workspace`; the agent runs there with the read-only tools (`read`, `glob`, `grep`, `ls`, plus `mcp`) and `shell`. No edit or delete: the tree is written through the guest's tools or the shell. Each shell command is bounded by the bridge, at the timeout the agent's call names (30 s when it names none), and runs in the lent tree as its working directory; the inactivity window does not bound it, so a long check the agent asked for is not cut short by a limit it cannot see. Without a lent workspace the agent runs in a private empty directory with every built-in tool disabled, so function-tool-only completions still work. `read` takes absolute paths and `shell` runs as the worker's user, so staying inside the tree is the prompt's to ask, not the toolset's to enforce; `CURSOR_SANDBOX` asks the bridge to confine writes to the tree and close the network, where Cursor's sandbox binary is installed, and off it leaves the operator's own `~/.cursor/sandbox.json` to apply.
 
 **Tools.** Guest-declared function tools become SDK custom tools at `CreateAgent`. When the agent calls one, the worker POSTs to this crate's loopback callback endpoint, which routes it into the session via `ToolHost::call_tool` under the host's name check, budget, size cap, and per-call timeout. The budget is this backend's: `CURSOR_MAX_TOOL_CALLS` guest tool calls a completion, answered through `WasiModelCtx::limits`, in place of the host's default of 32, since an agent that lays a tree one file a call runs past that long before its wall-clock cap. `Tool::Mcp` grants pass inline as `mcp_servers`; the grant's `tools` allowlist is advisory.
 
@@ -81,7 +82,7 @@ The request's `generation` controls (temperature, max tokens, …) are ignored: 
 
 Each `Send` (the opening prompt, and a correction if any) is bounded twice:
 
-- **Inactivity window** — the stream went silent while waiting on the bridge (opening frame, or a tool call in flight). A `backend` failure a caller may retry. Stands down once the model is composing its answer.
+- **Inactivity window** — the stream went silent while waiting on the bridge (opening frame, or a tool call in flight). A `backend` failure a caller may retry. Stands down once the model is composing its answer, and while a shell command runs, since the bridge bounds that by the call's own timeout.
 - **Absolute cap** — the completion's time budget. Reaches the guest as the typed `budget-exhausted`.
 
 Workers are process-group leaders and are shut down after their completion: a graceful `Shutdown` with 5s grace, then a kill of the whole group. A worker that crashes fails its completion with the typed `cursor-sdk-bridge exited (…)` rather than stalling the next one.

@@ -443,11 +443,20 @@ pub enum Phase {
 }
 
 impl Phase {
+    // The bridge's shell tool, whose command it bounds by the call's own
+    // timeout; the window would end a long check the model asked for.
+    const SHELL: &str = "shell";
+
     // Whether the inactivity window bounds this phase: the bridge and the
     // tools it runs answer within it, while the model — whose text the
-    // stream never carries — is bounded by the cap alone.
-    pub const fn bounded(&self) -> bool {
-        !matches!(self, Self::Model)
+    // stream never carries — and a shell command are bounded by the cap
+    // alone.
+    pub fn bounded(&self) -> bool {
+        match self {
+            Self::Opening => true,
+            Self::Tool(tool) => tool != Self::SHELL,
+            Self::Model => false,
+        }
     }
 }
 

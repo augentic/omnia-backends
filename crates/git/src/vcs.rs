@@ -484,9 +484,21 @@ impl<'a> Repo<'a> {
         Ok(output.status.success().then(|| output.text().trim().to_owned()))
     }
 
-    // The paths the two sides differ on: every path the merge touched, where a
-    // policy rule may apply. A rename is its two paths, each ruled on its own.
-    async fn touched(&self) -> Result<Vec<String>> {
+    // The paths both sides changed since their common ancestor, where a
+    // policy rule may apply; a path one side alone changed is git's clean
+    // merge and no rule's, whatever the rule would lay there. Without an
+    // ancestor, every path the two sides differ on. A rename is its two
+    // paths, each ruled on its own.
+    async fn touched(&self, base: Option<&str>) -> Result<Vec<String>> {
+        let Some(base) = base else {
+            return self.changed("HEAD", "MERGE_HEAD").await;
+        };
+        let ours = self.changed(base, "HEAD").await?;
+        let theirs = self.changed(base, "MERGE_HEAD").await?;
+        Ok(theirs.into_iter().filter(|path| ours.contains(path)).collect())
+    }
+
+    async fn changed(&self, from: &str, to: &str) -> Result<Vec<String>> {
         let args = [
             "diff",
             "--no-ext-diff",
@@ -494,8 +506,8 @@ impl<'a> Repo<'a> {
             "--no-renames",
             "--name-only",
             "-z",
-            "HEAD",
-            "MERGE_HEAD",
+            from,
+            to,
         ];
         let output = self.run(args, &self.shown(), "HEAD").await?;
         Ok(nul_separated(&output.text()))

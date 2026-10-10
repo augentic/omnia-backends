@@ -276,6 +276,8 @@ impl Server {
             "model": options["model"]["id"],
             "customTools": keys(&options["local"]["customTools"]),
             "mcpServers": keys(&options["mcpServers"]),
+            "tools": options["tools"]["names"],
+            "sandbox": options["local"]["sandboxOptions"]["enabled"],
         });
 
         let (ordinal, id) = {

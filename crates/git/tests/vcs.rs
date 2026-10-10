@@ -100,6 +100,19 @@ async fn vcs_matrix() {
     assert_eq!(git.git(&at("attributed"), &["show", "HEAD:data.txt"]), "theirs");
     assert_eq!(git.git(&at("attributed"), &["status", "--porcelain"]), "");
     assert_eq!(git.git(&at("moddel"), &["diff", "--name-status", "HEAD^1", "HEAD"]), "D\tkeep.txt");
+    assert_eq!(git.git(&at("delmod"), &["diff", "--name-status", "HEAD^2", "HEAD"]), "D\tgone.txt");
+
+    // a rule over a path one side alone added resolved nothing: each side's
+    // addition is what the merge brought the other
+    assert_eq!(
+        git.git(&at("onesided"), &["diff", "--name-status", "HEAD^1", "HEAD"]),
+        "A\ttheirs-only.txt"
+    );
+    assert_eq!(
+        git.git(&at("onesided"), &["diff", "--name-status", "HEAD^2", "HEAD"]),
+        "A\tours-only.txt"
+    );
+    assert_eq!(git.git(&at("onesided"), &["status", "--porcelain"]), "");
     assert_eq!(
         git.git(&at("binary"), &["rev-parse", "HEAD:blob.bin"]),
         git.git(&at("binary"), &["rev-parse", "HEAD^2:blob.bin"]),

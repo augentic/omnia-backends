@@ -476,8 +476,19 @@ pub struct LocalAgentOptions {
     pub cwd: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_options: Option<SandboxOptions>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub custom_tools: BTreeMap<String, CustomToolDefinition>,
+}
+
+// Sent only to switch the bridge's sandbox on: an explicit `false` would
+// override a `~/.cursor/sandbox.json` the operator set, where omission
+// leaves it to apply.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxOptions {
+    pub enabled: bool,
 }
 
 #[derive(Serialize)]

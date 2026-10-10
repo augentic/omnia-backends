@@ -13,8 +13,23 @@ use serde_json::Value;
 
 use crate::protocol::{
     AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
-    ModelSelection, ToolList,
+    ModelSelection, SandboxOptions, ToolList,
 };
+
+// The built-in tools a lent workspace grants: the read-only four, the
+// custom-tool channel, and the shell, which the bridge bounds by each
+// command's own timeout. `edit` and `delete` are withheld, so the tree is
+// written through the guest's tools or the shell alone.
+const LENT_TOOLS: [&str; 6] = ["glob", "grep", "ls", "mcp", "read", "shell"];
+
+// What the deployment fixes for every completion: the model a request
+// leaves unset, the key, and whether the bridge sandboxes a lent run.
+#[derive(Clone, Copy)]
+pub struct Defaults<'a> {
+    pub model: &'a str,
+    pub api_key: &'a str,
+    pub sandbox: bool,
+}
 
 // Everything one completion derives from the request: the agent to create
 // and the prompt to send it.
@@ -39,7 +54,7 @@ pub struct AgentSpec {
 
 impl Turn {
     pub async fn prepare(
-        request: &Request, lent: Option<&Path>, default_model: &str, api_key: &str,
+        request: &Request, lent: Option<&Path>, defaults: Defaults<'_>,
     ) -> Result<Self> {
         if request.generation.is_some() {
             tracing::debug!("request.generation is ignored (CreateAgent has no sampling controls)");
@@ -47,10 +62,10 @@ impl Turn {
 
         let workspace = Workspace::new(lent).await?;
         let cwd = workspace.cwd()?;
-        let options = agent_options(request, &cwd, workspace.is_lent(), default_model, api_key)?;
+        let options = agent_options(request, &cwd, workspace.is_lent(), defaults)?;
         let operation = AgentOperationOptions {
             cwd,
-            api_key: api_key.to_owned(),
+            api_key: defaults.api_key.to_owned(),
         };
         let text = with_mcp_hint(&request.mcp_servers(), request.to_string());
         Ok(Self {
@@ -120,7 +135,7 @@ impl Workspace {
 }
 
 fn agent_options(
-    request: &Request, cwd: &str, lent: bool, default_model: &str, api_key: &str,
+    request: &Request, cwd: &str, lent: bool, defaults: Defaults<'_>,
 ) -> Result<AgentOptions> {
     let mut custom_tools = BTreeMap::new();
     let mut mcp_servers = BTreeMap::new();
@@ -149,19 +164,17 @@ fn agent_options(
         }
     }
 
-    let model = request.model.as_deref().unwrap_or(default_model).to_owned();
-    let names = if lent {
-        ["glob", "grep", "ls", "mcp", "read"].iter().map(ToString::to_string).collect()
-    } else {
-        Vec::new()
-    };
+    let model = request.model.as_deref().unwrap_or(defaults.model).to_owned();
+    let names =
+        if lent { LENT_TOOLS.iter().map(ToString::to_string).collect() } else { Vec::new() };
 
     Ok(AgentOptions {
         model: ModelSelection { id: model },
-        api_key: api_key.to_owned(),
+        api_key: defaults.api_key.to_owned(),
         local: LocalAgentOptions {
             cwd: vec![cwd.to_owned()],
             source: lent.then(|| "SETTING_SOURCE_PROJECT".to_owned()),
+            sandbox_options: (lent && defaults.sandbox).then_some(SandboxOptions { enabled: true }),
             custom_tools,
         },
         mcp_servers,
@@ -200,11 +213,17 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
 mod tests {
     use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};
 
-    use super::{agent_options, with_mcp_hint};
+    use super::{Defaults, agent_options, with_mcp_hint};
+
+    const DEFAULTS: Defaults<'static> = Defaults {
+        model: "auto",
+        api_key: "test-key",
+        sandbox: false,
+    };
 
     #[test]
     fn workspace_shapes() {
-        let options = agent_options(&request(), "/workspace", true, "auto", "test-key").unwrap();
+        let options = agent_options(&request(), "/workspace", true, DEFAULTS).unwrap();
         assert_eq!(
             options.tools.as_ref().map(|t| t.names.clone()),
             Some(vec![
@@ -212,16 +231,35 @@ mod tests {
                 "grep".to_string(),
                 "ls".to_string(),
                 "mcp".to_string(),
-                "read".to_string()
+                "read".to_string(),
+                "shell".to_string()
             ]),
-            "a lent workspace grants read-only tools plus the custom-tool channel"
+            "a lent workspace grants the read-only tools, the custom-tool channel, and the shell"
         );
         assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
+        assert!(
+            options.local.sandbox_options.is_none(),
+            "the operator's own sandbox policy applies"
+        );
         assert_eq!(options.api_key, "test-key");
 
-        let options = agent_options(&request(), "/private", false, "auto", "test-key").unwrap();
+        let options = agent_options(&request(), "/private", false, DEFAULTS).unwrap();
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
         assert!(options.local.source.is_none());
+    }
+
+    #[test]
+    fn sandboxed_lend() {
+        let sandboxed = Defaults {
+            sandbox: true,
+            ..DEFAULTS
+        };
+        let options = agent_options(&request(), "/workspace", true, sandboxed).unwrap();
+        assert!(options.local.sandbox_options.as_ref().is_some_and(|sandbox| sandbox.enabled));
+
+        // nothing to confine without a lent tree
+        let options = agent_options(&request(), "/private", false, sandboxed).unwrap();
+        assert!(options.local.sandbox_options.is_none());
     }
 
     #[test]
@@ -258,7 +296,7 @@ mod tests {
             tools: vec![],
             url: "http://127.0.0.1:9/mcp".to_owned(),
         })];
-        let options = agent_options(&request, "/private", false, "auto", "test-key").unwrap();
+        let options = agent_options(&request, "/private", false, DEFAULTS).unwrap();
         assert!(options.mcp_servers.contains_key("docs"));
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
     }

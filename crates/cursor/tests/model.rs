@@ -6,9 +6,12 @@
 mod support;
 
 use omnia_cursor::ConnectOptions;
+use omnia_test::host::scratch;
 use serde_json::json;
 use support::fake_bridge::{Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
-use support::harness::{await_gone, connect, options, run_guest, sole_agent, spawning};
+use support::harness::{
+    await_gone, connect, options, run_guest, run_guest_over, sole_agent, spawning,
+};
 
 // A guest program without a matching test here fails to compile.
 test_programs::foreach_model!();
@@ -42,6 +45,31 @@ async fn model_echo_text() {
     assert_eq!(created.arg["apiKeyPresent"], true);
     assert_eq!(deleted.arg["apiKeyPresent"], true);
     assert_eq!(deleted.arg["apiKeyMatchesCreate"], true);
+
+    // nothing lent: every built-in tool off, and no sandbox asked for
+    assert_eq!(created.arg["tools"], json!([]));
+    assert!(created.arg["sandbox"].is_null(), "{}", created.arg);
+}
+
+#[tokio::test]
+async fn model_lent_workspace() {
+    let fake = Spawnable::new(&Config::echo());
+    let client = spawning(&fake, 1).await;
+    let lent = scratch();
+    run_guest_over(test_programs::MODEL_LENT_WORKSPACE, &[], &client, Some(lent.mount(true))).await;
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let (_, sequence) = sole_agent(&log);
+    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
+
+    // the lent tree is the agent's cwd, with the shell among its tools and
+    // the sandbox left to the operator's own policy
+    let created = log.saw(Rpc::CreateAgent)[0];
+    let cwd = std::fs::canonicalize(lent.path()).expect("the scratch root");
+    assert_eq!(created.text("cwd"), cwd.to_str().expect("a UTF-8 path"));
+    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read", "shell"]));
+    assert!(created.arg["sandbox"].is_null(), "{}", created.arg);
 }
 
 #[tokio::test]

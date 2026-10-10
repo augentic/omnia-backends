@@ -10,7 +10,7 @@ use http::{Method, Request};
 use http_body_util::{BodyExt as _, Full};
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
-use omnia::{Backend as _, ExitStatus};
+use omnia::{Backend as _, ExitStatus, Mount};
 use omnia_cursor::{Client, ConnectOptions};
 use omnia_test::host::{Backends, Deployment};
 use omnia_wasi_model::WasiModel;
@@ -32,6 +32,7 @@ pub fn options(max_agents: usize) -> ConnectOptions {
         inactivity_secs: 10,
         max_agents,
         max_tool_calls: 32,
+        sandbox: false,
     }
 }
 
@@ -50,10 +51,17 @@ pub async fn connect(options: ConnectOptions) -> Client {
 
 /// Run one guest program over `client`, requiring a clean exit.
 pub async fn run_guest(wasm: &str, args: &[&str], client: &Client) {
+    run_guest_over(wasm, args, client, None).await;
+}
+
+/// Run one guest program over `client` with `mount` preopened as its `.`,
+/// the tree a lending scenario grants, requiring a clean exit.
+pub async fn run_guest_over(wasm: &str, args: &[&str], client: &Client, mount: Option<Mount>) {
     let backends = Backends::defaults().await.model(client.clone());
     let status = Deployment::new()
         .guest("guest", wasm)
         .args(args.iter().copied())
+        .mounts(mount)
         .run_host::<WasiModel, _>(backends)
         .await
         .expect("guest runs");

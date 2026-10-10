@@ -2,7 +2,7 @@
 //! client pointed at the fake through `ConnectOptions::endpoint`, and a
 //! guest run through `omnia_test::host`.
 
-use omnia::{Backend as _, ExitStatus};
+use omnia::{Backend as _, ExitStatus, Mount};
 use omnia_genai::{Client, ConnectOptions};
 use omnia_test::host::{Backends, Deployment};
 use omnia_wasi_model::WasiModel;
@@ -24,10 +24,17 @@ pub async fn client(fake: &FakeOpenAi) -> Client {
 
 /// Run one guest program over `client`, requiring a clean exit.
 pub async fn run_guest(wasm: &str, args: &[&str], client: &Client) {
+    run_guest_over(wasm, args, client, None).await;
+}
+
+/// Run one guest program over `client` with `mount` preopened as its `.`,
+/// the tree a lending scenario grants, requiring a clean exit.
+pub async fn run_guest_over(wasm: &str, args: &[&str], client: &Client, mount: Option<Mount>) {
     let backends = Backends::defaults().await.model(client.clone());
     let status = Deployment::new()
         .guest("guest", wasm)
         .args(args.iter().copied())
+        .mounts(mount)
         .run_host::<WasiModel, _>(backends)
         .await
         .expect("guest runs");

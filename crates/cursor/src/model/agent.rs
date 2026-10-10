@@ -658,13 +658,40 @@ mod tests {
         tokio::pin!(deadline);
         let still_watching = time::timeout(2 * DEADLINES.inactivity, &mut deadline).await.is_err();
         assert!(still_watching, "the window fired under `Phase::Model`");
-        activity.send_replace(Activity::now(Phase::Tool("shell".to_owned())));
+        activity.send_replace(Activity::now(Phase::Tool("grep".to_owned())));
         let failure = deadline.await;
         assert!(
-            matches!(&failure, Failure::Inactive { waiting, idle_secs: 1, .. } if waiting == "tool `shell`"),
+            matches!(&failure, Failure::Inactive { waiting, idle_secs: 1, .. } if waiting == "tool `grep`"),
             "{failure}"
         );
         assert_eq!(started.elapsed(), 3 * DEADLINES.inactivity);
+    }
+
+    // A shell command runs as long as the model's timeout on it allows, and
+    // its result frame, however it ended, brings the window back for the
+    // next tool.
+    #[tokio::test(start_paused = true)]
+    async fn shell_outlives_window() {
+        let started = Instant::now();
+        let activity = watch::Sender::new(Activity::now(Phase::Tool("shell".to_owned())));
+        let deadline = DEADLINES.watch(&activity);
+        tokio::pin!(deadline);
+        let still_watching = time::timeout(2 * DEADLINES.inactivity, &mut deadline).await.is_err();
+        assert!(still_watching, "the window fired under a shell command");
+        activity.send_replace(Activity::now(Phase::Tool("read".to_owned())));
+        let failure = deadline.await;
+        assert!(
+            matches!(&failure, Failure::Inactive { waiting, idle_secs: 1, .. } if waiting == "tool `read`"),
+            "{failure}"
+        );
+        assert_eq!(started.elapsed(), 3 * DEADLINES.inactivity);
+
+        // left running, the cap alone ends it
+        let started = Instant::now();
+        let activity = watch::Sender::new(Activity::now(Phase::Tool("shell".to_owned())));
+        let failure = DEADLINES.watch(&activity).await;
+        assert!(matches!(failure, Failure::Timeout { cap_secs: 5 }), "{failure}");
+        assert_eq!(started.elapsed(), DEADLINES.cap);
     }
 
     #[test]

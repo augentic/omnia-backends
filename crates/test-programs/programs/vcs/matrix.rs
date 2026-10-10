@@ -32,6 +32,8 @@ async fn scenario() {
     merge_policy_resolves().await;
     merge_policy_beats_attributes().await;
     merge_policy_modify_delete().await;
+    merge_policy_delete_modify().await;
+    merge_policy_one_sided().await;
     merge_policy_binary().await;
     merge_up_to_date().await;
     log_over_base().await;
@@ -316,6 +318,49 @@ async fn merge_policy_modify_delete() {
     assert_eq!(merged.conflicts, Vec::<String>::new());
     assert!(merged.commit.is_some(), "the merge sealed");
     assert!(fs::metadata("moddel/keep.txt").is_err(), "the deleting side was kept");
+    assert!(WasiVcs.pending(repo).await.expect("pending").is_empty(), "the copy is sealed");
+}
+
+// The working copy deleted the path and the merged-in side edited it: `ours`
+// keeps the deletion, over the edited version the merge staged.
+async fn merge_policy_delete_modify() {
+    let repo = "./delmod";
+    let work = "./delmod-work";
+    WasiVcs.init(repo).await.expect("init");
+    write("delmod/gone.txt", "base\n");
+    let base = WasiVcs.commit(repo, "base").await.expect("commit").expect("base");
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    write("delmod-work/gone.txt", "theirs\n");
+    let theirs = WasiVcs.commit(work, "edit").await.expect("commit").expect("edit");
+    fs::remove_file("delmod/gone.txt").expect("delete on the working copy's side");
+    WasiVcs.commit(repo, "delete").await.expect("commit").expect("delete");
+
+    let policy = [rule("gone.txt", Strategy::Ours)];
+    let merged = WasiVcs.merge(repo, &theirs, "merge", &policy).await.expect("merge");
+    assert_eq!(merged.conflicts, Vec::<String>::new());
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert!(fs::metadata("delmod/gone.txt").is_err(), "the deleting side was kept");
+    assert!(WasiVcs.pending(repo).await.expect("pending").is_empty(), "the copy is sealed");
+}
+
+// A path one side alone added is git's clean merge: a rule naming it keeps
+// nothing from the side that lacks it, whichever side that is.
+async fn merge_policy_one_sided() {
+    let repo = "./onesided";
+    let work = "./onesided-work";
+    let base = seeded(repo).await;
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    write("onesided-work/theirs-only.txt", "theirs\n");
+    let theirs = WasiVcs.commit(work, "theirs").await.expect("commit").expect("theirs");
+    write("onesided/ours-only.txt", "ours\n");
+    WasiVcs.commit(repo, "ours").await.expect("commit").expect("ours");
+
+    let policy = [rule("theirs-only.txt", Strategy::Ours), rule("ours-only.txt", Strategy::Theirs)];
+    let merged = WasiVcs.merge(repo, &theirs, "merge", &policy).await.expect("merge");
+    assert_eq!(merged.conflicts, Vec::<String>::new());
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert_eq!(read("onesided/theirs-only.txt"), "theirs\n", "the merged-in side's addition stays");
+    assert_eq!(read("onesided/ours-only.txt"), "ours\n", "the working copy's addition stays");
     assert!(WasiVcs.pending(repo).await.expect("pending").is_empty(), "the copy is sealed");
 }
 

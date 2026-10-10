@@ -127,6 +127,21 @@ Unreleased
   that lays a tree one file a tool call ran past 32 before its wall-clock
   cap; the cap on the run is `CURSOR_TIMEOUT_SECS`, and the call budget
   now sits beside it as a knob of the same backend.
+- `omnia-cursor` grants `shell` on a lent workspace, beside the read-only
+  tools and the custom-tool channel, so an agent runs the checks its
+  prompt names — a compiler, a test runner — in the tree it was lent
+  rather than reading the tree and guessing what they would say; `edit`
+  and `delete` stay withheld. The bridge bounds each command by the
+  timeout the agent's call names (30 s when it names none), so the
+  inactivity window stands down while a shell command runs, as it does
+  while the model composes: a long check the agent asked for is no longer
+  cut short at `CURSOR_INACTIVITY_SECS` by a limit it could not see, and
+  the absolute cap alone bounds it. `ConnectOptions` gains `sandbox`
+  (`CURSOR_SANDBOX`, default `false`): on, a lent run asks the bridge for
+  its sandbox — writes confined to the tree, the network closed — which
+  needs Cursor's sandbox binary and refuses the completion where it is
+  missing; off, nothing is sent, so an operator's own
+  `~/.cursor/sandbox.json` applies as before.
 
 ### Changed
 
@@ -229,6 +244,17 @@ Unreleased
   been the DEBUG line's `correction` field, so `-v` no longer carries
   every rejected candidate in full and the findings are read where the
   guest logs them.
+
+### Fixed
+
+- `omnia-git` applies a merge rule only to a path both sides changed
+  since their common ancestor. It had applied one to every path the two
+  sides differ on, so a file one side alone added under an `ours` or
+  `theirs` rule — a lockfile the merged-in slice laid for the first time
+  — was removed from the merge as the side that lacked it, and the
+  removal itself refused, since git had staged the addition cleanly and
+  `rm` drops staged content only under `--force`, which it now carries.
+  Without a common ancestor every differing path is still ruled.
 
 ### Removed
 

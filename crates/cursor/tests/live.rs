@@ -44,6 +44,7 @@ async fn connect() -> Result<Client> {
         model: "auto".to_owned(),
         max_agents: 4,
         max_tool_calls: 128,
+        sandbox: false,
     })
     .await
 }
@@ -252,6 +253,7 @@ async fn worker_killed_mid_run_recovers() -> Result<()> {
         model: "auto".to_owned(),
         max_agents: 1,
         max_tool_calls: 128,
+        sandbox: false,
     })
     .await?;
     let completion = {

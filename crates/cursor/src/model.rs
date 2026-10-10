@@ -17,7 +17,7 @@ pub use agent::Deadlines;
 use agent::{Attempt, Unanswered};
 use anyhow::anyhow;
 use omnia_wasi_model::{Answer, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx};
-use options::Turn;
+use options::{Defaults, Turn};
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
 
@@ -75,7 +75,12 @@ impl Client {
             .ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))
             .map_err(Unanswered::settled)?;
 
-        let turn = Turn::prepare(request, tool_host.local_path(), &self.model, api_key)
+        let defaults = Defaults {
+            model: &self.model,
+            api_key,
+            sandbox: self.sandbox,
+        };
+        let turn = Turn::prepare(request, tool_host.local_path(), defaults)
             .await
             .map_err(Unanswered::settled)?;
         let lease = self.pool.lease().await.map_err(Unanswered::settled)?;

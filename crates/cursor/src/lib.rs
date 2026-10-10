@@ -8,6 +8,7 @@ mod protocol;
 mod worker;
 
 use std::env;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -30,7 +31,7 @@ pub struct Client {
     api_key: Option<String>,
     pool: Arc<Pool>,
     max_tool_calls: u32,
-    shell: bool,
+    shell_roots: Vec<PathBuf>,
 }
 
 impl std::fmt::Debug for Client {
@@ -40,7 +41,7 @@ impl std::fmt::Debug for Client {
             .field("model", &self.model)
             .field("max_agents", &self.pool.max_agents())
             .field("max_tool_calls", &self.max_tool_calls)
-            .field("shell", &self.shell)
+            .field("shell_roots", &self.shell_roots)
             .finish_non_exhaustive()
     }
 }
@@ -55,6 +56,9 @@ impl Backend for Client {
         ensure!(options.inactivity_secs > 0, "inactivity_secs must be greater than 0");
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
+        for root in &options.shell_roots {
+            ensure!(root.is_absolute(), "shell_roots entry {} is not absolute", root.display());
+        }
 
         let pool = Pool::connect(options.max_agents).await?;
         Ok(Self {
@@ -66,7 +70,7 @@ impl Backend for Client {
             api_key,
             pool: Arc::new(pool),
             max_tool_calls: options.max_tool_calls,
-            shell: options.shell,
+            shell_roots: options.shell_roots,
         })
     }
 }
@@ -81,7 +85,9 @@ fn elapsed_ms(since: Instant) -> u64 {
 
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
-    use fromenv::FromEnv;
+    use std::path::PathBuf;
+
+    use fromenv::{FromEnv, ParseResult};
 
     /// Connection options for the cursor backend.
     #[derive(Debug, Clone, FromEnv)]
@@ -105,10 +111,17 @@ mod config {
         /// `budget-exhausted`; the host's default is 32.
         #[env(from = "CURSOR_MAX_TOOL_CALLS", default = "128")]
         pub max_tool_calls: u32,
-        /// Whether a lent workspace grants the agent a shell, run under the
-        /// bridge's sandbox: writes confined to the tree, the network closed.
-        #[env(from = "CURSOR_SHELL", default = "false")]
-        pub shell: bool,
+        /// Host directories whose lends grant the agent a shell, run under
+        /// the bridge's sandbox: writes confined to the tree, the network
+        /// closed. Absolute paths separated as `PATH` is; a lend elsewhere
+        /// keeps the read-only tools.
+        #[env(from = "CURSOR_SHELL_ROOTS", default = "", with = paths)]
+        pub shell_roots: Vec<PathBuf>,
+    }
+
+    #[expect(clippy::unnecessary_wraps, reason = "the signature a `FromEnv` parser takes")]
+    fn paths(value: &str) -> ParseResult<Vec<PathBuf>> {
+        Ok(std::env::split_paths(value).filter(|path| !path.as_os_str().is_empty()).collect())
     }
 }
 pub use config::ConnectOptions;

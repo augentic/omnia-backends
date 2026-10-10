@@ -10,7 +10,8 @@ use omnia_test::host::scratch;
 use serde_json::json;
 use support::fake_bridge::{self, Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
 use support::harness::{
-    await_gone, connect, options, run_guest, run_guest_over, sole_agent, spawning,
+    await_gone, connect, expect_error_over, options, run_guest, run_guest_over, sole_agent,
+    spawning,
 };
 
 // A guest program without a matching test here fails to compile.
@@ -83,8 +84,29 @@ async fn model_lent_workspace() {
 #[tokio::test]
 async fn lent_shell() {
     let fake = Spawnable::new(&Config::echo());
+    let lent = scratch();
     let client = connect(ConnectOptions {
-        shell: true,
+        shell_roots: vec![lent.path().to_path_buf()],
+        ..options(1)
+    })
+    .await;
+    run_guest_over(test_programs::MODEL_LENT_WORKSPACE, &[], &client, Some(lent.mount(true))).await;
+    await_gone(&fake).await;
+
+    // a lend under one of the operator's roots adds the shell, and the
+    // bridge's sandbox with it
+    let log = fake.log();
+    let created = log.saw(Rpc::CreateAgent)[0];
+    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read", "shell"]));
+    assert_eq!(created.arg["sandbox"], true, "{}", created.arg);
+}
+
+#[tokio::test]
+async fn lent_outside_shell_roots() {
+    let fake = Spawnable::new(&Config::echo());
+    let trusted = scratch();
+    let client = connect(ConnectOptions {
+        shell_roots: vec![trusted.path().to_path_buf()],
         ..options(1)
     })
     .await;
@@ -92,11 +114,37 @@ async fn lent_shell() {
     run_guest_over(test_programs::MODEL_LENT_WORKSPACE, &[], &client, Some(lent.mount(true))).await;
     await_gone(&fake).await;
 
-    // the operator's knob adds the shell, and the bridge's sandbox with it
+    // the roots name trees, not a process-wide grant: a lend elsewhere
+    // keeps the read-only tools
     let log = fake.log();
     let created = log.saw(Rpc::CreateAgent)[0];
-    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read", "shell"]));
-    assert_eq!(created.arg["sandbox"], true, "{}", created.arg);
+    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read"]));
+    assert!(created.arg["sandbox"].is_null(), "{}", created.arg);
+}
+
+// The bridge folds a tree's own `.cursor/sandbox.json` into every shell
+// command's sandbox policy, so a lend carrying one is refused the shell
+// outright rather than confined on the tree's terms.
+#[tokio::test]
+async fn lent_sandbox_policy() {
+    let fake = Spawnable::new(&Config::echo());
+    let lent = scratch();
+    std::fs::create_dir(lent.path().join(".cursor")).expect("the tree's .cursor");
+    std::fs::write(
+        lent.path().join(".cursor/sandbox.json"),
+        r#"{"type":"workspace_readwrite","networkPolicy":{"version":1,"allow":["*"]}}"#,
+    )
+    .expect("the tree's sandbox policy");
+    let client = connect(ConnectOptions {
+        shell_roots: vec![lent.path().to_path_buf()],
+        ..options(1)
+    })
+    .await;
+    expect_error_over("carries `.cursor/sandbox.json`", &["lend"], &client, Some(lent.mount(true)))
+        .await;
+
+    // refused before any worker was asked for
+    assert!(fake.log().processes().is_empty(), "{}", fake.log().summary());
 }
 
 #[tokio::test]

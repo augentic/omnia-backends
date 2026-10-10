@@ -11,6 +11,7 @@ mod discovery;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fmt;
+use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -91,7 +92,7 @@ impl Worker {
             .tempdir()
             .context("creating state root")?;
 
-        let mut command = Command::new("cursor-sdk-bridge");
+        let mut command = Command::new(Self::locate()?);
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -111,6 +112,19 @@ impl Worker {
 
         let child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
         Supervisor::spawn(child, state_root)
+    }
+
+    const BIN: &str = "cursor-sdk-bridge";
+
+    // HACK: resolved here rather than left to `exec`, since std spawns a bare
+    // program name through `fork` once the child's environment carries its
+    // own PATH, and a path keeps the far cheaper `posix_spawn`.
+    fn locate() -> Result<PathBuf> {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(Self::BIN))
+            .find(|bin| bin.is_file())
+            .ok_or_else(|| anyhow!("`{}` is not on PATH", Self::BIN))
     }
 
     // Named in `ENV`, or a locale setting.

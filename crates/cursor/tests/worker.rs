@@ -75,6 +75,9 @@ const ANSWERED: [Rpc; 4] = [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::D
 // dropped, or with its stream lost — is cancelled and billed before teardown.
 const CANCELLED: [Rpc; 6] =
     [Rpc::CreateAgent, Rpc::Send, Rpc::CancelRun, Rpc::GetUsage, Rpc::CloseAgent, Rpc::DeleteAgent];
+// A completion dropped once its agent existed but before its send: no run
+// to cancel or bill, so teardown alone.
+const UNSENT: [Rpc; 3] = [Rpc::CreateAgent, Rpc::CloseAgent, Rpc::DeleteAgent];
 
 // The two workers of a two-way abandon: the one that recorded `rpc`, and
 // the one that did not.
@@ -266,7 +269,7 @@ async fn abandon_during_create() {
     let log = fake.log();
     let loser = log.process(loser.number).expect("the loser's history");
     let (_, sequence) = sole_agent(&loser);
-    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::CloseAgent, Rpc::DeleteAgent]);
+    assert_eq!(sequence, UNSENT);
     let created = loser.saw(Rpc::CreateAgent)[0];
     let deleted = loser.saw(Rpc::DeleteAgent)[0];
     assert_eq!(
@@ -336,10 +339,11 @@ async fn abandon_during_teardown() {
     await_gone(&fake).await;
     let log = fake.log();
     for process in log.workers() {
-        // the winner answered before its teardown, so the loser may have been dropped mid-run
+        // the winner answered before its teardown, so the loser may have been
+        // dropped mid-run, or before its send
         let (_, sequence) = sole_agent(&process);
         assert!(
-            sequence == ANSWERED || sequence == CANCELLED,
+            sequence == ANSWERED || sequence == CANCELLED || sequence == UNSENT,
             "process {}: {sequence:?}",
             process.number
         );

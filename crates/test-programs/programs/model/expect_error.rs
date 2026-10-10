@@ -6,8 +6,9 @@
 //! guest), `nudged` asks for a JSON answer with a check — so a reply that is
 //! not JSON is nudged before any check — and requires the failure to strike
 //! before any candidate has reached the guest, `budget` expects the typed
-//! `budget-exhausted` in the backend failure's place, and `without:<text>`
-//! asserts the detail does not carry `text`.
+//! `budget-exhausted` in the backend failure's place, `lend` lends the
+//! guest's `.` mount, and `without:<text>` asserts the detail does not carry
+//! `text`.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -23,6 +24,7 @@ async fn scenario() {
     let check = flags.iter().any(|flag| flag == "check");
     let nudged = flags.iter().any(|flag| flag == "nudged");
     let budget = flags.iter().any(|flag| flag == "budget");
+    let lend = flags.iter().any(|flag| flag == "lend");
     let absent: Vec<&str> = flags.iter().filter_map(|flag| flag.strip_prefix("without:")).collect();
     let format = if nudged { Format::Json } else { Format::Text };
 
@@ -34,6 +36,7 @@ async fn scenario() {
                 .tools(tools)
                 .format(format)
                 .check(check || nudged)
+                .maybe_workspace(lend.then_some("."))
                 .build(),
             |call: ToolCall| {
                 if call.name == CHECK_TOOL {

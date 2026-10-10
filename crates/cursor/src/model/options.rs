@@ -5,9 +5,10 @@
 //! servers.
 
 use std::collections::BTreeMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::Value;
 
@@ -21,20 +22,35 @@ use crate::protocol::{
 // written through the guest's tools alone.
 const LENT_TOOLS: [&str; 5] = ["glob", "grep", "ls", "mcp", "read"];
 
-// The tool the operator's `shell` knob adds to a lend, which the bridge
-// bounds by each command's own timeout. It runs as the worker's user, so it
-// is never granted without the bridge's sandbox: a lend is a preopen, not a
-// trust decision, and a prompt the tree itself injects would otherwise
-// name a command the host runs.
+// The tool a lend under one of the operator's `shell_roots` adds, which the
+// bridge bounds by each command's own timeout. It runs as the worker's user,
+// so it is never granted without the bridge's sandbox: a lend is a preopen,
+// not a trust decision, and a prompt the tree itself injects would
+// otherwise name a command the host runs.
 const SHELL_TOOL: &str = "shell";
 
+// The file the bridge folds into the sandbox policy of every shell command
+// run in a tree: its write paths and network allows join the operator's.
+const SANDBOX_POLICY: &str = ".cursor/sandbox.json";
+
 // What the deployment fixes for every completion: the model a request
-// leaves unset, the key, and whether a lent run gets the sandboxed shell.
+// leaves unset, the key, and the host trees whose lends get the sandboxed
+// shell.
 #[derive(Clone, Copy)]
 pub struct Defaults<'a> {
     pub model: &'a str,
     pub api_key: &'a str,
-    pub shell: bool,
+    pub shell_roots: &'a [PathBuf],
+}
+
+// The built-in tools a workspace grants: none for a private one, the
+// read-only set for a lend, and the sandboxed shell besides for a lend
+// under one of the operator's roots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tools {
+    None,
+    ReadOnly,
+    Shell,
 }
 
 // Everything one completion derives from the request: the agent to create
@@ -68,7 +84,8 @@ impl Turn {
 
         let workspace = Workspace::new(lent).await?;
         let cwd = workspace.cwd()?;
-        let options = agent_options(request, &cwd, workspace.is_lent(), defaults)?;
+        let tools = workspace.tools(defaults.shell_roots).await?;
+        let options = agent_options(request, &cwd, tools, defaults)?;
         let operation = AgentOperationOptions {
             cwd,
             api_key: defaults.api_key.to_owned(),
@@ -135,13 +152,45 @@ impl Workspace {
             .with_context(|| format!("invalid workspace path {}", path.display()))
     }
 
-    const fn is_lent(&self) -> bool {
-        matches!(self, Self::Lent(_))
+    // A lend under one of the roots gets the shell unless the tree carries
+    // its own sandbox policy, which the bridge would honour: a tree may not
+    // set its own confinement. Checked here rather than left to the bridge,
+    // which merges the file without a word.
+    async fn tools(&self, shell_roots: &[PathBuf]) -> Result<Tools> {
+        let Self::Lent(path) = self else {
+            return Ok(Tools::None);
+        };
+        if !under(path, shell_roots).await {
+            return Ok(Tools::ReadOnly);
+        }
+
+        let policy = path.join(SANDBOX_POLICY);
+        match tokio::fs::symlink_metadata(&policy).await {
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Tools::Shell),
+            Ok(_) => bail!(
+                "lent workspace {} carries `{SANDBOX_POLICY}`, which the shell's sandbox would \
+                 honour",
+                path.display()
+            ),
+            Err(error) => Err(error).with_context(|| format!("checking {}", policy.display())),
+        }
     }
 }
 
+// Whether the canonical `path` is at or beneath one of `roots`, each
+// resolved as the lend was so a symlinked root still matches; a root that
+// does not exist holds no tree.
+async fn under(path: &Path, roots: &[PathBuf]) -> bool {
+    for root in roots {
+        if tokio::fs::canonicalize(root).await.is_ok_and(|root| path.starts_with(root)) {
+            return true;
+        }
+    }
+    false
+}
+
 fn agent_options(
-    request: &Request, cwd: &str, lent: bool, defaults: Defaults<'_>,
+    request: &Request, cwd: &str, tools: Tools, defaults: Defaults<'_>,
 ) -> Result<AgentOptions> {
     let mut custom_tools = BTreeMap::new();
     let mut mcp_servers = BTreeMap::new();
@@ -171,9 +220,11 @@ fn agent_options(
     }
 
     let model = request.model.as_deref().unwrap_or(defaults.model).to_owned();
-    let shell = lent && defaults.shell;
-    let mut names: Vec<String> =
-        if lent { LENT_TOOLS.iter().map(ToString::to_string).collect() } else { Vec::new() };
+    let mut names: Vec<String> = match tools {
+        Tools::None => Vec::new(),
+        Tools::ReadOnly | Tools::Shell => LENT_TOOLS.iter().map(ToString::to_string).collect(),
+    };
+    let shell = tools == Tools::Shell;
     if shell {
         names.push(SHELL_TOOL.to_owned());
     }
@@ -183,7 +234,6 @@ fn agent_options(
         api_key: defaults.api_key.to_owned(),
         local: LocalAgentOptions {
             cwd: vec![cwd.to_owned()],
-            source: lent.then(|| "SETTING_SOURCE_PROJECT".to_owned()),
             sandbox_options: shell.then_some(SandboxOptions { enabled: true }),
             custom_tools,
         },
@@ -223,17 +273,17 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
 mod tests {
     use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};
 
-    use super::{Defaults, agent_options, with_mcp_hint};
+    use super::{Defaults, Tools, agent_options, with_mcp_hint};
 
     const DEFAULTS: Defaults<'static> = Defaults {
         model: "auto",
         api_key: "test-key",
-        shell: false,
+        shell_roots: &[],
     };
 
     #[test]
     fn workspace_shapes() {
-        let options = agent_options(&request(), "/workspace", true, DEFAULTS).unwrap();
+        let options = agent_options(&request(), "/workspace", Tools::ReadOnly, DEFAULTS).unwrap();
         assert_eq!(
             options.tools.as_ref().map(|t| t.names.clone()),
             Some(vec![
@@ -245,22 +295,16 @@ mod tests {
             ]),
             "a lent workspace grants the read-only tools and the custom-tool channel"
         );
-        assert_eq!(options.local.source.as_deref(), Some("SETTING_SOURCE_PROJECT"));
         assert!(options.local.sandbox_options.is_none(), "nothing runs that needs confining");
         assert_eq!(options.api_key, "test-key");
 
-        let options = agent_options(&request(), "/private", false, DEFAULTS).unwrap();
+        let options = agent_options(&request(), "/private", Tools::None, DEFAULTS).unwrap();
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
-        assert!(options.local.source.is_none());
     }
 
     #[test]
     fn shell_lend() {
-        let shell = Defaults {
-            shell: true,
-            ..DEFAULTS
-        };
-        let options = agent_options(&request(), "/workspace", true, shell).unwrap();
+        let options = agent_options(&request(), "/workspace", Tools::Shell, DEFAULTS).unwrap();
         assert_eq!(
             options.tools.as_ref().map(|t| t.names.clone()),
             Some(vec![
@@ -277,11 +321,6 @@ mod tests {
             options.local.sandbox_options.as_ref().is_some_and(|sandbox| sandbox.enabled),
             "and never without the sandbox"
         );
-
-        // no shell to confine without a lent tree
-        let options = agent_options(&request(), "/private", false, shell).unwrap();
-        assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
-        assert!(options.local.sandbox_options.is_none());
     }
 
     #[test]
@@ -318,7 +357,7 @@ mod tests {
             tools: vec![],
             url: "http://127.0.0.1:9/mcp".to_owned(),
         })];
-        let options = agent_options(&request, "/private", false, DEFAULTS).unwrap();
+        let options = agent_options(&request, "/private", Tools::None, DEFAULTS).unwrap();
         assert!(options.mcp_servers.contains_key("docs"));
         assert_eq!(options.tools.as_ref().map(|t| t.names.as_slice()), Some(&[][..]));
     }

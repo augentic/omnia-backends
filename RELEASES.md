@@ -131,22 +131,36 @@ Unreleased
   read-only tools and the custom-tool channel, so an agent runs the checks
   its prompt names — a compiler, a test runner — in the tree it was lent
   rather than reading the tree and guessing what they would say; `edit`
-  and `delete` stay withheld. The grant is the operator's, not the lend's:
-  `ConnectOptions` gains `shell` (`CURSOR_SHELL`, default `false`), and a
-  lend without it keeps the read-only tools alone, since a lend is a
+  and `delete` stay withheld. The grant is the operator's, tree by tree,
+  not the lend's: `ConnectOptions` gains `shell_roots`
+  (`CURSOR_SHELL_ROOTS`, absolute host directories separated as `PATH`
+  is, none by default), a lend at or beneath one of them gets the shell,
+  and a lend elsewhere keeps the read-only tools alone, since a lend is a
   preopen rather than a trust decision and a shell runs as the worker's
-  user. On, every shell-bearing run asks the bridge for its sandbox —
-  writes confined to the tree, the network closed — which needs Cursor's
-  sandbox binary and refuses the completion where it is missing, so a
-  command a prompt names, or a file in the tree injects, runs confined or
-  not at all. The bridge bounds each command by the timeout the agent's
+  user. Every shell-bearing run asks the bridge for its sandbox — writes
+  confined to the tree, the network closed — which needs Cursor's sandbox
+  binary and refuses the completion where it is missing, so a command a
+  prompt names, or a file in the tree injects, runs confined or not at
+  all. The bridge also folds a tree's own `.cursor/sandbox.json` into
+  every command's policy, adding its write paths and network allows to
+  the operator's, so a lend under a root that carries one fails the
+  completion rather than running on the tree's terms; and the lent
+  tree's `.cursor/` is never a setting source (the `source` once sent at
+  `CreateAgent` named no field of the bridge's and is gone), so its
+  rules, hooks and MCP servers stay out of the agent. The bridge bounds
+  each command by the timeout the agent's
   call names (30 s when it names none), so the inactivity window stands
   down while a shell command runs, as it does while the model composes: a
   long check the agent asked for is no longer cut short at
   `CURSOR_INACTIVITY_SECS` by a limit it could not see, and the absolute
-  cap alone bounds it. Workers are spawned without `CURSOR_API_KEY` in
-  their environment, which every RPC carries explicitly, so no shell
-  child inherits it.
+  cap alone bounds it. A guest custom tool named `shell` is a tool like
+  any other, so the window keeps running while it is awaited. Workers
+  are spawned from a fixed environment allowlist (the process basics,
+  the bridge's own `CURSOR_*` knobs, and the proxy and CA variables; the
+  README lists them) rather than the host's whole environment, so neither
+  `CURSOR_API_KEY`, which every RPC carries explicitly, nor the
+  credentials of a backend sharing the host process reach a worker or a
+  shell child it runs.
 
 ### Changed
 

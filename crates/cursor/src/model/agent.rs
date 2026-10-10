@@ -673,7 +673,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn shell_outlives_window() {
         let started = Instant::now();
-        let activity = watch::Sender::new(Activity::now(Phase::Tool("shell".to_owned())));
+        let activity = watch::Sender::new(Activity::now(Phase::Shell));
         let deadline = DEADLINES.watch(&activity);
         tokio::pin!(deadline);
         let still_watching = time::timeout(2 * DEADLINES.inactivity, &mut deadline).await.is_err();
@@ -688,7 +688,7 @@ mod tests {
 
         // left running, the cap alone ends it
         let started = Instant::now();
-        let activity = watch::Sender::new(Activity::now(Phase::Tool("shell".to_owned())));
+        let activity = watch::Sender::new(Activity::now(Phase::Shell));
         let failure = DEADLINES.watch(&activity).await;
         assert!(matches!(failure, Failure::Timeout { cap_secs: 5 }), "{failure}");
         assert_eq!(started.elapsed(), DEADLINES.cap);

@@ -273,7 +273,7 @@ impl Server {
         let arg = json!({
             "cwd": options["local"]["cwd"][0],
             "apiKeyPresent": !api_key.is_empty(),
-            "apiKeyInEnv": std::env::var_os("CURSOR_API_KEY").is_some(),
+            "env": environment(),
             "model": options["model"]["id"],
             "customTools": keys(&options["local"]["customTools"]),
             "mcpServers": keys(&options["mcpServers"]),
@@ -477,6 +477,23 @@ impl Server {
                     }
                 }
             }
+            Script::Started { name, args } => {
+                let started = json!({
+                    "sdkMessage": {
+                        "type": "tool_call",
+                        "message": {
+                            "agent_id": run.agent, "run_id": run.id,
+                            "call_id": format!("{}-call", run.id),
+                            "name": name, "args": args, "status": "running",
+                        },
+                    }
+                });
+                if tx.send_data(envelope(0, &started)).await.is_err() {
+                    return Outcome::Cancelled;
+                }
+                let _ = cancel.await;
+                Outcome::Cancelled
+            }
         }
     }
 
@@ -667,6 +684,15 @@ fn kill_self() -> ! {
 
 fn keys(object: &Value) -> Vec<String> {
     object.as_object().map(|map| map.keys().cloned().collect()).unwrap_or_default()
+}
+
+// The names in our environment, never the values: what the client let
+// through to a worker, and so to any shell child of its agent.
+fn environment() -> Vec<String> {
+    let mut names: Vec<String> =
+        std::env::vars_os().filter_map(|(name, _)| name.into_string().ok()).collect();
+    names.sort();
+    names
 }
 
 fn gen_token() -> String {

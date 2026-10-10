@@ -127,7 +127,7 @@ impl Completion {
     pub const fn spent(&mut self, phase: &Phase, waited: Duration) {
         let bucket = match phase {
             Phase::Opening => &mut self.opening,
-            Phase::Tool(_) => &mut self.tool,
+            Phase::Tool(_) | Phase::Shell => &mut self.tool,
             Phase::Model => &mut self.model,
         };
         *bucket = bucket.saturating_add(waited);
@@ -369,7 +369,7 @@ impl EventLog {
             .as_deref()
             .and_then(|call_id| self.pending_tools.get(call_id))
             .or_else(|| self.pending_tools.values().next());
-        pending.map_or(Phase::Model, |call| Phase::Tool(call.tool.clone()))
+        pending.map_or(Phase::Model, PendingCall::phase)
     }
 
     // The CLI stream spells the phase `subtype` (started/completed); the
@@ -412,6 +412,7 @@ impl EventLog {
                 let pending = known.or_else(call).unwrap_or_else(|| PendingCall {
                     tool: "unknown".to_owned(),
                     args: Value::Null,
+                    shell: false,
                 });
 
                 tracing::debug!(
@@ -420,7 +421,7 @@ impl EventLog {
                     result_bytes = result.to_string().len(),
                     "tool call completed"
                 );
-                let PendingCall { tool, args } = pending;
+                let PendingCall { tool, args, .. } = pending;
                 self.turns.push(ToolTurn { tool, args, result });
             }
             _ => {}
@@ -434,28 +435,25 @@ impl EventLog {
 
 // What a run's stream is waiting on, read off the frames so far: the
 // stream has yet to carry a frame, a started tool call has yet to complete,
-// or the model has every result and is composing.
+// the bridge's own shell is running a command, or the model has every
+// result and is composing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Phase {
     Opening,
     Tool(String),
+    Shell,
     Model,
 }
 
 impl Phase {
-    // The bridge's shell tool, whose command it bounds by the call's own
-    // timeout; the window would end a long check the model asked for.
-    const SHELL: &str = "shell";
-
     // Whether the inactivity window bounds this phase: the bridge and the
     // tools it runs answer within it, while the model — whose text the
-    // stream never carries — and a shell command are bounded by the cap
-    // alone.
-    pub fn bounded(&self) -> bool {
+    // stream never carries — and a shell command — which the bridge bounds
+    // by the call's own timeout — are bounded by the cap alone.
+    pub const fn bounded(&self) -> bool {
         match self {
-            Self::Opening => true,
-            Self::Tool(tool) => tool != Self::SHELL,
-            Self::Model => false,
+            Self::Opening | Self::Tool(_) => true,
+            Self::Shell | Self::Model => false,
         }
     }
 }
@@ -465,6 +463,7 @@ impl fmt::Display for Phase {
         match self {
             Self::Opening => f.write_str("the opening frame"),
             Self::Tool(tool) => write!(f, "tool `{tool}`"),
+            Self::Shell => f.write_str("the shell"),
             Self::Model => f.write_str("the model"),
         }
     }
@@ -474,9 +473,16 @@ impl fmt::Display for Phase {
 struct PendingCall {
     tool: String,
     args: Value,
+    // the bridge's own shell, not a guest tool of that name
+    shell: bool,
 }
 
 impl PendingCall {
+    // The bridge's shell, by the name it carries in the built-in position
+    // of its frame. A guest tool rides under `mcp`, so one named `shell`
+    // never reaches here.
+    const SHELL: &str = "shell";
+
     // The CLI stream's shape: `tool_call: { <name>ToolCall: { args, result } }`.
     fn nested(tool_call: &Value) -> Option<Self> {
         tool_call.as_object()?.iter().find_map(|(key, value)| {
@@ -485,6 +491,7 @@ impl PendingCall {
             Some(Self {
                 tool: tool.to_owned(),
                 args,
+                shell: tool == Self::SHELL,
             })
         })
     }
@@ -498,11 +505,17 @@ impl PendingCall {
         let custom = args.get("toolName").and_then(Value::as_str).map(|tool| Self {
             tool: tool.to_owned(),
             args: args.get("args").cloned().unwrap_or(Value::Null),
+            shell: false,
         });
         Some(custom.unwrap_or_else(|| Self {
             tool: name.to_owned(),
             args,
+            shell: name == Self::SHELL,
         }))
+    }
+
+    fn phase(&self) -> Phase {
+        if self.shell { Phase::Shell } else { Phase::Tool(self.tool.clone()) }
     }
 
     // The one argument worth a log line: a path, a pattern, or the first
@@ -786,8 +799,37 @@ mod tests {
 
         assert!(Phase::Opening.bounded());
         assert!(Phase::Tool("read".to_owned()).bounded());
+        assert!(!Phase::Shell.bounded());
         assert!(!Phase::Model.bounded());
         assert_eq!(Phase::Tool("read".to_owned()).to_string(), "tool `read`");
+    }
+
+    // The bridge's shell is the one in the built-in position of a frame, in
+    // either shape; a guest tool of the same name rides under `mcp` and is
+    // a tool like any other, so a stall on it is the window's to end.
+    #[test]
+    fn shell_phase() {
+        let mut log = EventLog::default();
+        observe_one(&mut log, &flat("shell", "c1", &json!({ "command": "cargo test" }), None));
+        assert_eq!(log.phase(), Phase::Shell);
+        assert_eq!(log.phase().to_string(), "the shell");
+        observe_one(&mut log, &resultless("shell", "c1", &json!({}), "completed"));
+
+        let custom = json!({ "providerIdentifier": "custom-user-tools", "toolName": "shell",
+            "args": { "command": "cargo test" } });
+        observe_one(&mut log, &flat("mcp", "c2", &custom, None));
+        assert_eq!(log.phase(), Phase::Tool("shell".to_owned()));
+        assert!(log.phase().bounded());
+        observe_one(&mut log, &resultless("mcp", "c2", &custom, "completed"));
+
+        observe_one(
+            &mut log,
+            &json!({ "type": "tool_call", "message": {
+                "subtype": "started", "call_id": "c3",
+                "tool_call": { "shellToolCall": { "args": { "command": "ls" } } },
+            }}),
+        );
+        assert_eq!(log.phase(), Phase::Shell);
     }
 
     // A terminal frame without a result still ends the call: the tool is
@@ -972,6 +1014,7 @@ mod tests {
             super::PendingCall {
                 tool: "read".to_owned(),
                 args,
+                shell: false,
             }
             .subject(cwd)
         };

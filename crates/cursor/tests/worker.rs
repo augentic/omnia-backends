@@ -482,6 +482,43 @@ async fn cap_hits() {
     assert_eq!(sequence, CANCELLED);
 }
 
+// The bridge's shell started and never ended: the window stands down for
+// the command the bridge itself bounds, and the 2s cap ends the run as the
+// guest's time budget.
+#[tokio::test]
+async fn shell_stalls() {
+    let fake = Spawnable::new(&Config::started("shell", json!({ "command": "cargo test" })));
+    let client = connect(ConnectOptions {
+        timeout_secs: 2,
+        ..with_window(WINDOW, 1)
+    })
+    .await;
+    expect_error("timed out after 2s", &["budget"], &client).await;
+    await_gone(&fake).await;
+
+    let (_, sequence) = sole_agent(&fake.log());
+    assert_eq!(sequence, CANCELLED);
+}
+
+// A guest tool the agent named `shell` rides under the bridge's `mcp`, a
+// tool like any other: a stall on it is the window's to end, not the cap's.
+#[tokio::test]
+async fn custom_shell_stalls() {
+    let custom = json!({ "providerIdentifier": "custom-user-tools", "toolName": "shell",
+        "args": { "command": "cargo test" } });
+    let fake = Spawnable::new(&Config::started("mcp", custom));
+    let client = connect(ConnectOptions {
+        timeout_secs: 30,
+        ..with_window(WINDOW, 1)
+    })
+    .await;
+    expect_error("inactive for 1s waiting on tool `shell`", &[], &client).await;
+    await_gone(&fake).await;
+
+    let (_, sequence) = sole_agent(&fake.log());
+    assert_eq!(sequence, CANCELLED);
+}
+
 // Five frames 400ms apart outlast the 1s window several times over: the
 // model's frames stand it down, and the cap is nowhere near.
 #[tokio::test]

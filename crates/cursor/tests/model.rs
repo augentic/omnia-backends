@@ -8,7 +8,7 @@ mod support;
 use omnia_cursor::ConnectOptions;
 use omnia_test::host::scratch;
 use serde_json::json;
-use support::fake_bridge::{Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
+use support::fake_bridge::{self, Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
 use support::harness::{
     await_gone, connect, options, run_guest, run_guest_over, sole_agent, spawning,
 };
@@ -46,9 +46,13 @@ async fn model_echo_text() {
     assert_eq!(deleted.arg["apiKeyPresent"], true);
     assert_eq!(deleted.arg["apiKeyMatchesCreate"], true);
 
-    // the key reaches the worker on the wire alone, never in an environment
-    // a shell child would inherit
-    assert_eq!(created.arg["apiKeyInEnv"], false, "{}", created.arg);
+    // the worker's environment is the allowlist: the key reaches it on the
+    // wire alone, and a credential the host process holds for another
+    // backend never does, so no shell child of the agent can print either
+    let env = created.arg["env"].as_array().expect("the worker's environment");
+    assert!(env.contains(&json!("PATH")), "{env:?}");
+    assert!(!env.contains(&json!("CURSOR_API_KEY")), "{env:?}");
+    assert!(!env.contains(&json!(fake_bridge::PLANTED_SECRET)), "{env:?}");
 
     // nothing lent: every built-in tool off, and no sandbox asked for
     assert_eq!(created.arg["tools"], json!([]));

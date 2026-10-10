@@ -9,6 +9,7 @@
 mod discovery;
 
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::fmt;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,43 @@ pub struct Worker {
 }
 
 impl Worker {
+    // The whole of a worker's environment, taken from the host's: the host
+    // process holds every co-located backend's credentials, and a shell
+    // command the agent runs prints what the worker has into a tool result
+    // the guest reads. The key rides on every RPC instead; git identity is
+    // withheld so the agent never points at the host repository.
+    const ENV: &[&str] = &[
+        // a process, and the programs a shell command finds
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "SHELL",
+        "USER",
+        "LOGNAME",
+        "TERM",
+        "LANG",
+        "TZ",
+        // the bridge's own knobs
+        "CURSOR_BACKEND_URL",
+        "CURSOR_WEBSITE_URL",
+        "CURSOR_DATA_DIR",
+        "CURSOR_RIPGREP_PATH",
+        "CURSOR_TREE_SITTER_VENDOR_DIR",
+        "CURSOR_SDK_BRIDGE_LOG",
+        "CURSOR_SDK_BRIDGE_DEBUG_STARTUP",
+        // the network it reaches Cursor over
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_USE_SYSTEM_CA",
+    ];
+
     // The handshake is left to `Spawned::handshake`, so a pool lease can
     // occupy the slot first.
     pub fn spawn(callback: &Registration) -> Result<Spawned> {
@@ -58,20 +96,13 @@ impl Worker {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .env_clear()
+            .envs(std::env::vars_os().filter(|(name, _)| Self::passes(name)))
             .env("CURSOR_SDK_CLIENT_LANGUAGE", "rust")
             .arg("--state-root")
             .arg(state_root.path())
             .args(["--tool-callback-url", callback.url()])
             .args(["--tool-callback-auth-token", callback.token()]);
-
-        // drop git identity, so the agent does not point at the host
-        // repository, and the key, which every RPC carries explicitly, so no
-        // shell child the agent runs inherits it
-        for var in
-            &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "CURSOR_API_KEY"]
-        {
-            command.env_remove(var);
-        }
 
         // lead a process group, so a kill reaches the agents the worker forks
         let mut command = CommandWrap::from(command);
@@ -80,6 +111,11 @@ impl Worker {
 
         let child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
         Supervisor::spawn(child, state_root)
+    }
+
+    // Named in `ENV`, or a locale setting.
+    fn passes(name: &OsStr) -> bool {
+        name.to_str().is_some_and(|name| Self::ENV.contains(&name) || name.starts_with("LC_"))
     }
 
     pub const fn rpc(&self) -> &Rpc {

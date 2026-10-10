@@ -4,18 +4,23 @@
 //! format's final-answer instruction and a hint naming the granted MCP
 //! servers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::process::Command;
 
 use crate::protocol::{
     AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
     ModelSelection, SandboxOptions, ToolList,
 };
+use crate::worker::Worker;
 
 // The built-in tools a lent workspace grants: the read-only four and the
 // custom-tool channel. `edit` and `delete` are withheld, so the tree is
@@ -33,13 +38,6 @@ const SHELL_TOOL: &str = "shell";
 // policy of every shell command: its write paths and network allows join
 // the operator's.
 const SANDBOX_POLICY: &str = ".cursor/sandbox.json";
-
-// What the bridge's sandbox keeps a shell from writing in the tree it runs
-// commands in, kept for a tree that reaches the sandbox as a write path
-// instead: the bridge runs `git` in the tree itself, and a hook or a config
-// a command planted would run as the worker's user.
-const GIT_PROTECTED: [&str; 5] =
-    [".git/hooks", ".git/config", ".git/config.worktree", ".git/info/attributes", ".git/commondir"];
 
 // What the deployment fixes for every completion: the model a request
 // leaves unset, the key, and the host trees whose lends get the sandboxed
@@ -145,6 +143,7 @@ impl Workspace {
             return Ok(Self::Lent(tree));
         }
 
+        let includes = config_includes(&tree).await?;
         let policy = private("omnia-cursor-policy-")?;
         let cwd = tokio::fs::canonicalize(policy.path())
             .await
@@ -153,7 +152,8 @@ impl Workspace {
         tokio::fs::create_dir_all(path.parent().expect("the policy has a parent"))
             .await
             .with_context(|| format!("creating {}", path.display()))?;
-        tokio::fs::write(&path, sandbox_policy(utf8(&cwd)?, utf8(&tree)?).to_string())
+        let policy_json = sandbox_policy(utf8(&cwd)?, utf8(&tree)?, &includes);
+        tokio::fs::write(&path, policy_json.to_string())
             .await
             .with_context(|| format!("writing {}", path.display()))?;
         Ok(Self::Shell {
@@ -214,22 +214,72 @@ fn utf8(path: &Path) -> Result<&str> {
     path.to_str().with_context(|| format!("invalid workspace path {}", path.display()))
 }
 
-// The policy the shell's `cwd` carries: the tree is a write path, with what
-// the bridge would have protected in it had it been the `cwd` kept
-// read-only, and the `cwd` is read-only in full. The sandbox's writable
-// root is the `cwd`, and the bridge reads this file again for every
-// command, so the directory is held read-only by its own policy rather
-// than by the protection of `.cursor` the bridge adds only where it finds
-// a git checkout. The network is left to the operator's own policy.
-fn sandbox_policy(cwd: &str, tree: &str) -> Value {
-    let protected: Vec<String> = std::iter::once(cwd.to_owned())
-        .chain(GIT_PROTECTED.iter().map(|protected| format!("{tree}/{protected}")))
+// The policy the shell's `cwd` carries: the tree is a write path; read-only
+// within it are `.git`, so no command alters the repository or what git
+// reads from it, and every config file git includes from the tree, so none
+// gains a hook, filter or diff command the bridge's own git would run; and
+// the `cwd` is read-only in full. The sandbox's writable root is the `cwd`,
+// and the bridge reads this file again for every command, so the directory
+// is held read-only by its own policy rather than by the protection of
+// `.cursor` the bridge adds only where it finds a git checkout. The network
+// is left to the operator's own policy.
+fn sandbox_policy(cwd: &str, tree: &str, includes: &[String]) -> Value {
+    let protected: Vec<String> = [cwd.to_owned(), format!("{tree}/.git")]
+        .into_iter()
+        .chain(includes.iter().cloned())
         .collect();
     json!({
         "type": "workspace_readwrite",
         "additionalReadwritePaths": [tree],
         "additionalReadonlyPaths": protected,
     })
+}
+
+// The config files git reads from inside `tree` besides those under
+// `.git`: an `include.path` in the repository's config names one, and git
+// resolves the path, its conditions and its own includes. Asked of git in
+// the worker's environment, so the answer is the one the bridge's git acts
+// on; where git cannot read the tree, the lend fails rather than guess.
+async fn config_includes(tree: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["config", "--list", "--show-origin", "-z"])
+        .current_dir(tree)
+        .env_clear()
+        .envs(Worker::environment())
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .with_context(|| format!("listing git config in {}", tree.display()))?;
+    if !output.status.success() {
+        bail!(
+            "listing git config in {} failed: {}",
+            tree.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    // keep the files under the tree, as git names them, outside `.git`
+    let dot_git = tree.join(".git");
+    let mut includes = BTreeSet::new();
+    for origin in config_origins(&output.stdout) {
+        let Ok(path) = tokio::fs::canonicalize(tree.join(origin)).await else {
+            continue;
+        };
+        if path.starts_with(tree) && !path.starts_with(&dot_git) {
+            includes.insert(utf8(&path)?.to_owned());
+        }
+    }
+    Ok(includes.into_iter().collect())
+}
+
+// The `file:` origins of `git config --list --show-origin -z` output, which
+// alternates an origin and a `key\nvalue`, each NUL-terminated.
+fn config_origins(output: &[u8]) -> impl Iterator<Item = &Path> {
+    output
+        .split(|byte| *byte == 0)
+        .step_by(2)
+        .filter_map(|origin| origin.strip_prefix(b"file:"))
+        .map(|path| Path::new(OsStr::from_bytes(path)))
 }
 
 // Whether the canonical `path` is at or beneath one of `roots`, each
@@ -297,14 +347,15 @@ fn agent_options(
     })
 }
 
-// Prepend the tree an agent not started in it is to work in, so its
-// commands, reads and searches go there rather than into its empty `cwd`.
+// Prepend the tree an agent not started in it is to work in. The sandbox
+// starts every command in the agent's `cwd`, whatever working directory
+// the call names, so the `cd` has to be the command's own.
 fn with_tree_hint(tree: Option<&str>, prompt: String) -> String {
     match tree {
         Some(tree) => format!(
-            "The project is `{tree}`. Work there: run every command with it as the working \
-             directory, and read and search there. The directory you were started in holds \
-             nothing of the project.\n\n{prompt}"
+            "The project is `{tree}`. Every shell command starts outside it, in a directory that \
+             holds nothing of the project, so begin each one with `cd {tree} && `. Read and \
+             search in the project.\n\n{prompt}"
         ),
         None => prompt,
     }
@@ -339,6 +390,8 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
 // MCP and model mapping is accepted by `tests/live.rs`.
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};
     use serde_json::json;
 
@@ -403,21 +456,29 @@ mod tests {
 
     #[test]
     fn shell_policy() {
+        let includes = roots(&["/work/tree/.gitconfig"]);
         assert_eq!(
-            sandbox_policy("/tmp/policy", "/work/tree"),
+            sandbox_policy("/tmp/policy", "/work/tree", &includes),
             json!({
                 "type": "workspace_readwrite",
                 "additionalReadwritePaths": ["/work/tree"],
-                "additionalReadonlyPaths": [
-                    "/tmp/policy",
-                    "/work/tree/.git/hooks",
-                    "/work/tree/.git/config",
-                    "/work/tree/.git/config.worktree",
-                    "/work/tree/.git/info/attributes",
-                    "/work/tree/.git/commondir",
-                ],
+                "additionalReadonlyPaths": ["/tmp/policy", "/work/tree/.git", "/work/tree/.gitconfig"],
             })
         );
+    }
+
+    #[test]
+    fn config_origins() {
+        let output = b"file:.git/config\0core.bare\nfalse\0\
+                       file:.git/../.gitconfig\0diff.x.command\n/bin/echo a\nb\0\
+                       command line:\0core.hookspath\n/dev/null\0\
+                       file:/home/u/.gitconfig\0user.name\nu\0";
+        let origins: Vec<&Path> = super::config_origins(output).collect();
+        assert_eq!(
+            origins,
+            [".git/config", ".git/../.gitconfig", "/home/u/.gitconfig"].map(Path::new)
+        );
+        assert_eq!(super::config_origins(b"").count(), 0);
     }
 
     #[test]
@@ -425,6 +486,7 @@ mod tests {
         assert_eq!(with_tree_hint(None, "hello".to_owned()), "hello");
         let hinted = with_tree_hint(Some("/work/tree"), "hello".to_owned());
         assert!(hinted.starts_with("The project is `/work/tree`."), "{hinted}");
+        assert!(hinted.contains("`cd /work/tree && `"), "{hinted}");
         assert!(hinted.ends_with("\n\nhello"), "{hinted}");
     }
 

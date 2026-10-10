@@ -64,6 +64,7 @@ impl Backend for Client {
                 Some((name.into_string().ok()?, value.into_string().ok()?))
             });
             worker::Worker::check_proxies(vars)?;
+            worker::Worker::check_git().await?;
         }
 
         let pool = Pool::connect(options.max_agents).await?;

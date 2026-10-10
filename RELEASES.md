@@ -147,13 +147,17 @@ Unreleased
   guest's to write for as long as the run lasts, so a shell-bearing
   agent is not started in the tree: its working directory is a private
   one of the backend's, created for the completion and removed with it,
-  whose policy admits the tree as a write path, keeps the tree's
-  `.git/hooks`, `.git/config` and the like read-only as the bridge would
-  have, holds the directory itself read-only so no command rewrites the
-  policy, and says nothing of the network; whatever the tree says of its
-  own confinement is never read. The tree rides beside the working
-  directory as a workspace root for the read-only tools, and the prompt
-  opens by naming it as the project to work in. The lent tree's
+  whose policy admits the tree as a write path, holds the directory
+  itself read-only so no command rewrites the policy, and says nothing
+  of the network; whatever the tree says of its own confinement is never
+  read. Read-only within the tree are its `.git` and every config file
+  git includes from inside the tree, asked of git itself, since the
+  bridge runs git in the tree outside the sandbox: no command alters the
+  repository or gives it a hook, filter or diff command. The tree rides
+  beside the working directory as a workspace root for the read-only
+  tools, and since the sandbox starts every command in the working
+  directory, the prompt opens by naming the tree and the `cd` each
+  command begins with. The lent tree's
   `.cursor/` is never a setting source (the `source` once sent at
   `CreateAgent` named no field of the bridge's and is gone), so its
   rules, hooks and MCP servers stay out of the agent. The bridge bounds
@@ -172,7 +176,12 @@ Unreleased
   credentials of a backend sharing the host process reach a worker or a
   shell child it runs; and since the bridge hands its whole environment
   to each shell command, a proxy URL carrying credentials is refused at
-  connect once `shell_roots` is set.
+  connect once `shell_roots` is set. Every worker's environment pins
+  `core.hooksPath=/dev/null` and `core.fsmonitor=false` as command-line
+  git config, above a repository's own and anything it includes, so the
+  git the bridge runs in a lent tree executes no hook and no fsmonitor
+  program the tree names; `shell_roots` requires the git 2.31 that reads
+  the pins, checked at connect.
 
 ### Changed
 

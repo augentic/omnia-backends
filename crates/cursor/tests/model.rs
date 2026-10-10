@@ -56,6 +56,15 @@ async fn model_echo_text() {
     assert!(!env.contains(&json!("CURSOR_API_KEY")), "{env:?}");
     assert!(!env.contains(&json!(fake_bridge::PLANTED_SECRET)), "{env:?}");
 
+    // and carries, above any repository's config, the pins under which the
+    // git the worker runs in a lent tree executes nothing the tree names
+    assert_eq!(
+        created.arg["git"],
+        json!({ "core.hooksPath": "/dev/null", "core.fsmonitor": "false" }),
+        "{}",
+        created.arg
+    );
+
     // nothing lent: every built-in tool off, and no sandbox asked for
     assert_eq!(created.arg["tools"], json!([]));
     assert!(created.arg["sandbox"].is_null(), "{}", created.arg);
@@ -106,8 +115,8 @@ async fn lent_shell() {
     // the agent's cwd is a private directory of the backend's, the tree
     // beside it: the bridge reads every command's sandbox policy from the
     // cwd alone, and the one there admits the tree as a write path, with
-    // the cwd itself and the tree's git hooks and config read-only, the
-    // network left the operator's
+    // the cwd itself and the tree's `.git` read-only, the network left the
+    // operator's
     let tree = tree(&lent);
     let cwd = created.text("cwd");
     assert_ne!(cwd, tree, "{}", created.arg);
@@ -115,15 +124,53 @@ async fn lent_shell() {
     let policy = &created.arg["policy"];
     assert_eq!(policy["type"], "workspace_readwrite", "{policy}");
     assert_eq!(policy["additionalReadwritePaths"], json!([tree]), "{policy}");
-    assert_eq!(policy["additionalReadonlyPaths"][0], cwd, "no command rewrites it: {policy}");
-    assert_eq!(policy["additionalReadonlyPaths"][1], format!("{tree}/.git/hooks"), "{policy}");
+    assert_eq!(policy["additionalReadonlyPaths"], json!([cwd, format!("{tree}/.git")]), "{policy}");
     assert!(policy.get("networkPolicy").is_none(), "{policy}");
     assert!(!Path::new(&cwd).exists(), "the policy directory went with the agent");
 
-    // the agent is not started in the tree, so the prompt names it
+    // the agent is not started in the tree, so the prompt names it, and
+    // every command's `cd`
     let prompt = log.saw(Rpc::Send)[0].text("text");
     assert!(prompt.starts_with(&format!("The project is `{tree}`.")), "{prompt}");
+    assert!(prompt.contains(&format!("`cd {tree} && `")), "{prompt}");
     assert!(prompt.contains("\n\nhi\n"), "the guest's message follows: {prompt}");
+}
+
+// A repository whose config includes a file inside the tree: the bridge's
+// own git reads it, outside the shell's sandbox, so the shell may not write
+// it, any more than `.git` itself.
+#[tokio::test]
+async fn lent_with_config_include() {
+    let fake = Spawnable::new(&Config::echo());
+    let lent = scratch();
+    for dir in [".git/objects", ".git/refs"] {
+        std::fs::create_dir_all(lent.path().join(dir)).expect("the repository");
+    }
+    std::fs::write(lent.path().join(".git/HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(
+        lent.path().join(".git/config"),
+        "[core]\n\trepositoryformatversion = 0\n[include]\n\tpath = ../.gitconfig\n",
+    )
+    .expect("the repository's config");
+    std::fs::write(lent.path().join(".gitconfig"), "[diff \"x\"]\n\tcommand = /bin/echo\n")
+        .expect("the included file");
+    let client = connect(ConnectOptions {
+        shell_roots: vec![lent.path().to_path_buf()],
+        ..options(1)
+    })
+    .await;
+    run_guest_over(test_programs::MODEL_LENT_WORKSPACE, &[], &client, Some(lent.mount(true))).await;
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let created = log.saw(Rpc::CreateAgent)[0];
+    let tree = tree(&lent);
+    let policy = &created.arg["policy"];
+    assert_eq!(
+        policy["additionalReadonlyPaths"],
+        json!([created.text("cwd"), format!("{tree}/.git"), format!("{tree}/.gitconfig")]),
+        "{policy}"
+    );
 }
 
 #[tokio::test]

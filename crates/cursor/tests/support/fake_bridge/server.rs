@@ -477,19 +477,21 @@ impl Server {
                     }
                 }
             }
-            Script::Started { name, args } => {
-                let started = json!({
-                    "sdkMessage": {
-                        "type": "tool_call",
-                        "message": {
-                            "agent_id": run.agent, "run_id": run.id,
-                            "call_id": format!("{}-call", run.id),
-                            "name": name, "args": args, "status": "running",
-                        },
+            Script::Started(calls) => {
+                for (index, call) in calls.iter().enumerate() {
+                    let started = json!({
+                        "sdkMessage": {
+                            "type": "tool_call",
+                            "message": {
+                                "agent_id": run.agent, "run_id": run.id,
+                                "call_id": format!("{}-call-{index}", run.id),
+                                "name": call.name, "args": call.args, "status": "running",
+                            },
+                        }
+                    });
+                    if tx.send_data(envelope(0, &started)).await.is_err() {
+                        return Outcome::Cancelled;
                     }
-                });
-                if tx.send_data(envelope(0, &started)).await.is_err() {
-                    return Outcome::Cancelled;
                 }
                 let _ = cancel.await;
                 Outcome::Cancelled

@@ -138,8 +138,15 @@ pub enum Script {
     Tool { name: String, args: Value, codec: Codec },
     /// One activity frame every `every_ms` for `frames` frames, then finish as `Echo` or hang.
     Paced { every_ms: u64, frames: usize, then: Then },
-    /// One `tool_call` frame starting `name` with `args`, as the bridge spells it, then silence.
-    Started { name: String, args: Value },
+    /// One `tool_call` frame starting each call, as the bridge spells it, then silence.
+    Started(Vec<Call>),
+}
+
+/// A tool call the fake starts and never ends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Call {
+    pub name: String,
+    pub args: Value,
 }
 
 /// The script and faults one fake process runs with.
@@ -187,12 +194,24 @@ impl Config {
     /// A run that starts the tool `name` with `args` and never ends it.
     pub fn started(name: &str, args: Value) -> Self {
         Self {
-            script: Script::Started {
+            script: Script::Started(vec![Call {
                 name: name.to_owned(),
                 args,
-            },
+            }]),
             faults: Vec::new(),
         }
+    }
+
+    /// A further tool the run starts beside the first, in the same silence.
+    #[must_use]
+    pub fn beside(mut self, name: &str, args: Value) -> Self {
+        if let Script::Started(calls) = &mut self.script {
+            calls.push(Call {
+                name: name.to_owned(),
+                args,
+            });
+        }
+        self
     }
 
     /// The tool script's codec.

@@ -504,6 +504,27 @@ async fn shell_stalls() {
     assert_eq!(sequence, CANCELLED);
 }
 
+// The shell started with a `read` beside it, neither ending: the window
+// stands down for the shell whatever the agent started with it, so the cap
+// ends the run and not the window on the read.
+#[tokio::test]
+async fn shell_beside_tool_stalls() {
+    let fake = Spawnable::new(
+        &Config::started("shell", json!({ "command": "cargo test" }))
+            .beside("read", json!({ "path": "Cargo.toml" })),
+    );
+    let client = connect(ConnectOptions {
+        timeout_secs: 2,
+        ..with_window(WINDOW, 1)
+    })
+    .await;
+    expect_error("timed out after 2s", &["budget"], &client).await;
+    await_gone(&fake).await;
+
+    let (_, sequence) = sole_agent(&fake.log());
+    assert_eq!(sequence, CANCELLED);
+}
+
 // A guest tool the agent named `shell` rides under the bridge's `mcp`, a
 // tool like any other: a stall on it is the window's to end, not the cap's.
 #[tokio::test]

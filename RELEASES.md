@@ -144,13 +144,17 @@ Unreleased
   all. The bridge also folds a tree's own `.cursor/sandbox.json` into
   every command's policy, adding its write paths and network allows to
   the operator's, so a lend under a root that carries one fails the
-  completion rather than running on the tree's terms; and the lent
-  tree's `.cursor/` is never a setting source (the `source` once sent at
+  completion rather than running on the tree's terms, and the check
+  holds for as long as the run lasts, since the tree is the guest's to
+  write meanwhile: a policy that appears mid-run ends the run, cancelled
+  with the command in flight, before the bridge reads it for the next;
+  and the lent tree's `.cursor/` is never a setting source (the `source` once sent at
   `CreateAgent` named no field of the bridge's and is gone), so its
   rules, hooks and MCP servers stay out of the agent. The bridge bounds
   each command by the timeout the agent's
   call names (30 s when it names none), so the inactivity window stands
-  down while a shell command runs, as it does while the model composes: a
+  down while a shell command runs, whatever the agent started beside it,
+  as it does while the model composes: a
   long check the agent asked for is no longer cut short at
   `CURSOR_INACTIVITY_SECS` by a limit it could not see, and the absolute
   cap alone bounds it. A guest custom tool named `shell` is a tool like

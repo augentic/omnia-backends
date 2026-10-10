@@ -360,16 +360,21 @@ impl EventLog {
         mem::take(&mut self.thinking)
     }
 
+    // A shell command pending anywhere among the calls is the phase, whatever
+    // the agent started beside it or since: the window must not bound a run
+    // while a command the bridge bounds is still running.
     pub fn phase(&self) -> Phase {
         if self.frames == 0 {
             return Phase::Opening;
         }
-        let pending = self
-            .last_pending
+        if self.pending_tools.values().any(|pending| pending.shell) {
+            return Phase::Shell;
+        }
+        self.last_pending
             .as_deref()
             .and_then(|call_id| self.pending_tools.get(call_id))
-            .or_else(|| self.pending_tools.values().next());
-        pending.map_or(Phase::Model, PendingCall::phase)
+            .or_else(|| self.pending_tools.values().next())
+            .map_or(Phase::Model, |pending| Phase::Tool(pending.tool.clone()))
     }
 
     // The CLI stream spells the phase `subtype` (started/completed); the
@@ -512,10 +517,6 @@ impl PendingCall {
             args,
             shell: name == Self::SHELL,
         }))
-    }
-
-    fn phase(&self) -> Phase {
-        if self.shell { Phase::Shell } else { Phase::Tool(self.tool.clone()) }
     }
 
     // The one argument worth a log line: a path, a pattern, or the first
@@ -830,6 +831,33 @@ mod tests {
             }}),
         );
         assert_eq!(log.phase(), Phase::Shell);
+    }
+
+    // The agent starts calls together and in any order, so the shell is the
+    // phase for as long as it is pending, whether it was started first, last,
+    // or has outlived every tool beside it.
+    #[test]
+    fn shell_beside_tool() {
+        let mut log = EventLog::default();
+        let read = json!({ "path": "a.ts" });
+        let grep = json!({ "pattern": "fn" });
+        let shell = json!({ "command": "cargo test" });
+
+        observe_one(&mut log, &flat("shell", "c1", &shell, None));
+        observe_one(&mut log, &flat("read", "c2", &read, None));
+        assert_eq!(log.phase(), Phase::Shell, "a tool started after the shell");
+
+        observe_one(&mut log, &resultless("read", "c2", &read, "completed"));
+        assert_eq!(log.phase(), Phase::Shell, "the shell alone");
+
+        observe_one(&mut log, &flat("grep", "c3", &grep, None));
+        assert_eq!(log.phase(), Phase::Shell, "a tool started while the shell runs");
+
+        observe_one(&mut log, &resultless("shell", "c1", &shell, "completed"));
+        assert_eq!(log.phase(), Phase::Tool("grep".to_owned()), "the window is back on the tool");
+
+        observe_one(&mut log, &flat("shell", "c4", &shell, None));
+        assert_eq!(log.phase(), Phase::Shell, "a shell started after a tool");
     }
 
     // A terminal frame without a result still ends the call: the tool is

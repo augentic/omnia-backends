@@ -67,11 +67,13 @@ pub struct Prompt {
 }
 
 // The agent one completion creates: the `CreateAgent` options, the pin
-// every later call on the agent repeats, and the workspace they point into.
+// every later call on the agent repeats, the workspace they point into, and
+// the watch a shell-bearing run keeps on it.
 pub struct AgentSpec {
     pub options: AgentOptions,
     pub operation: AgentOperationOptions,
     pub workspace: Workspace,
+    pub guard: Option<Guard>,
 }
 
 impl Turn {
@@ -85,6 +87,7 @@ impl Turn {
         let workspace = Workspace::new(lent).await?;
         let cwd = workspace.cwd()?;
         let tools = workspace.tools(defaults.shell_roots).await?;
+        let guard = (tools == Tools::Shell).then(|| workspace.guard());
         let options = agent_options(request, &cwd, tools, defaults)?;
         let operation = AgentOperationOptions {
             cwd,
@@ -96,6 +99,7 @@ impl Turn {
                 options,
                 operation,
                 workspace,
+                guard,
             },
             prompt: Prompt {
                 text,
@@ -163,14 +167,37 @@ impl Workspace {
         if !under(path, shell_roots).await {
             return Ok(Tools::ReadOnly);
         }
+        self.guard().check()?;
+        Ok(Tools::Shell)
+    }
 
-        let policy = path.join(SANDBOX_POLICY);
-        match tokio::fs::symlink_metadata(&policy).await {
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Tools::Shell),
+    fn guard(&self) -> Guard {
+        Guard {
+            tree: self.path().to_path_buf(),
+        }
+    }
+}
+
+// The watch a shell-bearing run keeps on its tree's sandbox policy. The
+// bridge reads the file afresh for every command, and the tree is the
+// guest's to write for as long as the run lasts, so the check at the lend
+// is the first of many: a policy that appears mid-run ends the run before
+// the bridge reads it for the next command.
+pub struct Guard {
+    tree: PathBuf,
+}
+
+impl Guard {
+    // One `lstat`, cheap enough for every frame and tick; anything at the
+    // path refuses, whatever it is.
+    pub fn check(&self) -> Result<()> {
+        let policy = self.tree.join(SANDBOX_POLICY);
+        match std::fs::symlink_metadata(&policy) {
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
             Ok(_) => bail!(
                 "lent workspace {} carries `{SANDBOX_POLICY}`, which the shell's sandbox would \
                  honour",
-                path.display()
+                self.tree.display()
             ),
             Err(error) => Err(error).with_context(|| format!("checking {}", policy.display())),
         }

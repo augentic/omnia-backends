@@ -10,8 +10,8 @@ use omnia_test::host::scratch;
 use serde_json::json;
 use support::fake_bridge::{self, Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
 use support::harness::{
-    await_gone, connect, expect_error_over, options, run_guest, run_guest_over, sole_agent,
-    spawning,
+    STARTUP, await_gone, connect, expect_error_over, options, run_guest, run_guest_over,
+    sole_agent, spawning,
 };
 
 // A guest program without a matching test here fails to compile.
@@ -145,6 +145,51 @@ async fn lent_sandbox_policy() {
 
     // refused before any worker was asked for
     assert!(fake.log().processes().is_empty(), "{}", fake.log().summary());
+}
+
+// The tree is the guest's to write for as long as the run lasts, so the
+// check is not one-shot: a policy that appears with a shell command in
+// flight ends the run, cancelled, before the bridge can read it for the next.
+#[tokio::test]
+async fn lent_sandbox_policy_mid_run() {
+    let fake = Spawnable::new(&Config::started("shell", json!({ "command": "cargo test" })));
+    let lent = scratch();
+    let client = connect(ConnectOptions {
+        shell_roots: vec![lent.path().to_path_buf()],
+        ..options(1)
+    })
+    .await;
+    let guest = tokio::spawn({
+        let client = client.clone();
+        let mount = lent.mount(true);
+        async move {
+            expect_error_over("carries `.cursor/sandbox.json`", &["lend"], &client, Some(mount))
+                .await;
+        }
+    });
+
+    // the shell command is running when the policy lands
+    fake_bridge::poll(|| fake.log().count(Rpc::Send) == 1, STARTUP, "the run to open").await;
+    std::fs::create_dir(lent.path().join(".cursor")).expect("the tree's .cursor");
+    std::fs::write(lent.path().join(".cursor/sandbox.json"), r#"{"type":"insecure_none"}"#)
+        .expect("the tree's sandbox policy");
+    guest.await.expect("the guest task joins");
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let (_, sequence) = sole_agent(&log);
+    assert_eq!(
+        sequence,
+        [
+            Rpc::CreateAgent,
+            Rpc::Send,
+            Rpc::CancelRun,
+            Rpc::GetUsage,
+            Rpc::CloseAgent,
+            Rpc::DeleteAgent
+        ],
+        "the run in flight was cancelled"
+    );
 }
 
 #[tokio::test]

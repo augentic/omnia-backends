@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, Span, instrument};
 
 use super::observe::{Completion, EventLog, Phase};
-use super::options::{AgentSpec, Prompt, Turn, Workspace};
+use super::options::{AgentSpec, Guard, Prompt, Turn, Workspace};
 use crate::endpoint::Attached;
 use crate::failure::Outcome;
 use crate::pool::Lease;
@@ -40,6 +40,11 @@ use crate::{Failure, elapsed_ms};
 const MAX_ROUNDS: u32 = 2;
 const TEARDOWN: Duration = Duration::from_secs(5);
 const PROGRESS: Duration = Duration::from_secs(15);
+// How often a shell-bearing run checks its guard between frames: a policy a
+// command writes lands while the stream is silent, and the next command
+// reads it only after the model has composed, so the tick wins that race
+// with room to spare.
+const GUARD: Duration = Duration::from_millis(250);
 
 // One completion attempt: its turn on a leased worker, callbacks into the tool host
 pub struct Attempt {
@@ -87,6 +92,7 @@ struct Agent {
     cancel: CancellationToken,
     completion: Completion,
     session: Attached,
+    guard: Option<Guard>,
 }
 
 impl Agent {
@@ -105,6 +111,7 @@ impl Agent {
             options,
             operation,
             workspace,
+            guard,
         } = agent;
 
         let worker = lease.worker();
@@ -144,6 +151,7 @@ impl Agent {
             cancel,
             completion,
             session,
+            guard,
         })
     }
 
@@ -214,9 +222,12 @@ impl Agent {
         }
     }
 
-    // One `Send` to its answer, booked on the completion either way
+    // One `Send` to its answer, booked on the completion either way. The
+    // guard goes first: the lease and the agent's creation may have taken
+    // a while, and no round opens on a tree that carries a policy.
     #[instrument(level = "debug", skip(self, text))]
     async fn send(&mut self, round: u32, text: &str) -> Result<Response> {
+        self.guarded()?;
         self.completion.attempt();
 
         // bounds run from `Send`, so an unopened stream is an inactivity failure
@@ -268,6 +279,7 @@ impl Agent {
         let mut log = EventLog::new(self.handle.operation.cwd.clone());
         let mut outcome: Option<RunStreamResult> = None;
         let mut progress = interval_at(Instant::now() + PROGRESS, PROGRESS);
+        let mut guard = interval_at(Instant::now() + GUARD, GUARD);
 
         loop {
             tokio::select! {
@@ -285,7 +297,10 @@ impl Agent {
                     if message.done.is_some() {
                         break;
                     }
+                    // after the run id, so the run it ends is cancelled by id
+                    self.guarded()?;
                 }
+                _ = guard.tick(), if self.guard.is_some() => self.guarded()?,
                 _ = progress.tick() => {
                     let current = activity.borrow();
                     tracing::info!(
@@ -327,6 +342,13 @@ impl Agent {
             transcript: log.finish(),
             usage: result.usage,
         })
+    }
+
+    // A shell-bearing run ends the moment its tree gains a sandbox policy,
+    // cancelled with the command in flight; a run without the shell has
+    // nothing to guard
+    fn guarded(&self) -> Result<()> {
+        self.guard.as_ref().map_or(Ok(()), Guard::check)
     }
 
     // A frame arrived: book the wait since the last one on the phase it was

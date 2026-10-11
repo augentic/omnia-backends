@@ -67,7 +67,7 @@ impl Client for crate::Client {
                 .or_else(|| key.map(|key| client.inner.partitioner.partition(key.as_bytes())));
 
             let id = client.inner.shared.next_send_id();
-            let mut record = BaseRecord::with_opaque_to(&topic, id).payload(&payload);
+            let mut record = BaseRecord::with_opaque_to(&topic, id.get()).payload(&payload);
             if let Some(partition) = partition {
                 record = record.partition(partition);
             }
@@ -76,9 +76,9 @@ impl Client for crate::Client {
                 Some(key) => enqueue(&client.inner.producer, record.key(key)).await,
                 None => enqueue(&client.inner.producer, record).await,
             };
-            if queued.is_err() {
-                // no delivery callback fires for a record that never queued
-                client.inner.shared.note_delivered(id);
+            if queued.is_ok() {
+                id.queued();
+            } else {
                 tracing::info!(monotonic_counter.publish_refused = 1, topic = %topic, reason = "refused");
             }
             queued.with_context(|| format!("send to {topic} refused"))
@@ -116,4 +116,33 @@ where
     };
     tokio::time::sleep(QUEUE_RETRY).await;
     producer.send(record).map_err(|(error, _)| error)
+}
+
+// What a send reads from a consumed record's metadata, without a broker; a
+// real send is `tests/live.rs::keyed_sends`.
+#[cfg(test)]
+mod tests {
+    use rdkafka::Timestamp;
+    use rdkafka::message::OwnedMessage;
+
+    use super::*;
+
+    #[test]
+    fn a_consumed_record_forwarded_with_its_metadata() {
+        let record = OwnedMessage::new(
+            None,
+            Some(b"k".to_vec()),
+            "t".to_owned(),
+            Timestamp::NotAvailable,
+            3,
+            7,
+            None,
+        );
+        let message = consume::message(&record, Vec::new());
+        let metadata = message.metadata.expect("a record carries metadata");
+
+        assert_eq!(metadata.get("key").map(String::as_str), Some("k"));
+        assert_eq!(metadata.get("source-partition").map(String::as_str), Some("3"));
+        assert_eq!(explicit_partition(&metadata), None);
+    }
 }

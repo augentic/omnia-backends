@@ -30,7 +30,7 @@ MSRV: Rust 1.99
 
 ### Consuming
 
-Each record reaches the guest with `metadata` carrying `key`, `partition`, `offset`, `timestamp` and the record's headers. At most 64 records are being handled at once. Records sharing a key are handled one at a time in offset order; records with different keys run concurrently.
+Each record reaches the guest with `metadata` carrying `key`, `source-partition`, `offset`, `timestamp` and the record's headers. The partition is not under `partition`, which on a send names the destination: a guest forwarding a record's metadata keeps its key and lets the partitioner place it. At most 64 records are being handled at once. Records sharing a key are handled one at a time in offset order; records with different keys run concurrently.
 
 With a registry configured, a payload that carries the Confluent wire-format header (first byte `0x00`, then a big-endian schema id) is unwrapped and validated against the schema its header names, fetched by id and kept for the life of the process. A payload without the header is passed through untouched, with one `warn` per topic. A framed record the guest must not see is dropped without running a guest, logged at `error`, counted as `discarded_messages` with a `reason`, and committed past:
 

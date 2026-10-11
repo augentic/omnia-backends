@@ -299,9 +299,11 @@ and the live test `keyed_sends` under both schemes.
 
 _Closes D3._
 
-Each inbound record's metadata carries `key`, `partition`, `offset` and
-`timestamp` alongside its headers. A send with no `metadata["key"]` goes
-out with a null key. The delivery callback tolerates a null or non-UTF-8
+Each inbound record's metadata carries `key`, `source-partition`, `offset`
+and `timestamp` alongside its headers. The partition is not under
+`partition`, which a send reads as its destination: a guest forwarding a
+record's metadata keeps its key and lets the partitioner place it. A send
+with no `metadata["key"]` goes out with a null key. The delivery callback tolerates a null or non-UTF-8
 key.
 
 ### 5. Errors — stop reporting failure as success

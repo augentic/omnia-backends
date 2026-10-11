@@ -83,8 +83,12 @@ impl Shared {
         let _ = self.consumer.set(Arc::downgrade(consumer));
     }
 
-    pub fn next_send_id(&self) -> usize {
-        self.sends.fetch_add(1, Ordering::AcqRel)
+    pub fn next_send_id(&self) -> SendId<'_> {
+        SendId {
+            shared: self,
+            id: self.sends.fetch_add(1, Ordering::AcqRel),
+            queued: false,
+        }
     }
 
     pub fn note_delivered(&self, id: usize) {
@@ -132,6 +136,35 @@ impl Shared {
             if let Err(error) = consumer.store_offset(topic, *partition, *offset) {
                 tracing::warn!("storing offset {topic}[{partition}]@{offset}: {error}");
             }
+        }
+    }
+}
+
+// A send's number, reported to the tracker exactly once: by the delivery
+// report once the record is queued, or on drop when it was not. A `send`
+// dropped in its retry sleep would otherwise skip its number, and the
+// watermark would stop below it with no offset able to commit past.
+pub struct SendId<'a> {
+    shared: &'a Shared,
+    id: usize,
+    queued: bool,
+}
+
+impl SendId<'_> {
+    pub const fn get(&self) -> usize {
+        self.id
+    }
+
+    // The record is queued; the delivery report takes the number over.
+    pub fn queued(mut self) {
+        self.queued = true;
+    }
+}
+
+impl Drop for SendId<'_> {
+    fn drop(&mut self) {
+        if !self.queued {
+            self.shared.note_delivered(self.id);
         }
     }
 }
@@ -380,7 +413,10 @@ impl Lane {
     }
 }
 
-fn message(record: &OwnedMessage, payload: Vec<u8>) -> Message {
+// The partition the record was read from travels as `source-partition`:
+// `partition` is a send's destination, and a guest forwarding a record's
+// metadata must not pin its output to where the record came from.
+pub fn message(record: &OwnedMessage, payload: Vec<u8>) -> Message {
     let mut metadata = Metadata::new();
     if let Some(headers) = record.headers() {
         for header in headers.iter() {
@@ -391,7 +427,7 @@ fn message(record: &OwnedMessage, payload: Vec<u8>) -> Message {
     if let Some(key) = record.key() {
         metadata.insert("key".to_owned(), String::from_utf8_lossy(key).into_owned());
     }
-    metadata.insert("partition".to_owned(), record.partition().to_string());
+    metadata.insert("source-partition".to_owned(), record.partition().to_string());
     metadata.insert("offset".to_owned(), record.offset().to_string());
     if let Some(millis) = record.timestamp().to_millis() {
         metadata.insert("timestamp".to_owned(), millis.to_string());
@@ -648,6 +684,22 @@ mod tests {
         assert_eq!(again.offset(), 5);
         again.complete(Ok(()));
         assert_eq!(scripted.stored_offset(0).await, Some(5));
+    }
+
+    // The dropped send reports its own number; the queued one leaves it to
+    // the delivery report, which the test plays.
+    #[test]
+    fn a_send_dropped_before_it_queued() {
+        let shared = Shared::new();
+        let dropped = shared.next_send_id();
+        let queued = shared.next_send_id();
+        drop(dropped);
+        queued.queued();
+
+        let mut tracker = shared.tracker.lock().expect("tracker");
+        let ticket = tracker.insert("t", 0, 3);
+        assert_eq!(tracker.done("t", 0, 3, ticket, 2), None);
+        assert_eq!(tracker.note_delivered(1), [("t".to_owned(), 0, 3)]);
     }
 
     #[test]

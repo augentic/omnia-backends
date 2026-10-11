@@ -41,8 +41,9 @@ const LOG_FILE: &str = "log.jsonl";
 const RELEASES_FILE: &str = "releases.json";
 // The name the client spawns a worker by.
 const BIN_NAME: &str = "cursor-sdk-bridge";
-// Where a spawned fake finds its home.
-const HOME_VAR: &str = "FAKE_BRIDGE_HOME";
+// A secret the test process carries, as a co-located backend's credential
+// would be, for a row to assert it never reaches a worker.
+pub const PLANTED_SECRET: &str = "OMNIA_TEST_SECRET";
 
 /// Where in an agent's lifecycle a [`Fault::Park`] or [`Fault::Hang`] holds the request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +138,8 @@ pub enum Script {
     Tool { name: String, args: Value, codec: Codec },
     /// One activity frame every `every_ms` for `frames` frames, then finish as `Echo` or hang.
     Paced { every_ms: u64, frames: usize, then: Then },
+    /// One `tool_call` frame starting `name` with `args`, as the bridge spells it, then silence.
+    Started { name: String, args: Value },
 }
 
 /// The script and faults one fake process runs with.
@@ -181,6 +184,17 @@ impl Config {
         }
     }
 
+    /// A run that starts the tool `name` with `args` and never ends it.
+    pub fn started(name: &str, args: Value) -> Self {
+        Self {
+            script: Script::Started {
+                name: name.to_owned(),
+                args,
+            },
+            faults: Vec::new(),
+        }
+    }
+
     /// The tool script's codec.
     #[must_use]
     pub const fn codec(mut self, codec: Codec) -> Self {
@@ -208,8 +222,9 @@ impl Config {
     }
 }
 
-/// Give the client a `CURSOR_API_KEY` when the environment has none; once per
-/// process, before any runtime thread exists.
+/// Give the client a `CURSOR_API_KEY` when the environment has none, and
+/// plant [`PLANTED_SECRET`] beside it; once per process, before any runtime
+/// thread exists.
 #[expect(unsafe_code, reason = "the key is read from the process environment")]
 pub fn dummy_key() {
     static SET: Once = Once::new();
@@ -218,6 +233,8 @@ pub fn dummy_key() {
             // SAFETY: set once, never unset, before the tests spawn threads.
             unsafe { std::env::set_var("CURSOR_API_KEY", "test-key") }
         }
+        // SAFETY: as above.
+        unsafe { std::env::set_var(PLANTED_SECRET, "hunter2") }
     });
 }
 
@@ -230,9 +247,10 @@ pub struct Spawnable {
 
 #[cfg(test)]
 impl Spawnable {
-    /// Lay out `config` and put the fake on `PATH`; `PATH` and `FAKE_BRIDGE_HOME`
-    /// are process-wide, so one `Spawnable` per test process (nextest's one test each).
-    #[expect(unsafe_code, reason = "the client finds the bridge through PATH and HOME")]
+    /// Lay out `config` and put the fake first on `PATH`, where a spawned fake
+    /// finds its home; `PATH` is process-wide, so one `Spawnable` per test
+    /// process (nextest's one test each).
+    #[expect(unsafe_code, reason = "the client finds the bridge through PATH")]
     pub fn new(config: &Config) -> Self {
         let home =
             tempfile::Builder::new().prefix("fake-bridge-").tempdir().expect("a home directory");
@@ -255,8 +273,6 @@ impl Spawnable {
         // SAFETY: set before the test spawns any thread of its own, and read
         // only by the client's spawns and their children from here on.
         unsafe { std::env::set_var("PATH", path) };
-        // SAFETY: as above.
-        unsafe { std::env::set_var(HOME_VAR, home.path()) };
         Self { home }
     }
 
@@ -350,9 +366,16 @@ impl Releases {
 pub struct Home(PathBuf);
 
 impl Home {
-    /// From `FAKE_BRIDGE_HOME`, which the test process set before spawning.
-    pub fn from_env() -> Self {
-        Self(PathBuf::from(std::env::var_os(HOME_VAR).expect("FAKE_BRIDGE_HOME is set")))
+    /// Where the client found us: the first directory on `PATH` holding a
+    /// `cursor-sdk-bridge`, which `Spawnable::new` laid the link in. The
+    /// client passes a worker `PATH` and nothing of its own, so no variable
+    /// of the fake's could carry the home.
+    pub fn on_path() -> Self {
+        let path = std::env::var_os("PATH").expect("PATH reaches the worker");
+        let home = std::env::split_paths(&path)
+            .find(|dir| dir.join(BIN_NAME).exists())
+            .expect("the fake is on PATH");
+        Self(home)
     }
 
     /// The config, or a plain echo when no script was laid out.
@@ -375,7 +398,7 @@ impl Home {
 /// The spawned binary's whole life: number ourselves through the log,
 /// handshake or fail it as scripted, serve until `Shutdown`.
 pub async fn run_spawned(args: Vec<String>) {
-    let home = Home::from_env();
+    let home = Home::on_path();
     let config = home.config();
     let recorder = log::Recorder::to_file(&home.log_path());
     let process = recorder.process();

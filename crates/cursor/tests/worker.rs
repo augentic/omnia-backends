@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use http::Method;
 use omnia::Backend as _;
 use omnia_cursor::{Client, ConnectOptions};
+use omnia_test::host::scratch;
 use omnia_wasi_model::{Limits, WasiModelCtx};
 use serde_json::json;
 use support::fake_bridge::{
@@ -21,7 +22,8 @@ use support::fake_bridge::{
 };
 use support::harness::{
     AT_ONCE, CALLBACK_PATH, GONE, STARTUP, await_forked_gone, await_gone, await_gone_within,
-    await_process_gone, callback, connect, expect_error, options, run_guest, sole_agent, spawning,
+    await_process_gone, callback, connect, expect_error, options, run_guest, run_guest_over,
+    sole_agent, spawning,
 };
 use tokio::task::JoinHandle;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -192,15 +194,88 @@ async fn keyless_complete() {
     assert!(fake.log().events.is_empty(), "a keyless completion spawned a process");
 }
 
+// --- Confinement ---
+
+// The worker's working directory is the lend, and what the agent may do
+// there follows where the lend sits: a lend under a shell root runs with a
+// shell, one beside it reads alone.
+#[tokio::test]
+async fn shell_on_shell_root() {
+    let fake = Spawnable::new(&Config::echo());
+    let scratch = scratch();
+    scratch.write("inside/.keep", "");
+    scratch.write("outside/.keep", "");
+    let client = connect(ConnectOptions {
+        shell_roots: vec![scratch.path().join("inside")],
+        ..options(1)
+    })
+    .await;
+
+    let lends = [("inside", true), ("outside", false)];
+    for (lend, _) in lends {
+        let mount = scratch.mount(true);
+        run_guest_over(test_programs::MODEL_LEND, &[&format!("./{lend}")], &client, [mount]).await;
+    }
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let creates = log.saw(Rpc::CreateAgent);
+    assert_eq!(creates.len(), 2, "{}", log.summary());
+    for (created, (lend, shell)) in creates.iter().zip(lends) {
+        let expected = std::fs::canonicalize(scratch.path().join(lend)).expect("the lend");
+        assert_eq!(created.text("cwd"), expected.to_string_lossy(), "{}", created.arg);
+        let tools = created.arg["tools"].as_array().expect("a tool list");
+        assert_eq!(tools.contains(&json!("shell")), shell, "{lend}: {tools:?}");
+        assert!(tools.contains(&json!("read")), "{lend}: {tools:?}");
+    }
+}
+
+// What the operator names in `worker_env` reaches the worker; the client's
+// own key named there is refused before anything is spawned.
+#[tokio::test]
+async fn worker_env_passes_through() {
+    let fake = Spawnable::new(&Config::echo());
+    fake_bridge::dummy_key();
+    let error = Client::connect_with(ConnectOptions {
+        worker_env: vec!["CURSOR_API_KEY".to_owned()],
+        ..options(1)
+    })
+    .await
+    .expect_err("the key is refused");
+    assert!(format!("{error:#}").contains("`CURSOR_API_KEY` is refused"), "{error:#}");
+    assert!(fake.log().events.is_empty(), "a refused option spawned a process");
+
+    let client = connect(ConnectOptions {
+        worker_env: vec![fake_bridge::PLANTED_SECRET.to_owned()],
+        ..options(1)
+    })
+    .await;
+    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let env = log.saw(Rpc::CreateAgent)[0].arg["env"].as_array().expect("the environment");
+    assert!(env.contains(&json!(fake_bridge::PLANTED_SECRET)), "{env:?}");
+    assert!(!env.contains(&json!("CURSOR_API_KEY")), "{env:?}");
+}
+
 // --- Abandon: the guest drops a completion at every point it can be waiting ---
 
 // Process 2 takes `Ping` and never answers: the loser is dropped with its
-// ready line seen but no RPC bound.
+// ready line seen but no RPC bound. Process 1 holds its answer until the
+// loser has pinged, since the two are spawned one fork apart.
 #[tokio::test]
 async fn abandon_during_handshake() {
-    let fake = Spawnable::new(&Config::echo().fault_on(2, Fault::Hang(Point::Ping)));
+    let fake = Spawnable::new(
+        &Config::echo().fault_on(1, Fault::Park(Point::Send)).fault_on(2, Fault::Hang(Point::Ping)),
+    );
     let client = spawning(&fake, 2).await;
-    run_guest(test_programs::MODEL_FANOUT_ABANDON, &["2"], &client).await;
+
+    let guest = abandon_guest(&client, 2);
+    fake.await_parked(Point::Send, 1).await;
+    await_rpcs(|| fake.log(), Rpc::Ping, 2, STARTUP).await;
+    assert!(fake.release_one(Point::Send));
+    guest.await.expect("the guest task joins");
 
     // nothing is bound to ask an unbound worker: killed at once, well under the graceful bound
     await_gone_within(&fake, AT_ONCE).await;
@@ -313,12 +388,19 @@ async fn abandon_before_stream() {
     assert_eq!(log.count(Rpc::CancelRun), 0);
 }
 
+// Both runs hold at `Send` until both have opened, so the loser has an
+// agent to tear down whichever answers first.
 #[tokio::test]
 async fn abandon_during_teardown() {
-    let fake = Spawnable::new(&Config::echo().fault(Fault::Park(Point::CloseAgent)));
+    let fake = Spawnable::new(
+        &Config::echo().fault(Fault::Park(Point::Send)).fault(Fault::Park(Point::CloseAgent)),
+    );
     let client = spawning(&fake, 2).await;
 
     let guest = abandon_guest(&client, 2);
+    fake.await_parked(Point::Send, 2).await;
+    assert!(fake.release_one(Point::Send));
+    assert!(fake.release_one(Point::Send));
     fake.await_parked(Point::CloseAgent, 2).await;
     guest.await.expect("the guest task joins");
 
@@ -482,6 +564,43 @@ async fn cap_hits() {
     assert_eq!(sequence, CANCELLED);
 }
 
+// The bridge's shell started and never ended: the window stands down for
+// the command the bridge itself bounds, and the 2s cap ends the run as the
+// guest's time budget.
+#[tokio::test]
+async fn shell_stalls() {
+    let fake = Spawnable::new(&Config::started("shell", json!({ "command": "cargo test" })));
+    let client = connect(ConnectOptions {
+        timeout_secs: 2,
+        ..with_window(WINDOW, 1)
+    })
+    .await;
+    expect_error("timed out after 2s", &["budget"], &client).await;
+    await_gone(&fake).await;
+
+    let (_, sequence) = sole_agent(&fake.log());
+    assert_eq!(sequence, CANCELLED);
+}
+
+// A guest tool the agent named `shell` rides under the bridge's `mcp`, a
+// tool like any other: a stall on it is the window's to end, not the cap's.
+#[tokio::test]
+async fn custom_shell_stalls() {
+    let custom = json!({ "providerIdentifier": "custom-user-tools", "toolName": "shell",
+        "args": { "command": "cargo test" } });
+    let fake = Spawnable::new(&Config::started("mcp", custom));
+    let client = connect(ConnectOptions {
+        timeout_secs: 30,
+        ..with_window(WINDOW, 1)
+    })
+    .await;
+    expect_error("inactive for 1s waiting on tool `shell`", &[], &client).await;
+    await_gone(&fake).await;
+
+    let (_, sequence) = sole_agent(&fake.log());
+    assert_eq!(sequence, CANCELLED);
+}
+
 // Five frames 400ms apart outlast the 1s window several times over: the
 // model's frames stand it down, and the cap is nowhere near.
 #[tokio::test]
@@ -536,27 +655,6 @@ async fn worker_exited_on_create_restarts() {
     assert_eq!(sequence, ANSWERED, "{}", second.summary());
     assert!(second.ended_with(Rpc::Shutdown));
     restarted_after(&first, &second);
-}
-
-// Each process forks a child that outlives it: process 1 dies on its `Send`
-// with the child still up and holding the stderr pipe, process 2 exits on
-// `Shutdown` the same way. Neither child is anyone's to reap; both go with
-// their process as its exit is seen.
-#[tokio::test]
-async fn grandchildren_swept() {
-    let fake =
-        Spawnable::new(&Config::echo().fault(Fault::Grandchild).fault_on(1, Fault::KillOnSend(1)));
-    let client = spawning(&fake, 1).await;
-    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    await_gone(&fake).await;
-
-    let log = fake.log();
-    let (first, second) = restarted(&log);
-    killed(&first);
-    assert!(second.ended_with(Rpc::Shutdown), "{}", second.summary());
-    for process in [&first, &second] {
-        await_forked_gone(process).await;
-    }
 }
 
 // Every process dies on its opening `Send`: one restart, then the second exit

@@ -35,18 +35,23 @@ For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia::Backend;
-use omnia_cursor::{Client, ConnectOptions};
+use omnia_cursor::{Client, ConnectOptions, Substrate};
 
 // Reads CURSOR_* from the environment, with the defaults below.
 let client = Client::connect().await?;
 
-// Or set the bounds, default model, and pool shape explicitly.
+// Or set the bounds, default model, pool shape, and confinement explicitly.
 let client = Client::connect_with(ConnectOptions {
     timeout_secs: 1800,
     inactivity_secs: 120,
     model: "composer-2".into(),
     max_agents: 2,
     max_tool_calls: 128,
+    shell_roots: vec!["/srv/checkouts".into()],
+    read_roots: vec!["/opt/toolchains".into()],
+    egress: vec!["registry.npmjs.org".into()],
+    worker_env: vec![],
+    confine: Substrate::Auto,
 }).await?;
 ```
 
@@ -62,14 +67,20 @@ A full guest + runtime demo lives in [`examples/cursor`](../../examples/cursor).
 | `CURSOR_INACTIVITY_SECS` | `120` | Cancel a run whose stream has gone silent while waiting on the bridge |
 | `CURSOR_MAX_AGENTS` | `8` | Agents live at once, each on its own worker; further completions queue |
 | `CURSOR_MAX_TOOL_CALLS` | `128` | Guest tool calls one completion may make before it ends as `budget-exhausted` |
+| `CURSOR_SHELL_ROOTS` | — | Directories (`:`-separated) a lend may sit beneath to run with the `shell` tool; a lend elsewhere reads alone |
+| `CURSOR_READ_ROOTS` | — | Directories (`:`-separated) a confined agent may read beside its lend, such as a toolchain or a package cache; each must exist |
+| `CURSOR_EGRESS` | — | Hosts (`,`-separated) a worker may reach through the client's egress proxy, `*.example.com` naming every host under a domain; `*.cursor.sh` and `*.cursor.com`, the bridge's own, are always among them |
+| `CURSOR_WORKER_ENV` | — | Further variable names (`,`-separated) the worker's environment carries from the host's; `CURSOR_API_KEY` is refused |
 
-Workers inherit the host's environment (minus the `GIT_*` identity variables), so `CURSOR_SDK_BRIDGE_LOG` passes straight through and the worker's RPC log lands in this crate's DEBUG output.
+Workers run under [`omnia-confine`](../confine): in the lend as their working directory, in a session of their own, and with an environment built from nothing: `PATH`, `LANG`, `LC_*`, `TZ`, `TERM`, a private `HOME` and `TMPDIR`, the variables the bridge itself reads (`CURSOR_SDK_BRIDGE_LOG`, `CURSOR_DATA_DIR`, the certificate variables, …), the proxy variables naming the client's egress proxy, and what `CURSOR_WORKER_ENV` adds. The host's `CURSOR_API_KEY` rides the handshake alone, and no `GIT_*` variable crosses.
+
+`ConnectOptions::confine` is the substrate that walls the process in, `Substrate::Auto` by default: Seatbelt on macOS, Landlock and seccomp on Linux, and a connect refusal where neither runs (a Linux kernel before 6.7, or one without Yama). `Substrate::Unconfined` is the boundary alone, set in code — no environment variable turns the kernel boundary off. Inside, a worker reads the system, its lend, its scratch, and `CURSOR_READ_ROOTS`; writes its lend and scratch; and reaches the network through the client's `CONNECT` proxy alone, which admits `CURSOR_EGRESS` and the bridge's own hosts after vetting what each name resolves to (loopback, link-local, the cloud metadata addresses, and the host's own addresses refused). On macOS the kernel closes the network to loopback, so the proxy is the one route out and no name resolves inside; `.git` and `.emery` beneath the lend are denied, and `ps` shows nothing of the host. On Linux the posture differs, and the differences are the operator's to weigh: Landlock ABI 4 fences TCP by port alone, so the ruleset handles no network right and egress is cooperative — the proxy variables, which the bridge, npm, git and curl honour, with datagram and raw sockets refused so the resolver's UDP path answers nothing — and a client that ignores the proxy and carries its own address reaches the network; `/proc` is readable whole, so the `environ`, `cmdline` and `maps` of other same-uid processes are readable inside (the host's own are closed, since it sets itself non-dumpable at connect; `mem` is closed by Yama); Landlock cannot deny beneath a grant, so `.git` and `.emery` beneath the lend are reachable; and `AF_UNIX` is ungoverned, so any host unix socket a command can path to is reachable. Same-uid loopback services are reachable from inside on both platforms, since the tree's own test loop needs loopback open. The full statement is the confine crate's [README](../confine/README.md).
 
 The request's `generation` controls (temperature, max tokens, …) are ignored: `CreateAgent` has no sampling knobs.
 
 ## How a completion runs
 
-**Workspace.** The guest lends a working tree through `grants.workspace`; the agent runs there with a read-only toolset (`read`, `glob`, `grep`, `ls`, plus `mcp`). No shell, edit, or delete. Without a lent workspace the agent runs in a private empty directory with every built-in tool disabled, so function-tool-only completions still work. `read` takes absolute paths, so staying inside the tree is the prompt's to ask, not the toolset's to enforce.
+**Workspace.** The guest lends a working tree through `grants.workspace`; the agent runs there with a read-only toolset (`read`, `glob`, `grep`, `ls`, plus `mcp`). A lend beneath one of `CURSOR_SHELL_ROOTS` adds `shell`, so the agent can run the tree's own build and tests; the bridge bounds each command and the inactivity window stands down while one runs. No edit or delete anywhere. Without a lent workspace the agent runs in a private empty directory with every built-in tool disabled, so function-tool-only completions still work. `read` takes absolute paths, and the toolset enforces no bound on them: under `Substrate::Auto` the kernel holds every read to the lend, the system, and `CURSOR_READ_ROOTS`; unconfined, staying inside the tree is the prompt's to ask.
 
 **Tools.** Guest-declared function tools become SDK custom tools at `CreateAgent`. When the agent calls one, the worker POSTs to this crate's loopback callback endpoint, which routes it into the session via `ToolHost::call_tool` under the host's name check, budget, size cap, and per-call timeout. The budget is this backend's: `CURSOR_MAX_TOOL_CALLS` guest tool calls a completion, answered through `WasiModelCtx::limits`, in place of the host's default of 32, since an agent that lays a tree one file a call runs past that long before its wall-clock cap. `Tool::Mcp` grants pass inline as `mcp_servers`; the grant's `tools` allowlist is advisory.
 
@@ -84,7 +95,7 @@ Each `Send` (the opening prompt, and a correction if any) is bounded twice:
 - **Inactivity window** — the stream went silent while waiting on the bridge (opening frame, or a tool call in flight). A `backend` failure a caller may retry. Stands down once the model is composing its answer.
 - **Absolute cap** — the completion's time budget. Reaches the guest as the typed `budget-exhausted`.
 
-Workers are process-group leaders and are shut down after their completion: a graceful `Shutdown` with 5s grace, then a kill of the whole group. A worker that crashes fails its completion with the typed `cursor-sdk-bridge exited (…)` rather than stalling the next one.
+Workers are session leaders and are shut down after their completion: a graceful `Shutdown` with 5s grace, then a kill of the whole session. A worker that crashes fails its completion with the typed `cursor-sdk-bridge exited (…)` rather than stalling the next one.
 
 A worker lost while a completion is *opening* (`CreateAgent` or the first `Send` fails with `WorkerExited` or `RpcError::Transport`, and no candidate has reached the guest) restarts the completion once on a fresh worker. Nothing else restarts.
 
@@ -107,7 +118,7 @@ Three tiers. The first two run on every `cargo nextest run -p omnia-cursor` with
 
 **Guests through the runtime.** Every scenario is a guest from [`crates/test-programs`](../test-programs) run through `omnia_test::host::Deployment`. [`tests/model.rs`](tests/model.rs) is one row per guest program (the `omnia:model` contract); [`tests/worker.rs`](tests/worker.rs) is the lifecycle and fault matrix. Each test also asserts the fake's RPC sequence and that every spawned process is gone afterwards.
 
-**The real bridge.** [`tests/live.rs`](tests/live.rs) drives real completions, including fan-out and a `kill -9` of a worker mid-run. All are `#[ignore]`d; run them by hand:
+**The real bridge.** [`tests/live.rs`](tests/live.rs) drives real completions, including fan-out, a `kill -9` of a worker mid-run, a turn completed inside the kernel boundary through the proxy, and an `npm install` through it over Node's bundled roots. All are `#[ignore]`d; run them by hand:
 
 ```bash
 CURSOR_API_KEY=... \

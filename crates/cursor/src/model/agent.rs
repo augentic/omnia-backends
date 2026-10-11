@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, Span, instrument};
 
 use super::observe::{Completion, EventLog, Phase};
-use super::options::{AgentSpec, Prompt, Turn, Workspace};
+use super::options::{AgentSpec, Prompt, Turn};
 use crate::endpoint::Attached;
 use crate::failure::Outcome;
 use crate::pool::Lease;
@@ -101,11 +101,7 @@ impl Agent {
 
         let mut completion = Completion::from(&turn);
         let Turn { agent, prompt } = turn;
-        let AgentSpec {
-            options,
-            operation,
-            workspace,
-        } = agent;
+        let AgentSpec { options, operation } = agent;
 
         let worker = lease.worker();
         let window = deadlines.inactivity;
@@ -135,7 +131,6 @@ impl Agent {
                 lease,
                 id,
                 operation,
-                workspace,
                 run_id: None,
             },
             prompt,
@@ -371,12 +366,11 @@ impl Agent {
     }
 }
 
-// Agent on its worker, with what delete needs: lease, pin/workspace, open run
+// Agent on its worker, with what delete needs: lease, pin, open run
 struct Handle {
     lease: Lease,
     id: String,
     operation: AgentOperationOptions,
-    workspace: Workspace,
     run_id: Option<String>,
 }
 
@@ -389,13 +383,12 @@ impl Handle {
         self.worker().rpc().send(self.id.clone(), text.to_owned()).await
     }
 
-    // Cancel, close, delete — each bounded, skipped if worker gone — then workspace, lease last
+    // Cancel, close, delete — each bounded, skipped if worker gone — then the lease
     async fn delete(self) {
         let Self {
             lease,
             id,
             operation,
-            workspace,
             run_id,
         } = self;
 
@@ -410,7 +403,6 @@ impl Handle {
         } else {
             tracing::debug!("worker exited; skipping agent teardown");
         }
-        drop(workspace);
         drop(lease);
     }
 }
@@ -561,9 +553,8 @@ mod tests {
     use tokio::time::{self, Instant};
 
     use super::{Activity, Deadlines, Phase, Unanswered};
-    use crate::Failure;
     use crate::protocol::RpcError;
-    use crate::worker::Exit;
+    use crate::{Exit, Failure};
 
     const DEADLINES: Deadlines = Deadlines {
         inactivity: Duration::from_secs(1),
@@ -665,6 +656,33 @@ mod tests {
             "{failure}"
         );
         assert_eq!(started.elapsed(), 3 * DEADLINES.inactivity);
+    }
+
+    // A shell command runs as long as the model's timeout on it allows, and
+    // its result frame, however it ended, brings the window back for the
+    // next tool.
+    #[tokio::test(start_paused = true)]
+    async fn shell_outlives_window() {
+        let started = Instant::now();
+        let activity = watch::Sender::new(Activity::now(Phase::Shell));
+        let deadline = DEADLINES.watch(&activity);
+        tokio::pin!(deadline);
+        let still_watching = time::timeout(2 * DEADLINES.inactivity, &mut deadline).await.is_err();
+        assert!(still_watching, "the window fired under a shell command");
+        activity.send_replace(Activity::now(Phase::Tool("read".to_owned())));
+        let failure = deadline.await;
+        assert!(
+            matches!(&failure, Failure::Inactive { waiting, idle_secs: 1, .. } if waiting == "tool `read`"),
+            "{failure}"
+        );
+        assert_eq!(started.elapsed(), 3 * DEADLINES.inactivity);
+
+        // left running, the cap alone ends it
+        let started = Instant::now();
+        let activity = watch::Sender::new(Activity::now(Phase::Shell));
+        let failure = DEADLINES.watch(&activity).await;
+        assert!(matches!(failure, Failure::Timeout { cap_secs: 5 }), "{failure}");
+        assert_eq!(started.elapsed(), DEADLINES.cap);
     }
 
     #[test]

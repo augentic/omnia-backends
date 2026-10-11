@@ -1,8 +1,8 @@
 //! Why a completion failed, typed, and the `outcome` label its `completion`
 //! event carries.
 
+use crate::Exit;
 use crate::protocol::{RpcError, RunStatus};
-use crate::worker::Exit;
 
 /// Why a completion failed, by variant rather than by message.
 ///

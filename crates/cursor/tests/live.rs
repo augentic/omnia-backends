@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use omnia::Backend as _;
-use omnia_cursor::{Client, ConnectOptions};
+use omnia_cursor::{Client, ConnectOptions, Substrate};
 use omnia_wasi_model::{
     Answer, Error, Format, Function, Grants, Mcp, Message, Request, Role, Schema, Tool,
     WasiModelCtx,
@@ -37,15 +37,23 @@ fn object(answer: &Answer) -> Value {
     value
 }
 
-async fn connect() -> Result<Client> {
-    Client::connect_with(ConnectOptions {
+fn options() -> ConnectOptions {
+    ConnectOptions {
         timeout_secs: 120,
         inactivity_secs: 120,
         model: "auto".to_owned(),
         max_agents: 4,
         max_tool_calls: 128,
-    })
-    .await
+        shell_roots: Vec::new(),
+        read_roots: Vec::new(),
+        egress: Vec::new(),
+        worker_env: Vec::new(),
+        confine: Substrate::Unconfined,
+    }
+}
+
+async fn connect() -> Result<Client> {
+    Client::connect_with(options()).await
 }
 
 fn temp_workspace(label: &str) -> Result<std::path::PathBuf> {
@@ -252,6 +260,11 @@ async fn worker_killed_mid_run_recovers() -> Result<()> {
         model: "auto".to_owned(),
         max_agents: 1,
         max_tool_calls: 128,
+        shell_roots: Vec::new(),
+        read_roots: Vec::new(),
+        egress: Vec::new(),
+        worker_env: Vec::new(),
+        confine: Substrate::Unconfined,
     })
     .await?;
     let completion = {
@@ -474,6 +487,106 @@ async fn check_exhausts() -> Result<()> {
     assert!(
         correction.contains(&candidates[1]),
         "the detail names the last rejected candidate: {correction}"
+    );
+    Ok(())
+}
+
+// --- Confined ---
+
+// The bridge inside the kernel boundary: with the network closed to
+// loopback on macOS, its backend is reached through the egress proxy alone,
+// so a turn completing is the proxy carrying it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
+async fn confined_turn_through_the_proxy() -> Result<()> {
+    let workspace = temp_workspace("confined")?;
+    let client = Client::connect_with(ConnectOptions {
+        shell_roots: vec![workspace.clone()],
+        confine: Substrate::Auto,
+        ..options()
+    })
+    .await?;
+    let answer: Answer = client
+        .complete(verdict_request(), local_path_tool_host(workspace))
+        .await
+        .map_err(|e| anyhow::anyhow!("the confined completion failed: {e:#}"))?;
+
+    let value = object(&answer);
+    assert!(
+        value.get("verdict").and_then(Value::as_str).is_some(),
+        "the answer must carry a string verdict: {value}"
+    );
+    Ok(())
+}
+
+fn install_request() -> Request {
+    Request {
+        model: None,
+        system: Some(
+            "You are a build agent working in the lent workspace. Run the command asked for \
+             with the shell and reply with the required JSON object."
+                .to_owned(),
+        ),
+        messages: vec![Message {
+            role: Role::User,
+            content: "Run `npm install` in the workspace, then read \
+                      `node_modules/is-number/package.json` and reply with {\"installed\": \
+                      <its version string>}. If the install fails, reply with {\"installed\": \
+                      \"failed\", \"reason\": <the error's last line>}."
+                .to_owned(),
+        }],
+        generation: None,
+        format: Format::Schema(Schema {
+            name: "installed".to_owned(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "installed": { "type": "string" },
+                    "reason": { "type": "string" }
+                },
+                "required": ["installed"]
+            })
+            .to_string(),
+        }),
+        tools: vec![],
+        grants: Grants { workspace: None },
+        check: false,
+    }
+}
+
+// `npm install` inside the boundary: the registry is listed, the proxy
+// carries the fetch, and TLS is verified against Node's bundled roots,
+// since the host's trust store is out of reach and `NODE_USE_SYSTEM_CA`
+// never crosses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs cursor-sdk-bridge, CURSOR_API_KEY, node and npm; run with --run-ignored"]
+async fn npm_install_through_the_proxy() -> Result<()> {
+    let workspace = temp_workspace("npm")?;
+    std::fs::write(
+        workspace.join("package.json"),
+        r#"{ "name": "confined-install", "private": true, "dependencies": { "is-number": "7.0.0" } }"#,
+    )?;
+    let client = Client::connect_with(ConnectOptions {
+        shell_roots: vec![workspace.clone()],
+        egress: vec!["registry.npmjs.org".to_owned()],
+        confine: Substrate::Auto,
+        ..options()
+    })
+    .await?;
+    let answer: Answer = client
+        .complete(install_request(), local_path_tool_host(workspace.clone()))
+        .await
+        .map_err(|e| anyhow::anyhow!("the install completion failed: {e:#}"))?;
+
+    let value = object(&answer);
+    assert_eq!(
+        value.get("installed").and_then(Value::as_str),
+        Some("7.0.0"),
+        "the install through the proxy: {value}"
+    );
+    assert!(
+        workspace.join("node_modules/is-number/package.json").exists(),
+        "the package landed in the workspace"
     );
     Ok(())
 }

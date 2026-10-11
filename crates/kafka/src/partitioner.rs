@@ -28,7 +28,7 @@ impl Partitioner {
     pub fn partition(self, key: &[u8]) -> i32 {
         match self.scheme {
             PartitionerScheme::KafkaJs => self.kafkajs(key),
-            PartitionerScheme::Java => java_partition(key, self.count),
+            PartitionerScheme::Java => self.java(key),
         }
     }
 
@@ -36,10 +36,14 @@ impl Partitioner {
     fn kafkajs(self, key: &[u8]) -> i32 {
         to_positive(murmur2(key)) % self.count
     }
+
+    // Kafka's `DefaultPartitioner`: `Utils.toPositive(murmur2(key)) % count`
+    fn java(self, key: &[u8]) -> i32 {
+        (java_murmur2(key) & i32::MAX) % self.count
+    }
 }
 
-// Kafka's `Utils.murmur2` / `toPositive`: wrapping `u32` arithmetic, then
-// the non-negative hash modulo the partition count.
+// Kafka's `Utils.murmur2`: wrapping `u32` arithmetic throughout.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -80,10 +84,6 @@ fn java_murmur2(data: &[u8]) -> i32 {
     hash = hash.wrapping_mul(M);
     hash ^= hash >> 15;
     hash as i32
-}
-
-fn java_partition(key: &[u8], count: i32) -> i32 {
-    (java_murmur2(key) & 0x7fff_ffff) % count
 }
 
 // kafkajs/src/producer/partitioners/default/murmur2.js (v1.15.0)

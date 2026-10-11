@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use anyhow::anyhow;
+use anyhow::{Context as _, anyhow};
 use futures::future::FutureExt;
 use omnia_wasi_messaging::{
     Client, FutureResult, Handler, Message, Metadata, RequestOptions, WasiMessagingCtx,
@@ -62,10 +62,9 @@ impl Client for crate::Client {
                 None => message.payload,
             };
             let metadata = message.metadata.unwrap_or_default();
-            let key = metadata.get("key").cloned();
-            let partition = explicit_partition(&metadata).or_else(|| {
-                key.as_deref().map(|key| client.inner.partitioner.partition(key.as_bytes()))
-            });
+            let key = metadata.get("key").map(String::as_str);
+            let partition = explicit_partition(&metadata)
+                .or_else(|| key.map(|key| client.inner.partitioner.partition(key.as_bytes())));
 
             let id = client.inner.shared.next_send_id();
             let mut record = BaseRecord::with_opaque_to(&topic, id).payload(&payload);
@@ -73,17 +72,16 @@ impl Client for crate::Client {
                 record = record.partition(partition);
             }
             // `.key()` changes the record's type, so each arm enqueues its own
-            let queued = match &key {
-                Some(key) => enqueue(&client.inner.producer, record.key(key.as_str())).await,
+            let queued = match key {
+                Some(key) => enqueue(&client.inner.producer, record.key(key)).await,
                 None => enqueue(&client.inner.producer, record).await,
             };
-            if let Err(error) = queued {
+            if queued.is_err() {
                 // no delivery callback fires for a record that never queued
                 client.inner.shared.note_delivered(id);
                 tracing::info!(monotonic_counter.publish_refused = 1, topic = %topic, reason = "refused");
-                return Err(anyhow!(error));
             }
-            Ok(())
+            queued.with_context(|| format!("send to {topic} refused"))
         }
         .boxed()
     }

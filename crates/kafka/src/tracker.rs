@@ -3,12 +3,19 @@ use std::collections::{BTreeMap, BTreeSet};
 // A resolved offset as `store_offset` takes it: topic, partition, offset.
 pub type Stored = (String, i32, i64);
 
+// One pull of a record. A revoke drops a pull in flight, and the offset comes
+// back as a new pull once the partition is assigned again; the earlier pull's
+// completion must not stand in for the new one, so the two are told apart by
+// ticket rather than by offset.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Ticket(u64);
+
 // One record the host has been given, or that is waiting on an earlier
 // record in its partition. `sends_before` is meaningful once `done` is set:
 // every produce numbered below it has to be delivered before the record is
 // resolved.
-#[derive(Default)]
 struct Pending {
+    ticket: Ticket,
     done: bool,
     sends_before: usize,
 }
@@ -57,33 +64,46 @@ pub struct Tracker {
     // every send numbered below this has a delivery report
     delivered: usize,
     out_of_order: BTreeSet<usize>,
+    tickets: u64,
 }
 
 impl Tracker {
-    pub fn insert(&mut self, topic: &str, partition: i32, offset: i64) {
+    pub fn insert(&mut self, topic: &str, partition: i32, offset: i64) -> Ticket {
+        let ticket = Ticket(self.tickets);
+        self.tickets += 1;
         let state = self.partition_or_insert(topic, partition);
         if !state.revoked {
-            state.pending.insert(offset, Pending::default());
+            state.pending.insert(
+                offset,
+                Pending {
+                    ticket,
+                    done: false,
+                    sends_before: 0,
+                },
+            );
         }
+        ticket
     }
 
     // Whether the record is still this consumer's to deliver. A revoke
-    // between the pull and the delivery drops it.
-    pub fn holds(&self, topic: &str, partition: i32, offset: i64) -> bool {
-        self.partition(topic, partition).is_some_and(|state| state.pending.contains_key(&offset))
+    // between the pull and the delivery drops it, and a redelivery of its
+    // offset pulled since does not stand in for it.
+    pub fn holds(&self, topic: &str, partition: i32, offset: i64, ticket: Ticket) -> bool {
+        self.partition(topic, partition)
+            .and_then(|state| state.pending.get(&offset))
+            .is_some_and(|pending| pending.ticket == ticket)
     }
 
     // Only the record's own partition can resolve here: the delivered
     // watermark has not moved.
     pub fn done(
-        &mut self, topic: &str, partition: i32, offset: i64, sends_before: usize,
+        &mut self, topic: &str, partition: i32, offset: i64, ticket: Ticket, sends_before: usize,
     ) -> Option<Stored> {
         let delivered = self.delivered;
         let state = self.partition_mut(topic, partition)?;
-        if let Some(pending) = state.pending.get_mut(&offset) {
-            pending.done = true;
-            pending.sends_before = sends_before;
-        }
+        let pending = state.pending.get_mut(&offset).filter(|pending| pending.ticket == ticket)?;
+        pending.done = true;
+        pending.sends_before = sends_before;
         state.resolve(delivered).map(|offset| (topic.to_owned(), partition, offset))
     }
 
@@ -168,22 +188,22 @@ mod tests {
     #[test]
     fn out_of_order_completions_store_the_resolved_offset() {
         let mut tracker = Tracker::default();
-        tracker.insert("t", 3, 100);
-        tracker.insert("t", 3, 101);
-        tracker.insert("t", 3, 102);
+        let first = tracker.insert("t", 3, 100);
+        let second = tracker.insert("t", 3, 101);
+        let third = tracker.insert("t", 3, 102);
 
-        assert_eq!(tracker.done("t", 3, 101, 0), None);
+        assert_eq!(tracker.done("t", 3, 101, second, 0), None);
         assert_eq!(tracker.stored_offset("t", 3), None);
 
-        assert_eq!(tracker.done("t", 3, 100, 0), Some(stored("t", 3, 101)));
-        assert_eq!(tracker.done("t", 3, 102, 0), Some(stored("t", 3, 102)));
+        assert_eq!(tracker.done("t", 3, 100, first, 0), Some(stored("t", 3, 101)));
+        assert_eq!(tracker.done("t", 3, 102, third, 0), Some(stored("t", 3, 102)));
     }
 
     #[test]
     fn record_done_before_its_sends_are_delivered() {
         let mut tracker = Tracker::default();
-        tracker.insert("t", 0, 7);
-        assert_eq!(tracker.done("t", 0, 7, 2), None);
+        let ticket = tracker.insert("t", 0, 7);
+        assert_eq!(tracker.done("t", 0, 7, ticket, 2), None);
 
         assert_eq!(tracker.note_delivered(0), []);
         assert_eq!(tracker.note_delivered(1), [stored("t", 0, 7)]);
@@ -192,10 +212,10 @@ mod tests {
     #[test]
     fn one_delivery_awaited_by_two_partitions() {
         let mut tracker = Tracker::default();
-        tracker.insert("t", 0, 1);
-        tracker.insert("u", 2, 9);
-        assert_eq!(tracker.done("t", 0, 1, 1), None);
-        assert_eq!(tracker.done("u", 2, 9, 1), None);
+        let t = tracker.insert("t", 0, 1);
+        let u = tracker.insert("u", 2, 9);
+        assert_eq!(tracker.done("t", 0, 1, t, 1), None);
+        assert_eq!(tracker.done("u", 2, 9, u, 1), None);
 
         assert_eq!(tracker.note_delivered(0), [stored("t", 0, 1), stored("u", 2, 9)]);
     }
@@ -203,20 +223,36 @@ mod tests {
     #[test]
     fn revoked_partition_drops_its_records() {
         let mut tracker = Tracker::default();
-        tracker.insert("t", 1, 5);
-        assert!(tracker.holds("t", 1, 5));
+        let held = tracker.insert("t", 1, 5);
+        assert!(tracker.holds("t", 1, 5, held));
 
         tracker.revoke("t", 1);
-        assert!(!tracker.holds("t", 1, 5));
-        assert_eq!(tracker.done("t", 1, 5, 0), None);
+        assert!(!tracker.holds("t", 1, 5, held));
+        assert_eq!(tracker.done("t", 1, 5, held, 0), None);
         assert_eq!(tracker.stored_offset("t", 1), None);
 
         // a record pulled before the reassignment is still dropped
-        tracker.insert("t", 1, 6);
-        assert!(!tracker.holds("t", 1, 6));
+        let dropped = tracker.insert("t", 1, 6);
+        assert!(!tracker.holds("t", 1, 6, dropped));
         tracker.assign("t", 1);
-        tracker.insert("t", 1, 7);
-        assert!(tracker.holds("t", 1, 7));
+        let held = tracker.insert("t", 1, 7);
+        assert!(tracker.holds("t", 1, 7, held));
+    }
+
+    #[test]
+    fn offset_pulled_again_after_a_reassignment() {
+        let mut tracker = Tracker::default();
+        let stale = tracker.insert("t", 1, 5);
+        tracker.revoke("t", 1);
+        tracker.assign("t", 1);
+        let fresh = tracker.insert("t", 1, 5);
+
+        assert!(!tracker.holds("t", 1, 5, stale));
+        assert_eq!(tracker.done("t", 1, 5, stale, 0), None);
+        assert_eq!(tracker.stored_offset("t", 1), None);
+
+        assert!(tracker.holds("t", 1, 5, fresh));
+        assert_eq!(tracker.done("t", 1, 5, fresh, 0), Some(stored("t", 1, 5)));
     }
 
     #[test]
@@ -229,7 +265,7 @@ mod tests {
         assert_eq!(tracker.note_delivered(0), []);
         assert_eq!(tracker.delivered, 2);
 
-        tracker.insert("t", 0, 10);
-        assert_eq!(tracker.done("t", 0, 10, 2), Some(stored("t", 0, 10)));
+        let ticket = tracker.insert("t", 0, 10);
+        assert_eq!(tracker.done("t", 0, 10, ticket, 2), Some(stored("t", 0, 10)));
     }
 }

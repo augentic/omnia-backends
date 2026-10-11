@@ -14,7 +14,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::JoinSet;
 
 use crate::registry::Registry;
-use crate::tracker::{Stored, Tracker};
+use crate::tracker::{Stored, Ticket, Tracker};
 
 // The most records this backend hands the host at once. The runtime's
 // instance pool is `POOL_TOTAL_CORE_INSTANCES` (1000); 64 stays well under it.
@@ -92,27 +92,29 @@ impl Shared {
         self.store_offsets(&stored);
     }
 
-    fn insert(&self, record: &OwnedMessage) {
+    fn insert(&self, record: &OwnedMessage) -> Ticket {
         self.tracker.lock().expect("tracker").insert(
-            record.topic(),
-            record.partition(),
-            record.offset(),
-        );
-    }
-
-    fn holds(&self, record: &OwnedMessage) -> bool {
-        self.tracker.lock().expect("tracker").holds(
             record.topic(),
             record.partition(),
             record.offset(),
         )
     }
 
-    fn done(&self, record: &OwnedMessage, sends_before: usize) {
+    fn holds(&self, record: &OwnedMessage, ticket: Ticket) -> bool {
+        self.tracker.lock().expect("tracker").holds(
+            record.topic(),
+            record.partition(),
+            record.offset(),
+            ticket,
+        )
+    }
+
+    fn done(&self, record: &OwnedMessage, ticket: Ticket, sends_before: usize) {
         let stored = self.tracker.lock().expect("tracker").done(
             record.topic(),
             record.partition(),
             record.offset(),
+            ticket,
             sends_before,
         );
         self.store_offsets(stored.as_slice());
@@ -226,17 +228,17 @@ impl Delivery {
     ) {
         // the tracker holds the offset's place before anything can wait on
         // it, so a later offset cannot resolve past it
-        self.shared.insert(&record);
+        let ticket = self.shared.insert(&record);
         let lane =
             record.key().map(|key| self.lanes.lock().expect("lanes").enqueue(Arc::from(key)));
         // a record behind its key waits without a slot and takes one when
         // its turn comes
         let slot = lane.as_ref().is_none_or(Lane::is_head).then_some(slot);
-        tasks.spawn(Arc::clone(self).deliver(record, lane, slot, place));
+        tasks.spawn(Arc::clone(self).deliver(record, ticket, lane, slot, place));
     }
 
     async fn deliver(
-        self: Arc<Self>, record: OwnedMessage, mut lane: Option<Lane>,
+        self: Arc<Self>, record: OwnedMessage, ticket: Ticket, mut lane: Option<Lane>,
         slot: Option<OwnedSemaphorePermit>, place: OwnedSemaphorePermit,
     ) -> Result<()> {
         if let Some(lane) = &mut lane {
@@ -248,7 +250,7 @@ impl Delivery {
         };
         self.report();
 
-        let outcome = self.handle(&record).await;
+        let outcome = self.handle(&record, ticket).await;
 
         // the slot goes before the lane, so the record behind can take it
         drop(slot);
@@ -272,8 +274,8 @@ impl Delivery {
     // redelivered from the committed offset, to whichever consumer holds
     // the partition now. `Ok` too for a record no guest could read: it is
     // dropped, logged, counted, and committed past.
-    async fn handle(&self, record: &OwnedMessage) -> Result<(), HandleError> {
-        if !self.shared.holds(record) {
+    async fn handle(&self, record: &OwnedMessage, ticket: Ticket) -> Result<(), HandleError> {
+        if !self.shared.holds(record, ticket) {
             return Ok(());
         }
         let raw = record.payload().unwrap_or_default();
@@ -292,22 +294,22 @@ impl Delivery {
                         topic = record.topic(),
                         reason = rejection.reason()
                     );
-                    self.done(record);
+                    self.done(record, ticket);
                     return Ok(());
                 }
             },
             None => raw.to_vec(),
         };
         self.handler.handle(message(record, payload)).await?;
-        self.done(record);
+        self.done(record, ticket);
         Ok(())
     }
 
     // Every send numbered below the counter went out before the guest
     // returned; the offset waits on them all.
-    fn done(&self, record: &OwnedMessage) {
+    fn done(&self, record: &OwnedMessage, ticket: Ticket) {
         let sends_before = self.shared.sends.load(Ordering::Acquire);
-        self.shared.done(record, sends_before);
+        self.shared.done(record, ticket, sends_before);
     }
 
     // `kafka_in_flight` pinned at `IN_FLIGHT` under lag means the slot count
@@ -513,6 +515,10 @@ mod tests {
         fn revoke(&self, partition: i32) {
             self.shared.tracker.lock().expect("tracker").revoke("t", partition);
         }
+
+        fn assign(&self, partition: i32) {
+            self.shared.tracker.lock().expect("tracker").assign("t", partition);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -620,6 +626,28 @@ mod tests {
         assert_eq!(scripted.delivered().await.offset(), 4);
         assert_eq!(scripted.stored_offset(1).await, Some(3));
         assert_eq!(scripted.stored_offset(0).await, None);
+    }
+
+    // The partition comes back before the first pull's handler returns, and
+    // the redelivery waits behind it in the lane.
+    #[tokio::test(start_paused = true)]
+    async fn a_record_redelivered_while_its_first_pull_is_in_flight() {
+        let mut scripted = Scripted::start();
+        scripted.pull(Some(b"a"), 0, 5);
+        let first = scripted.delivered().await;
+
+        scripted.revoke(0);
+        scripted.assign(0);
+        scripted.pull(Some(b"a"), 0, 5);
+        scripted.nothing_delivered().await;
+
+        first.complete(Ok(()));
+        assert_eq!(scripted.stored_offset(0).await, None);
+
+        let again = scripted.delivered().await;
+        assert_eq!(again.offset(), 5);
+        again.complete(Ok(()));
+        assert_eq!(scripted.stored_offset(0).await, Some(5));
     }
 
     #[test]

@@ -37,4 +37,4 @@ tracing.workspace = true
 [dev-dependencies]
 csv = "1.4.0"
 serde.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

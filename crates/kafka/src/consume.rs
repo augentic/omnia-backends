@@ -515,7 +515,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn keys_wait_only_on_themselves() {
         let mut scripted = Scripted::start();
         scripted.pull(Some(b"a"), 0, 0);
@@ -534,7 +534,7 @@ mod tests {
         assert_eq!(scripted.delivered().await.offset(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_record_without_a_key_never_waits() {
         let mut scripted = Scripted::start();
         scripted.pull(None, 0, 0);
@@ -545,7 +545,7 @@ mod tests {
         assert_eq!([first.offset(), second.offset()], [0, 1]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_record_past_the_bound_waits() {
         let bound = i64::try_from(IN_FLIGHT).expect("bound");
         let mut scripted = Scripted::start();
@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(scripted.delivered().await.offset(), bound);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_waiting_record_holds_the_resolved_offset() {
         let mut scripted = Scripted::start();
         scripted.pull(Some(b"a"), 0, 3);
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(scripted.stored_offset(0).await, Some(6));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_failed_outcome_ends_the_loop() {
         let mut scripted = Scripted::start();
         scripted.pull(Some(b"a"), 0, 7);
@@ -600,7 +600,7 @@ mod tests {
         assert_eq!(scripted.stored_offset(0).await, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_revoked_partition_is_skipped_but_not_the_rest() {
         let mut scripted = Scripted::start();
         scripted.pull(Some(b"a"), 0, 1);

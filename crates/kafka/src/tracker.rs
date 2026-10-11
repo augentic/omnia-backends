@@ -1,12 +1,50 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
+
+// A resolved offset as `store_offset` takes it: topic, partition, offset.
+pub type Stored = (String, i32, i64);
 
 // One record the host has been given, or that is waiting on an earlier
 // record in its partition. `sends_before` is meaningful once `done` is set:
 // every produce numbered below it has to be delivered before the record is
 // resolved.
+#[derive(Default)]
 struct Pending {
     done: bool,
     sends_before: usize,
+}
+
+impl Pending {
+    const fn resolved(&self, delivered: usize) -> bool {
+        self.done && self.sends_before <= delivered
+    }
+}
+
+// A partition's state, kept from its first record or assignment for the
+// life of the tracker. A revoke empties it rather than removing it, so a
+// record pulled before the revoke is still dropped when it comes.
+#[derive(Default)]
+struct Partition {
+    revoked: bool,
+    pending: BTreeMap<i64, Pending>,
+    stored: Option<i64>,
+}
+
+impl Partition {
+    // The leading records that are done with their sends delivered leave;
+    // the last of them is the new resolved offset.
+    fn resolve(&mut self, delivered: usize) -> Option<i64> {
+        let mut last = None;
+        while let Some(entry) = self.pending.first_entry()
+            && entry.get().resolved(delivered)
+        {
+            last = Some(*entry.key());
+            entry.remove();
+        }
+        if last.is_some() {
+            self.stored = last;
+        }
+        last
+    }
 }
 
 // The highest offset with every record before it done. Records finish out
@@ -15,78 +53,85 @@ struct Pending {
 // here until the gap closes.
 #[derive(Default)]
 pub struct Tracker {
-    partitions: HashMap<(String, i32), BTreeMap<i64, Pending>>,
+    topics: BTreeMap<String, BTreeMap<i32, Partition>>,
     // every send numbered below this has a delivery report
     delivered: usize,
     out_of_order: BTreeSet<usize>,
-    // partitions revoked and not yet reassigned; a record of one is dropped
-    revoked: HashSet<(String, i32)>,
-    stored: HashMap<(String, i32), i64>,
 }
 
 impl Tracker {
     pub fn insert(&mut self, topic: &str, partition: i32, offset: i64) {
-        let key = (topic.to_owned(), partition);
-        if self.revoked.contains(&key) {
-            return;
+        let state = self.partition_or_insert(topic, partition);
+        if !state.revoked {
+            state.pending.insert(offset, Pending::default());
         }
-        self.partitions.entry(key).or_default().insert(
-            offset,
-            Pending {
-                done: false,
-                sends_before: 0,
-            },
-        );
     }
 
     // Whether the record is still this consumer's to deliver. A revoke
     // between the pull and the delivery drops it.
     pub fn holds(&self, topic: &str, partition: i32, offset: i64) -> bool {
-        self.partitions
-            .get(&(topic.to_owned(), partition))
-            .is_some_and(|pending| pending.contains_key(&offset))
+        self.partition(topic, partition).is_some_and(|state| state.pending.contains_key(&offset))
     }
 
+    // Only the record's own partition can resolve here: the delivered
+    // watermark has not moved.
     pub fn done(
         &mut self, topic: &str, partition: i32, offset: i64, sends_before: usize,
-    ) -> Vec<(String, i32, i64)> {
-        let key = (topic.to_owned(), partition);
-        if let Some(pending) = self.partitions.get_mut(&key)
-            && let Some(state) = pending.get_mut(&offset)
-        {
-            state.done = true;
-            state.sends_before = sends_before;
+    ) -> Option<Stored> {
+        let delivered = self.delivered;
+        let state = self.partition_mut(topic, partition)?;
+        if let Some(pending) = state.pending.get_mut(&offset) {
+            pending.done = true;
+            pending.sends_before = sends_before;
         }
-        self.resolve()
+        state.resolve(delivered).map(|offset| (topic.to_owned(), partition, offset))
     }
 
     // A delivery report, including a send that never left the queue: skipping
-    // a number would leave `delivered` stuck below it.
-    pub fn note_delivered(&mut self, id: usize) -> Vec<(String, i32, i64)> {
+    // a number would leave `delivered` stuck below it. Only a report that
+    // moves the watermark can resolve a record.
+    pub fn note_delivered(&mut self, id: usize) -> Vec<Stored> {
         if id < self.delivered {
             return Vec::new();
         }
-        if id == self.delivered {
-            self.advance();
-        } else {
+        if id > self.delivered {
             self.out_of_order.insert(id);
+            return Vec::new();
         }
-        self.resolve()
+        self.advance();
+        self.resolve_all()
     }
 
     pub fn revoke(&mut self, topic: &str, partition: i32) {
-        let key = (topic.to_owned(), partition);
-        self.partitions.remove(&key);
-        self.revoked.insert(key);
+        *self.partition_or_insert(topic, partition) = Partition {
+            revoked: true,
+            ..Partition::default()
+        };
     }
 
     pub fn assign(&mut self, topic: &str, partition: i32) {
-        self.revoked.remove(&(topic.to_owned(), partition));
+        self.partition_or_insert(topic, partition).revoked = false;
     }
 
     #[cfg(test)]
     pub(crate) fn stored_offset(&self, topic: &str, partition: i32) -> Option<i64> {
-        self.stored.get(&(topic.to_owned(), partition)).copied()
+        self.partition(topic, partition).and_then(|state| state.stored)
+    }
+
+    fn partition(&self, topic: &str, partition: i32) -> Option<&Partition> {
+        self.topics.get(topic)?.get(&partition)
+    }
+
+    fn partition_mut(&mut self, topic: &str, partition: i32) -> Option<&mut Partition> {
+        self.topics.get_mut(topic)?.get_mut(&partition)
+    }
+
+    // The topic's name is allocated once, at its first partition.
+    fn partition_or_insert(&mut self, topic: &str, partition: i32) -> &mut Partition {
+        if !self.topics.contains_key(topic) {
+            self.topics.insert(topic.to_owned(), BTreeMap::new());
+        }
+        self.topics.get_mut(topic).expect("inserted above").entry(partition).or_default()
     }
 
     fn advance(&mut self) {
@@ -96,31 +141,14 @@ impl Tracker {
         }
     }
 
-    fn resolve(&mut self) -> Vec<(String, i32, i64)> {
+    fn resolve_all(&mut self) -> Vec<Stored> {
+        let delivered = self.delivered;
         let mut stored = Vec::new();
-        let keys: Vec<(String, i32)> = self.partitions.keys().cloned().collect();
-        for key in keys {
-            let (last, empty) = {
-                let Some(pending) = self.partitions.get_mut(&key) else {
-                    continue;
-                };
-                let mut last = None;
-                while let Some((&offset, state)) = pending.first_key_value() {
-                    if state.done && state.sends_before <= self.delivered {
-                        last = Some(offset);
-                        pending.pop_first();
-                    } else {
-                        break;
-                    }
+        for (topic, partitions) in &mut self.topics {
+            for (&partition, state) in partitions.iter_mut() {
+                if let Some(offset) = state.resolve(delivered) {
+                    stored.push((topic.clone(), partition, offset));
                 }
-                (last, pending.is_empty())
-            };
-            if let Some(offset) = last {
-                self.stored.insert(key.clone(), offset);
-                stored.push((key.0.clone(), key.1, offset));
-            }
-            if empty {
-                self.partitions.remove(&key);
             }
         }
         stored
@@ -133,6 +161,10 @@ impl Tracker {
 mod tests {
     use super::*;
 
+    fn stored(topic: &str, partition: i32, offset: i64) -> Stored {
+        (topic.to_owned(), partition, offset)
+    }
+
     #[test]
     fn out_of_order_completions_store_the_resolved_offset() {
         let mut tracker = Tracker::default();
@@ -140,24 +172,32 @@ mod tests {
         tracker.insert("t", 3, 101);
         tracker.insert("t", 3, 102);
 
-        assert_eq!(tracker.done("t", 3, 101, 0), []);
+        assert_eq!(tracker.done("t", 3, 101, 0), None);
         assert_eq!(tracker.stored_offset("t", 3), None);
 
-        let stored = tracker.done("t", 3, 100, 0);
-        assert_eq!(stored, vec![("t".to_owned(), 3, 101)]);
-
-        let stored = tracker.done("t", 3, 102, 0);
-        assert_eq!(stored, vec![("t".to_owned(), 3, 102)]);
+        assert_eq!(tracker.done("t", 3, 100, 0), Some(stored("t", 3, 101)));
+        assert_eq!(tracker.done("t", 3, 102, 0), Some(stored("t", 3, 102)));
     }
 
     #[test]
     fn record_done_before_its_sends_are_delivered() {
         let mut tracker = Tracker::default();
         tracker.insert("t", 0, 7);
-        assert_eq!(tracker.done("t", 0, 7, 2), []);
+        assert_eq!(tracker.done("t", 0, 7, 2), None);
 
         assert_eq!(tracker.note_delivered(0), []);
-        assert_eq!(tracker.note_delivered(1), vec![("t".to_owned(), 0, 7)]);
+        assert_eq!(tracker.note_delivered(1), [stored("t", 0, 7)]);
+    }
+
+    #[test]
+    fn one_delivery_awaited_by_two_partitions() {
+        let mut tracker = Tracker::default();
+        tracker.insert("t", 0, 1);
+        tracker.insert("u", 2, 9);
+        assert_eq!(tracker.done("t", 0, 1, 1), None);
+        assert_eq!(tracker.done("u", 2, 9, 1), None);
+
+        assert_eq!(tracker.note_delivered(0), [stored("t", 0, 1), stored("u", 2, 9)]);
     }
 
     #[test]
@@ -168,8 +208,8 @@ mod tests {
 
         tracker.revoke("t", 1);
         assert!(!tracker.holds("t", 1, 5));
-        assert_eq!(tracker.done("t", 1, 5, 0), []);
-        assert!(tracker.stored.is_empty());
+        assert_eq!(tracker.done("t", 1, 5, 0), None);
+        assert_eq!(tracker.stored_offset("t", 1), None);
 
         // a record pulled before the reassignment is still dropped
         tracker.insert("t", 1, 6);
@@ -190,6 +230,6 @@ mod tests {
         assert_eq!(tracker.delivered, 2);
 
         tracker.insert("t", 0, 10);
-        assert_eq!(tracker.done("t", 0, 10, 2), vec![("t".to_owned(), 0, 10)]);
+        assert_eq!(tracker.done("t", 0, 10, 2), Some(stored("t", 0, 10)));
     }
 }

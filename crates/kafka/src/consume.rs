@@ -14,7 +14,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::JoinSet;
 
 use crate::registry::Registry;
-use crate::tracker::Tracker;
+use crate::tracker::{Stored, Tracker};
 
 // The most records this backend hands the host at once. The runtime's
 // instance pool is `POOL_TOTAL_CORE_INSTANCES` (1000); 64 stays well under it.
@@ -115,10 +115,10 @@ impl Shared {
             record.offset(),
             sends_before,
         );
-        self.store_offsets(&stored);
+        self.store_offsets(stored.as_slice());
     }
 
-    fn store_offsets(&self, stored: &[(String, i32, i64)]) {
+    fn store_offsets(&self, stored: &[Stored]) {
         if stored.is_empty() {
             return;
         }

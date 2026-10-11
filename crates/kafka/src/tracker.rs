@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 // resolved.
 struct Pending {
     done: bool,
-    sends_before: u64,
+    sends_before: usize,
 }
 
 // The highest offset with every record before it done. Records finish out
@@ -17,8 +17,8 @@ struct Pending {
 pub struct Tracker {
     partitions: HashMap<(String, i32), BTreeMap<i64, Pending>>,
     // every send numbered below this has a delivery report
-    delivered: u64,
-    out_of_order: BTreeSet<u64>,
+    delivered: usize,
+    out_of_order: BTreeSet<usize>,
     // partitions revoked and not yet reassigned; a record of one is dropped
     revoked: HashSet<(String, i32)>,
     stored: HashMap<(String, i32), i64>,
@@ -48,7 +48,7 @@ impl Tracker {
     }
 
     pub fn done(
-        &mut self, topic: &str, partition: i32, offset: i64, sends_before: u64,
+        &mut self, topic: &str, partition: i32, offset: i64, sends_before: usize,
     ) -> Vec<(String, i32, i64)> {
         let key = (topic.to_owned(), partition);
         if let Some(pending) = self.partitions.get_mut(&key)
@@ -62,7 +62,7 @@ impl Tracker {
 
     // A delivery report, including a send that never left the queue: skipping
     // a number would leave `delivered` stuck below it.
-    pub fn note_delivered(&mut self, id: u64) -> Vec<(String, i32, i64)> {
+    pub fn note_delivered(&mut self, id: usize) -> Vec<(String, i32, i64)> {
         if id < self.delivered {
             return Vec::new();
         }

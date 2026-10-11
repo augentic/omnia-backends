@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::pin::pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -66,7 +66,7 @@ impl ConsumerContext for KafkaContext {
 // with the delivery loop.
 pub struct Shared {
     tracker: Mutex<Tracker>,
-    sends: AtomicU64,
+    sends: AtomicUsize,
     consumer: OnceLock<Weak<KafkaConsumer>>,
 }
 
@@ -74,7 +74,7 @@ impl Shared {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             tracker: Mutex::new(Tracker::default()),
-            sends: AtomicU64::new(0),
+            sends: AtomicUsize::new(0),
             consumer: OnceLock::new(),
         })
     }
@@ -83,11 +83,11 @@ impl Shared {
         let _ = self.consumer.set(Arc::downgrade(consumer));
     }
 
-    pub fn next_send_id(&self) -> u64 {
+    pub fn next_send_id(&self) -> usize {
         self.sends.fetch_add(1, Ordering::AcqRel)
     }
 
-    pub fn note_delivered(&self, id: u64) {
+    pub fn note_delivered(&self, id: usize) {
         let stored = self.tracker.lock().expect("tracker").note_delivered(id);
         self.store_offsets(&stored);
     }
@@ -108,7 +108,7 @@ impl Shared {
         )
     }
 
-    fn done(&self, record: &OwnedMessage, sends_before: u64) {
+    fn done(&self, record: &OwnedMessage, sends_before: usize) {
         let stored = self.tracker.lock().expect("tracker").done(
             record.topic(),
             record.partition(),

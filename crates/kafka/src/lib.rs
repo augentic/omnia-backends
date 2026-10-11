@@ -258,7 +258,6 @@ impl ProducerContext for Tracer {
     fn delivery(
         &self, delivery_result: &DeliveryResult<'_>, delivery_opaque: Self::DeliveryOpaque,
     ) {
-        let id = u64::try_from(delivery_opaque).unwrap_or(u64::MAX);
         match delivery_result {
             Ok(message) => {
                 let key = record_key(message);
@@ -274,7 +273,7 @@ impl ProducerContext for Tracer {
                 tracing::info!(monotonic_counter.delivery_failures = 1, key = %key);
             }
         }
-        self.shared.note_delivered(id);
+        self.shared.note_delivered(delivery_opaque);
     }
 }
 

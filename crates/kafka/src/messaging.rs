@@ -68,9 +68,7 @@ impl Client for crate::Client {
             });
 
             let id = client.inner.shared.next_send_id();
-            let mut record = BaseRecord::with_opaque_to(&topic, id)
-                .payload(&payload)
-                .timestamp(chrono::Utc::now().timestamp_millis());
+            let mut record = BaseRecord::with_opaque_to(&topic, id).payload(&payload);
             if let Some(partition) = partition {
                 record = record.partition(partition);
             }

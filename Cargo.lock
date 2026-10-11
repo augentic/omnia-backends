@@ -3885,7 +3885,6 @@ name = "omnia-kafka"
 version = "0.31.0"
 dependencies = [
  "anyhow",
- "chrono",
  "csv",
  "fromenv",
  "futures",

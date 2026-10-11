@@ -1,6 +1,6 @@
-//! What the `child` and `boundary` suites share: a connected [`Confine`]
-//! over `/bin/sh`, a boundary around a lend, and the liveness probes a
-//! process-death row ends on.
+//! What the `child`, `boundary`, `egress`, and `toolchain` suites share: a
+//! connected [`Confine`] over `/bin/sh`, a boundary around a lend, and the
+//! liveness probes a process-death row ends on.
 
 #![allow(dead_code, reason = "each suite uses its own subset")]
 

@@ -5,6 +5,7 @@ mod failure;
 mod model;
 mod pool;
 mod protocol;
+mod relay;
 mod worker;
 
 use std::env;
@@ -59,7 +60,7 @@ impl Backend for Client {
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
 
         let confine = Confine::connect(options.confine()).await?;
-        let pool = Pool::connect(options.max_agents).await?;
+        let pool = Pool::connect(options.max_agents, &options.backend_url).await?;
         Ok(Self {
             deadlines: Deadlines {
                 inactivity: Duration::from_secs(options.inactivity_secs),
@@ -77,19 +78,18 @@ impl Backend for Client {
 impl ConnectOptions {
     // What a worker may reach: the operator's roots and hosts, the bridge's
     // own settings and the operator's `worker_env` as the environment it
-    // reads of the host, and the client's own credential never among it.
+    // reads of the host, and never the client's own credential or the
+    // backend address, which would point the bridge past the relay.
     fn confine(&self) -> Options {
         let mut passthrough: Vec<String> =
             Worker::PASSTHROUGH.iter().map(ToString::to_string).collect();
         passthrough.extend(self.worker_env.iter().cloned());
-        let mut egress: Vec<String> = Worker::HOSTS.iter().map(ToString::to_string).collect();
-        egress.extend(self.egress.iter().cloned());
         Options {
             shell_roots: self.shell_roots.clone(),
             read_roots: self.read_roots.clone(),
-            egress,
+            egress: self.egress.clone(),
             passthrough,
-            refused: vec!["CURSOR_API_KEY".to_owned()],
+            refused: Worker::REFUSED.iter().map(ToString::to_string).collect(),
             substrate: self.confine,
         }
     }
@@ -116,6 +116,11 @@ mod config {
         /// Default model id.
         #[env(from = "CURSOR_MODEL", default = "composer-2.5")]
         pub model: String,
+        /// The Cursor backend the client's relay forwards the bridge's API
+        /// calls to, an `http` or `https` URL; the bridge itself is pointed
+        /// at the relay.
+        #[env(from = "CURSOR_BACKEND_URL", default = "https://api2.cursor.sh")]
+        pub backend_url: String,
         /// Absolute cap in seconds on one agent run; a correction's send gets
         /// a fresh cap.
         #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
@@ -142,14 +147,17 @@ mod config {
         /// workspace, `:`-separated; each must exist.
         #[env(from = "CURSOR_READ_ROOTS", default = "", with = paths)]
         pub read_roots: Vec<PathBuf>,
-        /// Hosts a worker may reach beside Cursor's own, comma-separated;
-        /// `*.example.com` names every host under a domain.
+        /// Hosts a worker's commands may reach through the egress proxy,
+        /// comma-separated; `*.example.com` names every host under a
+        /// domain. The bridge's own API goes through the relay, so none is
+        /// needed for it.
         #[env(from = "CURSOR_EGRESS", default = "", with = split)]
         pub egress: Vec<String>,
         /// Host environment variables passed to a worker by name,
         /// comma-separated, beside the bridge's own settings and the
-        /// trust-store variables it honours; `CURSOR_API_KEY` and the proxy
-        /// variables, which name the egress proxy, are refused.
+        /// trust-store variables it honours; `CURSOR_API_KEY`,
+        /// `CURSOR_BACKEND_URL`, and the proxy variables, which name the
+        /// relay and the egress proxy, are refused.
         #[env(from = "CURSOR_WORKER_ENV", default = "", with = split)]
         pub worker_env: Vec<String>,
         /// The mechanism that holds the boundary around a worker. Set in

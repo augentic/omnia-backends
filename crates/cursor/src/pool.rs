@@ -4,10 +4,11 @@
 //! one of the `max_agents` slots plus the worker the agent runs on — a
 //! freshly spawned process inside the boundary the completion laid,
 //! registered with the callback endpoint under its own token so its
-//! callbacks route to its own agent. A task of the pool's
-//! holds the permit and the token until the process has exited, so a slot
-//! never reopens, and a token never routes, while its process is still
-//! around; dropping the lease only asks the worker to go.
+//! callbacks route to its own agent, and pointed at the relay its API goes
+//! through. A task of the pool's holds the permit and the token until the
+//! process has exited, so a slot never reopens, and a token never routes,
+//! while its process is still around; dropping the lease only asks the
+//! worker to go.
 
 use std::sync::Arc;
 
@@ -19,22 +20,25 @@ use tokio::time::Instant;
 
 use crate::elapsed_ms;
 use crate::endpoint::{Attached, Endpoint, Registration};
+use crate::relay::Relay;
 use crate::worker::Worker;
 
 #[derive(Debug)]
 pub struct Pool {
     permits: Arc<Semaphore>,
     endpoint: Endpoint,
+    relay: Relay,
     max_agents: usize,
 }
 
 impl Pool {
     // Nothing is spawned until the first lease, so a missing or broken
     // binary surfaces as that lease's failure.
-    pub async fn connect(max_agents: usize) -> Result<Self> {
+    pub async fn connect(max_agents: usize, backend_url: &str) -> Result<Self> {
         Ok(Self {
             permits: Arc::new(Semaphore::new(max_agents.min(Semaphore::MAX_PERMITS))),
             endpoint: Endpoint::bind().await?,
+            relay: Relay::bind(backend_url).await?,
             max_agents,
         })
     }
@@ -52,7 +56,7 @@ impl Pool {
         }
 
         let registration = Arc::new(self.endpoint.register()?);
-        let spawned = Worker::spawn(&registration, boundary)?;
+        let spawned = Worker::spawn(&registration, self.relay.url(), boundary)?;
 
         // slot and token are held until the process is gone, however the lease ends
         let exited = spawned.exited();

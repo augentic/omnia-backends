@@ -274,6 +274,7 @@ impl Server {
             "cwd": options["local"]["cwd"][0],
             "apiKeyPresent": !api_key.is_empty(),
             "env": environment(),
+            "backendUrl": std::env::var("CURSOR_BACKEND_URL").unwrap_or_default(),
             "model": options["model"]["id"],
             "tools": options["tools"]["names"],
             "customTools": keys(&options["local"]["customTools"]),

@@ -127,8 +127,57 @@ Unreleased
   that lays a tree one file a tool call ran past 32 before its wall-clock
   cap; the cap on the run is `CURSOR_TIMEOUT_SECS`, and the call budget
   now sits beside it as a knob of the same backend.
+- `omnia-confine`, the crate that owns a host process in the model's
+  trust domain: `Confine::connect` holds the backend's `Options` to the
+  host once — `shell_roots`, `read_roots`, `egress`, `passthrough`,
+  `refused`, and the `Substrate` — probes the kernel substrate, and binds
+  the egress proxy; `Confinement::of` puts one process at a lend, or in a
+  private directory when nothing is lent; `Confine::lay` wraps it in a
+  `Boundary`, whose `command` runs a program inside with an environment
+  built from nothing (`PATH`, `LANG`, `LC_*`, `TZ`, `TERM`, a private
+  `HOME` and `TMPDIR`, the proxy variables, and the `passthrough`), in
+  the tree's open directory handle, as a session leader, and whose
+  `spawn` supervises it as a `Child` — the supervisor lifted from
+  `omnia-cursor`'s worker — or `output` runs it once under a bound.
+  Under `Substrate::Auto`, the default, the kernel holds the process to
+  its tree, its scratch, the system, and the read roots: on macOS a
+  Seatbelt profile rendered from Codex's base policy and applied through
+  `/usr/bin/sandbox-exec`, every path a `-D` parameter, `.git` and
+  `.emery` beneath the lend denied, `process-info` closed to outside
+  processes, and the network closed to loopback; on Linux a Landlock
+  ruleset (ABI 4, a hard requirement) and two seccomp filters built in
+  the parent and applied in the child, the host set non-dumpable at
+  connect, and a connect refusal where the kernel lacks Landlock ABI 4
+  or Yama. The proxy is an HTTP `CONNECT` proxy on loopback admitting the
+  `egress` list — a name, a `*.suffix`, or an IP literal — and vetting
+  every resolved address against the unspecified, loopback, link-local,
+  multicast, broadcast and cloud-metadata ranges, IPv4 carried in IPv6,
+  and the host's own addresses. The substrate files start from heel 0.3.0
+  (MIT OR Apache-2.0), with the notice kept in each header.
+- `omnia-cursor` runs every `cursor-sdk-bridge` under `omnia-confine`:
+  `ConnectOptions` gains `shell_roots` (`CURSOR_SHELL_ROOTS`),
+  `read_roots` (`CURSOR_READ_ROOTS`), `egress` (`CURSOR_EGRESS`, joined
+  to the bridge's own `*.cursor.sh` and `*.cursor.com`), `worker_env`
+  (`CURSOR_WORKER_ENV`), and `confine`, the `Substrate`, set in code
+  alone and `Auto` by default. A lend at or beneath a shell root runs with
+  the `shell` tool beside the read-only set, so an agent can run the
+  tree's own build and tests; the inactivity window stands down while a
+  shell command runs, since the bridge bounds it by the call's own
+  timeout, and `in progress` says the run is waiting on `the shell`.
+  `tests/live.rs` gains two ignored rows: a turn completed inside the
+  kernel boundary through the proxy, and an `npm install` through it.
 
 ### Changed
+
+- `omnia-cursor`'s workers inherit nothing of the host's environment:
+  `PATH`, `LANG`, `LC_*`, `TZ` and `TERM`, a private `HOME` and `TMPDIR`,
+  the proxy variables naming the client's egress proxy, the bridge's own
+  settings and the trust-store variables it honours, and what
+  `CURSOR_WORKER_ENV` names, with `CURSOR_API_KEY` riding the handshake
+  alone and `NODE_USE_SYSTEM_CA`, the proxy variables, and every
+  `GIT_DIR` sibling refused as a passthrough. Workers are session leaders
+  rather than process-group leaders, so a worker has no controlling
+  terminal; the kill at shutdown reaches the whole session.
 
 - `omnia-azure-blob` implements omnia's one `PackageStore` in place of the
   retired `ContentStore` and `ReleaseStore` pair: one blob per release in

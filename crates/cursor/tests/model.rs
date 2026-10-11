@@ -6,9 +6,12 @@
 mod support;
 
 use omnia_cursor::ConnectOptions;
+use omnia_test::host::scratch;
 use serde_json::json;
-use support::fake_bridge::{Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
-use support::harness::{await_gone, connect, options, run_guest, sole_agent, spawning};
+use support::fake_bridge::{self, Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
+use support::harness::{
+    await_gone, connect, options, run_guest, run_guest_over, sole_agent, spawning,
+};
 
 // A guest program without a matching test here fails to compile.
 test_programs::foreach_model!();
@@ -42,6 +45,37 @@ async fn model_echo_text() {
     assert_eq!(created.arg["apiKeyPresent"], true);
     assert_eq!(deleted.arg["apiKeyPresent"], true);
     assert_eq!(deleted.arg["apiKeyMatchesCreate"], true);
+
+    // the worker's environment is the allowlist: the key reaches it on the
+    // wire alone, and a credential the host process holds for another
+    // backend never does, so no shell child of the agent can print either
+    let env = created.arg["env"].as_array().expect("the worker's environment");
+    assert!(env.contains(&json!("PATH")), "{env:?}");
+    assert!(!env.contains(&json!("CURSOR_API_KEY")), "{env:?}");
+    assert!(!env.contains(&json!(fake_bridge::PLANTED_SECRET)), "{env:?}");
+
+    // nothing lent: a private working directory and every built-in tool off
+    assert_eq!(created.arg["tools"], json!([]));
+}
+
+// A lent workspace is the agent's working directory, canonical, with the
+// read-only tools on and no shell: nothing names it a shell root.
+#[tokio::test]
+async fn model_lend() {
+    let fake = Spawnable::new(&Config::echo());
+    let client = spawning(&fake, 1).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    run_guest_over(test_programs::MODEL_LEND, &["./tree"], &client, [scratch.mount(false)]).await;
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let (_, sequence) = sole_agent(&log);
+    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
+    let created = log.saw(Rpc::CreateAgent)[0];
+    let tree = std::fs::canonicalize(scratch.path().join("tree")).expect("the lend");
+    assert_eq!(created.text("cwd"), tree.to_string_lossy(), "{}", created.arg);
+    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read"]));
 }
 
 #[tokio::test]

@@ -16,8 +16,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub use agent::Deadlines;
 use agent::{Attempt, Unanswered};
 use anyhow::anyhow;
+use omnia_confine::Confinement;
 use omnia_wasi_model::{Answer, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx};
-use options::Turn;
+use options::{Access, Turn};
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
 
@@ -75,10 +76,17 @@ impl Client {
             .ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))
             .map_err(Unanswered::settled)?;
 
-        let turn = Turn::prepare(request, tool_host.local_path(), &self.model, api_key)
+        // the boundary is laid before the slot is taken, so a lend that
+        // cannot be entered costs no wait
+        let confinement = Confinement::of(tool_host.local_path(), self.confine.options())
             .await
             .map_err(Unanswered::settled)?;
-        let lease = self.pool.lease().await.map_err(Unanswered::settled)?;
+        let boundary = self.confine.lay(confinement);
+        let access = Access::of(&boundary);
+        let cwd = boundary.cwd().map_err(Unanswered::settled)?;
+        let turn = Turn::prepare(request, cwd, access, &self.model, api_key)
+            .map_err(Unanswered::settled)?;
+        let lease = self.pool.lease(boundary).await.map_err(Unanswered::settled)?;
 
         Attempt {
             lease,

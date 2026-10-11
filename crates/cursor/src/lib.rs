@@ -14,13 +14,15 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 pub use failure::Failure;
 use omnia::Backend;
+pub use omnia_confine::Exit;
+use omnia_confine::{Confine, Options};
 pub use protocol::{RpcError, RunStatus};
 use tokio::time::Instant;
 use tracing::instrument;
-pub use worker::Exit;
 
 use crate::model::Deadlines;
 use crate::pool::Pool;
+use crate::worker::Worker;
 
 /// Cursor model backend.
 #[derive(Clone)]
@@ -29,6 +31,7 @@ pub struct Client {
     model: String,
     api_key: Option<String>,
     pool: Arc<Pool>,
+    confine: Arc<Confine>,
     max_tool_calls: u32,
 }
 
@@ -39,6 +42,7 @@ impl std::fmt::Debug for Client {
             .field("model", &self.model)
             .field("max_agents", &self.pool.max_agents())
             .field("max_tool_calls", &self.max_tool_calls)
+            .field("confine", &self.confine.options())
             .finish_non_exhaustive()
     }
 }
@@ -54,6 +58,7 @@ impl Backend for Client {
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
 
+        let confine = Confine::connect(options.confine()).await?;
         let pool = Pool::connect(options.max_agents).await?;
         Ok(Self {
             deadlines: Deadlines {
@@ -63,8 +68,30 @@ impl Backend for Client {
             model: options.model,
             api_key,
             pool: Arc::new(pool),
+            confine: Arc::new(confine),
             max_tool_calls: options.max_tool_calls,
         })
+    }
+}
+
+impl ConnectOptions {
+    // What a worker may reach: the operator's roots and hosts, the bridge's
+    // own settings and the operator's `worker_env` as the environment it
+    // reads of the host, and the client's own credential never among it.
+    fn confine(&self) -> Options {
+        let mut passthrough: Vec<String> =
+            Worker::PASSTHROUGH.iter().map(ToString::to_string).collect();
+        passthrough.extend(self.worker_env.iter().cloned());
+        let mut egress: Vec<String> = Worker::HOSTS.iter().map(ToString::to_string).collect();
+        egress.extend(self.egress.iter().cloned());
+        Options {
+            shell_roots: self.shell_roots.clone(),
+            read_roots: self.read_roots.clone(),
+            egress,
+            passthrough,
+            refused: vec!["CURSOR_API_KEY".to_owned()],
+            substrate: self.confine,
+        }
     }
 }
 
@@ -78,7 +105,10 @@ fn elapsed_ms(since: Instant) -> u64 {
 
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
-    use fromenv::FromEnv;
+    use std::path::PathBuf;
+
+    use fromenv::{FromEnv, ParseResult};
+    use omnia_confine::Substrate;
 
     /// Connection options for the cursor backend.
     #[derive(Debug, Clone, FromEnv)]
@@ -92,7 +122,8 @@ mod config {
         pub timeout_secs: u64,
         /// Seconds without stream events before a run waiting on the bridge
         /// (its opening frame, a tool call) is cancelled; a model composing
-        /// its answer is bounded by `timeout_secs` alone.
+        /// its answer, or a shell command the bridge bounds itself, is
+        /// bounded by `timeout_secs` alone.
         #[env(from = "CURSOR_INACTIVITY_SECS", default = "120")]
         pub inactivity_secs: u64,
         /// Maximum agents live at once.
@@ -102,12 +133,52 @@ mod config {
         /// `budget-exhausted`; the host's default is 32.
         #[env(from = "CURSOR_MAX_TOOL_CALLS", default = "128")]
         pub max_tool_calls: u32,
+        /// Trees a lent workspace at or beneath which runs with a shell,
+        /// `:`-separated and relative to the invocation directory; a
+        /// workspace lent elsewhere is read-only.
+        #[env(from = "CURSOR_SHELL_ROOTS", default = "", with = paths)]
+        pub shell_roots: Vec<PathBuf>,
+        /// Trees a worker may read beside the system's own and its
+        /// workspace, `:`-separated; each must exist.
+        #[env(from = "CURSOR_READ_ROOTS", default = "", with = paths)]
+        pub read_roots: Vec<PathBuf>,
+        /// Hosts a worker may reach beside Cursor's own, comma-separated;
+        /// `*.example.com` names every host under a domain.
+        #[env(from = "CURSOR_EGRESS", default = "", with = split)]
+        pub egress: Vec<String>,
+        /// Host environment variables passed to a worker by name,
+        /// comma-separated, beside the bridge's own settings and the
+        /// trust-store variables it honours; `CURSOR_API_KEY` and the proxy
+        /// variables, which name the egress proxy, are refused.
+        #[env(from = "CURSOR_WORKER_ENV", default = "", with = split)]
+        pub worker_env: Vec<String>,
+        /// The mechanism that holds the boundary around a worker. Set in
+        /// code alone: the environment never turns the boundary off.
+        pub confine: Substrate,
+    }
+
+    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
+    fn split(s: &str) -> ParseResult<Vec<String>> {
+        Ok(s.split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
+    }
+
+    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
+    fn paths(s: &str) -> ParseResult<Vec<PathBuf>> {
+        Ok(std::env::split_paths(s).filter(|path| !path.as_os_str().is_empty()).collect())
     }
 }
 pub use config::ConnectOptions;
+pub use omnia_confine::Substrate;
 
 impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
-        Self::from_env().finalize().context("issue loading connection options")
+        Self::from_env()
+            .confine(Substrate::default())
+            .finalize()
+            .context("issue loading connection options")
     }
 }

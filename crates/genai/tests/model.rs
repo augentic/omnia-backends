@@ -7,9 +7,10 @@
 
 mod support;
 
+use omnia_test::host::scratch;
 use serde_json::json;
 use support::fake_openai::{self, Config, FakeOpenAi, Fault};
-use support::harness::{client, expect_error, run_guest};
+use support::harness::{client, expect_error, run_guest, run_guest_over};
 
 // Every guest program in `crates/test-programs` must have a matching test
 // here; a new program without one fails to compile.
@@ -44,6 +45,20 @@ async fn model_echo_text() {
         ]
     );
     assert!(requests[0].tools().is_empty(), "no tool is advertised without a workspace");
+}
+
+// A lent workspace advertises the host-side `read` and `list` tools over it.
+#[tokio::test]
+async fn model_lend() {
+    let fake = FakeOpenAi::serve(Config::echo()).await;
+    let client = client(&fake).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    run_guest_over(test_programs::MODEL_LEND, &["./tree"], &client, [scratch.mount(false)]).await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].tools(), ["read", "list"]);
 }
 
 #[tokio::test]

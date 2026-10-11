@@ -71,10 +71,11 @@ impl Backend for Client {
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
         let mut config = ClientConfig::from(&options);
-        config.set("message.timeout.ms", MESSAGE_TIMEOUT);
 
         let shared = Shared::new();
         let producer = config
+            .clone()
+            .set("message.timeout.ms", MESSAGE_TIMEOUT)
             .create_with_context(Tracer {
                 shared: Arc::clone(&shared),
             })

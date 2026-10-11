@@ -4,15 +4,17 @@
 //!
 //! The child enters the place's open directory handle before it executes,
 //! so git works where the runtime resolved the guest's location and never
-//! walks a path a guest could redirect meanwhile. The process leads a group
-//! of its own and is killed when its future is dropped, so a helper git
-//! forks — a credential helper, `ssh`, a merge driver — never outlives the
-//! operation that started it.
+//! walks a path a guest could redirect meanwhile. A working copy this
+//! client laid is addressed through the gitdir `add` recorded, never
+//! through the `.git` file at its root, which a guest lent the copy can
+//! rewrite. The process leads a group of its own and is killed when its
+//! future is dropped, so a helper git forks — a credential helper, `ssh`, a
+//! merge driver — never outlives the operation that started it.
 
 mod pins;
 
 use std::borrow::Cow;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::fd::{AsRawFd as _, RawFd};
 use std::path::{self, Path, PathBuf};
@@ -82,8 +84,17 @@ impl Client {
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(place) = at {
             enter(&mut command, place.dir().as_raw_fd());
-            if let Some(ceiling) = ceiling(place) {
-                command.env("GIT_CEILING_DIRECTORIES", ceiling);
+            match self.gitdir(place) {
+                Some(gitdir) => {
+                    let mut flag = OsString::from("--git-dir=");
+                    flag.push(gitdir);
+                    command.arg(flag);
+                }
+                None => {
+                    if let Some(ceiling) = ceiling(place) {
+                        command.env("GIT_CEILING_DIRECTORIES", ceiling);
+                    }
+                }
             }
         }
         command.args(args);

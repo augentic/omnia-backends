@@ -142,7 +142,9 @@ Unreleased
   Under `Substrate::Auto`, the default, the kernel holds the process to
   its tree, its scratch, the system, and the read roots: on macOS a
   Seatbelt profile rendered from Codex's base policy and applied through
-  `/usr/bin/sandbox-exec`, every path a `-D` parameter, `.git` and
+  `/usr/bin/sandbox-exec`, every path a `-D` parameter, the directories
+  above the lent tree listable (a Bun program reads every one on the way
+  to its working directory before it reads its environment), `.git` and
   `.emery` beneath the lend denied, `process-info` closed to outside
   processes, and the network closed to loopback; on Linux a Landlock
   ruleset (ABI 4, a hard requirement) and two seccomp filters built in
@@ -278,6 +280,34 @@ Unreleased
   been the DEBUG line's `correction` field, so `-v` no longer carries
   every rejected candidate in full and the findings are read where the
   guest logs them.
+- `omnia-git` addresses a working copy it laid through the gitdir git
+  recorded for it: `add` reads it back (`rev-parse --absolute-git-dir`)
+  once `worktree add` returns, and every later process at the copy — the
+  pins' read, `head`, `pending`, `commit`, `remove` — runs under `--git-dir`
+  naming it rather than searching from the copy's root. A guest lent the
+  copy writable, a model's shell among them, can rewrite the `.git` file at
+  its root to point at a repository it laid beneath, which the search
+  would have followed and read the copy's head and changes from; now that
+  file is never read, and what the copy seals is the repository's it was
+  cut from, the planted repository one untracked directory. A copy another
+  process laid is addressed as any place is.
+
+### Fixed
+
+- `omnia-git` applies a merge rule only to a path both sides changed
+  since their common ancestor. It had applied one to every path the two
+  sides differ on, so a file one side alone added under an `ours` or
+  `theirs` rule — a lockfile the merged-in slice laid for the first time
+  — was removed from the merge as the side that lacked it, and the
+  removal itself refused, since git had staged the addition cleanly and
+  `rm` drops staged content only under `--force`, which it now carries.
+  A rename one side made is followed as the merge follows it: the other
+  side's change to the old path counts as a change to the new, so a rule
+  over both names keeps one side whole — `ours` the old name with its
+  bytes, `theirs` the new with its — where the new name had looked like a
+  one-sided addition and stayed as git blended it, beside the old name a
+  rule restored. Without a common ancestor every differing path is still
+  ruled.
 
 ### Removed
 

@@ -31,7 +31,7 @@ pub enum Resolution {
 
 pub async fn resolve(repo: &Repo<'_>, rules: &[Rule]) -> Result<Resolution> {
     let base = repo.merge_base().await?;
-    for path in repo.touched().await? {
+    for path in repo.touched(base.as_deref()).await? {
         if let Some(strategy) = rule_for(&path, rules) {
             apply(repo, &path, strategy, base.as_deref()).await?;
         }
@@ -59,17 +59,15 @@ async fn apply(repo: &Repo<'_>, path: &str, strategy: Strategy, base: Option<&st
 }
 
 // The kept side laid whole over the path, or the path removed where that side
-// deleted it.
+// lacks it. The merge may have staged the other side's version cleanly,
+// which `rm` drops only under `--force`.
 async fn keep(repo: &Repo<'_>, path: &str, side: &str) -> Result<()> {
-    match repo.show(side, path).await? {
-        Some(content) => {
-            repo.write(path, &content)?;
-            repo.run(["add", "--", path], &repo.shown(), path).await?;
-        }
-        None => {
-            repo.run(["rm", "--quiet", "--ignore-unmatch", "--", path], &repo.shown(), path)
-                .await?;
-        }
+    if let Some(content) = repo.show(side, path).await? {
+        repo.write(path, &content)?;
+        repo.run(["add", "--", path], &repo.shown(), path).await?;
+    } else {
+        let args = ["rm", "--quiet", "--force", "--ignore-unmatch", "--", path];
+        repo.run(args, &repo.shown(), path).await?;
     }
     Ok(())
 }

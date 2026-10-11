@@ -222,14 +222,29 @@ impl Seatbelt {
             .into_iter()
             .chain(self.roots.iter().map(|root| root.path.as_path()))
             .chain(self.system.iter().map(PathBuf::as_path));
+        let above_tree = ancestors([place.tree]);
+        let mut listed = Vec::new();
         for (index, ancestor) in ancestors(granted).iter().enumerate() {
-            let _ = write!(
-                profile,
-                "\n  (literal {})",
-                params.add(format!("ANCESTOR_{index}"), ancestor)
-            );
+            let param = params.add(format!("ANCESTOR_{index}"), ancestor);
+            if above_tree.contains(ancestor) {
+                listed.push(param.clone());
+            }
+            let _ = write!(profile, "\n  (literal {param})");
         }
         profile.push_str(")\n");
+
+        // the tree's ancestors, listed: a Bun program (`cursor-sdk-bridge`)
+        // reads every directory on the way to its working directory before
+        // it reads its environment, and runs with none when one is closed;
+        // an allow with no filter would open every file, so a tree with
+        // nothing above it lists nothing
+        if !listed.is_empty() {
+            profile.push_str("(allow file-read-data");
+            for param in &listed {
+                let _ = write!(profile, "\n  (literal {param})");
+            }
+            profile.push_str(")\n");
+        }
         profile.push_str(NETWORK);
 
         let mut command = Command::new(SANDBOX_EXEC);
@@ -267,4 +282,39 @@ fn ancestors<'a>(paths: impl IntoIterator<Item = &'a Path>) -> BTreeSet<PathBuf>
 
 fn canonical(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))
+}
+
+// The profile's rendering for a tree no boundary row can lend: one directly
+// under the root, with nothing above it to list. What a process at a lent
+// tree sees is `tests/boundary.rs`.
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    use super::{Place, Seatbelt};
+
+    // A `file-read-data` allow with no filter would open every file, the
+    // denied `.git` among them, since the last matching rule settles a read.
+    #[tokio::test]
+    async fn tree_under_root() {
+        let scratch = tempfile::tempdir().expect("a scratch");
+        let seatbelt = Seatbelt::probe(&[]).await.expect("sandbox-exec answers");
+        let command = seatbelt
+            .command(&Place {
+                tree: Path::new("/Users"),
+                scratch: scratch.path(),
+                program: Path::new("/usr/bin/true"),
+            })
+            .expect("the profile renders");
+
+        let profile = command
+            .as_std()
+            .get_args()
+            .skip_while(|arg| *arg != OsStr::new("-p"))
+            .nth(1)
+            .expect("a profile follows -p")
+            .to_string_lossy();
+        assert!(!profile.contains("(allow file-read-data)"), "{profile}");
+    }
 }

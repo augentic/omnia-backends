@@ -155,29 +155,53 @@ Unreleased
   every resolved address against the unspecified, loopback, link-local,
   multicast, broadcast and cloud-metadata ranges, IPv4 carried in IPv6,
   and the host's own addresses. The substrate files start from heel 0.3.0
-  (MIT OR Apache-2.0), with the notice kept in each header.
+  (MIT OR Apache-2.0), with the notice kept in each header. The crate's
+  `tests/toolchain.rs` runs a build's toolchain inside the boundary — a
+  Node server on port 0, `node --test` with a worker thread, `npm install`
+  of a `file:` dependency with the cache in the scratch `HOME` — and, in
+  an ignored row, `npm install typescript` and `tsc --noEmit` through the
+  proxy.
 - `omnia-cursor` runs every `cursor-sdk-bridge` under `omnia-confine`:
   `ConnectOptions` gains `shell_roots` (`CURSOR_SHELL_ROOTS`),
-  `read_roots` (`CURSOR_READ_ROOTS`), `egress` (`CURSOR_EGRESS`, joined
-  to the bridge's own `*.cursor.sh` and `*.cursor.com`), `worker_env`
+  `read_roots` (`CURSOR_READ_ROOTS`), `egress` (`CURSOR_EGRESS`, the
+  hosts a worker's commands reach through the proxy), `worker_env`
   (`CURSOR_WORKER_ENV`), and `confine`, the `Substrate`, set in code
   alone and `Auto` by default. A lend at or beneath a shell root runs with
   the `shell` tool beside the read-only set, so an agent can run the
   tree's own build and tests; the inactivity window stands down while a
   shell command runs, since the bridge bounds it by the call's own
   timeout, and `in progress` says the run is waiting on `the shell`.
-  `tests/live.rs` gains two ignored rows: a turn completed inside the
-  kernel boundary through the proxy, and an `npm install` through it.
+  The bridge's own API goes through a relay of the client's, not the
+  proxy: a plain-HTTP server on the IPv6 loopback, bound beside the
+  callback endpoint, that the worker is pointed at through
+  `CURSOR_BACKEND_URL` and that forwards each call to the backend
+  `ConnectOptions::backend_url` names (`CURSOR_BACKEND_URL` on the host,
+  default `https://api2.cursor.sh`) over TLS under the host's own trust
+  store and proxy settings, bodies streamed both ways, calls under `/v1/`
+  to `api.cursor.com`, an unreachable backend `502`. The bridge's runtime
+  (Bun 1.3.9) cannot stream a request body through a `CONNECT` proxy, so
+  a bridge behind the proxy never completed a turn; behind the relay it
+  does, and no Cursor host is on the egress list any more. The relay is
+  addressed as `[::1]` and never `localhost` or `127.0.0.1`, which the
+  bridge reads as a cue to turn TLS verification off for itself and every
+  command it runs; `omnia-confine`'s `NO_PROXY` lists the IPv6 loopback
+  bracketed as well as bare, since Bun matches an entry against the host
+  as the URL spells it. `CURSOR_BACKEND_URL` is refused as a
+  `worker_env`, beside `CURSOR_API_KEY`. `tests/relay.rs` holds the relay
+  to a fake backend, and `tests/live.rs` gains two ignored rows: a turn
+  completed inside the kernel boundary with the bridge's API through the
+  relay, and an `npm install` through the proxy.
 
 ### Changed
 
 - `omnia-cursor`'s workers inherit nothing of the host's environment:
   `PATH`, `LANG`, `LC_*`, `TZ` and `TERM`, a private `HOME` and `TMPDIR`,
-  the proxy variables naming the client's egress proxy, the bridge's own
+  the proxy variables naming the client's egress proxy,
+  `CURSOR_BACKEND_URL` naming the client's relay, the bridge's own
   settings and the trust-store variables it honours, and what
   `CURSOR_WORKER_ENV` names, with `CURSOR_API_KEY` riding the handshake
-  alone and `NODE_USE_SYSTEM_CA`, the proxy variables, and every
-  `GIT_DIR` sibling refused as a passthrough. Workers are session leaders
+  alone and `NODE_USE_SYSTEM_CA`, `CURSOR_BACKEND_URL`, the proxy
+  variables, and every `GIT_DIR` sibling refused as a passthrough. Workers are session leaders
   rather than process-group leaders, so a worker has no controlling
   terminal; the kill at shutdown reaches the whole session.
 

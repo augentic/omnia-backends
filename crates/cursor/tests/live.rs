@@ -42,6 +42,7 @@ fn options() -> ConnectOptions {
         timeout_secs: 120,
         inactivity_secs: 120,
         model: "auto".to_owned(),
+        backend_url: "https://api2.cursor.sh".to_owned(),
         max_agents: 4,
         max_tool_calls: 128,
         shell_roots: Vec::new(),
@@ -258,6 +259,7 @@ async fn worker_killed_mid_run_recovers() -> Result<()> {
         timeout_secs: 120,
         inactivity_secs: 120,
         model: "auto".to_owned(),
+        backend_url: "https://api2.cursor.sh".to_owned(),
         max_agents: 1,
         max_tool_calls: 128,
         shell_roots: Vec::new(),
@@ -494,8 +496,9 @@ async fn check_exhausts() -> Result<()> {
 // --- Confined ---
 
 // The bridge inside the kernel boundary: with the network closed to
-// loopback on macOS, its backend is reached through the egress proxy alone,
-// so a turn completing is the proxy carrying it.
+// loopback on macOS and no Cursor host on the egress list, its backend is
+// reached through the client's relay alone, so a turn completing is the
+// relay carrying every call the bridge makes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
 async fn confined_turn_through_the_proxy() -> Result<()> {
@@ -555,9 +558,9 @@ fn install_request() -> Request {
 }
 
 // `npm install` inside the boundary: the registry is listed, the proxy
-// carries the fetch, and TLS is verified against Node's bundled roots,
-// since the host's trust store is out of reach and `NODE_USE_SYSTEM_CA`
-// never crosses.
+// carries the fetch while the bridge's own calls go through the relay, and
+// TLS is verified against Node's bundled roots, since the host's trust
+// store is out of reach and `NODE_USE_SYSTEM_CA` never crosses.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge, CURSOR_API_KEY, node and npm; run with --run-ignored"]
 async fn npm_install_through_the_proxy() -> Result<()> {

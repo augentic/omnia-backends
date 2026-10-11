@@ -28,6 +28,7 @@ pub const AT_ONCE: Duration = Duration::from_secs(4);
 pub fn options(max_agents: usize) -> ConnectOptions {
     ConnectOptions {
         model: "auto".to_owned(),
+        backend_url: "http://127.0.0.1:9".to_owned(),
         timeout_secs: 30,
         inactivity_secs: 10,
         max_agents,

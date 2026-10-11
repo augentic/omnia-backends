@@ -108,7 +108,9 @@ impl Confine {
     const INHERITED: [&str; 4] = ["PATH", "LANG", "TZ", "TERM"];
     // What a confined process reaches without the proxy: the host's own
     // loopback, where the callback endpoint and the proxy itself listen.
-    const NO_PROXY: &str = "127.0.0.1,localhost,::1";
+    // Bun matches an entry against the host as the URL spells it, so the
+    // IPv6 loopback is listed bracketed as well as bare.
+    const NO_PROXY: &str = "127.0.0.1,localhost,::1,[::1]";
     // What the boundary sets itself, so no `passthrough` puts the host's
     // value over it.
     const OWN: [&str; 10] = [

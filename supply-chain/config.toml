@@ -298,7 +298,7 @@ version = "0.14.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.cc]]
-version = "1.7.0"
+version = "1.8.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.cfg-if]]

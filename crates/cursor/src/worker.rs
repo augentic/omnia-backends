@@ -33,19 +33,15 @@ pub struct Worker {
 }
 
 impl Worker {
-    // The hosts the bridge itself reaches, which every allowlist carries;
-    // a `CURSOR_BACKEND_URL` elsewhere is the operator's to add to
-    // `CURSOR_EGRESS`.
-    pub const HOSTS: [&str; 2] = ["*.cursor.sh", "*.cursor.com"];
     // What the bridge reads of the host beyond what every confined process
     // inherits: its own settings, the trust-store variables its HTTP client
     // honours, and the user the shell it runs names. The proxy variables
-    // are the boundary's, naming its egress proxy.
-    pub const PASSTHROUGH: [&str; 13] = [
+    // are the boundary's, naming its egress proxy, and `CURSOR_BACKEND_URL`
+    // is the client's, naming its relay.
+    pub const PASSTHROUGH: [&str; 12] = [
         "SHELL",
         "USER",
         "LOGNAME",
-        "CURSOR_BACKEND_URL",
         "CURSOR_WEBSITE_URL",
         "CURSOR_DATA_DIR",
         "CURSOR_RIPGREP_PATH",
@@ -56,13 +52,18 @@ impl Worker {
         "SSL_CERT_DIR",
         "NODE_EXTRA_CA_CERTS",
     ];
+    // What no `worker_env` may name: the client's own credential, which
+    // rides the handshake alone, and the backend address, which would
+    // point the bridge past the relay.
+    pub const REFUSED: [&str; 2] = ["CURSOR_API_KEY", "CURSOR_BACKEND_URL"];
 
     // The handshake is left to `Spawned::handshake`, so a pool lease can
     // occupy the slot first.
-    pub fn spawn(callback: &Registration, boundary: Boundary) -> Result<Spawned> {
+    pub fn spawn(callback: &Registration, relay: &str, boundary: Boundary) -> Result<Spawned> {
         let mut command = boundary.command("cursor-sdk-bridge")?;
         command
             .env("CURSOR_SDK_CLIENT_LANGUAGE", "rust")
+            .env("CURSOR_BACKEND_URL", relay)
             .arg("--state-root")
             .arg(boundary.scratch())
             .args(["--tool-callback-url", callback.url()])

@@ -192,7 +192,7 @@ async fn proxy_in_the_environment() {
         assert!(env.contains(&format!("{name}={proxy}\n")), "{name}: {env}");
     }
     for name in ["NO_PROXY", "no_proxy"] {
-        assert!(env.contains(&format!("{name}=127.0.0.1,localhost,::1\n")), "{name}: {env}");
+        assert!(env.contains(&format!("{name}=127.0.0.1,localhost,::1,[::1]\n")), "{name}: {env}");
     }
 }
 

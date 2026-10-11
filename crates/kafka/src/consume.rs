@@ -227,7 +227,8 @@ impl Delivery {
         // the tracker holds the offset's place before anything can wait on
         // it, so a later offset cannot resolve past it
         self.shared.insert(&record);
-        let lane = record.key().map(|key| self.lanes.lock().expect("lanes").enqueue(key.to_vec()));
+        let lane =
+            record.key().map(|key| self.lanes.lock().expect("lanes").enqueue(Arc::from(key)));
         // a record behind its key waits without a slot and takes one when
         // its turn comes
         let slot = lane.as_ref().is_none_or(Lane::is_head).then_some(slot);
@@ -329,12 +330,12 @@ impl Delivery {
 // record is done.
 #[derive(Default)]
 struct Lanes {
-    tails: HashMap<Vec<u8>, (u64, oneshot::Receiver<()>)>,
+    tails: HashMap<Arc<[u8]>, (u64, oneshot::Receiver<()>)>,
     next: u64,
 }
 
 struct Lane {
-    key: Vec<u8>,
+    key: Arc<[u8]>,
     seq: u64,
     // the predecessor's completion; `None` at the head of the lane
     behind: Option<oneshot::Receiver<()>>,
@@ -343,11 +344,12 @@ struct Lane {
 }
 
 impl Lanes {
-    fn enqueue(&mut self, key: Vec<u8>) -> Lane {
+    fn enqueue(&mut self, key: Arc<[u8]>) -> Lane {
         let seq = self.next;
         self.next += 1;
         let (done, wakes_next) = oneshot::channel();
-        let behind = self.tails.insert(key.clone(), (seq, wakes_next)).map(|(_, behind)| behind);
+        let behind =
+            self.tails.insert(Arc::clone(&key), (seq, wakes_next)).map(|(_, behind)| behind);
         Lane {
             key,
             seq,
@@ -623,8 +625,8 @@ mod tests {
     #[test]
     fn a_lane_is_forgotten_with_its_last_record() {
         let mut lanes = Lanes::default();
-        let first = lanes.enqueue(b"a".to_vec());
-        let second = lanes.enqueue(b"a".to_vec());
+        let first = lanes.enqueue(Arc::from(b"a".as_slice()));
+        let second = lanes.enqueue(Arc::from(b"a".as_slice()));
         assert!(first.is_head());
         assert!(!second.is_head());
 

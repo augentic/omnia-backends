@@ -6,6 +6,7 @@ mod partitioner;
 mod registry;
 mod tracker;
 
+use std::borrow::Cow;
 use std::fmt::{self, Debug};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -260,28 +261,22 @@ impl ProducerContext for Tracer {
         &self, delivery_result: &DeliveryResult<'_>, delivery_opaque: Self::DeliveryOpaque,
     ) {
         match delivery_result {
-            Ok(message) => {
-                let key = record_key(message);
-                tracing::debug!(
-                    "sent message {key} in offset {offset} of partition {partition}",
-                    offset = message.offset(),
-                    partition = message.partition()
-                );
-            }
+            Ok(message) => tracing::debug!(
+                "sent message {key} in offset {offset} of partition {partition}",
+                key = record_key(message),
+                offset = message.offset(),
+                partition = message.partition()
+            ),
             Err((error, message)) => {
-                let key = record_key(message);
-                tracing::error!("failed to deliver message {key}: {error}");
-                tracing::info!(monotonic_counter.delivery_failures = 1, key = %key);
+                tracing::error!("failed to deliver message {}: {error}", record_key(message));
+                tracing::info!(monotonic_counter.delivery_failures = 1, topic = message.topic());
             }
         }
         self.shared.note_delivered(delivery_opaque);
     }
 }
 
-fn record_key(message: &impl rdkafka::Message) -> String {
-    match message.key_view::<str>() {
-        Some(Ok(key)) => key.to_owned(),
-        Some(Err(_)) => "<non-utf8>".to_owned(),
-        None => "<null>".to_owned(),
-    }
+// A key that is not UTF-8 is shown lossily, no key as `<null>`.
+fn record_key(message: &impl rdkafka::Message) -> Cow<'_, str> {
+    message.key().map_or(Cow::Borrowed("<null>"), String::from_utf8_lossy)
 }

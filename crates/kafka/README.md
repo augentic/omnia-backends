@@ -72,7 +72,7 @@ A record the guest does not handle — its handler returned `Err`, trapped, or t
 |---------|------------|--------|
 | `discarded_messages` | `topic`, `reason` | A record dropped without running a guest |
 | `publish_refused` | `topic`, `reason` | A send that returned `Err` to the guest |
-| `delivery_failures` | `key` | Queued message not delivered within 120 s |
+| `delivery_failures` | `topic` | Queued message not delivered within 120 s; the log line carries the key |
 
 ### Gauges
 

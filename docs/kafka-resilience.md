@@ -619,7 +619,7 @@ tracing::info!(monotonic_counter.discarded_messages = 1, topic = %topic, reason 
 | `processing_errors`  | `omnia`       | `service`, `topic`, `error`   | every `Err` from `handle`                                          | 2          |
 | `discarded_messages` | `omnia-kafka` | `topic`, `reason`             | a record dropped without running a guest                           | 7, 8, 9    |
 | `publish_refused`    | `omnia-kafka` | `topic`, `reason`             | a send that returned `Err` to the guest                            | 3, 11, 12  |
-| `delivery_failures`  | `omnia-kafka` | `key`                         | a queued send never delivered within 120 s                         | 4          |
+| `delivery_failures`  | `omnia-kafka` | `topic`                       | a queued send never delivered within 120 s                         | 4          |
 
 `reason` values:
 
@@ -728,9 +728,6 @@ topic rather than infer from these numbers.
 - An opt-in `send` that waits for delivery.
 - A dead-letter topic, so a dropped record keeps its bytes.
 - Pausing one partition, rather than restarting, when a record fails.
-- `delivery_failures` carries the record key as an attribute, which is
-  unbounded. Replacing it with `topic` (keeping the key in the log line)
-  is a small follow-up.
 - A streaming consumer interface so one guest instance keeps state across
   records.
 

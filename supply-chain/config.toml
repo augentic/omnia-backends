@@ -295,7 +295,7 @@ version = "0.14.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.cc]]
-version = "1.6.0"
+version = "1.7.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.cfg-if]]
@@ -890,10 +890,6 @@ criteria = "safe-to-deploy"
 version = "1.5.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.libc]]
-version = "0.2.190"
-criteria = "safe-to-deploy"
-
 [[exemptions.libredox]]
 version = "0.1.25"
 criteria = "safe-to-deploy"
@@ -1195,7 +1191,7 @@ version = "10.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.proptest]]
-version = "1.11.0"
+version = "1.12.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.prost]]
@@ -1292,6 +1288,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.rand_pcg]]
 version = "0.10.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.rand_xorshift]]
+version = "0.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rayon]]
@@ -1479,7 +1479,7 @@ version = "0.13.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.smallvec]]
-version = "1.16.2"
+version = "1.16.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.spdx]]
@@ -1651,7 +1651,7 @@ version = "0.1.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.triomphe]]
-version = "0.1.16"
+version = "0.1.17"
 criteria = "safe-to-deploy"
 
 [[exemptions.tryhard]]
@@ -1703,7 +1703,7 @@ version = "2.1.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid]]
-version = "1.27.0"
+version = "1.28.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid-simd]]

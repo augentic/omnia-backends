@@ -1,21 +1,20 @@
-use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
-use anyhow::anyhow;
-use futures::Stream;
+use anyhow::{Context as _, anyhow};
 use futures::future::FutureExt;
-use futures::stream::StreamExt;
-use futures::task::{Context, Poll};
 use omnia_wasi_messaging::{
-    Client, FutureResult, Message, Metadata, RequestOptions, Subscriptions, WasiMessagingCtx,
+    Client, FutureResult, Handler, Message, Metadata, RequestOptions, WasiMessagingCtx,
 };
-use rdkafka::Message as _;
-use rdkafka::message::{Headers, OwnedMessage};
-use rdkafka::producer::BaseRecord;
-use tokio::sync::mpsc;
+use rdkafka::error::{KafkaError, RDKafkaErrorCode};
+use rdkafka::message::ToBytes;
+use rdkafka::producer::{BaseRecord, ThreadedProducer};
 
-const CAPACITY: usize = 1024;
+use crate::{Tracer, consume};
+
+// One retry, long enough for a full queue to drain a slot.
+const QUEUE_RETRY: Duration = Duration::from_millis(20);
 
 impl WasiMessagingCtx for crate::Client {
     fn connect(&self) -> FutureResult<Arc<dyn Client>> {
@@ -24,66 +23,22 @@ impl WasiMessagingCtx for crate::Client {
     }
 }
 
-fn from_kafka(msg: &OwnedMessage, payload: Vec<u8>) -> Message {
-    let metadata = msg.headers().map(|headers| {
-        let mut md = HashMap::new();
-        for h in headers.iter() {
-            let bytes = h.value.unwrap_or_default();
-            md.insert(h.key.to_string(), String::from_utf8_lossy(bytes).to_string());
-        }
-        Metadata { inner: md }
-    });
-
-    let mut message = Message::new(payload);
-    message.topic = msg.topic().to_string();
-    message.metadata = metadata;
-    message
-}
-
 impl Client for crate::Client {
-    fn subscribe(&self) -> FutureResult<Subscriptions> {
+    // A client consumes once: the loop ends only with a record it could not
+    // deliver, and the process restarts to replay from the committed offset.
+    fn consume(&self, handler: Arc<dyn Handler>) -> FutureResult<()> {
         let client = self.clone();
 
         async move {
-            let Some(consumer) = client.consumer else {
-                return Err(anyhow!("No topics specified"));
+            let Some(consumer) = &client.inner.consumer else {
+                return Err(anyhow!("no topics to consume: the client has no consumer"));
             };
-            let registry = client.registry;
-
-            // forward the consumer stream to the subscriber
-            let (sender, receiver) = mpsc::channel::<Message>(CAPACITY);
-            tokio::spawn(async move {
-                consumer
-                    .stream()
-                    .filter_map(|res| async {
-                        res.map_or_else(
-                            |e| {
-                                tracing::error!("kafka consumer error: {e}");
-                                None
-                            },
-                            Some,
-                        )
-                    })
-                    .for_each(|msg| {
-                        let sender = sender.clone();
-                        let registry = registry.clone();
-                        async move {
-                            let payload = msg.payload().unwrap_or_default().to_vec();
-                            let decoded = if let Some(sr) = &registry {
-                                sr.decode(msg.topic(), &payload).await
-                            } else {
-                                payload
-                            };
-                            let message = from_kafka(&msg.detach(), decoded);
-                            if let Err(e) = sender.send(message).await {
-                                tracing::error!("failed to send message to subscriber: {e}");
-                            }
-                        }
-                    })
-                    .await;
-            });
-
-            Ok(Box::pin(Subscriber { receiver }) as Subscriptions)
+            if client.inner.consuming.swap(true, Ordering::AcqRel) {
+                return Err(anyhow!("already consuming"));
+            }
+            let shared = Arc::clone(&client.inner.shared);
+            let registry = client.inner.registry.clone();
+            consume::run(consume::records(consumer), shared, registry, handler).await
         }
         .boxed()
     }
@@ -92,35 +47,41 @@ impl Client for crate::Client {
         let client = self.clone();
 
         async move {
-            // schema registry validation when available
-            let payload = if let Some(sr) = &client.registry {
-                sr.encode(&topic, message.payload).await
-            } else {
-                message.payload
+            let payload = match &client.inner.registry {
+                Some(registry) => match registry.encode(&topic, message.payload).await {
+                    Ok(payload) => payload,
+                    Err(rejection) => {
+                        tracing::info!(
+                            monotonic_counter.publish_refused = 1,
+                            topic = %topic,
+                            reason = rejection.reason()
+                        );
+                        return Err(anyhow!("send to {topic} refused: {rejection}"));
+                    }
+                },
+                None => message.payload,
             };
-
             let metadata = message.metadata.unwrap_or_default();
-            let now = chrono::Utc::now().timestamp_millis();
+            let key = metadata.get("key").map(String::as_str);
+            let partition = explicit_partition(&metadata)
+                .or_else(|| key.map(|key| client.inner.partitioner.partition(key.as_bytes())));
 
-            let key = metadata.get("key").cloned().unwrap_or_default();
-            let mut record =
-                BaseRecord::to(&topic).payload(&payload).key(key.as_bytes()).timestamp(now);
-
-            // an explicit partition, else the key's KafkaJS partition
-            let partition = metadata.get("partition").cloned().unwrap_or_default();
-            let partition = partition.parse().unwrap_or(-1);
-            if partition >= 0 {
-                record = record.partition(partition);
-            } else if let Some(key) = metadata.get("key") {
-                let partition = client.partitioner.partition(key.as_bytes());
+            let id = client.inner.shared.next_send_id();
+            let mut record = BaseRecord::with_opaque_to(&topic, id.get()).payload(&payload);
+            if let Some(partition) = partition {
                 record = record.partition(partition);
             }
-
-            if let Err((e, _)) = client.producer.send(record) {
-                tracing::error!("producer::error {e}");
+            // `.key()` changes the record's type, so each arm enqueues its own
+            let queued = match key {
+                Some(key) => enqueue(&client.inner.producer, record.key(key)).await,
+                None => enqueue(&client.inner.producer, record).await,
+            };
+            if queued.is_ok() {
+                id.queued();
+            } else {
+                tracing::info!(monotonic_counter.publish_refused = 1, topic = %topic, reason = "refused");
             }
-
-            Ok(())
+            queued.with_context(|| format!("send to {topic} refused"))
         }
         .boxed()
     }
@@ -128,19 +89,60 @@ impl Client for crate::Client {
     fn request(
         &self, _topic: String, _message: Message, _options: Option<RequestOptions>,
     ) -> FutureResult<Message> {
-        async move { unimplemented!() }.boxed()
+        async { Err(anyhow!("request-reply is not supported by the Kafka backend")) }.boxed()
     }
 }
 
-#[derive(Debug)]
-pub struct Subscriber {
-    receiver: mpsc::Receiver<Message>,
+fn explicit_partition(metadata: &Metadata) -> Option<i32> {
+    metadata
+        .get("partition")
+        .and_then(|value| value.parse().ok())
+        .filter(|partition| *partition >= 0)
 }
 
-impl Stream for Subscriber {
-    type Item = Message;
+// A full queue hands the record back with the error, so the retry sends the
+// very same one.
+async fn enqueue<K, P>(
+    producer: &ThreadedProducer<Tracer>, record: BaseRecord<'_, K, P, usize>,
+) -> Result<(), KafkaError>
+where
+    K: ToBytes + Sync + ?Sized,
+    P: ToBytes + Sync + ?Sized,
+{
+    let record = match producer.send(record) {
+        Ok(()) => return Ok(()),
+        Err((KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull), record)) => record,
+        Err((error, _)) => return Err(error),
+    };
+    tokio::time::sleep(QUEUE_RETRY).await;
+    producer.send(record).map_err(|(error, _)| error)
+}
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.receiver.poll_recv(cx)
+// What a send reads from a consumed record's metadata, without a broker; a
+// real send is `tests/live.rs::keyed_sends`.
+#[cfg(test)]
+mod tests {
+    use rdkafka::Timestamp;
+    use rdkafka::message::OwnedMessage;
+
+    use super::*;
+
+    #[test]
+    fn a_consumed_record_forwarded_with_its_metadata() {
+        let record = OwnedMessage::new(
+            None,
+            Some(b"k".to_vec()),
+            "t".to_owned(),
+            Timestamp::NotAvailable,
+            3,
+            7,
+            None,
+        );
+        let message = consume::message(&record, Vec::new());
+        let metadata = message.metadata.expect("a record carries metadata");
+
+        assert_eq!(metadata.get("key").map(String::as_str), Some("k"));
+        assert_eq!(metadata.get("source-partition").map(String::as_str), Some("3"));
+        assert_eq!(explicit_partition(&metadata), None);
     }
 }

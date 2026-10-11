@@ -142,7 +142,9 @@ Unreleased
   Under `Substrate::Auto`, the default, the kernel holds the process to
   its tree, its scratch, the system, and the read roots: on macOS a
   Seatbelt profile rendered from Codex's base policy and applied through
-  `/usr/bin/sandbox-exec`, every path a `-D` parameter, `.git` and
+  `/usr/bin/sandbox-exec`, every path a `-D` parameter, the directories
+  above the lent tree listable (a Bun program reads every one on the way
+  to its working directory before it reads its environment), `.git` and
   `.emery` beneath the lend denied, `process-info` closed to outside
   processes, and the network closed to loopback; on Linux a Landlock
   ruleset (ABI 4, a hard requirement) and two seccomp filters built in

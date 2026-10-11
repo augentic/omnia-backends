@@ -242,9 +242,6 @@ impl Seatbelt {
         }
         profile.push_str(")\n");
         profile.push_str(NETWORK);
-        if let Ok(extra) = std::env::var("CONFINE_EXTRA_TMP_BISECT") {
-            profile.push_str(&extra);
-        }
 
         let mut command = Command::new(SANDBOX_EXEC);
         command.arg("-p").arg(profile);

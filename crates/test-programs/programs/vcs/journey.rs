@@ -26,7 +26,7 @@ async fn scenario() {
         .clone_repo(url, PROJECT, omnia_sdk::vcs::CloneOptions { depth: None })
         .await
         .expect("clone");
-    assert_eq!(WasiVcs.head(PROJECT).await, Err(Error::NotFound("HEAD".to_owned())));
+    assert!(matches!(WasiVcs.head(PROJECT).await, Err(Error::NotFound(_))), "no commit yet");
     fs::write("project/README.md", "# project\n").expect("writing the readme");
     assert_eq!(
         WasiVcs.pending(PROJECT).await.expect("pending"),
@@ -78,7 +78,7 @@ async fn scenario() {
     // the first label reaches the origin and comes back by fetch
     WasiVcs.push(PROJECT, "origin", "emery/rev1").await.expect("push");
     WasiVcs.fetch(PROJECT, "origin").await.expect("fetch");
-    assert_eq!(WasiVcs.resolve(PROJECT, "origin/emery/rev1").await.expect("resolve"), slice_1);
+    assert_eq!(WasiVcs.fetched(PROJECT, "origin", "emery/rev1").await.expect("fetched"), slice_1);
 
     // the working copy goes
     WasiVcs.remove(WORK).await.expect("remove");

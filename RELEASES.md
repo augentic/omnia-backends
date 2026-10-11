@@ -46,11 +46,26 @@ Unreleased
   it is written into the repository; a `union` over a binary fails the
   merge; a conflict no rule resolves comes back as data with the merge
   aborted and the tree on its head, and no failed merge stays in
-  progress. A `label` on the branch the working copy sits on detaches the
-  copy onto its commit first. A `clone` with a depth passes
-  `--no-single-branch`, so a shallow clone still answers every label.
-  What git reports is read into the typed `omnia:vcs` error. Wired as
-  `WasiVcs: omnia_git::Client`.
+  progress; a merge the policy sealed carries the message as given, its
+  own `#` lines included and the `# Conflicts:` hint git appends never
+  part of it. `log` is `git log
+  --first-parent` over `<base>..<revision>`, both resolved first and
+  either unknown `not-found`: the chain newest first, the base left out,
+  a merge one entry and the side it brought in none, each entry the
+  commit's id and its message as sealed. `descends` is `merge-base
+  --is-ancestor` over the two resolved commits, read by exit status. A
+  `label` on the branch the working copy sits on detaches the copy onto
+  its commit first, and `labelled` reads it back as the exact ref
+  `refs/heads/<name>` alone, so a tag or a remote-tracking ref of the
+  same spelling, which git resolves a bare name to first, is never the
+  label, and nor is a commit a `~`, `^`, or `@{}` in the name would walk
+  to; `fetched` reads a remote's label as the exact ref
+  `refs/remotes/<remote>/<name>` the same way, so a guest never spells
+  `origin/<name>` itself. A `push` is never forced: a rejection the remote's branch has
+  moved past is the typed `diverged`, naming the label. A `clone` with a
+  depth passes `--no-single-branch`, so a shallow clone still answers
+  every label. What git reports is read into the typed `omnia:vcs`
+  error. Wired as `WasiVcs: omnia_git::Client`.
 - `omnia-cursor`'s `complete` span carries the request's schema name as
   `label` when the format is a schema — the guest's own name for the
   question — so a host log tells one completion from another by what was
@@ -104,6 +119,14 @@ Unreleased
   the agent's `cwd` relative to it, so the eighty characters go on the
   part that tells one file from another rather than on the lent tree's
   absolute path; the transcript keeps the path as the agent spelled it.
+- `omnia-cursor` owns the guest tool-call budget: `ConnectOptions`
+  gains `max_tool_calls` (`CURSOR_MAX_TOOL_CALLS`, default `128`; zero
+  refused at connect), answered to the host through
+  `WasiModelCtx::limits` in place of `wasi-model`'s default of 32, with
+  the result-size cap and the per-call timeout left the host's. An agent
+  that lays a tree one file a tool call ran past 32 before its wall-clock
+  cap; the cap on the run is `CURSOR_TIMEOUT_SECS`, and the call budget
+  now sits beside it as a knob of the same backend.
 
 ### Changed
 

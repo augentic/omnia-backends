@@ -31,6 +31,7 @@ pub fn options(max_agents: usize) -> ConnectOptions {
         timeout_secs: 30,
         inactivity_secs: 10,
         max_agents,
+        max_tool_calls: 32,
     }
 }
 

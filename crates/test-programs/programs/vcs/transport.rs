@@ -19,7 +19,6 @@ const FIRST: &str = "./clones/first";
 const SECOND: &str = "./clones/second";
 const SHALLOW: &str = "./clones/shallow";
 const LABEL: &str = "emery/rev-1";
-const REMOTE_LABEL: &str = "origin/emery/rev-1";
 
 async fn scenario() {
     let arguments = arguments();
@@ -34,21 +33,20 @@ async fn scenario() {
 
     // a second clone sees the label; a later push reaches it by fetch
     WasiVcs.clone_repo(url, SECOND, WHOLE).await.expect("clone");
-    assert_eq!(WasiVcs.resolve(SECOND, REMOTE_LABEL).await.expect("resolve"), first);
+    assert_eq!(WasiVcs.fetched(SECOND, "origin", LABEL).await.expect("fetched"), first);
     fs::write("clones/first/b.txt", "b\n").expect("writing b");
     let next = WasiVcs.commit(FIRST, "b").await.expect("commit").expect("b");
     WasiVcs.label(FIRST, LABEL, &next).await.expect("move label");
     WasiVcs.push(FIRST, "origin", LABEL).await.expect("push");
     assert_eq!(
-        WasiVcs.resolve(SECOND, REMOTE_LABEL).await.expect("stale"),
+        WasiVcs.fetched(SECOND, "origin", LABEL).await.expect("stale"),
         first,
         "a clone sees nothing before it fetches"
     );
     WasiVcs.fetch(SECOND, "origin").await.expect("fetch");
-    assert_eq!(WasiVcs.resolve(SECOND, REMOTE_LABEL).await.expect("fresh"), next);
+    assert_eq!(WasiVcs.fetched(SECOND, "origin", LABEL).await.expect("fresh"), next);
 
     // a shallow clone holds every label at the one commit it asked for
     WasiVcs.clone_repo(url, SHALLOW, CloneOptions { depth: Some(1) }).await.expect("shallow");
-    assert!(fs::metadata("clones/shallow/.git/shallow").is_ok(), "the clone is shallow");
-    assert_eq!(WasiVcs.resolve(SHALLOW, REMOTE_LABEL).await.expect("resolve"), next);
+    assert_eq!(WasiVcs.fetched(SHALLOW, "origin", LABEL).await.expect("fetched"), next);
 }

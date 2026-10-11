@@ -222,12 +222,23 @@ impl Seatbelt {
             .into_iter()
             .chain(self.roots.iter().map(|root| root.path.as_path()))
             .chain(self.system.iter().map(PathBuf::as_path));
+        let above_tree = ancestors([place.tree]);
+        let mut listed = Vec::new();
         for (index, ancestor) in ancestors(granted).iter().enumerate() {
-            let _ = write!(
-                profile,
-                "\n  (literal {})",
-                params.add(format!("ANCESTOR_{index}"), ancestor)
-            );
+            let param = params.add(format!("ANCESTOR_{index}"), ancestor);
+            if above_tree.contains(ancestor) {
+                listed.push(param.clone());
+            }
+            let _ = write!(profile, "\n  (literal {param})");
+        }
+        profile.push_str(")\n");
+
+        // the tree's ancestors, listed: a Bun program (`cursor-sdk-bridge`)
+        // reads every directory on the way to its working directory before
+        // it reads its environment, and runs with none when one is closed
+        profile.push_str("(allow file-read-data");
+        for param in &listed {
+            let _ = write!(profile, "\n  (literal {param})");
         }
         profile.push_str(")\n");
         profile.push_str(NETWORK);

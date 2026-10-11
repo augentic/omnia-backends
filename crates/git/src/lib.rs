@@ -3,10 +3,13 @@
 mod command;
 mod vcs;
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{self, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context as _, Result, ensure};
 use omnia::Backend;
+use omnia_wasi_vcs::Place;
 use tracing::instrument;
 
 /// The oldest git the backend runs over: `config --show-scope`, which the
@@ -17,6 +20,11 @@ pub const MIN_VERSION: (u32, u32) = (2, 26);
 #[derive(Debug, Clone)]
 pub struct Client {
     binary: PathBuf,
+    // The gitdir of every working copy this client laid, by the copy's
+    // absolute path: a guest lent the copy can rewrite the `.git` file at
+    // its root, so the copy is addressed through the gitdir `add` recorded
+    // and that file is never read.
+    copies: Arc<Mutex<BTreeMap<PathBuf, PathBuf>>>,
 }
 
 impl Backend for Client {
@@ -38,6 +46,7 @@ impl Client {
     pub async fn connect(binary: impl Into<PathBuf>) -> Result<Self> {
         let client = Self {
             binary: binary.into(),
+            copies: Arc::default(),
         };
         let output = client.git(None, ["--version"], &[]).await?;
         ensure!(output.status.success(), "`git --version` failed: {}", output.stderr.trim());
@@ -52,6 +61,36 @@ impl Client {
         );
         Ok(client)
     }
+
+    // Record the gitdir a working copy at `at` was laid with.
+    pub(crate) fn register(&self, at: &Place, gitdir: PathBuf) {
+        if let Some(copy) = key(at) {
+            self.copies().insert(copy, gitdir);
+        }
+    }
+
+    // Drop a working copy's gitdir once the copy is gone.
+    pub(crate) fn forget(&self, at: &Place) {
+        if let Some(copy) = key(at) {
+            self.copies().remove(&copy);
+        }
+    }
+
+    // The gitdir a working copy at `at` is addressed through, none for a
+    // place this client did not lay.
+    pub(crate) fn gitdir(&self, at: &Place) -> Option<PathBuf> {
+        key(at).and_then(|copy| self.copies().get(&copy).cloned())
+    }
+
+    fn copies(&self) -> MutexGuard<'_, BTreeMap<PathBuf, PathBuf>> {
+        self.copies.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+// The place's path as `add` hands it to git, which is how its gitdir is
+// keyed; the runtime spells a location the same way every time it resolves.
+fn key(at: &Place) -> Option<PathBuf> {
+    path::absolute(at.path()).ok()
 }
 
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]

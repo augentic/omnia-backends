@@ -4,10 +4,11 @@
 //! whether one commit descends from another, and a label read back as the
 //! branch alone where the host laid a tag of its name; what `pending`
 //! reports for each kind of change; a commit with nothing to seal; a dirty
-//! working copy removed. Each section runs in a repository of its own
-//! beneath the `.` mount, so the host reads each with git afterwards; the
-//! arguments name the repository the host laid with the tag, the commit
-//! its label sits at, and the commit its tag does.
+//! working copy removed; a working copy whose `.git` file was rewritten
+//! still addressed as the copy it was cut as. Each section runs in a
+//! repository of its own beneath the `.` mount, so the host reads each with
+//! git afterwards; the arguments name the repository the host laid with the
+//! tag, the commit its label sits at, and the commit its tag does.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -32,6 +33,9 @@ async fn scenario() {
     merge_policy_resolves().await;
     merge_policy_beats_attributes().await;
     merge_policy_modify_delete().await;
+    merge_policy_delete_modify().await;
+    merge_policy_one_sided().await;
+    merge_policy_rename().await;
     merge_policy_binary().await;
     merge_up_to_date().await;
     log_over_base().await;
@@ -41,6 +45,7 @@ async fn scenario() {
     pending_kinds().await;
     commit_nothing().await;
     remove_dirty_worktree().await;
+    worktree_gitdir_pinned().await;
 }
 
 fn write(path: &str, content: &str) {
@@ -319,6 +324,92 @@ async fn merge_policy_modify_delete() {
     assert!(WasiVcs.pending(repo).await.expect("pending").is_empty(), "the copy is sealed");
 }
 
+// The working copy deleted the path and the merged-in side edited it: `ours`
+// keeps the deletion, over the edited version the merge staged.
+async fn merge_policy_delete_modify() {
+    let repo = "./delmod";
+    let work = "./delmod-work";
+    WasiVcs.init(repo).await.expect("init");
+    write("delmod/gone.txt", "base\n");
+    let base = WasiVcs.commit(repo, "base").await.expect("commit").expect("base");
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    write("delmod-work/gone.txt", "theirs\n");
+    let theirs = WasiVcs.commit(work, "edit").await.expect("commit").expect("edit");
+    fs::remove_file("delmod/gone.txt").expect("delete on the working copy's side");
+    WasiVcs.commit(repo, "delete").await.expect("commit").expect("delete");
+
+    let policy = [rule("gone.txt", Strategy::Ours)];
+    let merged = WasiVcs.merge(repo, &theirs, "merge", &policy).await.expect("merge");
+    assert_eq!(merged.conflicts, Vec::<String>::new());
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert!(fs::metadata("delmod/gone.txt").is_err(), "the deleting side was kept");
+    assert!(WasiVcs.pending(repo).await.expect("pending").is_empty(), "the copy is sealed");
+}
+
+// A path one side alone added is git's clean merge: a rule naming it keeps
+// nothing from the side that lacks it, whichever side that is.
+async fn merge_policy_one_sided() {
+    let repo = "./onesided";
+    let work = "./onesided-work";
+    let base = seeded(repo).await;
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    write("onesided-work/theirs-only.txt", "theirs\n");
+    let theirs = WasiVcs.commit(work, "theirs").await.expect("commit").expect("theirs");
+    write("onesided/ours-only.txt", "ours\n");
+    WasiVcs.commit(repo, "ours").await.expect("commit").expect("ours");
+
+    let policy = [rule("theirs-only.txt", Strategy::Ours), rule("ours-only.txt", Strategy::Theirs)];
+    let merged = WasiVcs.merge(repo, &theirs, "merge", &policy).await.expect("merge");
+    assert_eq!(merged.conflicts, Vec::<String>::new());
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert_eq!(read("onesided/theirs-only.txt"), "theirs\n", "the merged-in side's addition stays");
+    assert_eq!(read("onesided/ours-only.txt"), "ours\n", "the working copy's addition stays");
+    assert!(WasiVcs.pending(repo).await.expect("pending").is_empty(), "the copy is sealed");
+}
+
+// a repository whose working copy edited `old.txt` while the merged-in side
+// renamed it to `new.txt`, and the merged-in commit
+async fn renamed(repo: &str, work: &str) -> String {
+    WasiVcs.init(repo).await.expect("init");
+    write(&format!("{repo}/old.txt"), "base\n");
+    let base = WasiVcs.commit(repo, "base").await.expect("commit").expect("base");
+    WasiVcs.add(repo, work, &base).await.expect("add");
+    fs::rename(format!("{work}/old.txt"), format!("{work}/new.txt")).expect("rename on their side");
+    let theirs = WasiVcs.commit(work, "rename").await.expect("commit").expect("rename");
+    write(&format!("{repo}/old.txt"), "ours\n");
+    WasiVcs.commit(repo, "edit").await.expect("commit").expect("edit");
+    theirs
+}
+
+// The merged-in side renamed a path the working copy edited, so git carries
+// the edit to the new name: a rule over both names keeps one side whole,
+// `ours` the old name with its bytes and `theirs` the new name with its, not
+// the old name restored beside git's blend of the new.
+async fn merge_policy_rename() {
+    let theirs = renamed("./renamed", "./renamed-work").await;
+    let policy = [rule("*.txt", Strategy::Ours)];
+    let merged = WasiVcs.merge("./renamed", &theirs, "merge", &policy).await.expect("merge");
+    assert_eq!(merged.conflicts, Vec::<String>::new());
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert_eq!(read("renamed/old.txt"), "ours\n");
+    assert!(fs::metadata("renamed/new.txt").is_err(), "the new name was kept beside the old");
+    assert!(WasiVcs.pending("./renamed").await.expect("pending").is_empty(), "the copy is sealed");
+
+    let theirs = renamed("./renamed-theirs", "./renamed-theirs-work").await;
+    let policy = [rule("*.txt", Strategy::Theirs)];
+    let merged = WasiVcs.merge("./renamed-theirs", &theirs, "merge", &policy).await.expect("merge");
+    assert_eq!(merged.conflicts, Vec::<String>::new());
+    assert!(merged.commit.is_some(), "the merge sealed");
+    assert_eq!(
+        read("renamed-theirs/new.txt"),
+        "base\n",
+        "git's blend stood where theirs' bytes go"
+    );
+    assert!(fs::metadata("renamed-theirs/old.txt").is_err(), "the old name stayed");
+    let pending = WasiVcs.pending("./renamed-theirs").await.expect("pending");
+    assert!(pending.is_empty(), "the copy is sealed");
+}
+
 // A blob no text encoding holds: a `union` over it cannot be sealed and leaves
 // the copy on its head with nothing of the attempt behind, and `theirs` lays
 // it byte for byte.
@@ -417,4 +508,32 @@ async fn remove_dirty_worktree() {
     WasiVcs.remove(work).await.expect("remove");
     assert!(fs::metadata("copies/work").is_err(), "the files went with the working copy");
     assert_eq!(read("dirty/a.txt"), "a\n", "the repository is untouched");
+}
+
+// A guest lent the copy rewrites its `.git` file to point at a repository
+// it laid beneath; the copy stays addressed through the gitdir it was cut
+// with, so the fake repository is an untracked directory the commit seals
+// as a gitlink, never the repository the copy's head or commit reaches.
+// The copy stays for the host to read the sealed commit from the gitdir.
+async fn worktree_gitdir_pinned() {
+    let repo = "./pinned";
+    let base = seeded(repo).await;
+    let work = "./pinned-work";
+    WasiVcs.add(repo, work, &base).await.expect("add");
+
+    let fake = "./pinned-work/fake";
+    WasiVcs.init(fake).await.expect("init the fake");
+    write("pinned-work/fake/decoy.txt", "decoy\n");
+    let decoy = WasiVcs.commit(fake, "fake").await.expect("commit").expect("the decoy");
+    write("pinned-work/.git", "gitdir: fake/.git\n");
+
+    assert_eq!(WasiVcs.head(work).await.expect("head"), base, "the copy's own head");
+    write("pinned-work/b.txt", "b\n");
+    let pending = WasiVcs.pending(work).await.expect("pending");
+    assert!(pending.contains(&change("b.txt", ChangeKind::Added)), "{pending:?}");
+    let sealed = WasiVcs.commit(work, "sealed").await.expect("commit").expect("sealed");
+    assert_ne!(sealed, decoy);
+    assert_eq!(WasiVcs.head(work).await.expect("head"), sealed);
+    assert_eq!(WasiVcs.head(fake).await.expect("head"), decoy, "the fake is untouched");
+    assert_eq!(WasiVcs.head(repo).await.expect("head"), base, "the repository's head stays");
 }

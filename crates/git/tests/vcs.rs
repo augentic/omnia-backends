@@ -100,6 +100,25 @@ async fn vcs_matrix() {
     assert_eq!(git.git(&at("attributed"), &["show", "HEAD:data.txt"]), "theirs");
     assert_eq!(git.git(&at("attributed"), &["status", "--porcelain"]), "");
     assert_eq!(git.git(&at("moddel"), &["diff", "--name-status", "HEAD^1", "HEAD"]), "D\tkeep.txt");
+    assert_eq!(git.git(&at("delmod"), &["diff", "--name-status", "HEAD^2", "HEAD"]), "D\tgone.txt");
+
+    // a rule over a path one side alone added resolved nothing: each side's
+    // addition is what the merge brought the other
+    assert_eq!(
+        git.git(&at("onesided"), &["diff", "--name-status", "HEAD^1", "HEAD"]),
+        "A\ttheirs-only.txt"
+    );
+    assert_eq!(
+        git.git(&at("onesided"), &["diff", "--name-status", "HEAD^2", "HEAD"]),
+        "A\tours-only.txt"
+    );
+    assert_eq!(git.git(&at("onesided"), &["status", "--porcelain"]), "");
+
+    // a rename followed: the sealed tree is the kept side's, whole
+    assert_eq!(git.git(&at("renamed"), &["diff", "--name-status", "HEAD^1", "HEAD"]), "");
+    assert_eq!(git.git(&at("renamed-theirs"), &["diff", "--name-status", "HEAD^2", "HEAD"]), "");
+    assert_eq!(git.git(&at("renamed"), &["status", "--porcelain"]), "");
+    assert_eq!(git.git(&at("renamed-theirs"), &["status", "--porcelain"]), "");
     assert_eq!(
         git.git(&at("binary"), &["rev-parse", "HEAD:blob.bin"]),
         git.git(&at("binary"), &["rev-parse", "HEAD^2:blob.bin"]),
@@ -146,6 +165,22 @@ async fn vcs_matrix() {
     assert!(!at("copies/work").exists());
     let listed = git.git(&at("dirty"), &["worktree", "list", "--porcelain"]);
     assert_eq!(listed.matches("worktree ").count(), 1, "{listed}");
+
+    // the copy whose `.git` file was rewritten sealed into the repository it
+    // was cut from, read through the gitdir `worktree add` laid, its detached
+    // HEAD the commit's id: the fake repository beneath it is one gitlink in
+    // the commit (`add -A` over an embedded repository records the gitlink
+    // and warns) and holds its one decoy commit
+    assert_eq!(fs::read_to_string(at("pinned-work/.git")).expect(".git"), "gitdir: fake/.git\n");
+    let head = fs::read_to_string(at("pinned/.git/worktrees/pinned-work/HEAD")).expect("HEAD");
+    let sealed = head.trim();
+    assert_eq!(git.git(&at("pinned"), &["log", "-1", "--format=%s", sealed]), "sealed");
+    assert_eq!(
+        git.git(&at("pinned"), &["show", "--format=", "--name-status", sealed]),
+        "A\tb.txt\nA\tfake"
+    );
+    assert_eq!(git.git(&at("pinned-work/fake"), &["rev-list", "--count", "HEAD"]), "1");
+    assert_eq!(git.git(&at("pinned-work/fake"), &["log", "-1", "--format=%s"]), "fake");
 }
 
 #[tokio::test]

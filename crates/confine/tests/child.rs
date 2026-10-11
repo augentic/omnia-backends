@@ -216,6 +216,24 @@ async fn output_killed_past_the_bound() {
     await_gone(grandchild).await;
 }
 
+// --- Output ---
+
+// Both pipes are read to EOF whatever the bytes: a line in anything but
+// UTF-8 ahead of the ready line neither hides it nor closes stdout under
+// the write behind it.
+#[tokio::test]
+async fn ready_behind_binary_output() {
+    let confine = connect(Options::default()).await;
+    let boundary = boundary(&confine, None).await;
+    let script = "printf '\\377\\376 binary\\n' >&2; printf '\\377\\376 binary\\n'; \
+                  echo 'ready token' >&2; echo after; exit 0";
+    let mut child = spawn_sh(boundary, script, Some(READY));
+
+    assert_eq!(child.ready().await.as_deref(), Some("token"));
+    let exit = child.exited().await;
+    assert_eq!(code(&exit), Some(0), "{exit}");
+}
+
 // --- Logging ---
 
 // Every event's fields, flattened to text.

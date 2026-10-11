@@ -3,6 +3,7 @@
 
 use std::convert::Infallible;
 use std::fmt;
+use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,13 +132,14 @@ impl fmt::Display for Refusal {
 /// Returns an error when the interfaces cannot be enumerated.
 #[expect(unsafe_code, reason = "`getifaddrs` has no safe wrapper among the crate's dependencies")]
 pub fn own_addresses() -> Result<Vec<IpAddr>> {
-    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: `getifaddrs` fills `head` with a list `freeifaddrs` releases;
-    // the list is walked before it is released and never after.
+    let mut head = MaybeUninit::<*mut libc::ifaddrs>::uninit();
+    // SAFETY: `getifaddrs` writes `head` as it succeeds, a list `freeifaddrs`
+    // releases; the list is walked before it is released and never after.
     unsafe {
-        if libc::getifaddrs(&raw mut head) != 0 {
+        if libc::getifaddrs(head.as_mut_ptr()) != 0 {
             return Err(std::io::Error::last_os_error()).context("enumerating the interfaces");
         }
+        let head = head.assume_init();
         let mut addresses = Vec::new();
         let mut entry = head;
         while !entry.is_null() {

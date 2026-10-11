@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use process_wrap::tokio::ChildWrapper;
 use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt as _, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, BufReader};
 use tokio::process::{ChildStderr, ChildStdout};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -25,6 +25,8 @@ use tracing::{Instrument as _, Span};
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
 const TAIL_LINES: usize = 20;
+// A line is cut here, so an endless one is read in pieces and never held whole.
+const LINE_BYTES: u64 = 64 * 1024;
 
 /// A spawned process under supervision. Dropping it kills the process.
 ///
@@ -336,9 +338,8 @@ fn read_stderr(
 
     let reader = tokio::spawn(
         async move {
-            let mut lines = BufReader::new(stderr).lines();
             let mut pending = Some(ready_tx);
-            while let Ok(Some(line)) = lines.next_line().await {
+            each_line(stderr, |line| {
                 // the ready line may carry a credential: never logged
                 if let Some(payload) = ready.and_then(|prefix| line.strip_prefix(prefix)) {
                     if let Some(tx) = pending.take() {
@@ -348,7 +349,8 @@ fn read_stderr(
                     tracing::debug!(program = %state.program, %line, stream = "stderr", "child output");
                     state.tail.push(line);
                 }
-            }
+            })
+            .await;
         }
         .instrument(Span::current()),
     );
@@ -360,13 +362,35 @@ fn read_stderr(
 fn drain_stdout(stdout: ChildStdout, state: Arc<State>) {
     tokio::spawn(
         async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            each_line(stdout, |line| {
                 tracing::debug!(program = %state.program, %line, stream = "stdout", "child output");
-            }
+            })
+            .await;
         }
         .instrument(Span::current()),
     );
+}
+
+// Every line to EOF, decoded lossily and cut at `LINE_BYTES`: what the
+// child writes is untrusted, and nothing in it may end the read and close
+// the pipe under a live writer.
+async fn each_line(reader: impl AsyncRead + Unpin, mut each: impl FnMut(String)) {
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match (&mut reader).take(LINE_BYTES).read_until(b'\n', &mut line).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+        }
+        each(String::from_utf8_lossy(&line).into_owned());
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

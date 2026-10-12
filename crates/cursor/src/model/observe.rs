@@ -389,8 +389,16 @@ impl EventLog {
                         subject = pending.subject(self.cwd.as_deref()),
                         "tool call"
                     );
-                    // the arguments whole, for a `-vv` run reading what the agent asked for
-                    tracing::trace!(tool = %pending.tool, args = %pending.args, "tool call args");
+
+                    // the arguments whole, under a target of their own so a filter can
+                    // open them without the stream's frames
+                    tracing::trace!(
+                        target: "omnia_cursor::tools",
+                        tool = %pending.tool,
+                        args = %pending.args,
+                        "tool call args"
+                    );
+
                     self.pending_tools.insert(call_id.to_owned(), pending);
                     self.last_pending = Some(call_id.to_owned());
                 }
@@ -519,22 +527,22 @@ impl PendingCall {
     }
 
     // The one argument worth a log line: a path, a pattern, or the first
-    // line of a command, cut to a readable width. A path the agent spells
-    // under its `cwd` is shown relative to it, so the width goes on the
-    // part that tells one file from another.
+    // line of a command, cut to a readable width. Every `<cwd>/` in it is
+    // spelled `./`, in a command as in a path, so the width goes on the
+    // part that tells one file from another and a command keeps its words.
     fn subject(&self, cwd: Option<&str>) -> Option<String> {
         const KEYS: &[&str] = &["path", "globPattern", "pattern", "command", "query", "url"];
         const WIDTH: usize = 80;
         let text = first_match(&self.args, KEYS)?;
         let line = text.lines().next().unwrap_or_default();
         let line = cwd
-            .and_then(|cwd| line.strip_prefix(cwd)?.strip_prefix('/'))
-            .filter(|rest| !rest.is_empty())
-            .unwrap_or(line);
+            .map(|cwd| cwd.trim_end_matches('/'))
+            .filter(|root| !root.is_empty())
+            .map_or_else(|| line.to_owned(), |root| line.replace(&format!("{root}/"), "./"));
         Some(if line.chars().count() > WIDTH {
             format!("{}…", line.chars().take(WIDTH).collect::<String>())
         } else {
-            line.to_owned()
+            line
         })
     }
 }
@@ -1005,8 +1013,9 @@ mod tests {
         assert!(log.finish().is_none());
     }
 
-    // A path under the agent's `cwd` is shown relative to it; anything else
-    // is shown as spelled, cut to the width.
+    // A path under the agent's `cwd` is shown relative to it, in a command's
+    // words as in a path argument; anything else is shown as spelled, cut to
+    // the width.
     #[test]
     fn subjects() {
         let cwd = "/Users/me/project";
@@ -1020,7 +1029,19 @@ mod tests {
         };
         assert_eq!(
             subject(json!({ "path": "/Users/me/project/src/orders.ts" }), Some(cwd)).as_deref(),
-            Some("src/orders.ts")
+            Some("./src/orders.ts")
+        );
+        assert_eq!(
+            subject(json!({ "command": "cd /Users/me/project/x && npm test" }), Some(cwd))
+                .as_deref(),
+            Some("cd ./x && npm test"),
+            "a command keeps its words"
+        );
+        assert_eq!(
+            subject(json!({ "command": "cp /Users/me/project/a /Users/me/project/b" }), Some(cwd))
+                .as_deref(),
+            Some("cp ./a ./b"),
+            "every occurrence"
         );
         assert_eq!(
             subject(json!({ "path": "/Users/me/project" }), Some(cwd)).as_deref(),
@@ -1044,7 +1065,7 @@ mod tests {
         let long = format!("{cwd}/{}", "a".repeat(100));
         let shown = subject(json!({ "path": long }), Some(cwd)).expect("a path");
         assert_eq!(shown.chars().count(), 81, "eighty characters and the ellipsis");
-        assert!(shown.starts_with("aaaa"), "the width is spent on the relative part: {shown}");
+        assert!(shown.starts_with("./aaaa"), "the width is spent on the relative part: {shown}");
         assert_eq!(subject(json!({ "other": 1 }), Some(cwd)), None);
     }
 }

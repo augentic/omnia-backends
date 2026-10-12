@@ -114,11 +114,16 @@ Unreleased
 - Each tool call's arguments are logged whole at TRACE (`tool call args`,
   with `tool` and `args`) as the call starts, beneath the DEBUG `tool
   call` line's one-argument `subject`, so a `-vv` run reads what the
-  agent asked of each tool without the payload head of every frame.
-- The `subject` on `tool call` / `tool call completed` shows a path under
-  the agent's `cwd` relative to it, so the eighty characters go on the
-  part that tells one file from another rather than on the lent tree's
-  absolute path; the transcript keeps the path as the agent spelled it.
+  agent asked of each tool without the payload head of every frame. The
+  line goes out under the target `omnia_cursor::tools`, so
+  `RUST_LOG=omnia_cursor=debug,omnia_cursor::tools=trace` reads the
+  arguments without the stream's frames.
+- The `subject` on `tool call` / `tool call completed` spells every
+  `<cwd>/` in the argument as `./`, in a command's words as in a path, so
+  the eighty characters go on the part that tells one file from another
+  rather than on the lent tree's absolute path, and `cd <cwd>/x && npm
+  test` reads `cd ./x && npm test`; the transcript keeps the text as the
+  agent spelled it.
 - `omnia-cursor` owns the guest tool-call budget: `ConnectOptions`
   gains `max_tool_calls` (`CURSOR_MAX_TOOL_CALLS`, default `128`; zero
   refused at connect), answered to the host through

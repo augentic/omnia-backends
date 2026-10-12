@@ -111,7 +111,7 @@ Everything a completion logs sits under its `complete` span (`n`, `model`, `form
 
 - `completion started` (DEBUG) / `completion` (INFO on an answer, WARN otherwise), with phase buckets `opening_ms`, `tool_ms`, `model_ms`, `check_ms`, `thinking_ms`, and token counts.
 - `in progress` (INFO) every 15s while a run is open: `elapsed_s`, `frames`, `tool_calls`, `silent_s`, and what it is `waiting` on.
-- `tool call` / `tool call completed` (DEBUG), arguments at TRACE.
+- `tool call` / `tool call completed` (DEBUG) with a `subject`: a path, a pattern, or a command's first line, every `<cwd>/` in it spelled `./`. The arguments whole at TRACE under the target `omnia_cursor::tools`, so `RUST_LOG=omnia_cursor=debug,omnia_cursor::tools=trace` reads them without the stream's frames.
 - Worker exit at WARN with `pid`, `uptime_ms`, `status`; its stderr tail at DEBUG only, since it is untrusted subprocess output.
 
 ## Tests

@@ -581,8 +581,8 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.syn]]
-version = "3.0.8"
-when = "2026-10-11"
+version = "3.0.9"
+when = "2026-10-12"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
@@ -686,8 +686,8 @@ user-login = "seanmonstar"
 user-name = "Sean McArthur"
 
 [[publisher.unicode-ident]]
-version = "1.0.26"
-when = "2026-09-17"
+version = "1.0.27"
+when = "2026-10-12"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"

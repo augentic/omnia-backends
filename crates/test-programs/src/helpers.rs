@@ -1,8 +1,9 @@
 //! Shared helpers for the guest scenario programs in `programs/<capability>/`.
 
-use omnia_sdk::model::{Function, Message, Role, Tool};
+use omnia_sdk::model::{Function, Message, Question, Role, Tool};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 /// The typed answer the `check_*` scenarios ask for.
 #[derive(Debug, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -48,10 +49,36 @@ pub fn lookup() -> Tool {
     )
 }
 
-/// The operator arguments the deployment passed, `argv[0]` excluded.
+// The argument naming the workspace a scenario lends with its request.
+const LEND: &str = "lend=";
+
+/// The operator arguments the deployment passed, `argv[0]` and the `lend=`
+/// argument excluded.
 #[must_use]
 pub fn arguments() -> Vec<String> {
-    omnia_sdk::wasip3::cli::environment::get_arguments().into_iter().skip(1).collect()
+    omnia_sdk::wasip3::cli::environment::get_arguments()
+        .into_iter()
+        .skip(1)
+        .filter(|argument| !argument.starts_with(LEND))
+        .collect()
+}
+
+/// The workspace a scenario lends with every request: the `lend=<path>`
+/// argument, a path on the guest's preopens. `None` lends nothing.
+#[must_use]
+pub fn lend() -> Option<String> {
+    omnia_sdk::wasip3::cli::environment::get_arguments()
+        .into_iter()
+        .find_map(|argument| argument.strip_prefix(LEND).map(ToOwned::to_owned))
+}
+
+/// `question` over the scenario's lend, when there is one.
+#[must_use]
+pub fn lent<T: JsonSchema + DeserializeOwned + Send>(question: Question<T>) -> Question<T> {
+    match lend() {
+        Some(lend) => question.workspace(lend),
+        None => question,
+    }
 }
 
 /// How many completions a fan-out scenario holds pending at once: the first

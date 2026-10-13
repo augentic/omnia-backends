@@ -52,7 +52,7 @@ impl Worker {
         "SSL_CERT_DIR",
         "NODE_EXTRA_CA_CERTS",
     ];
-    // What no `worker_env` may name: the client's own credential, which
+    // What no worker grant may set: the client's own credential, which
     // rides the handshake alone, and the backend address, which would
     // point the bridge past the relay.
     pub const REFUSED: [&str; 2] = ["CURSOR_API_KEY", "CURSOR_BACKEND_URL"];

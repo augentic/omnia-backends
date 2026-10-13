@@ -4,12 +4,12 @@
 #![cfg(target_arch = "wasm32")]
 
 use omnia_sdk::model::{Error, Question, WasiModel};
-use test_programs::Verdict;
+use test_programs::{Verdict, lent};
 
 omnia_sdk::command!(scenario);
 
 async fn scenario() {
-    let error = Question::<Verdict>::new("verdict")
+    let error = lent(Question::<Verdict>::new("verdict"))
         .ask(&WasiModel, "judge this", None, Verdict::passing)
         .await
         .expect_err("no candidate passes the check");

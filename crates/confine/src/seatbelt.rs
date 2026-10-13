@@ -3,13 +3,12 @@
 
 // Lifted from heel 0.3.0, `src/platform/macos/{mod,profile}.rs` and
 // `templates/sandbox.txt`, Copyright (c) 2025 Lexo Liu, MIT OR Apache-2.0:
-// the launcher by absolute path, the three-pass rule order, every path
-// resolved before the kernel sees it, and a configured path that does not
-// exist refused rather than rendered as a rule matching nothing.
+// the launcher by absolute path, the three-pass rule order, and every path
+// resolved before the kernel sees it.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fmt::{self, Write as _};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -84,54 +83,24 @@ const NODES: [&str; 3] = ["/tmp", "/etc", "/var"];
 const PROBE: &str = "(version 1)(allow default)";
 const PROBE_BOUND: Duration = Duration::from_secs(10);
 
-// The Seatbelt profile's fixed parts, settled at connect: the system roots
-// the host has and the operator's read roots as they resolve.
+// The Seatbelt profile's fixed part, settled at connect: the system roots
+// the host has.
 #[derive(Debug)]
 pub struct Seatbelt {
     system: Vec<PathBuf>,
-    roots: Vec<Root>,
 }
 
-#[derive(Debug)]
-struct Root {
-    path: PathBuf,
-    filter: Filter,
-}
-
-// `literal` names one path and `subpath` a tree, so a grant naming a
-// directory with `literal` grants nothing beneath it.
-#[derive(Debug, Clone, Copy)]
-enum Filter {
-    Literal,
-    Subpath,
-}
-
-impl Filter {
-    fn of(path: &Path) -> Result<Self> {
-        let metadata = std::fs::metadata(path)
-            .with_context(|| format!("read root {} does not exist", path.display()))?;
-        Ok(if metadata.is_dir() { Self::Subpath } else { Self::Literal })
-    }
-}
-
-impl fmt::Display for Filter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Literal => "literal",
-            Self::Subpath => "subpath",
-        })
-    }
-}
-
-// Where one process is put, every path canonical.
+// Where one process is put, every path canonical, and the directories its
+// ask was granted to read.
 pub struct Place<'a> {
     pub tree: &'a Path,
     pub scratch: &'a Path,
     pub program: &'a Path,
+    pub read: &'a [PathBuf],
 }
 
 impl Seatbelt {
-    pub async fn probe(read_roots: &[PathBuf]) -> Result<Self> {
+    pub async fn probe() -> Result<Self> {
         ensure!(Path::new(SANDBOX_EXEC).exists(), "`{SANDBOX_EXEC}` is not available");
         let output = timeout(
             PROBE_BOUND,
@@ -147,16 +116,7 @@ impl Seatbelt {
         );
 
         let system = SYSTEM.iter().filter_map(|root| std::fs::canonicalize(root).ok()).collect();
-        let roots = read_roots
-            .iter()
-            .map(|root| {
-                Ok(Root {
-                    path: root.clone(),
-                    filter: Filter::of(root)?,
-                })
-            })
-            .collect::<Result<_>>()?;
-        Ok(Self { system, roots })
+        Ok(Self { system })
     }
 
     // `sandbox-exec -p <profile> -D<KEY>=<path>.. -- <program>`: the profile
@@ -186,12 +146,11 @@ impl Seatbelt {
 
         // the grants
         profile.push_str("\n; --- the grants ---\n");
-        for (index, root) in self.roots.iter().enumerate() {
+        for (index, root) in place.read.iter().enumerate() {
             let _ = writeln!(
                 profile,
-                "(allow file-read* ({} {}))",
-                root.filter,
-                params.add(format!("ROOT_{index}"), &root.path)
+                "(allow file-read* (subpath {}))",
+                params.add(format!("ROOT_{index}"), root)
             );
         }
         let tree = params.add("TREE".to_owned(), place.tree);
@@ -220,7 +179,7 @@ impl Seatbelt {
         }
         let granted = [place.tree, &scratch, &program]
             .into_iter()
-            .chain(self.roots.iter().map(|root| root.path.as_path()))
+            .chain(place.read.iter().map(PathBuf::as_path))
             .chain(self.system.iter().map(PathBuf::as_path));
         let above_tree = ancestors([place.tree]);
         let mut listed = Vec::new();
@@ -299,12 +258,13 @@ mod tests {
     #[tokio::test]
     async fn tree_under_root() {
         let scratch = tempfile::tempdir().expect("a scratch");
-        let seatbelt = Seatbelt::probe(&[]).await.expect("sandbox-exec answers");
+        let seatbelt = Seatbelt::probe().await.expect("sandbox-exec answers");
         let command = seatbelt
             .command(&Place {
                 tree: Path::new("/Users"),
                 scratch: scratch.path(),
                 program: Path::new("/usr/bin/true"),
+                read: &[],
             })
             .expect("the profile renders");
 

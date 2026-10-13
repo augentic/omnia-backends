@@ -6,14 +6,18 @@
 
 use futures::future::join_all;
 use omnia_sdk::model::{Model as _, Request, WasiModel};
-use test_programs::{fanout_width, lookup, seam, user};
+use test_programs::{fanout_width, lend, lookup, seam, user};
 
 omnia_sdk::command!(scenario);
 
 async fn scenario() {
     let width = fanout_width();
     let replies = join_all((0..width).map(|index| async move {
-        let request = Request::builder().messages(vec![user("hi")]).tools(vec![lookup()]).build();
+        let request = Request::builder()
+            .messages(vec![user("hi")])
+            .maybe_workspace(lend())
+            .tools(vec![lookup()])
+            .build();
         let mut calls = 0;
         let reply = WasiModel
             .complete_with(request, |call| {

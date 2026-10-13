@@ -3,8 +3,8 @@
 //! installing from the tree with its cache in the scratch.
 //!
 //! The rows need `node` and `npm` on `PATH`, as omnia-git's need `git`. A
-//! toolchain under `$HOME` is passed in `read_roots`, as an operator names
-//! one.
+//! toolchain under `$HOME` is asked for as a `~/` read root, as a target
+//! adapter spells one.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
-use omnia_confine::{Confine, Options, Substrate};
+use omnia_confine::{Ask, Confine, Options};
 
 const BOUND: Duration = Duration::from_secs(120);
 const LIVE_BOUND: Duration = Duration::from_secs(300);
@@ -93,33 +93,37 @@ fn on_path(program: &str) -> PathBuf {
 }
 
 // The install prefix of each tool under the host's `$HOME`, which the
-// scratch `HOME` hides: `<prefix>/bin/<tool>` as nvm, volta, and fnm lay it.
-fn toolchain_roots() -> Vec<PathBuf> {
+// scratch `HOME` hides, spelled `~/`-relative: `<prefix>/bin/<tool>` as
+// nvm, volta, and fnm lay it.
+fn toolchain_roots() -> Vec<String> {
     let home = std::env::var_os("HOME").map(PathBuf::from).expect("the host has a home");
+    let home = std::fs::canonicalize(home).expect("the home resolves");
     let mut roots = Vec::new();
     for tool in ["node", "npm"] {
         let bin = on_path(tool).parent().expect("a directory").to_owned();
         let bin = std::fs::canonicalize(&bin).expect("the directory resolves");
-        let prefix = bin.parent().expect("a prefix").to_owned();
-        if prefix.starts_with(&home) && !roots.contains(&prefix) {
-            roots.push(prefix);
+        let prefix = bin.parent().expect("a prefix");
+        if let Ok(beneath) = prefix.strip_prefix(&home) {
+            let root = format!("~/{}", beneath.display());
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
         }
     }
     roots
 }
 
-async fn toolchain(egress: Vec<String>) -> Confine {
-    support::connect(Options {
-        read_roots: toolchain_roots(),
+// The toolchain's ask: its prefixes under the home, and `egress`.
+fn toolchain(egress: Vec<String>) -> Ask {
+    Ask {
         egress,
-        substrate: Substrate::Auto,
-        ..Options::default()
-    })
-    .await
+        read: toolchain_roots(),
+        ..Ask::default()
+    }
 }
 
-async fn run(confine: &Confine, tree: &Path, script: &str, bound: Duration) -> Output {
-    let boundary = support::boundary(confine, Some(tree)).await;
+async fn run(confine: &Confine, ask: &Ask, tree: &Path, script: &str, bound: Duration) -> Output {
+    let boundary = support::asking(confine, Some(tree), ask).await;
     let command = support::sh(&boundary, script);
     boundary.output(command, bound).await.expect("the shell answers")
 }
@@ -142,9 +146,9 @@ fn passed(output: &Output, what: &str) {
 #[tokio::test]
 async fn node_serves_on_port_zero() {
     let (_lend, tree) = tree(&[("serve.mjs", SERVE)]);
-    let confine = toolchain(vec![]).await;
+    let confine = support::connect(Options::default()).await;
 
-    let output = run(&confine, &tree, "node serve.mjs", BOUND).await;
+    let output = run(&confine, &toolchain(vec![]), &tree, "node serve.mjs", BOUND).await;
     passed(&output, "a server on port 0, fetched from inside");
     assert_eq!(text(&output.stdout), "200 served /ping");
 }
@@ -152,11 +156,11 @@ async fn node_serves_on_port_zero() {
 #[tokio::test]
 async fn node_test_runs() {
     let (_lend, tree) = tree(&[("test/worker.test.mjs", WORKER_TEST)]);
-    let confine = toolchain(vec![]).await;
+    let confine = support::connect(Options::default()).await;
 
     let script = "node --test --test-force-exit --test-timeout=5000 --test-reporter=tap \
                   test/worker.test.mjs";
-    let output = run(&confine, &tree, script, BOUND).await;
+    let output = run(&confine, &toolchain(vec![]), &tree, script, BOUND).await;
     passed(&output, "node --test with a worker thread");
     let report = text(&output.stdout);
     assert!(report.contains("ok 1 - a worker thread answers"), "{report}");
@@ -175,8 +179,8 @@ async fn npm_installs_a_local_dependency() {
         ("dep/index.js", "module.exports = \"dep answers\";\n"),
         ("index.js", "console.log(require(\"dep\"));\n"),
     ]);
-    let confine = toolchain(vec![]).await;
-    let boundary = support::boundary(&confine, Some(&tree)).await;
+    let confine = support::connect(Options::default()).await;
+    let boundary = support::asking(&confine, Some(&tree), &toolchain(vec![])).await;
     let cache = boundary.scratch().join(".npm");
 
     let script = "npm install --no-audit --no-fund >/dev/null && node index.js && npm config get \
@@ -208,14 +212,15 @@ async fn live_toolchain_through_the_proxy() {
         ("tsconfig.json", TSCONFIG),
         ("src/index.ts", INDEX_TS),
     ]);
-    let confine = toolchain(vec!["registry.npmjs.org".to_owned()]).await;
+    let confine = support::connect(Options::default()).await;
+    let ask = toolchain(vec!["registry.npmjs.org".to_owned()]);
 
     let script = format!(
         "npm install --no-audit --no-fund typescript@{TYPESCRIPT} >/dev/null && node -p \
          'require(\"./node_modules/typescript/package.json\").version' && npx tsc --noEmit && echo \
          checked"
     );
-    let output = run(&confine, &tree, &script, LIVE_BOUND).await;
+    let output = run(&confine, &ask, &tree, &script, LIVE_BOUND).await;
     passed(&output, "npm install typescript and tsc through the proxy");
     assert_eq!(text(&output.stdout), format!("{TYPESCRIPT}\nchecked"));
 }

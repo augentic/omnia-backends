@@ -134,18 +134,27 @@ Unreleased
   now sits beside it as a knob of the same backend.
 - `omnia-confine`, the crate that owns a host process in the model's
   trust domain: `Confine::connect` holds the backend's `Options` to the
-  host once — `shell_roots`, `read_roots`, `egress`, `passthrough`,
-  `refused`, and the `Substrate` — probes the kernel substrate, and binds
-  the egress proxy; `Confinement::of` puts one process at a lend, or in a
-  private directory when nothing is lent; `Confine::lay` wraps it in a
-  `Boundary`, whose `command` runs a program inside with an environment
-  built from nothing (`PATH`, `LANG`, `LC_*`, `TZ`, `TERM`, a private
-  `HOME` and `TMPDIR`, the proxy variables, and the `passthrough`), in
-  the tree's open directory handle, as a session leader, and whose
-  `spawn` supervises it as a `Child` — the supervisor lifted from
-  `omnia-cursor`'s worker — or `output` runs it once under a bound.
-  Under `Substrate::Auto`, the default, the kernel holds the process to
-  its tree, its scratch, the system, and the read roots: on macOS a
+  host once — `shell_roots`, `passthrough`, `refused` — reads the
+  operator's `HOME` as what a `~/` spells, and probes the kernel
+  substrate, refusing to connect where none runs; `Confinement::of` puts
+  one process at a lend, or in a private directory when nothing is lent;
+  `Confine::lay` wraps it in a `Boundary` under the process's own `Ask` —
+  `egress`, the hosts its commands may reach; `read`, the roots beneath
+  the home it may read, each spelled `~/<path>`, one the home lacks
+  logged at WARN and granted nothing; `env`, the variables set for it, a
+  value's leading `~/` the home — binding the egress proxy for that
+  boundary alone, and answering an ask that breaks a rule of the lay (a
+  root spelled otherwise, resolving outside the home, or a file; a
+  variable the boundary holds or no name at all) with the typed
+  `Refused`, which a backend tells from a host failure. The `Boundary`'s
+  `command` runs a program inside with an environment built from nothing
+  (`PATH`, `LANG`, `LC_*`, `TZ`, `TERM`, a private `HOME` and `TMPDIR`,
+  the proxy variables, the `passthrough`, and the ask's `env`), in the
+  tree's open directory handle, as a session leader, and its `spawn`
+  supervises it as a `Child` — the supervisor lifted from `omnia-cursor`'s
+  worker — or `output` runs it once under a bound. The kernel holds the
+  process to its tree, its scratch, the system, and the ask's read roots,
+  always, with no substrate setting to turn it off: on macOS a
   Seatbelt profile rendered from Codex's base policy and applied through
   `/usr/bin/sandbox-exec`, every path a `-D` parameter, the directories
   above the lent tree listable (a Bun program reads every one on the way
@@ -155,8 +164,8 @@ Unreleased
   ruleset (ABI 4, a hard requirement) and two seccomp filters built in
   the parent and applied in the child, the host set non-dumpable at
   connect, and a connect refusal where the kernel lacks Landlock ABI 4
-  or Yama. The proxy is an HTTP `CONNECT` proxy on loopback admitting the
-  `egress` list — a name, a `*.suffix`, or an IP literal — and vetting
+  or Yama. The proxy is an HTTP `CONNECT` proxy on loopback, one per
+  boundary, admitting the ask's `egress` — a name or a `*.suffix` — and vetting
   every resolved address against the unspecified, loopback, link-local,
   multicast, broadcast and cloud-metadata ranges, IPv4 carried in IPv6,
   and the host's own addresses. The substrate files start from heel 0.3.0
@@ -167,21 +176,26 @@ Unreleased
   an ignored row, `npm install typescript` and `tsc --noEmit` through the
   proxy.
 - `omnia-cursor` runs every `cursor-sdk-bridge` under `omnia-confine`:
-  `ConnectOptions` gains `shell_roots` (`CURSOR_SHELL_ROOTS`),
-  `read_roots` (`CURSOR_READ_ROOTS`), `egress` (`CURSOR_EGRESS`, the
-  hosts a worker's commands reach through the proxy), `worker_env`
-  (`CURSOR_WORKER_ENV`), and `confine`, the `Substrate`, set in code
-  alone and `Auto` by default. A lend at or beneath a shell root runs with
-  the `shell` tool beside the read-only set, so an agent can run the
-  tree's own build and tests; the inactivity window stands down while a
-  shell command runs, since the bridge bounds it by the call's own
-  timeout, and `in progress` says the run is waiting on `the shell`.
+  `ConnectOptions` gains `shell_roots` (`CURSOR_SHELL_ROOTS`), and what
+  a worker reaches beyond its lend is the completion's own ask —
+  `grants.worker` of `omnia:model@0.2.0`, the `egress` hosts, `~/` `read`
+  roots, and `env` the guest spells per request — laid as the boundary's
+  `Ask`: a grant over a lend under no shell root, or one the lay refuses
+  (`CURSOR_API_KEY` or `CURSOR_BACKEND_URL` as an `env`, a root outside
+  the home), is `invalid-request` before anything is spawned, and no
+  setting of the deployment widens a worker's reach. A lend at or beneath
+  a shell root runs with the `shell` tool beside the read-only set, so an
+  agent can run the tree's own build and tests; the inactivity window
+  stands down while a shell command runs, since the bridge bounds it by
+  the call's own timeout, and `in progress` says the run is waiting on
+  `the shell`.
   The bridge's own API goes through a relay of the client's, not the
   proxy: a plain-HTTP server on the IPv6 loopback, bound beside the
   callback endpoint, that the worker is pointed at through
   `CURSOR_BACKEND_URL` and that forwards each call to the backend
-  `ConnectOptions::backend_url` names (`CURSOR_BACKEND_URL` on the host,
-  default `https://api2.cursor.sh`) over TLS under the host's own trust
+  `ConnectOptions::backend_url` names (`https://api2.cursor.sh` under
+  `connect`, set in code alone; a host's `CURSOR_BACKEND_URL` is Cursor's
+  own variable, which the client does not read) over TLS under the host's own trust
   store and proxy settings, bodies streamed both ways, calls under `/v1/`
   to `api.cursor.com`, an unreachable backend `502`. The bridge's runtime
   (Bun 1.3.9) cannot stream a request body through a `CONNECT` proxy, so
@@ -191,22 +205,24 @@ Unreleased
   bridge reads as a cue to turn TLS verification off for itself and every
   command it runs; `omnia-confine`'s `NO_PROXY` lists the IPv6 loopback
   bracketed as well as bare, since Bun matches an entry against the host
-  as the URL spells it. `CURSOR_BACKEND_URL` is refused as a
-  `worker_env`, beside `CURSOR_API_KEY`. `tests/relay.rs` holds the relay
-  to a fake backend, and `tests/live.rs` gains two ignored rows: a turn
-  completed inside the kernel boundary with the bridge's API through the
-  relay, and an `npm install` through the proxy.
+  as the URL spells it. `tests/relay.rs` holds the relay to a fake
+  backend, and `tests/live.rs` gains two ignored rows: a turn completed
+  inside the kernel boundary with the bridge's API through the relay, and
+  an `npm install` through the proxy under a request's egress grant. The
+  fake bridge the suites spawn runs inside the boundary as the real one
+  does, its script and log in a home every guest lends.
 
 ### Changed
 
 - `omnia-cursor`'s workers inherit nothing of the host's environment:
   `PATH`, `LANG`, `LC_*`, `TZ` and `TERM`, a private `HOME` and `TMPDIR`,
-  the proxy variables naming the client's egress proxy,
+  the proxy variables naming the boundary's egress proxy,
   `CURSOR_BACKEND_URL` naming the client's relay, the bridge's own
-  settings and the trust-store variables it honours, and what
-  `CURSOR_WORKER_ENV` names, with `CURSOR_API_KEY` riding the handshake
+  settings and the trust-store variables it honours, and the completion's
+  `grants.worker` `env`, with `CURSOR_API_KEY` riding the handshake
   alone and `NODE_USE_SYSTEM_CA`, `CURSOR_BACKEND_URL`, the proxy
-  variables, and every `GIT_DIR` sibling refused as a passthrough. Workers are session leaders
+  variables, and every `GIT_DIR` sibling refused as a passthrough or a
+  grant. Workers are session leaders
   rather than process-group leaders, so a worker has no controlling
   terminal; the kill at shutdown reaches the whole session.
 

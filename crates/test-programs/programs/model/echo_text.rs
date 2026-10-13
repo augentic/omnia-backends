@@ -3,7 +3,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use omnia_sdk::model::{Model as _, Request, WasiModel};
-use test_programs::user;
+use test_programs::{lend, user};
 
 omnia_sdk::command!(scenario);
 
@@ -13,6 +13,7 @@ async fn scenario() {
             Request::builder()
                 .system("be terse")
                 .messages(vec![user("hi"), user("second")])
+                .maybe_workspace(lend())
                 .build(),
         )
         .await

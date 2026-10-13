@@ -16,8 +16,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub use agent::Deadlines;
 use agent::{Attempt, Unanswered};
 use anyhow::anyhow;
-use omnia_confine::Confinement;
-use omnia_wasi_model::{Answer, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx};
+use omnia_confine::{Ask, Confinement, Refused};
+use omnia_wasi_model::{
+    Answer, Error, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx, WorkerGrant,
+};
 use options::{Access, Turn};
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
@@ -77,11 +79,16 @@ impl Client {
             .map_err(Unanswered::settled)?;
 
         // the boundary is laid before the slot is taken, so a lend that
-        // cannot be entered costs no wait
+        // cannot be entered, or an ask the host refuses, costs no wait
         let confinement = Confinement::of(tool_host.local_path(), self.confine.options())
             .await
             .map_err(Unanswered::settled)?;
-        let boundary = self.confine.lay(confinement);
+        let ask = ask(request.grants.worker.as_ref(), &confinement).map_err(Unanswered::settled)?;
+        let boundary = self
+            .confine
+            .lay(confinement, &ask)
+            .await
+            .map_err(|error| Unanswered::settled(refusal(error)))?;
         let access = Access::of(&boundary);
         let cwd = boundary.cwd().map_err(Unanswered::settled)?;
         let turn = Turn::prepare(request, cwd, access, &self.model, api_key)
@@ -96,5 +103,37 @@ impl Client {
         }
         .complete()
         .await
+    }
+}
+
+// The ask a completion's worker grant makes of the boundary. A grant needs
+// a shell: a worker reaches beyond its lend through the commands it runs
+// there, so one over a read-only lend is the request's fault, refused before
+// anything is laid.
+fn ask(grant: Option<&WorkerGrant>, confinement: &Confinement) -> anyhow::Result<Ask> {
+    let Some(grant) = grant else {
+        return Ok(Ask::default());
+    };
+    if !confinement.shell() {
+        let lend = if confinement.lent() { "is under no shell root" } else { "is nothing" };
+        return Err(Error::InvalidRequest(format!(
+            "worker grant: the workspace lent {lend}, so the worker runs no command that could \
+             use it"
+        ))
+        .into());
+    }
+    Ok(Ask {
+        egress: grant.egress.clone(),
+        read: grant.read.clone(),
+        env: grant.env.clone(),
+    })
+}
+
+// A lay the boundary refused for the ask's fault is the request's; a host
+// failure stays the backend's.
+fn refusal(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast::<Refused>() {
+        Ok(refused) => Error::InvalidRequest(format!("worker grant: {refused}")).into(),
+        Err(error) => error,
     }
 }

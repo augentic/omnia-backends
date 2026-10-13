@@ -22,6 +22,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tracing::{Instrument as _, Span};
 
+use crate::egress::Egress;
+
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
 const TAIL_LINES: usize = 20;
@@ -44,9 +46,10 @@ pub struct Child {
 
 impl Child {
     // The tasks run under the caller's span, so what the process says and
-    // how it exits are reported under the work that spawned it.
+    // how it exits are reported under the work that spawned it. `held` is
+    // what the process needs for its life: its scratch and its proxy.
     pub(crate) fn supervise(
-        mut child: Box<dyn ChildWrapper>, program: String, scratch: TempDir,
+        mut child: Box<dyn ChildWrapper>, program: String, held: (TempDir, Egress),
         ready: Option<&'static str>,
     ) -> Result<Self> {
         let started_at = Instant::now();
@@ -71,7 +74,7 @@ impl Child {
         tokio::spawn(
             Supervisor {
                 child,
-                scratch,
+                held,
                 stderr,
                 state: Arc::clone(&state),
                 stop,
@@ -194,7 +197,7 @@ struct Stop {
 // waits on the process, tears it down on request, and publishes its exit
 struct Supervisor {
     child: Box<dyn ChildWrapper>,
-    scratch: TempDir,
+    held: (TempDir, Egress),
     stderr: JoinHandle<()>,
     state: Arc<State>,
     stop: mpsc::Receiver<Stop>,
@@ -244,7 +247,7 @@ impl Supervisor {
         }
 
         let _ = self.exit.send(Some(exit));
-        drop(self.scratch);
+        drop(self.held);
     }
 
     async fn ask(&mut self, stop: Stop) {

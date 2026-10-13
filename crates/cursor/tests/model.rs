@@ -2,15 +2,17 @@
 //! (`crates/test-programs/programs/model/`) asserts what it observes over an
 //! `omnia_cursor::Client` and traps on failure; the test asserts what reached
 //! the fake `cursor-sdk-bridge` and that every spawned process is gone again.
+//! Every completion lends the fake's home, where the confined fake finds its
+//! script and log; the worker-grant rows are the `worker` suite's.
 
 mod support;
 
 use omnia_cursor::ConnectOptions;
-use omnia_test::host::scratch;
 use serde_json::json;
 use support::fake_bridge::{self, Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
 use support::harness::{
-    await_gone, connect, options, run_guest, run_guest_over, sole_agent, spawning,
+    await_gone, connect, options, run_guest, run_guest_lending, run_guest_over, sole_agent,
+    spawning,
 };
 
 // A guest program without a matching test here fails to compile.
@@ -53,9 +55,49 @@ async fn model_echo_text() {
     assert!(env.contains(&json!("PATH")), "{env:?}");
     assert!(!env.contains(&json!("CURSOR_API_KEY")), "{env:?}");
     assert!(!env.contains(&json!(fake_bridge::PLANTED_SECRET)), "{env:?}");
+    assert_eq!(created.arg["granted"], json!({}), "no grant: nothing set beyond the allowlist");
 
-    // nothing lent: a private working directory and every built-in tool off
-    assert_eq!(created.arg["tools"], json!([]));
+    // the home lent and no shell root named: the read-only tools alone
+    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read"]));
+}
+
+// A completion lending nothing runs its worker in a private directory the
+// fake finds no script or log in: it answers as the echo, and nothing of the
+// completion reaches the home.
+#[tokio::test]
+async fn model_echo_text_unlent() {
+    let fake = Spawnable::new(&Config::echo());
+    let client = spawning(&fake, 1).await;
+    run_guest_lending(test_programs::MODEL_ECHO_TEXT, &[], &client, []).await;
+    await_gone(&fake).await;
+
+    assert!(fake.log().events.is_empty(), "{}", fake.log().summary());
+}
+
+// A worker grant over a lend under a shell root reaches the worker as the
+// boundary lays it: the variable set, the proxy in its environment, and the
+// shell on. What the grant's `~/` spells, what it reads, and what the lay
+// refuses are the `worker` suite's.
+#[tokio::test]
+async fn model_worker() {
+    let fake = Spawnable::new(&Config::echo());
+    let client = connect(ConnectOptions {
+        shell_roots: vec![fake.home().to_path_buf()],
+        ..options(1)
+    })
+    .await;
+    let grant = ["env:OMNIA_TEST_TOOLS=rust", "egress:registry.npmjs.org"];
+    run_guest(test_programs::MODEL_WORKER, &grant, &client).await;
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let (_, sequence) = sole_agent(&log);
+    assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
+    let created = log.saw(Rpc::CreateAgent)[0];
+    assert_eq!(created.arg["granted"], json!({ "OMNIA_TEST_TOOLS": "rust" }), "{}", created.arg);
+    let env = created.arg["env"].as_array().expect("the worker's environment");
+    assert!(env.contains(&json!("HTTPS_PROXY")), "{env:?}");
+    assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read", "shell"]));
 }
 
 // A lent workspace is the agent's working directory, canonical, with the
@@ -64,17 +106,14 @@ async fn model_echo_text() {
 async fn model_lend() {
     let fake = Spawnable::new(&Config::echo());
     let client = spawning(&fake, 1).await;
-    let scratch = scratch();
-    scratch.write("tree/.keep", "");
-    run_guest_over(test_programs::MODEL_LEND, &["./tree"], &client, [scratch.mount(false)]).await;
+    run_guest_over(test_programs::MODEL_LEND, &[Spawnable::MOUNT], &client, []).await;
     await_gone(&fake).await;
 
     let log = fake.log();
     let (_, sequence) = sole_agent(&log);
     assert_eq!(sequence, [Rpc::CreateAgent, Rpc::Send, Rpc::CloseAgent, Rpc::DeleteAgent]);
     let created = log.saw(Rpc::CreateAgent)[0];
-    let tree = std::fs::canonicalize(scratch.path().join("tree")).expect("the lend");
-    assert_eq!(created.text("cwd"), tree.to_string_lossy(), "{}", created.arg);
+    assert_eq!(created.text("cwd"), fake.home().to_string_lossy(), "{}", created.arg);
     assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read"]));
 }
 

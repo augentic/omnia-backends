@@ -3,12 +3,16 @@
 #![cfg(target_arch = "wasm32")]
 
 use omnia_sdk::model::{Model as _, Request, WasiModel};
-use test_programs::{lookup, user};
+use test_programs::{lend, lookup, user};
 
 omnia_sdk::command!(scenario);
 
 async fn scenario() {
-    let request = Request::builder().messages(vec![user("hi")]).tools(vec![lookup()]).build();
+    let request = Request::builder()
+        .messages(vec![user("hi")])
+        .maybe_workspace(lend())
+        .tools(vec![lookup()])
+        .build();
 
     let reply = WasiModel
         .complete_with(request, |_call| async { Err::<String, _>("no data".to_owned()) })

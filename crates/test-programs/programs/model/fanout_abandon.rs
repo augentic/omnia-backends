@@ -6,7 +6,7 @@
 
 use futures::future::select_all;
 use omnia_sdk::model::{Model as _, Request, WasiModel};
-use test_programs::{fanout_width, seam, user};
+use test_programs::{fanout_width, lend, seam, user};
 
 omnia_sdk::command!(scenario);
 
@@ -16,7 +16,12 @@ async fn scenario() {
         .map(|index| {
             Box::pin(async move {
                 let reply = WasiModel
-                    .complete(Request::builder().messages(vec![user(&seam(index))]).build())
+                    .complete(
+                        Request::builder()
+                            .messages(vec![user(&seam(index))])
+                            .maybe_workspace(lend())
+                            .build(),
+                    )
                     .await;
                 (index, reply)
             })

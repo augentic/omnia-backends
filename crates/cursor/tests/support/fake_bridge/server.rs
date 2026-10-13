@@ -44,6 +44,10 @@ pub const EXIT_ON_CREATE: i32 = 7;
 
 const END_STREAM: u8 = 0x02;
 const CALLBACK_PATH: &str = "/sdk.v1.SdkCustomToolCallbackService/CallCustomTool";
+/// The prefix of the variables a `CreateAgent` records by value.
+pub const GRANTED_PREFIX: &str = "OMNIA_TEST_";
+/// The variable naming a file the fake reads from inside the boundary.
+pub const PROBE: &str = "OMNIA_TEST_PROBE";
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type Body = BoxBody<Bytes, BoxError>;
@@ -274,6 +278,8 @@ impl Server {
             "cwd": options["local"]["cwd"][0],
             "apiKeyPresent": !api_key.is_empty(),
             "env": environment(),
+            "granted": granted(),
+            "probe": probe(),
             "backendUrl": std::env::var("CURSOR_BACKEND_URL").unwrap_or_default(),
             "model": options["model"]["id"],
             "tools": options["tools"]["names"],
@@ -693,6 +699,27 @@ fn environment() -> Vec<String> {
         std::env::vars_os().filter_map(|(name, _)| name.into_string().ok()).collect();
     names.sort();
     names
+}
+
+// The variables a worker grant set for us, by value: those under the
+// suites' `OMNIA_TEST_` prefix, which no host of the suites' own exports but
+// the planted secret, and that must never be among them.
+fn granted() -> Value {
+    let granted: serde_json::Map<String, Value> = std::env::vars()
+        .filter(|(name, _)| name.starts_with(GRANTED_PREFIX))
+        .map(|(name, value)| (name, Value::String(value)))
+        .collect();
+    Value::Object(granted)
+}
+
+// What the file `OMNIA_TEST_PROBE` names holds, read from inside the
+// boundary, so a row can tell a read root the worker was granted from one it
+// was not: the contents, or the error the read ends on.
+fn probe() -> Value {
+    std::env::var(PROBE).map_or(Value::Null, |path| match std::fs::read_to_string(&path) {
+        Ok(contents) => json!({ "ok": contents }),
+        Err(error) => json!({ "err": error.to_string() }),
+    })
 }
 
 fn gen_token() -> String {

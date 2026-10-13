@@ -12,7 +12,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use omnia_sdk::model::{CHECK_TOOL, Error, Format, Model as _, Request, ToolCall, WasiModel};
-use test_programs::{arguments, lookup, user};
+use test_programs::{arguments, lend, lookup, user};
 
 omnia_sdk::command!(scenario);
 
@@ -31,6 +31,7 @@ async fn scenario() {
         .complete_with(
             Request::builder()
                 .messages(vec![user("hi")])
+                .maybe_workspace(lend())
                 .tools(tools)
                 .format(format)
                 .check(check || nudged)

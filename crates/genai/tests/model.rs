@@ -61,6 +61,22 @@ async fn model_lend() {
     assert_eq!(requests[0].tools(), ["read", "list"]);
 }
 
+// A worker grant is for the worker a backend runs, and this one runs none:
+// the grant is inert, and the completion runs as any over a lend does.
+#[tokio::test]
+async fn model_worker() {
+    let fake = FakeOpenAi::serve(Config::echo()).await;
+    let client = client(&fake).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    let grant = ["env:OMNIA_TEST_TOOLS=rust", "egress:registry.npmjs.org", "lend=./tree"];
+    run_guest_over(test_programs::MODEL_WORKER, &grant, &client, [scratch.mount(false)]).await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].tools(), ["read", "list"]);
+}
+
 #[tokio::test]
 async fn model_check_accepted() {
     let fake = FakeOpenAi::serve(Config::replies([PASS])).await;

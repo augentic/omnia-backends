@@ -23,6 +23,7 @@ use tracing::instrument;
 
 use crate::model::Deadlines;
 use crate::pool::Pool;
+use crate::relay::Relay;
 use crate::worker::Worker;
 
 /// Cursor model backend.
@@ -76,21 +77,15 @@ impl Backend for Client {
 }
 
 impl ConnectOptions {
-    // What a worker may reach: the operator's roots and hosts, the bridge's
-    // own settings and the operator's `worker_env` as the environment it
-    // reads of the host, and never the client's own credential or the
-    // backend address, which would point the bridge past the relay.
+    // What every worker reaches: the bridge's own settings as the
+    // environment it reads of the host, and never the client's own
+    // credential or the backend address, which would point the bridge past
+    // the relay. What one worker reaches beyond is its completion's ask.
     fn confine(&self) -> Options {
-        let mut passthrough: Vec<String> =
-            Worker::PASSTHROUGH.iter().map(ToString::to_string).collect();
-        passthrough.extend(self.worker_env.iter().cloned());
         Options {
             shell_roots: self.shell_roots.clone(),
-            read_roots: self.read_roots.clone(),
-            egress: self.egress.clone(),
-            passthrough,
+            passthrough: Worker::PASSTHROUGH.iter().map(ToString::to_string).collect(),
             refused: Worker::REFUSED.iter().map(ToString::to_string).collect(),
-            substrate: self.confine,
         }
     }
 }
@@ -108,7 +103,6 @@ mod config {
     use std::path::PathBuf;
 
     use fromenv::{FromEnv, ParseResult};
-    use omnia_confine::Substrate;
 
     /// Connection options for the cursor backend.
     #[derive(Debug, Clone, FromEnv)]
@@ -118,8 +112,8 @@ mod config {
         pub model: String,
         /// The Cursor backend the client's relay forwards the bridge's API
         /// calls to, an `http` or `https` URL; the bridge itself is pointed
-        /// at the relay.
-        #[env(from = "CURSOR_BACKEND_URL", default = "https://api2.cursor.sh")]
+        /// at the relay. Set in code alone, Cursor's own backend from the
+        /// environment: nothing in it points the client elsewhere.
         pub backend_url: String,
         /// Absolute cap in seconds on one agent run; a correction's send gets
         /// a fresh cap.
@@ -140,38 +134,11 @@ mod config {
         pub max_tool_calls: u32,
         /// Trees a lent workspace at or beneath which runs with a shell,
         /// `:`-separated and relative to the invocation directory; a
-        /// workspace lent elsewhere is read-only.
+        /// workspace lent elsewhere is read-only. What a worker reaches
+        /// beyond its workspace — hosts, `~/` roots, variables — is the
+        /// completion's `grants.worker`, never a setting here.
         #[env(from = "CURSOR_SHELL_ROOTS", default = "", with = paths)]
         pub shell_roots: Vec<PathBuf>,
-        /// Trees a worker may read beside the system's own and its
-        /// workspace, `:`-separated; each must exist.
-        #[env(from = "CURSOR_READ_ROOTS", default = "", with = paths)]
-        pub read_roots: Vec<PathBuf>,
-        /// Hosts a worker's commands may reach through the egress proxy,
-        /// comma-separated; `*.example.com` names every host under a
-        /// domain. The bridge's own API goes through the relay, so none is
-        /// needed for it.
-        #[env(from = "CURSOR_EGRESS", default = "", with = split)]
-        pub egress: Vec<String>,
-        /// Host environment variables passed to a worker by name,
-        /// comma-separated, beside the bridge's own settings and the
-        /// trust-store variables it honours; `CURSOR_API_KEY`,
-        /// `CURSOR_BACKEND_URL`, and the proxy variables, which name the
-        /// relay and the egress proxy, are refused.
-        #[env(from = "CURSOR_WORKER_ENV", default = "", with = split)]
-        pub worker_env: Vec<String>,
-        /// The mechanism that holds the boundary around a worker. Set in
-        /// code alone: the environment never turns the boundary off.
-        pub confine: Substrate,
-    }
-
-    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
-    fn split(s: &str) -> ParseResult<Vec<String>> {
-        Ok(s.split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .map(ToOwned::to_owned)
-            .collect())
     }
 
     #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
@@ -180,12 +147,11 @@ mod config {
     }
 }
 pub use config::ConnectOptions;
-pub use omnia_confine::Substrate;
 
 impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env()
-            .confine(Substrate::default())
+            .backend_url(Relay::BACKEND.to_owned())
             .finalize()
             .context("issue loading connection options")
     }

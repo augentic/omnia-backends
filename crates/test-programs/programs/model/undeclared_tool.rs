@@ -3,7 +3,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use omnia_sdk::model::{Error, Model as _, Request, WasiModel};
-use test_programs::user;
+use test_programs::{lend, user};
 
 omnia_sdk::command!(scenario);
 
@@ -11,7 +11,7 @@ async fn scenario() {
     // No tools declared; the host rejects the backend's `lookup` call
     // before the guest ever sees it.
     let error = WasiModel
-        .complete(Request::builder().messages(vec![user("hi")]).build())
+        .complete(Request::builder().messages(vec![user("hi")]).maybe_workspace(lend()).build())
         .await
         .expect_err("undeclared tool fails the completion");
     assert!(

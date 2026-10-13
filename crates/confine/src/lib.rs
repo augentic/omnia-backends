@@ -9,10 +9,10 @@ mod linux;
 mod seatbelt;
 
 use std::ffi::{OsStr, OsString};
-use std::fmt;
-use std::path::{self, PathBuf};
+use std::path::{self, Path, PathBuf};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::Arc;
+use std::{fmt, io};
 
 use anyhow::{Context as _, Result, bail};
 
@@ -20,48 +20,65 @@ pub use crate::child::{Child, Exit};
 pub use crate::confinement::{Boundary, Confinement};
 use crate::egress::Egress;
 
-/// What a confined process may reach, as plain data.
+/// What every confined process may reach, as plain data.
 ///
 /// A backend fills it from its own configuration; nothing here names an
-/// environment variable of the crate's own.
+/// environment variable of the crate's own. What one process asks beyond
+/// it is its [`Ask`].
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     /// Trees a lend at or beneath which runs with a shell.
     pub shell_roots: Vec<PathBuf>,
-    /// Trees a confined process may read beside the system's own.
-    pub read_roots: Vec<PathBuf>,
-    /// Hosts a confined process may reach through the egress proxy.
-    ///
-    /// A name matches whole, `*.suffix` matches the suffix and every name
-    /// beneath it, and an IP literal is connected as written.
-    pub egress: Vec<String>,
     /// Host environment variables copied into a confined process, by name.
     pub passthrough: Vec<String>,
     /// Environment variable names that must never reach a confined process.
     pub refused: Vec<String>,
-    /// The mechanism that holds the boundary.
-    pub substrate: Substrate,
 }
 
-/// The mechanism that holds the boundary around a process.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Substrate {
-    /// The platform's kernel boundary: Seatbelt on macOS, Landlock and
-    /// seccomp on Linux.
+/// What one process asks of the host beyond the boundary's own.
+///
+/// Laid with the process by [`Confine::lay`], which holds each entry to the
+/// host before the process runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ask {
+    /// Hosts the process may reach through its egress proxy.
     ///
-    /// [`Confine::connect`] refuses it where the platform runs none.
-    #[default]
-    Auto,
-    /// No kernel boundary: the working directory, the environment, the
-    /// session, and the egress proxy alone.
-    Unconfined,
+    /// A name matches whole, `*.suffix` matches the suffix and every name
+    /// beneath it, and an IP literal is connected as written.
+    pub egress: Vec<String>,
+    /// Trees the process may read beside the system's own, each spelled
+    /// `~/<path>`: a directory beneath the operator's home.
+    pub read: Vec<String>,
+    /// Environment variables set for the process, a value's leading `~/`
+    /// spelling the operator's home.
+    pub env: Vec<(String, String)>,
+}
+
+/// An [`Ask`] the host refuses: an entry that breaks a rule of the lay.
+///
+/// [`Confine::lay`] fails with one of these, downcastable from its error,
+/// where the ask itself is at fault, and with a plain error where the host
+/// failed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused(String);
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+macro_rules! refuse {
+    ($($arg:tt)*) => {
+        return Err(anyhow::Error::new(Refused(format!($($arg)*))))
+    };
 }
 
 // The substrate as connected, which every boundary laid shares.
 #[derive(Debug, Clone)]
 pub(crate) enum Wall {
-    None,
     #[cfg(target_os = "linux")]
     Landlock(Arc<linux::Linux>),
     #[cfg(target_os = "macos")]
@@ -70,17 +87,17 @@ pub(crate) enum Wall {
 
 impl Wall {
     #[cfg(target_os = "linux")]
-    async fn platform(read_roots: &[PathBuf]) -> Result<Self> {
-        Ok(Self::Landlock(Arc::new(linux::Linux::probe(read_roots).await?)))
+    async fn platform() -> Result<Self> {
+        Ok(Self::Landlock(Arc::new(linux::Linux::probe().await?)))
     }
 
     #[cfg(target_os = "macos")]
-    async fn platform(read_roots: &[PathBuf]) -> Result<Self> {
-        Ok(Self::Seatbelt(Arc::new(seatbelt::Seatbelt::probe(read_roots).await?)))
+    async fn platform() -> Result<Self> {
+        Ok(Self::Seatbelt(Arc::new(seatbelt::Seatbelt::probe().await?)))
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    async fn platform(_read_roots: &[PathBuf]) -> Result<Self> {
+    async fn platform() -> Result<Self> {
         bail!("no confinement substrate runs on this platform")
     }
 }
@@ -88,15 +105,14 @@ impl Wall {
 /// The confinement a connected backend lays around every process it spawns.
 ///
 /// Connecting holds the [`Options`] to the host once: the roots are
-/// resolved, the `passthrough` is checked, the substrate is probed, the
-/// egress proxy is bound, and the environment a process inherits is read.
-/// What [`Confine::lay`] builds from them cannot fail on the operator's
-/// configuration.
+/// resolved, the `passthrough` is checked, the kernel substrate is probed,
+/// the operator's home is read, and the environment a process inherits is
+/// read. [`Confine::lay`] then holds each process's [`Ask`] to the host.
 pub struct Confine {
     options: Options,
     inherited: Vec<(OsString, OsString)>,
     wall: Wall,
-    egress: Egress,
+    home: Option<PathBuf>,
 }
 
 impl Confine {
@@ -111,8 +127,8 @@ impl Confine {
     // Bun matches an entry against the host as the URL spells it, so the
     // IPv6 loopback is listed bracketed as well as bare.
     const NO_PROXY: &str = "127.0.0.1,localhost,::1,[::1]";
-    // What the boundary sets itself, so no `passthrough` puts the host's
-    // value over it.
+    // What the boundary sets itself, so no `passthrough` or ask puts
+    // another value over it.
     const OWN: [&str; 10] = [
         "HOME",
         "TMPDIR",
@@ -130,30 +146,19 @@ impl Confine {
 
     /// Connects: holds `options` to the host and reads what a process inherits.
     ///
-    /// `shell_roots` are made absolute against the current directory and
-    /// `read_roots` are canonicalised, so a lend is compared with them
-    /// however either was spelled.
+    /// `shell_roots` are made absolute against the current directory, so a
+    /// lend is compared with them however they were spelled. The operator's
+    /// `HOME` is read here, canonical, as what an [`Ask`]'s `~/` spells.
     ///
     /// # Errors
     ///
     /// Returns an error when a `passthrough` names a variable the boundary
-    /// sets itself, one in `refused`, or a `GIT_DIR` sibling; when a
-    /// `read_roots` entry does not exist; or when [`Substrate::Auto`] finds
-    /// no substrate that runs on this host.
+    /// sets itself, one in `refused`, or a `GIT_DIR` sibling, or when no
+    /// kernel substrate runs on this host.
     pub async fn connect(mut options: Options) -> Result<Self> {
-        // the passthrough held to what may reach the process
         for name in &options.passthrough {
-            let name = name.as_str();
-            if Self::OWN.contains(&name) {
-                bail!("`{name}` is the boundary's to set and cannot be passed through");
-            }
-            if Self::REFUSED.contains(&name)
-                || options.refused.iter().any(|refused| refused == name)
-            {
-                bail!("`{name}` is refused and cannot be passed through");
-            }
-            if Self::GIT_SELECTION.contains(&name) {
-                bail!("`{name}` selects a repository and cannot be passed through");
+            if let Err(why) = Self::settable(name, &options.refused) {
+                bail!("passthrough {why}");
             }
         }
 
@@ -162,19 +167,12 @@ impl Confine {
             *root = path::absolute(&*root)
                 .with_context(|| format!("resolving shell root {}", root.display()))?;
         }
-        for root in &mut options.read_roots {
-            *root = tokio::fs::canonicalize(&*root)
-                .await
-                .with_context(|| format!("read root {} does not exist", root.display()))?;
-        }
 
-        // the substrate probed and the way out bound
-        let wall = match options.substrate {
-            Substrate::Unconfined => Wall::None,
-            Substrate::Auto => Wall::platform(&options.read_roots).await?,
+        let wall = Wall::platform().await?;
+        let home = match std::env::var_os("HOME") {
+            Some(home) => tokio::fs::canonicalize(home).await.ok(),
+            None => None,
         };
-        let egress = Egress::bind(&options.egress).await?;
-
         let inherited = std::env::vars_os()
             .filter(|(name, _)| Self::passes(name, &options.passthrough))
             .collect();
@@ -182,7 +180,7 @@ impl Confine {
             options,
             inherited,
             wall,
-            egress,
+            home,
         })
     }
 
@@ -194,27 +192,93 @@ impl Confine {
         })
     }
 
-    /// The options as connected: absolute `shell_roots`, canonical `read_roots`.
+    // Whether a value under `name` may reach a process, whoever puts it
+    // there; the `Err` is why not.
+    fn settable(name: &str, refused: &[String]) -> Result<(), String> {
+        if Self::OWN.contains(&name) {
+            return Err(format!("`{name}` is the boundary's to set"));
+        }
+        if Self::REFUSED.contains(&name) || refused.iter().any(|refused| refused == name) {
+            return Err(format!("`{name}` is refused"));
+        }
+        if Self::GIT_SELECTION.contains(&name) {
+            return Err(format!("`{name}` selects a repository"));
+        }
+        Ok(())
+    }
+
+    /// The options as connected: absolute `shell_roots`.
     #[must_use]
     pub const fn options(&self) -> &Options {
         &self.options
     }
 
-    /// The egress proxy every boundary's `HTTPS_PROXY` names.
-    #[must_use]
-    pub const fn egress(&self) -> &Egress {
-        &self.egress
-    }
-
-    /// Lays the boundary around one process, where `confinement` put it.
+    /// Lays the boundary around one process, where `confinement` put it,
+    /// granting what `ask` names.
     ///
     /// The process's environment is what connecting inherited, its `HOME`
-    /// and `TMPDIR` the confinement's scratch, and its proxy variables the
-    /// egress proxy, with the host's own loopback excepted.
-    #[must_use]
-    pub fn lay(&self, confinement: Confinement) -> Boundary {
+    /// and `TMPDIR` the confinement's scratch, its proxy variables an egress
+    /// proxy bound for it alone and admitting the ask's `egress`, with the
+    /// host's own loopback excepted, and the ask's `env` over them. Each of
+    /// the ask's `read` roots is resolved against the operator's home; one
+    /// that does not exist is logged at WARN and granted nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`Refused`] when a `read` root is not spelled `~/<path>`,
+    /// resolves outside the home or to a file, or names a home the host has
+    /// none of, or when an `env` name is not a variable name or is one the
+    /// boundary holds (its own, a refused one, a `GIT_DIR` sibling); and a
+    /// plain error when a root cannot be read or the proxy cannot be bound.
+    pub async fn lay(&self, confinement: Confinement, ask: &Ask) -> Result<Boundary> {
+        let read = self.roots(&ask.read).await?;
+        let egress = Egress::bind(&ask.egress).await?;
+        let env = self.environment(&confinement, &egress, &ask.env)?;
+        Ok(Boundary::new(confinement, env, self.wall.clone(), read, egress))
+    }
+
+    async fn roots(&self, read: &[String]) -> Result<Vec<PathBuf>> {
+        let mut roots = Vec::new();
+        for entry in read {
+            let Some(rest) = entry.strip_prefix("~/").filter(|rest| !rest.is_empty()) else {
+                refuse!(
+                    "read root `{entry}` must be a directory beneath the home, spelled `~/<path>`"
+                );
+            };
+            let home = self.home(entry)?;
+            let asked = home.join(rest);
+            let root = match tokio::fs::canonicalize(&asked).await {
+                Ok(root) => root,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    tracing::warn!(root = %asked.display(), "read root does not exist; not granted");
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("resolving read root {}", asked.display()));
+                }
+            };
+            if root == home || !root.starts_with(home) {
+                refuse!("read root `{entry}` resolves to {}, outside the home", root.display());
+            }
+            let metadata = tokio::fs::metadata(&root)
+                .await
+                .with_context(|| format!("reading read root {}", root.display()))?;
+            if !metadata.is_dir() {
+                refuse!("read root `{entry}` is not a directory");
+            }
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        Ok(roots)
+    }
+
+    fn environment(
+        &self, confinement: &Confinement, egress: &Egress, asked: &[(String, String)],
+    ) -> Result<Vec<(OsString, OsString)>> {
         let scratch = confinement.scratch().as_os_str().to_owned();
-        let proxy = OsString::from(format!("http://{}", self.egress.address()));
+        let proxy = OsString::from(format!("http://{}", egress.address()));
         let mut env = self.inherited.clone();
         env.extend(Self::OWN.iter().map(|&name| {
             let value = match name {
@@ -224,7 +288,30 @@ impl Confine {
             };
             (OsString::from(name), value)
         }));
-        Boundary::new(confinement, env, self.wall.clone())
+
+        // the ask's variables over them, each held as a passthrough is
+        for (name, value) in asked {
+            if !is_name(name) {
+                refuse!("`{name}` is not an environment variable name");
+            }
+            if let Err(why) = Self::settable(name, &self.options.refused) {
+                refuse!("env {why}");
+            }
+            let value = match value.strip_prefix("~/") {
+                Some(rest) => self.home(value)?.join(rest).into_os_string(),
+                None => OsString::from(value),
+            };
+            env.retain(|(held, _)| held != name.as_str());
+            env.push((OsString::from(name), value));
+        }
+        Ok(env)
+    }
+
+    fn home(&self, spelled: &str) -> Result<&Path> {
+        match self.home.as_deref() {
+            Some(home) => Ok(home),
+            None => refuse!("`{spelled}` names the home, which the host has none of"),
+        }
     }
 }
 
@@ -236,7 +323,14 @@ impl fmt::Debug for Confine {
             .field("options", &self.options)
             .field("inherited", &inherited)
             .field("wall", &self.wall)
-            .field("egress", &self.egress.address())
+            .field("home", &self.home)
             .finish()
     }
+}
+
+// `[A-Za-z_][A-Za-z0-9_]*`: what a shell exports and `Command::env` accepts.
+fn is_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }

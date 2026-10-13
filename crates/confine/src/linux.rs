@@ -6,7 +6,7 @@
 // seccomp_filter}.rs`, Copyright (c) 2025 Lexo Liu, MIT OR Apache-2.0:
 // support probed by creating a ruleset rather than forking, the ruleset a
 // hard requirement with anything short of full enforcement a failure, a
-// system path skipped when absent and a configured one refused, and
+// system path skipped when absent and a granted one refused, and
 // `clone3` refused with `ENOSYS` in a filter of its own.
 
 use std::collections::BTreeMap;
@@ -36,28 +36,28 @@ const EXECUTABLE: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib3
 const READABLE: [&str; 4] = ["/etc", "/proc", "/sys", "/run"];
 const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
 
-// Where one process is put, every path canonical.
+// Where one process is put, every path canonical, and the directories its
+// ask was granted to read.
 pub struct Place<'a> {
     pub tree: &'a Path,
     pub scratch: &'a Path,
     pub program: &'a Path,
+    pub read: &'a [PathBuf],
 }
 
-// The substrate as probed: the roots every ruleset grants beside the
-// system's, and the filters every process gets, compiled once.
+// The substrate as probed: the filters every process gets, compiled once.
 pub struct Linux {
-    read_roots: Vec<PathBuf>,
     filters: Filters,
 }
 
 impl std::fmt::Debug for Linux {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Linux").field("read_roots", &self.read_roots).finish_non_exhaustive()
+        f.debug_struct("Linux").finish_non_exhaustive()
     }
 }
 
 impl Linux {
-    pub async fn probe(read_roots: &[PathBuf]) -> Result<Self> {
+    pub async fn probe() -> Result<Self> {
         // the kernel's landlock, by creating a ruleset rather than forking:
         // the TCP right is ABI 4's, so handling it holds the kernel to it
         let created = Ruleset::default()
@@ -85,10 +85,7 @@ impl Linux {
 
         let filters = Filters::compile()?;
         undumpable()?;
-        Ok(Self {
-            read_roots: read_roots.to_vec(),
-            filters,
-        })
+        Ok(Self { filters })
     }
 
     // The ruleset over `place` and the filters, applied in the child once
@@ -142,12 +139,12 @@ impl Linux {
         }
 
         // the process's own: its tree, its scratch, its program, and the
-        // roots the operator opened, which run as they read since a
+        // roots its ask was granted, which run as they read since a
         // toolchain lives there
         required(&mut ruleset, place.tree, AccessFs::from_all(abi))?;
         required(&mut ruleset, place.scratch, AccessFs::from_all(abi))?;
         required(&mut ruleset, place.program, AccessFs::ReadFile | AccessFs::Execute)?;
-        for root in &self.read_roots {
+        for root in place.read {
             required(&mut ruleset, root, AccessFs::from_read(abi) | AccessFs::Execute)?;
         }
         Ok(ruleset)

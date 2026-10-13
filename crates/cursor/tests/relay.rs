@@ -53,20 +53,20 @@ async fn bridge_pointed_at_the_relay() {
     assert_ne!(relay, "http://backend.invalid");
 }
 
-// `CURSOR_BACKEND_URL` is the client's to set, so a `worker_env` naming it
-// is refused at connect, before anything is spawned.
+// `CURSOR_BACKEND_URL` is the client's to set, so a worker grant naming it
+// is refused as the request's fault, before anything is spawned.
 #[tokio::test]
-async fn backend_url_refused_as_worker_env() {
+async fn backend_url_refused_as_a_grant() {
     let fake = Spawnable::new(&Config::echo());
-    fake_bridge::dummy_key();
-    let error = Client::connect_with(ConnectOptions {
-        worker_env: vec!["CURSOR_BACKEND_URL".to_owned()],
+    let client = connect(ConnectOptions {
+        shell_roots: vec![fake.home().to_path_buf()],
         ..options(1)
     })
-    .await
-    .expect_err("the backend address is refused");
-    assert!(format!("{error:#}").contains("`CURSOR_BACKEND_URL` is refused"), "{error:#}");
-    assert!(fake.log().events.is_empty(), "a refused option spawned a process");
+    .await;
+    let grant = ["env:CURSOR_BACKEND_URL=http://backend.invalid", "refused:is refused"];
+    run_guest(test_programs::MODEL_WORKER, &grant, &client).await;
+
+    assert!(fake.log().events.is_empty(), "a refused grant spawned: {}", fake.log().summary());
 }
 
 // A backend that is not an http(s) URL is refused at connect.

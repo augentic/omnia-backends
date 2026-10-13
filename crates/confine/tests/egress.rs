@@ -167,6 +167,35 @@ async fn tunnel_to_loopback_literal() {
 }
 
 #[tokio::test]
+async fn listed_literal_vetted() {
+    let mut rows = vec![
+        ("169.254.169.254".to_owned(), "a cloud metadata address"),
+        ("fd00:ec2::254".to_owned(), "a cloud metadata address"),
+        ("::ffff:100.100.100.200".to_owned(), "a cloud metadata address"),
+        ("fe80::1".to_owned(), "a link-local address"),
+        ("0.0.0.0".to_owned(), "an unspecified address"),
+    ];
+    // the host's own address beyond the special ranges, where it has one
+    let own = own_addresses().expect("the host's interfaces");
+    rows.extend(
+        own.into_iter()
+            .find(|address| Refusal::of(*address, &[]).is_none())
+            .map(|address| (address.to_string(), "an address of the host's own")),
+    );
+    let listed: Vec<&str> = rows.iter().map(|(address, _)| address.as_str()).collect();
+    let boundary = proxy(&listed).await;
+    for (address, class) in &rows {
+        let target = match ip(address) {
+            IpAddr::V4(_) => format!("{address}:80"),
+            IpAddr::V6(_) => format!("[{address}]:80"),
+        };
+        let (status, body, _) = connect_to(boundary.egress().address(), &target).await;
+        assert_eq!(status, 403, "{target}: {body}");
+        assert!(body.contains(class), "{target}: {body}");
+    }
+}
+
+#[tokio::test]
 async fn plain_get_refused() {
     let boundary = proxy(&["127.0.0.1", "example.com"]).await;
     let (status, body, _) = request(

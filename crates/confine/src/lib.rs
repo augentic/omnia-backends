@@ -49,7 +49,9 @@ pub struct Ask {
     /// Hosts the process may reach through its egress proxy.
     ///
     /// A name matches whole, `*.suffix` matches the suffix and every name
-    /// beneath it, and an IP literal is connected as written.
+    /// beneath it, and an IP literal matches itself. Every address, resolved
+    /// or literal, is held to [`egress::Refusal`] before the tunnel opens,
+    /// a loopback literal alone excepted.
     pub egress: Vec<String>,
     /// Trees the process may read beside the system's own, each spelled
     /// `~/<path>`: a directory beneath the operator's home.

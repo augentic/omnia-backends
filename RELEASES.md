@@ -169,10 +169,12 @@ Unreleased
   the parent and applied in the child, the host set non-dumpable at
   connect, and a connect refusal where the kernel lacks Landlock ABI 4
   or Yama. The proxy is an HTTP `CONNECT` proxy on loopback, one per
-  boundary, admitting the ask's `egress` — a name or a `*.suffix` — and vetting
-  every resolved address against the unspecified, loopback, link-local,
-  multicast, broadcast and cloud-metadata ranges, IPv4 carried in IPv6,
-  and the host's own addresses. The substrate files start from heel 0.3.0
+  boundary, admitting the ask's `egress` — a name, a `*.suffix`, or an IP
+  literal — and vetting every address, resolved or literal, against the
+  unspecified, loopback, link-local, multicast, broadcast and
+  cloud-metadata ranges, IPv4 carried in IPv6, and the host's own
+  addresses, a loopback literal alone connected as written. The substrate
+  files start from heel 0.3.0
   (MIT OR Apache-2.0), with the notice kept in each header. The crate's
   `tests/toolchain.rs` runs a build's toolchain inside the boundary — a
   Node server on port 0, `node --test` with a worker thread, `npm install`

@@ -145,11 +145,14 @@ Unreleased
   value's leading `~/` the home — binding the egress proxy for that
   boundary alone, and answering an ask that breaks a rule of the lay (a
   root spelled otherwise, resolving outside the home, or a file; a
-  variable the boundary holds or no name at all) with the typed
-  `Refused`, which a backend tells from a host failure. The `Boundary`'s
-  `command` runs a program inside with an environment built from nothing
-  (`PATH`, `LANG`, `LC_*`, `TZ`, `TERM`, a private `HOME` and `TMPDIR`,
-  the proxy variables, the `passthrough`, and the ask's `env`), in the
+  variable the boundary holds, one the dynamic loader or a runtime reads
+  at startup, one the host passes through, or no name at all) with the
+  typed `Refused`, which a backend tells from a host failure. The
+  `Boundary`'s `command` runs a program inside with an environment built
+  from nothing (`PATH`, `LANG`, `LC_*`, `TZ`, `TERM`, a private `HOME`
+  and `TMPDIR`, the proxy variables, the `passthrough`, and the ask's
+  `env`), the bare program resolved against the host's `PATH` rather
+  than the ask's, in the
   tree's open directory handle, as a session leader, and its `spawn`
   supervises it as a `Child` — the supervisor lifted from `omnia-cursor`'s
   worker — or `output` runs it once under a bound. The kernel holds the
@@ -221,8 +224,12 @@ Unreleased
   settings and the trust-store variables it honours, and the completion's
   `grants.worker` `env`, with `CURSOR_API_KEY` riding the handshake
   alone and `NODE_USE_SYSTEM_CA`, `CURSOR_BACKEND_URL`, the proxy
-  variables, and every `GIT_DIR` sibling refused as a passthrough or a
-  grant. Workers are session leaders
+  variables, the dynamic loader's `LD_*` and `DYLD_*`, `BUN_OPTIONS`,
+  `NODE_OPTIONS`, and every `GIT_DIR` sibling refused as a passthrough
+  or a grant, and a grant that names one of the bridge's passthroughs
+  refused as well. A grant's `PATH` reaches the commands the worker
+  runs, while `cursor-sdk-bridge` is resolved against the host's.
+  Workers are session leaders
   rather than process-group leaders, so a worker has no controlling
   terminal; the kill at shutdown reaches the whole session.
 

@@ -35,9 +35,9 @@ pub struct Worker {
 impl Worker {
     // What the bridge reads of the host beyond what every confined process
     // inherits: its own settings, the trust-store variables its HTTP client
-    // honours, and the user the shell it runs names. The proxy variables
-    // are the boundary's, naming its egress proxy, and `CURSOR_BACKEND_URL`
-    // is the client's, naming its relay.
+    // honours, and the user the shell it runs names; no worker grant sets
+    // one. The proxy variables are the boundary's, naming its egress
+    // proxy, and `CURSOR_BACKEND_URL` is the client's, naming its relay.
     pub const PASSTHROUGH: [&str; 12] = [
         "SHELL",
         "USER",
@@ -52,9 +52,9 @@ impl Worker {
         "SSL_CERT_DIR",
         "NODE_EXTRA_CA_CERTS",
     ];
-    // What no worker grant may set: the client's own credential, which
-    // rides the handshake alone, and the backend address, which would
-    // point the bridge past the relay.
+    // What no worker grant may set, beside what the boundary refuses of
+    // itself: the client's own credential, which rides the handshake alone,
+    // and the backend address, which would point the bridge past the relay.
     pub const REFUSED: [&str; 2] = ["CURSOR_API_KEY", "CURSOR_BACKEND_URL"];
 
     // The handshake is left to `Spawned::handshake`, so a pool lease can

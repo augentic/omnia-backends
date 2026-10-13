@@ -122,6 +122,9 @@ impl Confine {
         ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
     // What every confined process inherits from the host, beside `LC_*`.
     const INHERITED: [&str; 4] = ["PATH", "LANG", "TZ", "TERM"];
+    // The dynamic loader's variables, by prefix: each maps code of an
+    // ask's into the program before it runs.
+    const LOADER: [&str; 2] = ["LD_", "DYLD_"];
     // What a confined process reaches without the proxy: the host's own
     // loopback, where the callback endpoint and the proxy itself listen.
     // Bun matches an entry against the host as the URL spells it, so the
@@ -141,8 +144,10 @@ impl Confine {
         "all_proxy",
         "no_proxy",
     ];
-    // What never reaches a confined process by the crate's own rule.
-    const REFUSED: [&str; 1] = ["NODE_USE_SYSTEM_CA"];
+    // What never reaches a confined process by the crate's own rule: the
+    // trust-store switch, and the option lists Bun and Node read at
+    // startup, which would run code of an ask's inside the program.
+    const REFUSED: [&str; 3] = ["NODE_USE_SYSTEM_CA", "BUN_OPTIONS", "NODE_OPTIONS"];
 
     /// Connects: holds `options` to the host and reads what a process inherits.
     ///
@@ -153,8 +158,8 @@ impl Confine {
     /// # Errors
     ///
     /// Returns an error when a `passthrough` names a variable the boundary
-    /// sets itself, one in `refused`, or a `GIT_DIR` sibling, or when no
-    /// kernel substrate runs on this host.
+    /// sets itself, one in `refused`, one of the dynamic loader's, or a
+    /// `GIT_DIR` sibling, or when no kernel substrate runs on this host.
     pub async fn connect(mut options: Options) -> Result<Self> {
         for name in &options.passthrough {
             if let Err(why) = Self::settable(name, &options.refused) {
@@ -201,6 +206,9 @@ impl Confine {
         if Self::REFUSED.contains(&name) || refused.iter().any(|refused| refused == name) {
             return Err(format!("`{name}` is refused"));
         }
+        if Self::LOADER.iter().any(|prefix| name.starts_with(prefix)) {
+            return Err(format!("`{name}` is the dynamic loader's"));
+        }
         if Self::GIT_SELECTION.contains(&name) {
             return Err(format!("`{name}` selects a repository"));
         }
@@ -228,13 +236,24 @@ impl Confine {
     /// Returns a [`Refused`] when a `read` root is not spelled `~/<path>`,
     /// resolves outside the home or to a file, or names a home the host has
     /// none of, or when an `env` name is not a variable name or is one the
-    /// boundary holds (its own, a refused one, a `GIT_DIR` sibling); and a
-    /// plain error when a root cannot be read or the proxy cannot be bound.
+    /// boundary holds (its own, a refused one, the dynamic loader's, a
+    /// `GIT_DIR` sibling, or a `passthrough` of the host's); and a plain
+    /// error when a root cannot be read or the proxy cannot be bound.
     pub async fn lay(&self, confinement: Confinement, ask: &Ask) -> Result<Boundary> {
         let read = self.roots(&ask.read).await?;
         let egress = Egress::bind(&ask.egress).await?;
         let env = self.environment(&confinement, &egress, &ask.env)?;
-        Ok(Boundary::new(confinement, env, self.wall.clone(), read, egress))
+        Ok(Boundary::new(confinement, env, self.path(), self.wall.clone(), read, egress))
+    }
+
+    // The host's `PATH` as connecting read it: what a bare program the
+    // backend names resolves against, whatever an ask sets.
+    fn path(&self) -> OsString {
+        self.inherited
+            .iter()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
     }
 
     async fn roots(&self, read: &[String]) -> Result<Vec<PathBuf>> {
@@ -289,13 +308,18 @@ impl Confine {
             (OsString::from(name), value)
         }));
 
-        // the ask's variables over them, each held as a passthrough is
+        // the ask's variables over them, each held as a passthrough is, and
+        // never over a passthrough: those are the program's own settings,
+        // read of the host
         for (name, value) in asked {
             if !is_name(name) {
                 refuse!("`{name}` is not an environment variable name");
             }
             if let Err(why) = Self::settable(name, &self.options.refused) {
                 refuse!("env {why}");
+            }
+            if self.options.passthrough.iter().any(|passed| passed == name) {
+                refuse!("env `{name}` is the host's to pass through");
             }
             let value = match value.strip_prefix("~/") {
                 Some(rest) => self.home(value)?.join(rest).into_os_string(),

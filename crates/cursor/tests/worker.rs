@@ -278,6 +278,9 @@ fn worker_grant_laid() {
             ("read:~/tools/marker.txt", "is not a directory"),
             ("env:HOME=/elsewhere", "the boundary's to set"),
             ("env:CURSOR_API_KEY=k", "is refused"),
+            ("env:BUN_OPTIONS=--preload=./x.js", "is refused"),
+            ("env:LD_PRELOAD=./x.so", "the dynamic loader's"),
+            ("env:SSL_CERT_FILE=./ca.pem", "the host's to pass through"),
             ("env:GIT_DIR=.git", "selects a repository"),
         ] {
             let refused = format!("refused:{why}");

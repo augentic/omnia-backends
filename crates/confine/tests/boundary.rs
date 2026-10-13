@@ -5,6 +5,7 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::env;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -143,6 +144,32 @@ async fn program_resolved_on_path() {
     assert_eq!(output.stdout, b"found\n");
 }
 
+// An ask's `PATH` reaches the process, so a toolchain is found inside; the
+// program the backend names is resolved against the host's `PATH`, so the
+// `sh` planted first on the ask's is never the one spawned.
+#[tokio::test]
+async fn path_in_the_ask() {
+    let lend = tempfile::tempdir().expect("a lend");
+    let tree = lend.path().join("tree");
+    let bin = tree.join("bin");
+    std::fs::create_dir_all(&bin).expect("a bin directory");
+    std::fs::write(bin.join("sh"), "#!/bin/sh\necho planted\n").expect("a planted sh");
+    std::fs::set_permissions(bin.join("sh"), std::fs::Permissions::from_mode(0o755))
+        .expect("the planted sh is executable");
+    let path = format!("{}:{}", bin.display(), env::var("PATH").expect("the host has a PATH"));
+    let confine = connect(Options::default()).await;
+    let ask = Ask {
+        env: vec![("PATH".to_owned(), path.clone())],
+        ..Ask::default()
+    };
+    let boundary = support::asking(&confine, Some(&tree), &ask).await;
+
+    let mut command = boundary.command("sh").expect("sh is on the host's PATH");
+    command.args(["-c", "echo found && printf '%s' \"$PATH\""]);
+    let output = boundary.output(command, BOUND).await.expect("sh answers");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), format!("found\n{path}"));
+}
+
 // --- Connect ---
 
 #[tokio::test]
@@ -153,6 +180,9 @@ async fn passthrough_refused() {
         ("HTTPS_PROXY", "the boundary's to set"),
         ("no_proxy", "the boundary's to set"),
         ("NODE_USE_SYSTEM_CA", "refused"),
+        ("BUN_OPTIONS", "refused"),
+        ("LD_PRELOAD", "the dynamic loader's"),
+        ("DYLD_INSERT_LIBRARIES", "the dynamic loader's"),
         ("GIT_DIR", "selects a repository"),
         ("GIT_INDEX_FILE", "selects a repository"),
         ("CURSOR_API_KEY", "refused"),
@@ -254,12 +284,13 @@ fn read_root_held_to_the_home() {
 }
 
 // An ask's variables reach the process, a leading `~/` spelling the home;
-// a name the boundary holds, or no name at all, is refused as a
-// passthrough is.
+// a name the boundary holds, one the host passes through, or no name at
+// all, is refused as a passthrough is.
 #[test]
 fn env_set_and_home_expanded() {
     support::under_home(async |home| {
         let confine = connect(Options {
+            passthrough: vec!["SSL_CERT_FILE".to_owned()],
             refused: vec!["CURSOR_API_KEY".to_owned()],
             ..Options::default()
         })
@@ -283,8 +314,13 @@ fn env_set_and_home_expanded() {
             ("HOME", "the boundary's to set"),
             ("https_proxy", "the boundary's to set"),
             ("NODE_USE_SYSTEM_CA", "refused"),
+            ("BUN_OPTIONS", "refused"),
+            ("NODE_OPTIONS", "refused"),
             ("CURSOR_API_KEY", "refused"),
+            ("LD_PRELOAD", "the dynamic loader's"),
+            ("DYLD_INSERT_LIBRARIES", "the dynamic loader's"),
             ("GIT_DIR", "selects a repository"),
+            ("SSL_CERT_FILE", "the host's to pass through"),
             ("1ST", "not an environment variable name"),
             ("A=B", "not an environment variable name"),
             ("", "not an environment variable name"),

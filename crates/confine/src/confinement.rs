@@ -164,6 +164,7 @@ async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
 pub struct Boundary {
     confinement: Confinement,
     env: Vec<(OsString, OsString)>,
+    path: OsString,
     wall: Wall,
     read: Vec<PathBuf>,
     egress: Egress,
@@ -171,12 +172,13 @@ pub struct Boundary {
 
 impl Boundary {
     pub(crate) const fn new(
-        confinement: Confinement, env: Vec<(OsString, OsString)>, wall: Wall, read: Vec<PathBuf>,
-        egress: Egress,
+        confinement: Confinement, env: Vec<(OsString, OsString)>, path: OsString, wall: Wall,
+        read: Vec<PathBuf>, egress: Egress,
     ) -> Self {
         Self {
             confinement,
             env,
+            path,
             wall,
             read,
             egress,
@@ -234,8 +236,9 @@ impl Boundary {
     ///
     /// The command's environment is the boundary's and nothing of the
     /// host's; what the caller adds to it rides. A bare `program` is
-    /// resolved against the boundary's `PATH` here, so an absent one is
-    /// refused before any spawn. Under Seatbelt the command is the
+    /// resolved here against the host's `PATH` as connecting read it, never
+    /// one the ask set, so an absent one is refused before any spawn and no
+    /// ask chooses the program. Under Seatbelt the command is the
     /// substrate's launcher, which applies the boundary and runs `program`
     /// in its place, so the arguments the caller adds are the program's;
     /// under Landlock the rules are applied in the child before `program`
@@ -243,8 +246,8 @@ impl Boundary {
     ///
     /// # Errors
     ///
-    /// Returns an error when a bare `program` is not on the boundary's
-    /// `PATH`, or when the substrate cannot lay its rules over the tree.
+    /// Returns an error when a bare `program` is not on the host's `PATH`,
+    /// or when the substrate cannot lay its rules over the tree.
     pub fn command(&self, program: &str) -> Result<Command> {
         let program = self.locate(program)?;
         let mut command = match &self.wall {
@@ -280,13 +283,8 @@ impl Boundary {
         if program.contains('/') {
             return Ok(PathBuf::from(program));
         }
-        let path = self
-            .env
-            .iter()
-            .find(|(name, _)| name == "PATH")
-            .map(|(_, value)| value.as_os_str())
-            .unwrap_or_default();
-        env::split_paths(path)
+        let path = self.env.iter().find(|(name, _)| name == "PATH").map(|(_, v)| v.clone()).unwrap_or_default();
+        env::split_paths(&path)
             .map(|dir| dir.join(program))
             .find(|candidate| executable(candidate))
             .with_context(|| format!("`{program}` is not on PATH"))

@@ -261,7 +261,10 @@ mod tests {
             generation: None,
             format: Format::Text,
             tools: vec![],
-            grants: Grants { workspace: None },
+            grants: Grants {
+                workspace: None,
+                worker: None,
+            },
             check: false,
         }
     }

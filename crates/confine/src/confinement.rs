@@ -18,6 +18,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::child::Child;
+use crate::egress::Egress;
 #[cfg(target_os = "linux")]
 use crate::linux;
 #[cfg(target_os = "macos")]
@@ -135,9 +136,9 @@ impl fmt::Debug for Confinement {
     }
 }
 
-// A root is compared as spelled and as it resolves, since the lend is
+// A root is compared as spelled and as it resolves, since `path` is
 // canonical and a root may be a symlink away from it.
-async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
+pub async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
     for root in roots {
         if path.starts_with(root) {
             return true;
@@ -151,26 +152,36 @@ async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
     false
 }
 
-/// The boundary around one process: where it runs and what it inherits.
+/// The boundary around one process: where it runs, what it inherits, and
+/// what its ask was granted.
 ///
 /// [`Boundary::command`] builds a command inside it, [`Boundary::spawn`]
 /// starts a supervised [`Child`] there, and [`Boundary::output`] runs a
-/// one-shot command inside it and captures what it wrote.
+/// one-shot command inside it and captures what it wrote. The egress proxy
+/// the process's `HTTPS_PROXY` names is the boundary's own, serving until
+/// the process it was laid for has exited.
 #[derive(Debug)]
 pub struct Boundary {
     confinement: Confinement,
     env: Vec<(OsString, OsString)>,
+    path: OsString,
     wall: Wall,
+    read: Vec<PathBuf>,
+    egress: Egress,
 }
 
 impl Boundary {
     pub(crate) const fn new(
-        confinement: Confinement, env: Vec<(OsString, OsString)>, wall: Wall,
+        confinement: Confinement, env: Vec<(OsString, OsString)>, path: OsString, wall: Wall,
+        read: Vec<PathBuf>, egress: Egress,
     ) -> Self {
         Self {
             confinement,
             env,
+            path,
             wall,
+            read,
+            egress,
         }
     }
 
@@ -178,6 +189,19 @@ impl Boundary {
     #[must_use]
     pub fn tree(&self) -> &Path {
         self.confinement.tree()
+    }
+
+    /// The trees the process reads beside the system, its tree, and its
+    /// scratch: the ask's `read` roots that exist, canonical.
+    #[must_use]
+    pub fn read(&self) -> &[PathBuf] {
+        &self.read
+    }
+
+    /// The egress proxy the process's proxy variables name.
+    #[must_use]
+    pub const fn egress(&self) -> &Egress {
+        &self.egress
     }
 
     /// The working directory as text, for a wire that carries it as a string.
@@ -212,8 +236,9 @@ impl Boundary {
     ///
     /// The command's environment is the boundary's and nothing of the
     /// host's; what the caller adds to it rides. A bare `program` is
-    /// resolved against the boundary's `PATH` here, so an absent one is
-    /// refused before any spawn. Under Seatbelt the command is the
+    /// resolved here against the host's `PATH` as connecting read it, never
+    /// one the ask set, so an absent one is refused before any spawn and no
+    /// ask chooses the program. Under Seatbelt the command is the
     /// substrate's launcher, which applies the boundary and runs `program`
     /// in its place, so the arguments the caller adds are the program's;
     /// under Landlock the rules are applied in the child before `program`
@@ -221,12 +246,11 @@ impl Boundary {
     ///
     /// # Errors
     ///
-    /// Returns an error when a bare `program` is not on the boundary's
-    /// `PATH`, or when the substrate cannot lay its rules over the tree.
+    /// Returns an error when a bare `program` is not on the host's `PATH`,
+    /// or when the substrate cannot lay its rules over the tree.
     pub fn command(&self, program: &str) -> Result<Command> {
         let program = self.locate(program)?;
         let mut command = match &self.wall {
-            Wall::None => Command::new(&program),
             #[cfg(target_os = "linux")]
             Wall::Landlock(_) => Command::new(&program),
             #[cfg(target_os = "macos")]
@@ -234,17 +258,20 @@ impl Boundary {
                 tree: self.tree(),
                 scratch: self.scratch(),
                 program: &program,
+                read: &self.read,
             })?,
         };
         enter(&mut command, self.confinement.dir.as_raw_fd());
         #[cfg(target_os = "linux")]
-        if let Wall::Landlock(linux) = &self.wall {
+        {
+            let Wall::Landlock(linux) = &self.wall;
             linux.restrain(
                 &mut command,
                 &linux::Place {
                     tree: self.tree(),
                     scratch: self.scratch(),
                     program: &program,
+                    read: &self.read,
                 },
             )?;
         }
@@ -256,13 +283,7 @@ impl Boundary {
         if program.contains('/') {
             return Ok(PathBuf::from(program));
         }
-        let path = self
-            .env
-            .iter()
-            .find(|(name, _)| name == "PATH")
-            .map(|(_, value)| value.as_os_str())
-            .unwrap_or_default();
-        env::split_paths(path)
+        env::split_paths(&self.path)
             .map(|dir| dir.join(program))
             .find(|candidate| executable(candidate))
             .with_context(|| format!("`{program}` is not on PATH"))
@@ -273,7 +294,8 @@ impl Boundary {
     /// The child reads nothing on stdin, and what it writes is read by the
     /// supervisor: stdout drained to DEBUG, stderr kept as the child's tail.
     /// A stderr line starting with `ready` is the handshake the child
-    /// answers [`Child::ready`] with; it is never logged.
+    /// answers [`Child::ready`] with; it is never logged. The scratch and
+    /// the egress proxy live as long as the process.
     ///
     /// # Errors
     ///
@@ -281,7 +303,7 @@ impl Boundary {
     pub fn spawn(self, command: Command, ready: Option<&'static str>) -> Result<Child> {
         let program = program_of(&command);
         let child = launch(command)?;
-        Child::supervise(child, program, self.confinement.scratch, ready)
+        Child::supervise(child, program, (self.confinement.scratch, self.egress), ready)
     }
 
     /// Runs `command` inside the boundary once and captures what it wrote.

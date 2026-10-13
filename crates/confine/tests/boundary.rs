@@ -1,15 +1,18 @@
 //! What a process inside the boundary sees — its working directory and its
-//! environment — and what connecting refuses.
+//! environment — what connecting refuses, and what an ask is held to.
 
 mod support;
 
 use std::collections::BTreeMap;
 use std::env;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use omnia_confine::{Boundary, Confine, Options};
+use omnia_confine::{Ask, Boundary, Confine, Options};
 use support::{boundary, connect, sh};
+use tracing_subscriber::layer::SubscriberExt as _;
 
 const BOUND: Duration = Duration::from_secs(5);
 const PLANTED: &str = "OMNIA_CONFINE_PLANTED";
@@ -141,6 +144,32 @@ async fn program_resolved_on_path() {
     assert_eq!(output.stdout, b"found\n");
 }
 
+// An ask's `PATH` reaches the process, so a toolchain is found inside; the
+// program the backend names is resolved against the host's `PATH`, so the
+// `sh` planted first on the ask's is never the one spawned.
+#[tokio::test]
+async fn path_in_the_ask() {
+    let lend = tempfile::tempdir().expect("a lend");
+    let tree = lend.path().join("tree");
+    let bin = tree.join("bin");
+    std::fs::create_dir_all(&bin).expect("a bin directory");
+    std::fs::write(bin.join("sh"), "#!/bin/sh\necho planted\n").expect("a planted sh");
+    std::fs::set_permissions(bin.join("sh"), std::fs::Permissions::from_mode(0o755))
+        .expect("the planted sh is executable");
+    let path = format!("{}:{}", bin.display(), env::var("PATH").expect("the host has a PATH"));
+    let confine = connect(Options::default()).await;
+    let ask = Ask {
+        env: vec![("PATH".to_owned(), path.clone())],
+        ..Ask::default()
+    };
+    let boundary = support::asking(&confine, Some(&tree), &ask).await;
+
+    let mut command = boundary.command("sh").expect("sh is on the host's PATH");
+    command.args(["-c", "echo found && printf '%s' \"$PATH\""]);
+    let output = boundary.output(command, BOUND).await.expect("sh answers");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), format!("found\n{path}"));
+}
+
 // --- Connect ---
 
 #[tokio::test]
@@ -151,6 +180,9 @@ async fn passthrough_refused() {
         ("HTTPS_PROXY", "the boundary's to set"),
         ("no_proxy", "the boundary's to set"),
         ("NODE_USE_SYSTEM_CA", "refused"),
+        ("BUN_OPTIONS", "refused"),
+        ("LD_PRELOAD", "the dynamic loader's"),
+        ("DYLD_INSERT_LIBRARIES", "the dynamic loader's"),
         ("GIT_DIR", "selects a repository"),
         ("GIT_INDEX_FILE", "selects a repository"),
         ("CURSOR_API_KEY", "refused"),
@@ -168,29 +200,204 @@ async fn passthrough_refused() {
     }
 }
 
-#[tokio::test]
-async fn read_root_must_exist() {
-    let roots = tempfile::tempdir().expect("roots");
-    let error = Confine::connect(Options {
-        read_roots: vec![roots.path().join("missing")],
-        ..Options::default()
-    })
-    .await
-    .expect_err("an absent read root");
-    assert!(error.to_string().contains("does not exist"), "{error:#}");
+// --- The ask ---
 
-    let present = roots.path().join("present");
-    std::fs::create_dir(&present).expect("a read root");
-    let confine = connect(Options {
-        read_roots: vec![present.clone()],
-        ..Options::default()
-    })
-    .await;
-    assert_eq!(
-        confine.options().read_roots,
-        vec![std::fs::canonicalize(&present).expect("canonical")],
-        "read roots are canonical"
-    );
+// Every event's message and fields, flattened to text.
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
+    fn on_event(
+        &self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut text = format!("{} ", event.metadata().level());
+        event.record(&mut Flatten(&mut text));
+        self.0.lock().expect("captured lock").push(text);
+    }
+}
+
+struct Flatten<'a>(&'a mut String);
+
+impl tracing::field::Visit for Flatten<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        let _ = write!(self.0, "{}={value:?} ", field.name());
+    }
+}
+
+// A root the home lacks grants nothing and ends nothing: a toolchain the
+// adapter names and this machine does not have is no reason to refuse the
+// turn. The roots that exist are granted beside it, canonical.
+#[test]
+fn read_root_absent_skipped() {
+    let captured = Captured::default();
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(captured.clone()))
+        .expect("this test owns the process's subscriber");
+    support::under_home(async |home| {
+        std::fs::create_dir(home.join("present")).expect("a read root");
+        std::os::unix::fs::symlink(home.join("present"), home.join("link")).expect("a link");
+        let confine = connect(support::reading_beneath(home)).await;
+
+        let boundary = support::asking(
+            &confine,
+            None,
+            &support::reading(&["~/missing", "~/present", "~/link"]),
+        )
+        .await;
+        assert_eq!(boundary.read(), [home.join("present")], "present once, canonical");
+
+        let events = captured.0.lock().expect("captured lock").clone();
+        let missing = home.join("missing");
+        assert!(
+            events.iter().any(|event| {
+                event.starts_with("WARN ")
+                    && event.contains("read root does not exist")
+                    && event.contains(&missing.display().to_string())
+            }),
+            "the skipped root is logged at WARN: {events:#?}"
+        );
+    });
+}
+
+#[test]
+fn read_root_held_to_the_home() {
+    support::under_home(async |home| {
+        std::fs::create_dir(home.join("tools")).expect("a directory");
+        std::fs::write(home.join("note.txt"), "a file\n").expect("a file");
+        let outside = tempfile::tempdir().expect("outside the home");
+        std::os::unix::fs::symlink(outside.path(), home.join("away")).expect("a link out");
+        let confine = connect(support::reading_beneath(home)).await;
+
+        for (root, why) in [
+            (home.join("tools").display().to_string(), "spelled `~/<path>`"),
+            ("~/".to_owned(), "spelled `~/<path>`"),
+            ("~".to_owned(), "spelled `~/<path>`"),
+            ("tools".to_owned(), "spelled `~/<path>`"),
+            ("~/note.txt".to_owned(), "is not a directory"),
+            ("~/tools/..".to_owned(), "outside the home"),
+            ("~/away".to_owned(), "outside the home"),
+        ] {
+            let error = support::refused(&confine, &support::reading(&[&root])).await;
+            assert!(error.contains(why), "`{root}`: {error}");
+        }
+    });
+}
+
+// The host bounds what an ask reads of the home: a root at or beneath one
+// of its `read_roots`, compared as spelled and as it resolves, is granted;
+// a sibling is refused; with no `read_roots`, every root is.
+#[test]
+fn read_root_held_to_the_bound() {
+    support::under_home(async |home| {
+        std::fs::create_dir_all(home.join("tools/node")).expect("a toolchain");
+        std::fs::create_dir(home.join(".ssh")).expect("a sibling");
+        std::os::unix::fs::symlink(home.join("tools"), home.join("link")).expect("a link in");
+
+        for bound in [home.join("tools"), home.join("link")] {
+            let confine = connect(support::reading_beneath(&bound)).await;
+            let ask = support::reading(&["~/tools", "~/tools/node", "~/link"]);
+            let boundary = support::asking(&confine, None, &ask).await;
+            assert_eq!(boundary.read(), [home.join("tools"), home.join("tools/node")]);
+
+            let error = support::refused(&confine, &support::reading(&["~/.ssh"])).await;
+            assert!(error.contains("outside the host's read roots"), "{error}");
+        }
+
+        let unbounded = connect(Options::default()).await;
+        let error = support::refused(&unbounded, &support::reading(&["~/tools"])).await;
+        assert!(error.contains("outside the host's read roots"), "{error}");
+    });
+}
+
+// An ask's variables reach the process, a leading `~/` spelling the home;
+// a name the boundary holds, one the host passes through, or no name at
+// all, is refused as a passthrough is.
+#[test]
+fn env_set_and_home_expanded() {
+    support::under_home(async |home| {
+        let confine = connect(Options {
+            passthrough: vec!["SSL_CERT_FILE".to_owned()],
+            refused: vec!["CURSOR_API_KEY".to_owned()],
+            ..Options::default()
+        })
+        .await;
+
+        let ask = Ask {
+            env: vec![
+                ("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned()),
+                ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
+                ("TILDE".to_owned(), "a~/b".to_owned()),
+            ],
+            ..Ask::default()
+        };
+        let seen = environment(support::asking(&confine, None, &ask).await).await;
+        let rustup = home.join(".rustup").display().to_string();
+        assert_eq!(seen.get("RUSTUP_HOME"), Some(&rustup), "{seen:#?}");
+        assert_eq!(seen.get("CARGO_TERM_COLOR").map(String::as_str), Some("never"));
+        assert_eq!(seen.get("TILDE").map(String::as_str), Some("a~/b"), "only a leading `~/`");
+
+        for (name, why) in [
+            ("HOME", "the boundary's to set"),
+            ("https_proxy", "the boundary's to set"),
+            ("NODE_USE_SYSTEM_CA", "refused"),
+            ("BUN_OPTIONS", "refused"),
+            ("NODE_OPTIONS", "refused"),
+            ("CURSOR_API_KEY", "refused"),
+            ("LD_PRELOAD", "the dynamic loader's"),
+            ("DYLD_INSERT_LIBRARIES", "the dynamic loader's"),
+            ("GIT_DIR", "selects a repository"),
+            ("SSL_CERT_FILE", "the host's to pass through"),
+            ("1ST", "not an environment variable name"),
+            ("A=B", "not an environment variable name"),
+            ("", "not an environment variable name"),
+        ] {
+            let ask = Ask {
+                env: vec![(name.to_owned(), "x".to_owned())],
+                ..Ask::default()
+            };
+            let error = support::refused(&confine, &ask).await;
+            assert!(error.contains(name) && error.contains(why), "`{name}`: {error}");
+        }
+    });
+}
+
+// Without a home, nothing `~/` spells can be granted or expanded.
+#[test]
+#[expect(unsafe_code, reason = "the home is unset on the one thread of the test")]
+fn home_required_for_tilde() {
+    // SAFETY: nothing else runs yet; the runtime below is built after the write.
+    unsafe { env::remove_var("HOME") };
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    runtime.block_on(async {
+        let confine = connect(Options::default()).await;
+        let error = support::refused(&confine, &support::reading(&["~/tools"])).await;
+        assert!(error.contains("names the home, which the host has none of"), "{error}");
+
+        let ask = Ask {
+            env: vec![("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned())],
+            ..Ask::default()
+        };
+        let error = support::refused(&confine, &ask).await;
+        assert!(error.contains("names the home, which the host has none of"), "{error}");
+
+        // nothing `~/` asked, nothing missed
+        let seen = environment(boundary(&confine, None).await).await;
+        assert!(seen.contains_key("PATH"), "{seen:#?}");
+    });
+}
+
+// Each boundary binds a proxy of its own, admitting its ask alone.
+#[tokio::test]
+async fn proxy_per_boundary() {
+    let confine = connect(Options::default()).await;
+    let first = boundary(&confine, None).await;
+    let second = boundary(&confine, None).await;
+    assert_ne!(first.egress().address(), second.egress().address());
+
+    let proxy = format!("http://{}", first.egress().address());
+    let seen = environment(first).await;
+    assert_eq!(seen.get("HTTPS_PROXY"), Some(&proxy), "{seen:#?}");
+    assert_ne!(seen.get("HTTPS_PROXY"), Some(&format!("http://{}", second.egress().address())));
 }
 
 // --- Seatbelt (macOS) ---
@@ -200,7 +407,7 @@ mod seatbelt {
     use std::path::{Path, PathBuf};
     use std::process::Output;
 
-    use omnia_confine::Boundary;
+    use omnia_confine::{Boundary, Options};
 
     use super::{BOUND, support};
 
@@ -244,7 +451,7 @@ mod seatbelt {
         let (_lend, tree) = tree();
         let outside = tempfile::tempdir().expect("outside");
         let escape = outside.path().join("escape");
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
 
         let inside = run(
             support::boundary(&confine, Some(&tree)).await,
@@ -268,7 +475,7 @@ mod seatbelt {
     async fn host_home_unreadable() {
         let (_lend, tree) = tree();
         let home = std::env::var("HOME").expect("the host has a home");
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
         let boundary = support::boundary(&confine, Some(&tree)).await;
         let scratch = std::fs::canonicalize(boundary.scratch()).expect("the scratch");
 
@@ -285,7 +492,7 @@ mod seatbelt {
     #[tokio::test]
     async fn engine_directories_closed() {
         let (_lend, tree) = tree();
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
 
         let output = run(support::boundary(&confine, Some(&tree)).await, "cat src/main.rs").await;
         passed(&output, "reading a source file");
@@ -343,7 +550,7 @@ mod seatbelt {
         git(&["worktree", "add", "-q", copy.to_str().expect("utf-8")], &repository);
         std::fs::write(copy.join("note.txt"), "a linked copy\n").expect("a file in the copy");
 
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
         let output = run(support::boundary(&confine, Some(&copy)).await, "git --version").await;
         passed(&output, "git itself runs inside");
 
@@ -362,7 +569,7 @@ mod seatbelt {
     async fn outside_process_invisible() {
         let (_lend, tree) = tree();
         support::probe(&tree);
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
         let host = std::process::id();
 
         let probe = support::probe_outside(&tree, &["procargs", &host.to_string()]);
@@ -385,36 +592,43 @@ mod seatbelt {
     async fn loopback_server_answers() {
         let (_lend, tree) = tree();
         support::probe(&tree);
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
         let output = run(support::boundary(&confine, Some(&tree)).await, "./probe loopback").await;
         passed(&output, "a server on port 0 over loopback");
         assert!(text(&output.stdout).parse::<u16>().is_ok(), "{}", text(&output.stdout));
     }
 
-    #[tokio::test]
-    async fn read_root_readable() {
-        let (_lend, tree) = tree();
-        let roots = tempfile::tempdir().expect("roots");
-        let shared = roots.path().join("shared");
-        let private = roots.path().join("private");
-        std::fs::create_dir_all(&shared).expect("shared");
-        std::fs::create_dir_all(&private).expect("private");
-        std::fs::write(shared.join("note.txt"), "shared\n").expect("a shared file");
-        std::fs::write(private.join("secret.txt"), "secret\n").expect("a private file");
+    // A root is one boundary's: the one asking reads it, one asking
+    // nothing does not.
+    #[test]
+    fn read_root_readable() {
+        support::under_home(async |home| {
+            let (_lend, tree) = tree();
+            let shared = home.join("shared");
+            let private = home.join("private");
+            std::fs::create_dir_all(&shared).expect("shared");
+            std::fs::create_dir_all(&private).expect("private");
+            std::fs::write(shared.join("note.txt"), "shared\n").expect("a shared file");
+            std::fs::write(private.join("secret.txt"), "secret\n").expect("a private file");
+            let confine = support::connect(support::reading_beneath(home)).await;
+            let ask = support::reading(&["~/shared"]);
 
-        let confine = support::confined(vec![shared.clone()]).await;
-        let script = format!("cat '{}'", shared.join("note.txt").display());
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
-        passed(&output, "reading a read root");
-        assert_eq!(text(&output.stdout), "shared");
+            let script = format!("cat '{}'", shared.join("note.txt").display());
+            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            passed(&output, "reading a read root");
+            assert_eq!(text(&output.stdout), "shared");
 
-        let script = format!("echo x > '{}'", shared.join("written").display());
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
-        refused(&output, "writing a read root");
+            let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+            refused(&output, "reading a root another boundary asked");
 
-        let script = format!("cat '{}'", private.join("secret.txt").display());
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
-        refused(&output, "reading beside a read root");
+            let script = format!("echo x > '{}'", shared.join("written").display());
+            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            refused(&output, "writing a read root");
+
+            let script = format!("cat '{}'", private.join("secret.txt").display());
+            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            refused(&output, "reading beside a read root");
+        });
     }
 }
 
@@ -425,7 +639,7 @@ mod landlock {
     use std::path::PathBuf;
     use std::process::Output;
 
-    use omnia_confine::Boundary;
+    use omnia_confine::{Boundary, Options};
 
     use super::{BOUND, support};
 
@@ -464,7 +678,7 @@ mod landlock {
     #[tokio::test]
     async fn syscalls_refused() {
         let (_lend, tree) = tree();
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
 
         let control = support::probe_outside(&tree, &["syscall", "socket", "inet", "dgram"]);
         passed(&control, "a datagram socket opens on the host");
@@ -494,7 +708,7 @@ mod landlock {
     #[tokio::test]
     async fn sockets_admitted() {
         let (_lend, tree) = tree();
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
         for row in [
             "socket inet stream",
             "socket inet6 stream+nonblock+cloexec",
@@ -511,7 +725,7 @@ mod landlock {
     #[tokio::test]
     async fn clone3_unsupported_and_threads_run() {
         let (_lend, tree) = tree();
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
 
         let control = support::probe_outside(&tree, &["syscall", "clone3"]);
         refused(&control, "clone3 with too small a block outside", "EINVAL");
@@ -531,7 +745,7 @@ mod landlock {
         let (_lend, tree) = tree();
         let outside = tempfile::tempdir().expect("outside");
         let escape = outside.path().join("escape");
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
 
         let inside = run(
             support::boundary(&confine, Some(&tree)).await,
@@ -551,7 +765,7 @@ mod landlock {
     async fn host_home_unreadable() {
         let (_lend, tree) = tree();
         let home = std::env::var("HOME").expect("the host has a home");
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
         let boundary = support::boundary(&confine, Some(&tree)).await;
         let scratch = boundary.scratch().to_path_buf();
 
@@ -561,34 +775,41 @@ mod landlock {
         assert_eq!(text(&output.stdout), scratch.to_string_lossy(), "the process's own home");
     }
 
-    #[tokio::test]
-    async fn read_root_readable_and_kept() {
-        let (_lend, tree) = tree();
-        let roots = tempfile::tempdir().expect("roots");
-        let shared = roots.path().join("shared");
-        std::fs::create_dir_all(&shared).expect("shared");
-        std::fs::write(shared.join("note.txt"), "shared\n").expect("a shared file");
-        std::fs::write(roots.path().join("secret.txt"), "secret\n").expect("a private file");
-        let confine = support::confined(vec![shared.clone()]).await;
+    // A root is one boundary's: the one asking reads it, one asking
+    // nothing does not.
+    #[test]
+    fn read_root_readable_and_kept() {
+        support::under_home(async |home| {
+            let (_lend, tree) = tree();
+            let shared = home.join("shared");
+            std::fs::create_dir_all(&shared).expect("shared");
+            std::fs::write(shared.join("note.txt"), "shared\n").expect("a shared file");
+            std::fs::write(home.join("secret.txt"), "secret\n").expect("a private file");
+            let confine = support::connect(support::reading_beneath(home)).await;
+            let ask = support::reading(&["~/shared"]);
 
-        let script = format!("cat '{}'", shared.join("note.txt").display());
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
-        passed(&output, "reading a read root");
-        assert_eq!(text(&output.stdout), "shared");
+            let script = format!("cat '{}'", shared.join("note.txt").display());
+            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            passed(&output, "reading a read root");
+            assert_eq!(text(&output.stdout), "shared");
 
-        let script = format!("echo x > '{}'", shared.join("written").display());
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
-        refused(&output, "writing a read root", "Permission denied");
+            let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+            refused(&output, "reading a root another boundary asked", "Permission denied");
 
-        let script = format!("cat '{}'", roots.path().join("secret.txt").display());
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
-        refused(&output, "reading beside a read root", "Permission denied");
+            let script = format!("echo x > '{}'", shared.join("written").display());
+            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            refused(&output, "writing a read root", "Permission denied");
 
-        // a rename out of the root is a removal there, which read does not grant
-        let script = format!("mv '{}' ./taken.txt", shared.join("note.txt").display());
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
-        assert!(!output.status.success(), "the file was moved out: {}", text(&output.stdout));
-        assert!(shared.join("note.txt").exists(), "the read root kept its file");
+            let script = format!("cat '{}'", home.join("secret.txt").display());
+            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            refused(&output, "reading beside a read root", "Permission denied");
+
+            // a rename out of the root is a removal there, which read does not grant
+            let script = format!("mv '{}' ./taken.txt", shared.join("note.txt").display());
+            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            assert!(!output.status.success(), "the file was moved out: {}", text(&output.stdout));
+            assert!(shared.join("note.txt").exists(), "the read root kept its file");
+        });
     }
 
     // The host sets itself non-dumpable at connect, so its `/proc/<pid>`
@@ -600,7 +821,7 @@ mod landlock {
         let before = support::probe_outside(&tree, &["environ", &host]);
         passed(&before, "the host's environment reads before connecting");
 
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
         let after = support::probe_outside(&tree, &["environ", &host]);
         refused(&after, "the host's environment after connecting", "Permission denied");
 
@@ -612,7 +833,7 @@ mod landlock {
     #[tokio::test]
     async fn loopback_server_answers() {
         let (_lend, tree) = tree();
-        let confine = support::confined(vec![]).await;
+        let confine = support::connect(Options::default()).await;
         let output = run(support::boundary(&confine, Some(&tree)).await, "./probe loopback").await;
         passed(&output, "a server on port 0 over loopback");
         assert!(text(&output.stdout).parse::<u16>().is_ok(), "{}", text(&output.stdout));

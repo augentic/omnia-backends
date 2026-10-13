@@ -1,7 +1,9 @@
 //! The guest-driven harness the `model` and `worker` suites share: a client
-//! over the fake on `PATH`, a guest run through `omnia_test::host`, and the
-//! wait for every spawned process to be gone that every row ends on.
+//! over the fake on `PATH`, a guest run through `omnia_test::host` with the
+//! fake's home lent, and the wait for every spawned process to be gone that
+//! every row ends on.
 
+use std::path::Path;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -11,7 +13,7 @@ use http_body_util::{BodyExt as _, Full};
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
 use omnia::{Backend as _, ExitStatus, Mount};
-use omnia_cursor::{Client, ConnectOptions, Substrate};
+use omnia_cursor::{Client, ConnectOptions};
 use omnia_test::host::{Backends, Deployment};
 use omnia_wasi_model::WasiModel;
 use serde_json::Value;
@@ -25,6 +27,9 @@ pub const STARTUP: Duration = Duration::from_secs(120);
 /// "At once": well under every 5s timeout the client pays for a worker that will not answer.
 pub const AT_ONCE: Duration = Duration::from_secs(4);
 
+/// The `lend=` argument every guest lends the fake's home by.
+const LEND_HOME: &str = "lend=/fake";
+
 pub fn options(max_agents: usize) -> ConnectOptions {
     ConnectOptions {
         model: "auto".to_owned(),
@@ -35,10 +40,20 @@ pub fn options(max_agents: usize) -> ConnectOptions {
         max_tool_calls: 32,
         shell_roots: Vec::new(),
         read_roots: Vec::new(),
-        egress: Vec::new(),
-        worker_env: Vec::new(),
-        confine: Substrate::Unconfined,
     }
+}
+
+/// Runs `test` with the process's `HOME` pointed at a fresh directory, so a
+/// row grants `~/` roots without touching the operator's home. The runtime
+/// is built after the write, on the test's one thread.
+#[expect(unsafe_code, reason = "the home is set on the one thread of the test")]
+pub fn under_home(test: impl AsyncFnOnce(&Path)) {
+    let home = tempfile::tempdir().expect("a home");
+    let path = std::fs::canonicalize(home.path()).expect("the home resolves");
+    // SAFETY: nothing else runs yet; the runtime below is built after the write.
+    unsafe { std::env::set_var("HOME", &path) };
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    runtime.block_on(test(&path));
 }
 
 /// A client spawning one process of `fake` per lease; `connect` itself spawns nothing.
@@ -54,14 +69,27 @@ pub async fn connect(options: ConnectOptions) -> Client {
     Client::connect_with(options).await.expect("the fake handshakes")
 }
 
-/// Run one guest program over `client`, requiring a clean exit.
+/// Run one guest program over `client`, the fake's home mounted as
+/// [`Spawnable::MOUNT`] and lent with every completion, requiring a clean
+/// exit.
 pub async fn run_guest(wasm: &str, args: &[&str], client: &Client) {
     run_guest_over(wasm, args, client, []).await;
 }
 
-/// Run one guest program over `client` with `mounts` preopened, requiring a
-/// clean exit.
+/// Run one guest program over `client` with `mounts` preopened beside the
+/// fake's home, lent with every completion, requiring a clean exit.
 pub async fn run_guest_over(
+    wasm: &str, args: &[&str], client: &Client, mounts: impl IntoIterator<Item = Mount>,
+) {
+    let args: Vec<&str> = args.iter().copied().chain([LEND_HOME]).collect();
+    let mounts: Vec<Mount> = std::iter::once(Spawnable::mount()).chain(mounts).collect();
+    run_guest_lending(wasm, &args, client, mounts).await;
+}
+
+/// Run one guest program over `client` lending only what `args` and
+/// `mounts` say, requiring a clean exit: a completion lent nothing confines
+/// its worker to a private directory, where the fake finds no script.
+pub async fn run_guest_lending(
     wasm: &str, args: &[&str], client: &Client, mounts: impl IntoIterator<Item = Mount>,
 ) {
     let backends = Backends::defaults().await.model(client.clone());

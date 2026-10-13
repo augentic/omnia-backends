@@ -7,11 +7,16 @@
 //! holding the [`Config`] (script and faults), the shared JSONL log every
 //! spawned process appends to, and a `cursor-sdk-bridge` symlink to the
 //! `fake-cursor-sdk-bridge` binary (`main.rs`, this same module), put first
-//! on the test process's `PATH`. A [`Fault::Park`] holds a request until the
-//! test releases it: the process records the park and waits for the release
-//! count the test writes beside the log to pass its ticket. The suites' side
-//! — [`Spawnable`] and the liveness probe — is `cfg(test)`, since the binary
-//! is built against the crate's `[dependencies]` alone.
+//! on the test process's `PATH`. The client confines every process it spawns
+//! to its lend, so the home is also what every guest lends, mounted as
+//! [`Spawnable::MOUNT`] by the harness: the spawned fake reads its script
+//! and appends its log in its working directory, and one spawned with
+//! nothing lent runs as a plain echo that records nothing the test can see.
+//! A [`Fault::Park`] holds a request until the test releases it: the process
+//! records the park and waits for the release count the test writes beside
+//! the log to pass its ticket. The suites' side — [`Spawnable`] and the
+//! liveness probe — is `cfg(test)`, since the binary is built against the
+//! crate's `[dependencies]` alone.
 
 mod log;
 // The crate's own callback codec, by path: one codec on both sides of the
@@ -34,6 +39,8 @@ use self::log::Kind;
 pub use self::log::alive;
 #[allow(unused_imports, reason = "the suites' side of the module")]
 pub use self::log::{Event, History, Log, Process, Rpc};
+#[allow(unused_imports, reason = "the suites' side of the module")]
+pub use self::server::PROBE;
 use self::server::{Callback, Server};
 
 const SCRIPT_FILE: &str = "script.json";
@@ -238,18 +245,29 @@ pub fn dummy_key() {
     });
 }
 
+// The one home of the test process, for the harness to mount: process-wide
+// as `PATH` is, since the client finds the fake through `PATH`.
+#[cfg(test)]
+static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 /// The fake as the process the client spawns: a home holding the script, log
-/// and releases, and the `cursor-sdk-bridge` link on this test process's `PATH`.
+/// and releases, lent to every completion, and the `cursor-sdk-bridge` link
+/// on this test process's `PATH`.
 #[cfg(test)]
 pub struct Spawnable {
     home: tempfile::TempDir,
+    canonical: PathBuf,
 }
 
 #[cfg(test)]
 impl Spawnable {
-    /// Lay out `config` and put the fake first on `PATH`, where a spawned fake
-    /// finds its home; `PATH` is process-wide, so one `Spawnable` per test
-    /// process (nextest's one test each).
+    /// The preopen the harness mounts the home as for every guest, and the
+    /// path the guest lends it by.
+    pub const MOUNT: &str = "/fake";
+
+    /// Lay out `config` and put the fake first on `PATH`, where the client
+    /// finds it; `PATH` is process-wide, so one `Spawnable` per test process
+    /// (nextest's one test each).
     #[expect(unsafe_code, reason = "the client finds the bridge through PATH")]
     pub fn new(config: &Config) -> Self {
         let home =
@@ -264,6 +282,8 @@ impl Spawnable {
             home.path().join(BIN_NAME),
         )
         .expect("linking the fake binary");
+        let canonical = std::fs::canonicalize(home.path()).expect("the home resolves");
+        HOME.set(canonical.clone()).expect("one Spawnable per test process");
 
         let mut path = home.path().as_os_str().to_owned();
         if let Some(rest) = std::env::var_os("PATH") {
@@ -273,7 +293,23 @@ impl Spawnable {
         // SAFETY: set before the test spawns any thread of its own, and read
         // only by the client's spawns and their children from here on.
         unsafe { std::env::set_var("PATH", path) };
-        Self { home }
+        Self { home, canonical }
+    }
+
+    /// The home, canonical: the working directory of every spawned fake
+    /// that was lent it.
+    pub fn home(&self) -> &Path {
+        &self.canonical
+    }
+
+    /// The home as the guest's [`Self::MOUNT`], for the harness to preopen;
+    /// a `Spawnable` stands before any guest runs.
+    pub fn mount() -> omnia::Mount {
+        omnia::Mount {
+            name: Self::MOUNT.to_owned(),
+            path: HOME.get().expect("a Spawnable stands before any guest runs").clone(),
+            writable: false,
+        }
     }
 
     /// Everything every process recorded so far.
@@ -366,16 +402,12 @@ impl Releases {
 pub struct Home(PathBuf);
 
 impl Home {
-    /// Where the client found us: the first directory on `PATH` holding a
-    /// `cursor-sdk-bridge`, which `Spawnable::new` laid the link in. The
-    /// client passes a worker `PATH` and nothing of its own, so no variable
-    /// of the fake's could carry the home.
-    pub fn on_path() -> Self {
-        let path = std::env::var_os("PATH").expect("PATH reaches the worker");
-        let home = std::env::split_paths(&path)
-            .find(|dir| dir.join(BIN_NAME).exists())
-            .expect("the fake is on PATH");
-        Self(home)
+    /// Our working directory: the tree the client lent us, which the suites
+    /// lay the home out as. Nothing of the host reaches a confined worker
+    /// but its lend, so the files can live nowhere else; a worker lent
+    /// nothing finds no script and answers as an echo.
+    pub fn lent() -> Self {
+        Self(std::env::current_dir().expect("the worker has a working directory"))
     }
 
     /// The config, or a plain echo when no script was laid out.
@@ -398,7 +430,7 @@ impl Home {
 /// The spawned binary's whole life: number ourselves through the log,
 /// handshake or fail it as scripted, serve until `Shutdown`.
 pub async fn run_spawned(args: Vec<String>) {
-    let home = Home::on_path();
+    let home = Home::lent();
     let config = home.config();
     let recorder = log::Recorder::to_file(&home.log_path());
     let process = recorder.process();

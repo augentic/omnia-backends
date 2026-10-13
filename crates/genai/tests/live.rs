@@ -95,7 +95,10 @@ fn lookup_request() -> Request {
             }"#
             .to_owned(),
         })],
-        grants: Grants { workspace: None },
+        grants: Grants {
+            workspace: None,
+            worker: None,
+        },
         check: false,
     }
 }
@@ -226,7 +229,10 @@ fn check_request() -> Request {
         generation: None,
         format: Format::Json,
         tools: vec![],
-        grants: Grants { workspace: None },
+        grants: Grants {
+            workspace: None,
+            worker: None,
+        },
         check: true,
     }
 }
@@ -250,7 +256,10 @@ fn workspace_request() -> Request {
         generation: None,
         format: Format::Json,
         tools: vec![],
-        grants: Grants { workspace: None },
+        grants: Grants {
+            workspace: None,
+            worker: None,
+        },
         check: false,
     }
 }

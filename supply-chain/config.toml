@@ -1402,11 +1402,11 @@ version = "0.4.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.schemars]]
-version = "1.2.2"
+version = "1.2.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.schemars_derive]]
-version = "1.2.2"
+version = "1.2.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.seccompiler]]

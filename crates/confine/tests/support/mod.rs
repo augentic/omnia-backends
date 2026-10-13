@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use omnia_confine::{Boundary, Child, Confine, Confinement, Options, Substrate};
+use omnia_confine::{Ask, Boundary, Child, Confine, Confinement, Options, Refused};
 use tokio::process::Command;
 
 /// How long a process may take to be gone once its death was set in motion.
@@ -18,15 +18,33 @@ pub async fn connect(options: Options) -> Confine {
     Confine::connect(options).await.expect("the options hold")
 }
 
-/// A connected `Confine` under the platform's kernel substrate, reading
-/// `read_roots` beside the system.
-pub async fn confined(read_roots: Vec<PathBuf>) -> Confine {
-    connect(Options {
-        read_roots,
-        substrate: Substrate::Auto,
+/// Runs `test` with the process's `HOME` pointed at a fresh directory, so a
+/// row grants `~/` roots without touching the operator's home. The runtime
+/// is built after the write, on the test's one thread.
+#[expect(unsafe_code, reason = "the home is set on the one thread of the test")]
+pub fn under_home(test: impl AsyncFnOnce(&Path)) {
+    let home = tempfile::tempdir().expect("a home");
+    let path = std::fs::canonicalize(home.path()).expect("the home resolves");
+    // SAFETY: nothing else runs yet; the runtime below is built after the write.
+    unsafe { std::env::set_var("HOME", &path) };
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    runtime.block_on(test(&path));
+}
+
+/// Options bounding an ask's `read` roots to `root` and what is beneath it.
+pub fn reading_beneath(root: &Path) -> Options {
+    Options {
+        read_roots: vec![root.to_path_buf()],
         ..Options::default()
-    })
-    .await
+    }
+}
+
+/// An `Ask` reading `roots`, each spelled `~/`-relative.
+pub fn reading(roots: &[&str]) -> Ask {
+    Ask {
+        read: roots.iter().map(ToString::to_string).collect(),
+        ..Ask::default()
+    }
 }
 
 /// The probe binary copied into `tree` as `probe`, where the boundary may
@@ -46,10 +64,26 @@ pub fn probe_outside(tree: &Path, args: &[&str]) -> std::process::Output {
         .expect("the probe runs on the host")
 }
 
-/// A boundary around `lend` under `confine`.
+/// A boundary around `lend` under `confine`, asking nothing.
 pub async fn boundary(confine: &Confine, lend: Option<&Path>) -> Boundary {
+    asking(confine, lend, &Ask::default()).await
+}
+
+/// A boundary around `lend` under `confine`, granted `ask`.
+pub async fn asking(confine: &Confine, lend: Option<&Path>, ask: &Ask) -> Boundary {
     let confinement = Confinement::of(lend, confine.options()).await.expect("the lend holds");
-    confine.lay(confinement)
+    confine.lay(confinement, ask).await.expect("the ask holds")
+}
+
+/// What `confine` refuses `ask` for, around a private directory: the
+/// `Refused` the lay's error carries, since the ask's fault is typed.
+pub async fn refused(confine: &Confine, ask: &Ask) -> String {
+    let confinement = Confinement::of(None, confine.options()).await.expect("the lend holds");
+    let error = confine.lay(confinement, ask).await.expect_err("the ask is refused");
+    error
+        .downcast_ref::<Refused>()
+        .unwrap_or_else(|| panic!("an ask's fault is typed `Refused`: {error:#}"))
+        .to_string()
 }
 
 /// `/bin/sh -c <script>` inside `boundary`.

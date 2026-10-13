@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use omnia_confine::{Exit, Options, Substrate};
+use omnia_confine::{Exit, Options};
 use support::{alive, await_gone, boundary, connect, pid_of, sh, spawn_sh};
 use tokio::time::Instant;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -163,27 +163,27 @@ async fn fail_on_exit_passes_a_value() {
 
 // --- Terminal ---
 
-// The session is the boundary's own, read through `ps`, which the kernel
-// substrate never runs (it is setuid on macOS).
+// The session is the boundary's own: `/dev/tty` opens nothing inside, and
+// `ps`, run from the test process since the kernel substrate never runs it
+// (it is setuid on macOS), shows the child no controlling terminal.
 #[tokio::test]
 async fn tty_opens_nothing() {
-    let confine = connect(Options {
-        substrate: Substrate::Unconfined,
-        ..Options::default()
-    })
-    .await;
+    let confine = connect(Options::default()).await;
     let boundary = boundary(&confine, None).await;
     // in a subshell, since dash exits on a special builtin's redirection failing
-    let command = sh(
-        &boundary,
-        "if ( : </dev/tty ) 2>/dev/null; then echo open; else echo none; fi; ps -o tty= -p $$",
-    );
+    let command =
+        sh(&boundary, "if ( : </dev/tty ) 2>/dev/null; then echo open; else echo none; fi");
     let output = boundary.output(command, BOUND).await.expect("sh answers");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "none", "/dev/tty opened");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut lines = stdout.lines().map(str::trim);
-    assert_eq!(lines.next(), Some("none"), "/dev/tty opened: {stdout}");
-    assert!(matches!(lines.next(), Some("?" | "??" | "-")), "a controlling terminal: {stdout}");
+    let boundary = support::boundary(&confine, None).await;
+    let child = spawn_sh(boundary, "exec sleep 600", None);
+    let ps = std::process::Command::new("ps")
+        .args(["-o", "tty=", "-p", &child.pid().to_string()])
+        .output()
+        .expect("ps runs on the host");
+    let tty = String::from_utf8_lossy(&ps.stdout).trim().to_owned();
+    assert!(matches!(tty.as_str(), "?" | "??" | "-"), "a controlling terminal: {tty:?}");
 }
 
 // --- One shot ---

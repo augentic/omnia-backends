@@ -14,7 +14,6 @@ use std::time::{Duration, Instant, SystemTime};
 use http::Method;
 use omnia::Backend as _;
 use omnia_cursor::{Client, ConnectOptions};
-use omnia_test::host::scratch;
 use omnia_wasi_model::{Limits, WasiModelCtx};
 use serde_json::json;
 use support::fake_bridge::{
@@ -22,8 +21,8 @@ use support::fake_bridge::{
 };
 use support::harness::{
     AT_ONCE, CALLBACK_PATH, GONE, STARTUP, await_forked_gone, await_gone, await_gone_within,
-    await_process_gone, callback, connect, expect_error, options, run_guest, run_guest_over,
-    sole_agent, spawning,
+    await_process_gone, callback, connect, expect_error, options, run_guest, sole_agent, spawning,
+    under_home,
 };
 use tokio::task::JoinHandle;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -198,65 +197,122 @@ async fn keyless_complete() {
 
 // The worker's working directory is the lend, and what the agent may do
 // there follows where the lend sits: a lend under a shell root runs with a
-// shell, one beside it reads alone.
+// shell, the same lend under a client naming no shell root reads alone.
 #[tokio::test]
 async fn shell_on_shell_root() {
     let fake = Spawnable::new(&Config::echo());
-    let scratch = scratch();
-    scratch.write("inside/.keep", "");
-    scratch.write("outside/.keep", "");
-    let client = connect(ConnectOptions {
-        shell_roots: vec![scratch.path().join("inside")],
+    let under = connect(ConnectOptions {
+        shell_roots: vec![fake.home().to_path_buf()],
         ..options(1)
     })
     .await;
+    let beside = spawning(&fake, 1).await;
 
-    let lends = [("inside", true), ("outside", false)];
-    for (lend, _) in lends {
-        let mount = scratch.mount(true);
-        run_guest_over(test_programs::MODEL_LEND, &[&format!("./{lend}")], &client, [mount]).await;
+    let clients = [(&under, true), (&beside, false)];
+    for (client, _) in clients {
+        run_guest(test_programs::MODEL_LEND, &[Spawnable::MOUNT], client).await;
     }
     await_gone(&fake).await;
 
     let log = fake.log();
     let creates = log.saw(Rpc::CreateAgent);
     assert_eq!(creates.len(), 2, "{}", log.summary());
-    for (created, (lend, shell)) in creates.iter().zip(lends) {
-        let expected = std::fs::canonicalize(scratch.path().join(lend)).expect("the lend");
-        assert_eq!(created.text("cwd"), expected.to_string_lossy(), "{}", created.arg);
+    for (created, (_, shell)) in creates.iter().zip(clients) {
+        assert_eq!(created.text("cwd"), fake.home().to_string_lossy(), "{}", created.arg);
         let tools = created.arg["tools"].as_array().expect("a tool list");
-        assert_eq!(tools.contains(&json!("shell")), shell, "{lend}: {tools:?}");
-        assert!(tools.contains(&json!("read")), "{lend}: {tools:?}");
+        assert_eq!(tools.contains(&json!("shell")), shell, "shell {shell}: {tools:?}");
+        assert!(tools.contains(&json!("read")), "{tools:?}");
     }
 }
 
-// What the operator names in `worker_env` reaches the worker; the client's
-// own key named there is refused before anything is spawned.
+// A worker grant is for a worker that runs commands, so one over a lend
+// under no shell root is refused as the request's fault before anything is
+// spawned.
 #[tokio::test]
-async fn worker_env_passes_through() {
+async fn worker_grant_needs_a_shell() {
     let fake = Spawnable::new(&Config::echo());
-    fake_bridge::dummy_key();
-    let error = Client::connect_with(ConnectOptions {
-        worker_env: vec!["CURSOR_API_KEY".to_owned()],
-        ..options(1)
-    })
-    .await
-    .expect_err("the key is refused");
-    assert!(format!("{error:#}").contains("`CURSOR_API_KEY` is refused"), "{error:#}");
-    assert!(fake.log().events.is_empty(), "a refused option spawned a process");
+    let client = spawning(&fake, 1).await;
+    let grant = ["env:OMNIA_TEST_TOOLS=~/tools", "refused:under no shell root"];
+    run_guest(test_programs::MODEL_WORKER, &grant, &client).await;
 
-    let client = connect(ConnectOptions {
-        worker_env: vec![fake_bridge::PLANTED_SECRET.to_owned()],
-        ..options(1)
-    })
-    .await;
-    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
-    await_gone(&fake).await;
+    assert!(fake.log().events.is_empty(), "a refused grant spawned: {}", fake.log().summary());
+}
 
-    let log = fake.log();
-    let env = log.saw(Rpc::CreateAgent)[0].arg["env"].as_array().expect("the environment");
-    assert!(env.contains(&json!(fake_bridge::PLANTED_SECRET)), "{env:?}");
-    assert!(!env.contains(&json!("CURSOR_API_KEY")), "{env:?}");
+// What the grant spells against the operator's home: a `~/` read root the
+// worker reads inside, beside a sibling of the home it cannot, and a `~/`
+// env value spelling the home. A root the home lacks is skipped; an entry
+// the lay refuses — a sibling outside the deployment's `read_roots` among
+// them — ends the completion as the request's fault, nothing spawned for
+// it.
+#[test]
+fn worker_grant_laid() {
+    under_home(async |home| {
+        std::fs::create_dir(home.join("tools")).expect("a read root");
+        std::fs::write(home.join("tools/marker.txt"), "granted\n").expect("a file to read");
+        std::fs::create_dir(home.join("private")).expect("a sibling");
+        std::fs::write(home.join("private/secret.txt"), "secret\n").expect("a file beside");
+        let outside = tempfile::tempdir().expect("outside the home");
+        std::os::unix::fs::symlink(outside.path(), home.join("away")).expect("a link out");
+        let fake = Spawnable::new(&Config::echo());
+        let client = connect(ConnectOptions {
+            shell_roots: vec![fake.home().to_path_buf()],
+            read_roots: vec![home.join("tools")],
+            ..options(1)
+        })
+        .await;
+
+        let secret = home.join("private/secret.txt").display().to_string();
+        let grants = [
+            vec![
+                "read:~/tools".to_owned(),
+                "read:~/missing".to_owned(),
+                "env:OMNIA_TEST_TOOLS=~/tools".to_owned(),
+                "env:OMNIA_TEST_PROBE=~/tools/marker.txt".to_owned(),
+            ],
+            vec!["read:~/tools".to_owned(), format!("env:OMNIA_TEST_PROBE={secret}")],
+        ];
+        for grant in &grants {
+            let grant: Vec<&str> = grant.iter().map(String::as_str).collect();
+            run_guest(test_programs::MODEL_WORKER, &grant, &client).await;
+        }
+        for (entry, why) in [
+            ("read:~/away", "outside the home"),
+            ("read:~/private", "outside the host's read roots"),
+            ("read:~/tools/marker.txt", "is not a directory"),
+            ("env:HOME=/elsewhere", "the boundary's to set"),
+            ("env:CURSOR_API_KEY=k", "is refused"),
+            ("env:BUN_OPTIONS=--preload=./x.js", "is refused"),
+            ("env:LD_PRELOAD=./x.so", "the dynamic loader's"),
+            ("env:SSL_CERT_FILE=./ca.pem", "the host's to pass through"),
+            ("env:GIT_DIR=.git", "selects a repository"),
+        ] {
+            let refused = format!("refused:{why}");
+            run_guest(test_programs::MODEL_WORKER, &[entry, &refused], &client).await;
+        }
+        await_gone(&fake).await;
+
+        let log = fake.log();
+        let creates = log.saw(Rpc::CreateAgent);
+        assert_eq!(creates.len(), grants.len(), "one agent per laid grant: {}", log.summary());
+
+        let granted = creates[0];
+        let tools = granted.arg["tools"].as_array().expect("a tool list");
+        assert!(tools.contains(&json!("shell")), "{tools:?}");
+        assert_eq!(
+            granted.arg["granted"],
+            json!({
+                "OMNIA_TEST_TOOLS": home.join("tools"),
+                "OMNIA_TEST_PROBE": home.join("tools/marker.txt"),
+            }),
+            "{}",
+            granted.arg
+        );
+        assert_eq!(granted.arg["probe"], json!({ "ok": "granted\n" }), "{}", granted.arg);
+
+        let beside = creates[1];
+        assert_eq!(beside.arg["granted"], json!({ "OMNIA_TEST_PROBE": secret }));
+        assert!(beside.arg["probe"]["err"].is_string(), "{}", beside.arg);
+    });
 }
 
 // --- Abandon: the guest drops a completion at every point it can be waiting ---
@@ -293,14 +349,28 @@ async fn abandon_during_handshake() {
 }
 
 // Process 2 forks a child, then never prints its ready line: the loser is
-// dropped inside the stderr scan.
+// dropped inside the stderr scan. Process 1 holds its answer until the
+// loser has forked, since the two are spawned one fork apart.
 #[tokio::test]
 async fn abandon_before_ready() {
     let fake = Spawnable::new(
-        &Config::echo().fault_on(2, Fault::Grandchild).fault_on(2, Fault::NeverReady),
+        &Config::echo()
+            .fault_on(1, Fault::Park(Point::Send))
+            .fault_on(2, Fault::Grandchild)
+            .fault_on(2, Fault::NeverReady),
     );
     let client = spawning(&fake, 2).await;
-    run_guest(test_programs::MODEL_FANOUT_ABANDON, &["2"], &client).await;
+
+    let guest = abandon_guest(&client, 2);
+    fake.await_parked(Point::Send, 1).await;
+    fake_bridge::poll(
+        || fake.log().workers().get(1).is_some_and(|loser| !loser.forked().is_empty()),
+        STARTUP,
+        "process 2's fork",
+    )
+    .await;
+    assert!(fake.release_one(Point::Send));
+    guest.await.expect("the guest task joins");
     await_gone_within(&fake, AT_ONCE).await;
 
     let log = fake.log();

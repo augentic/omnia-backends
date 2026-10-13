@@ -66,6 +66,9 @@ impl Relay {
     // The REST API the bridge's own client defaults to, which every call
     // under `/v1/` is forwarded to.
     pub const API: &str = "https://api.cursor.com";
+    // Cursor's backend, where every other call of a client loaded from the
+    // environment is forwarded.
+    pub const BACKEND: &str = "https://api2.cursor.sh";
 
     // Bind on the IPv6 loopback, forwarding to `backend`, an `http` or
     // `https` URL; the client to the upstream is built once here.

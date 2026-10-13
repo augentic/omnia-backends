@@ -1,5 +1,5 @@
 //! The egress proxy: the one way out of the boundary, a loopback `CONNECT`
-//! proxy admitting the hosts the operator named and nothing else.
+//! proxy admitting the hosts the ask named and nothing else.
 
 use std::convert::Infallible;
 use std::fmt;
@@ -28,11 +28,13 @@ const METADATA: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200)),
 ];
 
-/// Why an address a listed host resolved to is not connected.
+/// Why an address a listed host names or resolves to is not connected.
 ///
 /// A name on the allowlist is resolved once and every address it answers
-/// is held to these classes, so a listed name cannot lead the tunnel back
-/// to the host itself, its network segment, or a cloud's metadata service.
+/// is held to these classes; a listed IP literal is held to them as
+/// written, loopback alone admitted. So no listed host leads the tunnel
+/// back to the host itself, its network segment, or a cloud's metadata
+/// service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refusal {
@@ -165,15 +167,14 @@ pub fn own_addresses() -> Result<Vec<IpAddr>> {
     }
 }
 
-// One allowlist entry as the operator spelled it.
+// One allowlist entry as the ask spelled it.
 #[derive(Debug, Clone)]
 enum Entry {
     // A host name, matched whole and without regard to case.
     Exact(String),
     // `*.suffix`: the suffix and every name beneath it.
     Suffix(String),
-    // An IP literal, connected as written and never vetted: how an
-    // operator names a loopback mirror.
+    // An IP literal, vetted as written: how an ask names a loopback mirror.
     Literal(IpAddr),
 }
 
@@ -192,7 +193,7 @@ impl Entry {
 enum Admission {
     // A listed name: resolve and vet every address.
     Name,
-    // A listed literal: connect as written.
+    // A listed literal: vet as written.
     Literal(IpAddr),
 }
 
@@ -283,9 +284,10 @@ async fn serve(listener: TcpListener, allowlist: Arc<Allowlist>) {
     }
 }
 
-// `CONNECT host:port` alone: the host held to the allowlist, a name
-// resolved once and every answer vetted, the tunnel opened before the
-// client hears `200`, so a refusal is a status and never a closed tunnel.
+// `CONNECT host:port` alone: the host held to the allowlist and every
+// address vetted, a name resolved once and each answer classed, a literal
+// classed as written, the tunnel opened before the client hears `200`, so
+// a refusal is a status and never a closed tunnel.
 async fn handle(request: Request<Incoming>, allowlist: &Allowlist) -> Response<Full<Bytes>> {
     if request.method() != Method::CONNECT {
         return answer(StatusCode::METHOD_NOT_ALLOWED, "only CONNECT is proxied");
@@ -298,21 +300,23 @@ async fn handle(request: Request<Incoming>, allowlist: &Allowlist) -> Response<F
         return answer(StatusCode::BAD_REQUEST, "CONNECT needs host:port");
     };
 
-    let upstream = match allowlist.admits(&host) {
-        None => {
-            tracing::warn!(host, port, "egress refused: not on the allowlist");
-            return answer(StatusCode::FORBIDDEN, &format!("`{host}` is not on the allowlist"));
+    let admitted = match allowlist.admits(&host) {
+        None => Err("is not on the allowlist".to_owned()),
+        Some(Admission::Literal(address)) => {
+            literal(address, port).map_err(|refusal| format!("is {refusal}"))
         }
-        Some(Admission::Literal(address)) => connect(vec![SocketAddr::new(address, port)]).await,
-        Some(Admission::Name) => match vetted(&host, port).await {
-            Ok(addresses) => connect(addresses).await,
-            Err(refusal) => {
-                tracing::warn!(host, port, %refusal, "egress refused");
-                return answer(StatusCode::FORBIDDEN, &format!("`{host}` resolves to {refusal}"));
-            }
-        },
+        Some(Admission::Name) => {
+            vetted(&host, port).await.map_err(|refusal| format!("resolves to {refusal}"))
+        }
     };
-    let upstream = match upstream {
+    let addresses = match admitted {
+        Ok(addresses) => addresses,
+        Err(why) => {
+            tracing::warn!(host, port, why, "egress refused");
+            return answer(StatusCode::FORBIDDEN, &format!("`{host}` {why}"));
+        }
+    };
+    let upstream = match connect(addresses).await {
         Ok(upstream) => upstream,
         Err(error) => {
             tracing::warn!(host, port, error = format!("{error:#}"), "egress unreachable");
@@ -337,13 +341,19 @@ async fn handle(request: Request<Incoming>, allowlist: &Allowlist) -> Response<F
     Response::new(Full::default())
 }
 
+// A listed literal as written, unless it is of a refused class; loopback
+// is admitted, the mirror a literal exists to name.
+fn literal(address: IpAddr, port: u16) -> std::result::Result<Vec<SocketAddr>, Refusal> {
+    match Refusal::of(address, &own()) {
+        None | Some(Refusal::Loopback) => Ok(vec![SocketAddr::new(address, port)]),
+        Some(refusal) => Err(refusal),
+    }
+}
+
 // The addresses a listed name resolved to that pass the vetting; `Err`
 // names what the last refused one was when none pass.
 async fn vetted(host: &str, port: u16) -> std::result::Result<Vec<SocketAddr>, Refusal> {
-    let own = own_addresses().unwrap_or_else(|error| {
-        tracing::warn!(error = format!("{error:#}"), "egress cannot read the host's addresses");
-        Vec::new()
-    });
+    let own = own();
     let mut admitted = Vec::new();
     let mut refused = None;
     if let Ok(resolved) = tokio::net::lookup_host((host, port)).await {
@@ -358,6 +368,14 @@ async fn vetted(host: &str, port: u16) -> std::result::Result<Vec<SocketAddr>, R
         (true, Some(refusal)) => Err(refusal),
         _ => Ok(admitted),
     }
+}
+
+// The host's own addresses, or none where they cannot be read.
+fn own() -> Vec<IpAddr> {
+    own_addresses().unwrap_or_else(|error| {
+        tracing::warn!(error = format!("{error:#}"), "egress cannot read the host's addresses");
+        Vec::new()
+    })
 }
 
 async fn connect(addresses: Vec<SocketAddr>) -> Result<TcpStream> {

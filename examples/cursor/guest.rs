@@ -47,7 +47,10 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
                 description: "Lifecycle stages".to_string(),
                 parameters: json!({ "type": "object", "properties": {} }).to_string(),
             })],
-            grants: Grants { workspace },
+            grants: Grants {
+                workspace,
+                worker: None,
+            },
             check: false,
         };
 

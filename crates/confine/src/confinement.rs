@@ -283,8 +283,7 @@ impl Boundary {
         if program.contains('/') {
             return Ok(PathBuf::from(program));
         }
-        let path = self.env.iter().find(|(name, _)| name == "PATH").map(|(_, v)| v.clone()).unwrap_or_default();
-        env::split_paths(&path)
+        env::split_paths(&self.path)
             .map(|dir| dir.join(program))
             .find(|candidate| executable(candidate))
             .with_context(|| format!("`{program}` is not on PATH"))

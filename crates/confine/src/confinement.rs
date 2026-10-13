@@ -260,7 +260,8 @@ impl Boundary {
         };
         enter(&mut command, self.confinement.dir.as_raw_fd());
         #[cfg(target_os = "linux")]
-        if let Wall::Landlock(linux) = &self.wall {
+        {
+            let Wall::Landlock(linux) = &self.wall;
             linux.restrain(
                 &mut command,
                 &linux::Place {

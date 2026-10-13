@@ -97,7 +97,7 @@ impl Linux {
                   only on its failure path"
     )]
     pub fn restrain(&self, command: &mut Command, place: &Place<'_>) -> Result<()> {
-        let mut ruleset = Some(self.ruleset(place)?);
+        let mut ruleset = Some(Self::ruleset(place)?);
         let mut filters = Some(self.filters.clone());
         unsafe {
             command.pre_exec(move || {
@@ -118,7 +118,7 @@ impl Linux {
         Ok(())
     }
 
-    fn ruleset(&self, place: &Place<'_>) -> Result<RulesetCreated> {
+    fn ruleset(place: &Place<'_>) -> Result<RulesetCreated> {
         let abi = REQUIRED;
         let mut ruleset = Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)

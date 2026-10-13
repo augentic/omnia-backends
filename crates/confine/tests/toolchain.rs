@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
-use omnia_confine::{Ask, Confine};
+use omnia_confine::{Ask, Confine, Options};
 
 const BOUND: Duration = Duration::from_secs(120);
 const LIVE_BOUND: Duration = Duration::from_secs(300);
@@ -92,17 +92,14 @@ fn on_path(program: &str) -> PathBuf {
         })
 }
 
-// The host's home, canonical: what the toolchain's `~/` spells, and the
-// bound its roots are held to.
+// The host's home, canonical: what the toolchain's `~/` spells.
 fn home() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).expect("the host has a home");
     std::fs::canonicalize(home).expect("the home resolves")
 }
 
-// A `Confine` whose read roots are bounded at the home, so a toolchain
-// anywhere beneath it can be asked for.
 async fn connect() -> Confine {
-    support::connect(support::reading_beneath(&home())).await
+    support::connect(Options::default()).await
 }
 
 // The install prefix of each tool under the host's `$HOME`, which the

@@ -46,7 +46,6 @@ fn options() -> ConnectOptions {
         max_agents: 4,
         max_tool_calls: 128,
         shell_roots: Vec::new(),
-        read_roots: Vec::new(),
     }
 }
 
@@ -263,7 +262,6 @@ async fn worker_killed_mid_run_recovers() -> Result<()> {
         max_agents: 1,
         max_tool_calls: 128,
         shell_roots: Vec::new(),
-        read_roots: Vec::new(),
     })
     .await?;
     let completion = {

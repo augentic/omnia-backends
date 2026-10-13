@@ -241,9 +241,9 @@ async fn worker_grant_needs_a_shell() {
 // What the grant spells against the operator's home: a `~/` read root the
 // worker reads inside, beside a sibling of the home it cannot, and a `~/`
 // env value spelling the home. A root the home lacks is skipped; an entry
-// the lay refuses — a sibling outside the deployment's `read_roots` among
-// them — ends the completion as the request's fault, nothing spawned for
-// it.
+// the lay refuses — a credential store among them, with nothing of the
+// deployment set — ends the completion as the request's fault, nothing
+// spawned for it.
 #[test]
 fn worker_grant_laid() {
     under_home(async |home| {
@@ -256,7 +256,6 @@ fn worker_grant_laid() {
         let fake = Spawnable::new(&Config::echo());
         let client = connect(ConnectOptions {
             shell_roots: vec![fake.home().to_path_buf()],
-            read_roots: vec![home.join("tools")],
             ..options(1)
         })
         .await;
@@ -277,7 +276,7 @@ fn worker_grant_laid() {
         }
         for (entry, why) in [
             ("read:~/away", "outside the home"),
-            ("read:~/private", "outside the host's read roots"),
+            ("read:~/.ssh", "a credential store"),
             ("read:~/tools/marker.txt", "is not a directory"),
             ("env:HOME=/elsewhere", "the boundary's to set"),
             ("env:CURSOR_API_KEY=k", "is refused"),

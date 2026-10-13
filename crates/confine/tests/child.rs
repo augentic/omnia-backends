@@ -171,7 +171,8 @@ async fn tty_opens_nothing() {
     let confine = connect(Options::default()).await;
     let boundary = boundary(&confine, None).await;
     // in a subshell, since dash exits on a special builtin's redirection failing
-    let command = sh(&boundary, "if ( : </dev/tty ) 2>/dev/null; then echo open; else echo none; fi");
+    let command =
+        sh(&boundary, "if ( : </dev/tty ) 2>/dev/null; then echo open; else echo none; fi");
     let output = boundary.output(command, BOUND).await.expect("sh answers");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "none", "/dev/tty opened");
 

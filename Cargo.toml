@@ -66,7 +66,7 @@ prost = "0.14.4"
 prost-types = "0.14.4"
 reqwest = "0.13.5"
 rustls = { version = "0.23.45", default-features = false, features = ["logging", "ring", "std"] }
-schemars = "1.2.2"
+schemars = "1.2.3"
 seccompiler = "0.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -97,36 +97,37 @@ omnia-wasi-vault = "0.37.0"
 omnia-wasi-vcs = "0.37.0"
 
 [patch.crates-io]
-# LOCAL-PATCH omnia = { git = "https://github.com/augentic/omnia"}
-omnia = { path = "../omnia/crates/omnia" }
-# LOCAL-PATCH omnia-core = { git = "https://github.com/augentic/omnia" }
-omnia-core = { path = "../omnia/crates/omnia-core" }
-# LOCAL-PATCH omnia-plugin = { git = "https://github.com/augentic/omnia" }
-omnia-plugin = { path = "../omnia/crates/omnia-plugin" }
-# LOCAL-PATCH omnia-sdk = { git = "https://github.com/augentic/omnia" }
-omnia-sdk = { path = "../omnia/crates/omnia-sdk" }
-# LOCAL-PATCH omnia-test = { git = "https://github.com/augentic/omnia" }
-omnia-test = { path = "../omnia/crates/omnia-test" }
-# LOCAL-PATCH omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
-# LOCAL-PATCH omnia-wasi-docstore = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
-# LOCAL-PATCH omnia-wasi-identity = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }
-# LOCAL-PATCH omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-keyvalue = { path = "../omnia/crates/wasi-keyvalue" }
-# LOCAL-PATCH omnia-wasi-messaging = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-messaging = { path = "../omnia/crates/wasi-messaging" }
-# LOCAL-PATCH omnia-wasi-model = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-model = { path = "../omnia/crates/wasi-model" }
-# LOCAL-PATCH omnia-wasi-otel = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-otel = { path = "../omnia/crates/wasi-otel" }
-# LOCAL-PATCH omnia-wasi-sql = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-sql = { path = "../omnia/crates/wasi-sql" }
-# LOCAL-PATCH omnia-wasi-vault = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-vault = { path = "../omnia/crates/wasi-vault" }
-# LOCAL-PATCH omnia-wasi-vcs = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-vcs = { path = "../omnia/crates/wasi-vcs" }
+omnia = { git = "https://github.com/augentic/omnia"}
+omnia-core = { git = "https://github.com/augentic/omnia" }
+omnia-plugin = { git = "https://github.com/augentic/omnia" }
+omnia-sdk = { git = "https://github.com/augentic/omnia" }
+omnia-test = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-docstore = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-identity = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-messaging = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-model = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-otel = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-sql = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-vault = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-vcs = { git = "https://github.com/augentic/omnia" }
+
+# omnia = { path = "../omnia/crates/omnia" }
+# omnia-core = { path = "../omnia/crates/omnia-core" }
+# omnia-plugin = { path = "../omnia/crates/omnia-plugin" }
+# omnia-sdk = { path = "../omnia/crates/omnia-sdk" }
+# omnia-test = { path = "../omnia/crates/omnia-test" }
+# omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
+# omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
+# omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }
+# omnia-wasi-keyvalue = { path = "../omnia/crates/wasi-keyvalue" }
+# omnia-wasi-messaging = { path = "../omnia/crates/wasi-messaging" }
+# omnia-wasi-model = { path = "../omnia/crates/wasi-model" }
+# omnia-wasi-otel = { path = "../omnia/crates/wasi-otel" }
+# omnia-wasi-sql = { path = "../omnia/crates/wasi-sql" }
+# omnia-wasi-vault = { path = "../omnia/crates/wasi-vault" }
+# omnia-wasi-vcs = { path = "../omnia/crates/wasi-vcs" }
 
 [profile.release]
 lto = true

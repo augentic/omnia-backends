@@ -171,8 +171,8 @@ pub struct Boundary {
 
 impl Boundary {
     pub(crate) const fn new(
-        confinement: Confinement, env: Vec<(OsString, OsString)>, wall: Wall,
-        read: Vec<PathBuf>, egress: Egress,
+        confinement: Confinement, env: Vec<(OsString, OsString)>, wall: Wall, read: Vec<PathBuf>,
+        egress: Egress,
     ) -> Self {
         Self {
             confinement,

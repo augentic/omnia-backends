@@ -179,7 +179,10 @@ mod tests {
             generation: None,
             format: Format::Text,
             tools,
-            grants: Grants { workspace: None, worker: None },
+            grants: Grants {
+                workspace: None,
+                worker: None,
+            },
             check: false,
         }
     }

@@ -136,9 +136,9 @@ impl fmt::Debug for Confinement {
     }
 }
 
-// A root is compared as spelled and as it resolves, since the lend is
+// A root is compared as spelled and as it resolves, since `path` is
 // canonical and a root may be a symlink away from it.
-async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
+pub async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
     for root in roots {
         if path.starts_with(root) {
             return true;

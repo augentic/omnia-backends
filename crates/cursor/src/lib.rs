@@ -80,10 +80,12 @@ impl ConnectOptions {
     // What every worker reaches: the bridge's own settings as the
     // environment it reads of the host, and never the client's own
     // credential or the backend address, which would point the bridge past
-    // the relay. What one worker reaches beyond is its completion's ask.
+    // the relay. What one worker reaches beyond is its completion's ask,
+    // its `read` roots held beneath the deployment's.
     fn confine(&self) -> Options {
         Options {
             shell_roots: self.shell_roots.clone(),
+            read_roots: self.read_roots.clone(),
             passthrough: Worker::PASSTHROUGH.iter().map(ToString::to_string).collect(),
             refused: Worker::REFUSED.iter().map(ToString::to_string).collect(),
         }
@@ -136,9 +138,14 @@ mod config {
         /// `:`-separated and relative to the invocation directory; a
         /// workspace lent elsewhere is read-only. What a worker reaches
         /// beyond its workspace — hosts, `~/` roots, variables — is the
-        /// completion's `grants.worker`, never a setting here.
+        /// completion's `grants.worker`, bounded by `read_roots` alone.
         #[env(from = "CURSOR_SHELL_ROOTS", default = "", with = paths)]
         pub shell_roots: Vec<PathBuf>,
+        /// Trees a worker grant's `~/` read roots must fall at or beneath,
+        /// `:`-separated and relative to the invocation directory; with
+        /// none, no grant reads the operator's home.
+        #[env(from = "CURSOR_READ_ROOTS", default = "", with = paths)]
+        pub read_roots: Vec<PathBuf>,
     }
 
     #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]

@@ -31,6 +31,14 @@ pub fn under_home(test: impl AsyncFnOnce(&Path)) {
     runtime.block_on(test(&path));
 }
 
+/// Options bounding an ask's `read` roots to `root` and what is beneath it.
+pub fn reading_beneath(root: &Path) -> Options {
+    Options {
+        read_roots: vec![root.to_path_buf()],
+        ..Options::default()
+    }
+}
+
 /// An `Ask` reading `roots`, each spelled `~/`-relative.
 pub fn reading(roots: &[&str]) -> Ask {
     Ask {

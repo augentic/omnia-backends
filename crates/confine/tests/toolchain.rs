@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
-use omnia_confine::{Ask, Confine, Options};
+use omnia_confine::{Ask, Confine};
 
 const BOUND: Duration = Duration::from_secs(120);
 const LIVE_BOUND: Duration = Duration::from_secs(300);
@@ -92,12 +92,24 @@ fn on_path(program: &str) -> PathBuf {
         })
 }
 
+// The host's home, canonical: what the toolchain's `~/` spells, and the
+// bound its roots are held to.
+fn home() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).expect("the host has a home");
+    std::fs::canonicalize(home).expect("the home resolves")
+}
+
+// A `Confine` whose read roots are bounded at the home, so a toolchain
+// anywhere beneath it can be asked for.
+async fn connect() -> Confine {
+    support::connect(support::reading_beneath(&home())).await
+}
+
 // The install prefix of each tool under the host's `$HOME`, which the
 // scratch `HOME` hides, spelled `~/`-relative: `<prefix>/bin/<tool>` as
 // nvm, volta, and fnm lay it.
 fn toolchain_roots() -> Vec<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).expect("the host has a home");
-    let home = std::fs::canonicalize(home).expect("the home resolves");
+    let home = home();
     let mut roots = Vec::new();
     for tool in ["node", "npm"] {
         let bin = on_path(tool).parent().expect("a directory").to_owned();
@@ -146,7 +158,7 @@ fn passed(output: &Output, what: &str) {
 #[tokio::test]
 async fn node_serves_on_port_zero() {
     let (_lend, tree) = tree(&[("serve.mjs", SERVE)]);
-    let confine = support::connect(Options::default()).await;
+    let confine = connect().await;
 
     let output = run(&confine, &toolchain(vec![]), &tree, "node serve.mjs", BOUND).await;
     passed(&output, "a server on port 0, fetched from inside");
@@ -156,7 +168,7 @@ async fn node_serves_on_port_zero() {
 #[tokio::test]
 async fn node_test_runs() {
     let (_lend, tree) = tree(&[("test/worker.test.mjs", WORKER_TEST)]);
-    let confine = support::connect(Options::default()).await;
+    let confine = connect().await;
 
     let script = "node --test --test-force-exit --test-timeout=5000 --test-reporter=tap \
                   test/worker.test.mjs";
@@ -179,7 +191,7 @@ async fn npm_installs_a_local_dependency() {
         ("dep/index.js", "module.exports = \"dep answers\";\n"),
         ("index.js", "console.log(require(\"dep\"));\n"),
     ]);
-    let confine = support::connect(Options::default()).await;
+    let confine = connect().await;
     let boundary = support::asking(&confine, Some(&tree), &toolchain(vec![])).await;
     let cache = boundary.scratch().join(".npm");
 
@@ -212,7 +224,7 @@ async fn live_toolchain_through_the_proxy() {
         ("tsconfig.json", TSCONFIG),
         ("src/index.ts", INDEX_TS),
     ]);
-    let confine = support::connect(Options::default()).await;
+    let confine = connect().await;
     let ask = toolchain(vec!["registry.npmjs.org".to_owned()]);
 
     let script = format!(

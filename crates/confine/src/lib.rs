@@ -29,6 +29,11 @@ use crate::egress::Egress;
 pub struct Options {
     /// Trees a lend at or beneath which runs with a shell.
     pub shell_roots: Vec<PathBuf>,
+    /// Trees an [`Ask`]'s `read` roots must fall at or beneath.
+    ///
+    /// The deployment's bound on what a process reads of the operator's
+    /// home; with none, no `read` root is granted.
+    pub read_roots: Vec<PathBuf>,
     /// Host environment variables copied into a confined process, by name.
     pub passthrough: Vec<String>,
     /// Environment variable names that must never reach a confined process.
@@ -151,9 +156,10 @@ impl Confine {
 
     /// Connects: holds `options` to the host and reads what a process inherits.
     ///
-    /// `shell_roots` are made absolute against the current directory, so a
-    /// lend is compared with them however they were spelled. The operator's
-    /// `HOME` is read here, canonical, as what an [`Ask`]'s `~/` spells.
+    /// `shell_roots` and `read_roots` are made absolute against the current
+    /// directory, so a lend or a root is compared with them however they
+    /// were spelled. The operator's `HOME` is read here, canonical, as what
+    /// an [`Ask`]'s `~/` spells.
     ///
     /// # Errors
     ///
@@ -171,6 +177,10 @@ impl Confine {
         for root in &mut options.shell_roots {
             *root = path::absolute(&*root)
                 .with_context(|| format!("resolving shell root {}", root.display()))?;
+        }
+        for root in &mut options.read_roots {
+            *root = path::absolute(&*root)
+                .with_context(|| format!("resolving read root {}", root.display()))?;
         }
 
         let wall = Wall::platform().await?;
@@ -215,7 +225,7 @@ impl Confine {
         Ok(())
     }
 
-    /// The options as connected: absolute `shell_roots`.
+    /// The options as connected: absolute `shell_roots` and `read_roots`.
     #[must_use]
     pub const fn options(&self) -> &Options {
         &self.options
@@ -228,14 +238,16 @@ impl Confine {
     /// and `TMPDIR` the confinement's scratch, its proxy variables an egress
     /// proxy bound for it alone and admitting the ask's `egress`, with the
     /// host's own loopback excepted, and the ask's `env` over them. Each of
-    /// the ask's `read` roots is resolved against the operator's home; one
-    /// that does not exist is logged at WARN and granted nothing.
+    /// the ask's `read` roots is resolved against the operator's home and
+    /// held beneath the [`Options`]' `read_roots`; one that does not exist
+    /// is logged at WARN and granted nothing.
     ///
     /// # Errors
     ///
     /// Returns a [`Refused`] when a `read` root is not spelled `~/<path>`,
-    /// resolves outside the home or to a file, or names a home the host has
-    /// none of, or when an `env` name is not a variable name or is one the
+    /// resolves outside the home, outside every `read_roots` entry, or to a
+    /// file, or names a home the host has none of, or when an `env` name is
+    /// not a variable name or is one the
     /// boundary holds (its own, a refused one, the dynamic loader's, a
     /// `GIT_DIR` sibling, or a `passthrough` of the host's); and a plain
     /// error when a root cannot be read or the proxy cannot be bound.
@@ -279,6 +291,9 @@ impl Confine {
             };
             if root == home || !root.starts_with(home) {
                 refuse!("read root `{entry}` resolves to {}, outside the home", root.display());
+            }
+            if !confinement::beneath_any(&root, &self.options.read_roots).await {
+                refuse!("read root `{entry}` is outside the host's read roots");
             }
             let metadata = tokio::fs::metadata(&root)
                 .await

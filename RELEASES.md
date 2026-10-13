@@ -134,17 +134,18 @@ Unreleased
   now sits beside it as a knob of the same backend.
 - `omnia-confine`, the crate that owns a host process in the model's
   trust domain: `Confine::connect` holds the backend's `Options` to the
-  host once — `shell_roots`, `passthrough`, `refused` — reads the
-  operator's `HOME` as what a `~/` spells, and probes the kernel
+  host once — `shell_roots`, `read_roots`, `passthrough`, `refused` —
+  reads the operator's `HOME` as what a `~/` spells, and probes the kernel
   substrate, refusing to connect where none runs; `Confinement::of` puts
   one process at a lend, or in a private directory when nothing is lent;
   `Confine::lay` wraps it in a `Boundary` under the process's own `Ask` —
   `egress`, the hosts its commands may reach; `read`, the roots beneath
-  the home it may read, each spelled `~/<path>`, one the home lacks
-  logged at WARN and granted nothing; `env`, the variables set for it, a
-  value's leading `~/` the home — binding the egress proxy for that
-  boundary alone, and answering an ask that breaks a rule of the lay (a
-  root spelled otherwise, resolving outside the home, or a file; a
+  the home it may read, each spelled `~/<path>` and held beneath the
+  `read_roots` the deployment set, one the home lacks logged at WARN and
+  granted nothing; `env`, the variables set for it, a value's leading
+  `~/` the home — binding the egress proxy for that boundary alone, and
+  answering an ask that breaks a rule of the lay (a root spelled
+  otherwise, resolving outside the home or the `read_roots`, or a file; a
   variable the boundary holds, one the dynamic loader or a runtime reads
   at startup, one the host passes through, or no name at all) with the
   typed `Refused`, which a backend tells from a host failure. The
@@ -185,8 +186,10 @@ Unreleased
   roots, and `env` the guest spells per request — laid as the boundary's
   `Ask`: a grant over a lend under no shell root, or one the lay refuses
   (`CURSOR_API_KEY` or `CURSOR_BACKEND_URL` as an `env`, a root outside
-  the home), is `invalid-request` before anything is spawned, and no
-  setting of the deployment widens a worker's reach. A lend at or beneath
+  the home or outside `CURSOR_READ_ROOTS`, the deployment's bound on what
+  a grant reads of the home), is `invalid-request` before anything is
+  spawned, and no setting of the deployment widens a worker's reach
+  beyond what its completion asked. A lend at or beneath
   a shell root runs with the `shell` tool beside the read-only set, so an
   agent can run the tree's own build and tests; the inactivity window
   stands down while a shell command runs, since the bridge bounds it by

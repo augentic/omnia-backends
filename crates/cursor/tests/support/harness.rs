@@ -39,7 +39,6 @@ pub fn options(max_agents: usize) -> ConnectOptions {
         max_agents,
         max_tool_calls: 32,
         shell_roots: Vec::new(),
-        read_roots: Vec::new(),
     }
 }
 

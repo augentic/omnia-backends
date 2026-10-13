@@ -236,7 +236,7 @@ fn read_root_absent_skipped() {
     support::under_home(async |home| {
         std::fs::create_dir(home.join("present")).expect("a read root");
         std::os::unix::fs::symlink(home.join("present"), home.join("link")).expect("a link");
-        let confine = connect(support::reading_beneath(home)).await;
+        let confine = connect(Options::default()).await;
 
         let boundary = support::asking(
             &confine,
@@ -266,7 +266,7 @@ fn read_root_held_to_the_home() {
         std::fs::write(home.join("note.txt"), "a file\n").expect("a file");
         let outside = tempfile::tempdir().expect("outside the home");
         std::os::unix::fs::symlink(outside.path(), home.join("away")).expect("a link out");
-        let confine = connect(support::reading_beneath(home)).await;
+        let confine = connect(Options::default()).await;
 
         for (root, why) in [
             (home.join("tools").display().to_string(), "spelled `~/<path>`"),
@@ -283,29 +283,45 @@ fn read_root_held_to_the_home() {
     });
 }
 
-// The host bounds what an ask reads of the home: a root at or beneath one
-// of its `read_roots`, compared as spelled and as it resolves, is granted;
-// a sibling is refused; with no `read_roots`, every root is.
+// Nothing of the host bounds what an ask reads of the home but the
+// credential stores: a toolchain anywhere beneath the home is granted with
+// nothing set, and a store is refused as spelled, through a link, from
+// above, and on a machine that lacks it.
 #[test]
-fn read_root_held_to_the_bound() {
+fn read_root_credential_store_refused() {
     support::under_home(async |home| {
         std::fs::create_dir_all(home.join("tools/node")).expect("a toolchain");
-        std::fs::create_dir(home.join(".ssh")).expect("a sibling");
+        std::fs::create_dir_all(home.join(".config/nvim")).expect("a tool's settings");
+        std::fs::create_dir(home.join(".ssh")).expect("a store");
+        std::fs::create_dir(home.join("dotfiles")).expect("a tree a store resolves into");
         std::os::unix::fs::symlink(home.join("tools"), home.join("link")).expect("a link in");
+        std::os::unix::fs::symlink(home.join(".ssh"), home.join("keys"))
+            .expect("a link to a store");
+        std::os::unix::fs::symlink(home.join("dotfiles"), home.join(".gnupg"))
+            .expect("a store that is a link");
+        let confine = connect(Options::default()).await;
 
-        for bound in [home.join("tools"), home.join("link")] {
-            let confine = connect(support::reading_beneath(&bound)).await;
-            let ask = support::reading(&["~/tools", "~/tools/node", "~/link"]);
-            let boundary = support::asking(&confine, None, &ask).await;
-            assert_eq!(boundary.read(), [home.join("tools"), home.join("tools/node")]);
+        let ask = support::reading(&["~/tools", "~/tools/node", "~/link", "~/.config/nvim"]);
+        let boundary = support::asking(&confine, None, &ask).await;
+        assert_eq!(
+            boundary.read(),
+            [home.join("tools"), home.join("tools/node"), home.join(".config/nvim")]
+        );
 
-            let error = support::refused(&confine, &support::reading(&["~/.ssh"])).await;
-            assert!(error.contains("outside the host's read roots"), "{error}");
+        for root in [
+            "~/.ssh",
+            "~/.ssh/keys",
+            "~/.aws",
+            "~/.config/gh",
+            "~/.config",
+            "~/Library",
+            "~/keys",
+            "~/tools/../.ssh",
+            "~/dotfiles",
+        ] {
+            let error = support::refused(&confine, &support::reading(&[root])).await;
+            assert!(error.contains("a credential store"), "`{root}`: {error}");
         }
-
-        let unbounded = connect(Options::default()).await;
-        let error = support::refused(&unbounded, &support::reading(&["~/tools"])).await;
-        assert!(error.contains("outside the host's read roots"), "{error}");
     });
 }
 
@@ -610,7 +626,7 @@ mod seatbelt {
             std::fs::create_dir_all(&private).expect("private");
             std::fs::write(shared.join("note.txt"), "shared\n").expect("a shared file");
             std::fs::write(private.join("secret.txt"), "secret\n").expect("a private file");
-            let confine = support::connect(support::reading_beneath(home)).await;
+            let confine = support::connect(Options::default()).await;
             let ask = support::reading(&["~/shared"]);
 
             let script = format!("cat '{}'", shared.join("note.txt").display());
@@ -785,7 +801,7 @@ mod landlock {
             std::fs::create_dir_all(&shared).expect("shared");
             std::fs::write(shared.join("note.txt"), "shared\n").expect("a shared file");
             std::fs::write(home.join("secret.txt"), "secret\n").expect("a private file");
-            let confine = support::connect(support::reading_beneath(home)).await;
+            let confine = support::connect(Options::default()).await;
             let ask = support::reading(&["~/shared"]);
 
             let script = format!("cat '{}'", shared.join("note.txt").display());

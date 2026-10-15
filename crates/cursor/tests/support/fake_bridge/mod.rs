@@ -245,127 +245,131 @@ pub fn dummy_key() {
     });
 }
 
-// The one home of the test process, for the harness to mount: process-wide
-// as `PATH` is, since the client finds the fake through `PATH`.
-#[cfg(test)]
-static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+cfg_select! {
+    test => {
+        // The one home of the test process, for the harness to mount: process-wide
+        // as `PATH` is, since the client finds the fake through `PATH`.
+        static HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-/// The fake as the process the client spawns: a home holding the script, log
-/// and releases, lent to every completion, and the `cursor-sdk-bridge` link
-/// on this test process's `PATH`.
-#[cfg(test)]
-pub struct Spawnable {
-    home: tempfile::TempDir,
-    canonical: PathBuf,
-}
-
-#[cfg(test)]
-impl Spawnable {
-    /// The preopen the harness mounts the home as for every guest, and the
-    /// path the guest lends it by.
-    pub const MOUNT: &str = "/fake";
-
-    /// Lay out `config` and put the fake first on `PATH`, where the client
-    /// finds it; `PATH` is process-wide, so one `Spawnable` per test process
-    /// (nextest's one test each).
-    #[expect(unsafe_code, reason = "the client finds the bridge through PATH")]
-    pub fn new(config: &Config) -> Self {
-        let home =
-            tempfile::Builder::new().prefix("fake-bridge-").tempdir().expect("a home directory");
-        std::fs::write(
-            home.path().join(SCRIPT_FILE),
-            serde_json::to_vec_pretty(config).expect("a config serializes"),
-        )
-        .expect("writing the script");
-        std::os::unix::fs::symlink(
-            env!("CARGO_BIN_EXE_fake-cursor-sdk-bridge"),
-            home.path().join(BIN_NAME),
-        )
-        .expect("linking the fake binary");
-        let canonical = std::fs::canonicalize(home.path()).expect("the home resolves");
-        HOME.set(canonical.clone()).expect("one Spawnable per test process");
-
-        let mut path = home.path().as_os_str().to_owned();
-        if let Some(rest) = std::env::var_os("PATH") {
-            path.push(":");
-            path.push(rest);
+        /// The fake as the process the client spawns: a home holding the script, log
+        /// and releases, lent to every completion, and the `cursor-sdk-bridge` link
+        /// on this test process's `PATH`.
+        pub struct Spawnable {
+            home: tempfile::TempDir,
+            canonical: PathBuf,
         }
-        // SAFETY: set before the test spawns any thread of its own, and read
-        // only by the client's spawns and their children from here on.
-        unsafe { std::env::set_var("PATH", path) };
-        Self { home, canonical }
-    }
 
-    /// The home, canonical: the working directory of every spawned fake
-    /// that was lent it.
-    pub fn home(&self) -> &Path {
-        &self.canonical
-    }
+        impl Spawnable {
+            /// The preopen the harness mounts the home as for every guest, and the
+            /// path the guest lends it by.
+            pub const MOUNT: &str = "/fake";
 
-    /// The home as the guest's [`Self::MOUNT`], for the harness to preopen;
-    /// a `Spawnable` stands before any guest runs.
-    pub fn mount() -> omnia::Mount {
-        omnia::Mount {
-            name: Self::MOUNT.to_owned(),
-            path: HOME.get().expect("a Spawnable stands before any guest runs").clone(),
-            writable: false,
+            /// Lay out `config` and put the fake first on `PATH`, where the client
+            /// finds it; `PATH` is process-wide, so one `Spawnable` per test process
+            /// (nextest's one test each).
+            #[expect(unsafe_code, reason = "the client finds the bridge through PATH")]
+            pub fn new(config: &Config) -> Self {
+                let home = tempfile::Builder::new()
+                    .prefix("fake-bridge-")
+                    .tempdir()
+                    .expect("a home directory");
+                std::fs::write(
+                    home.path().join(SCRIPT_FILE),
+                    serde_json::to_vec_pretty(config).expect("a config serializes"),
+                )
+                .expect("writing the script");
+                std::os::unix::fs::symlink(
+                    env!("CARGO_BIN_EXE_fake-cursor-sdk-bridge"),
+                    home.path().join(BIN_NAME),
+                )
+                .expect("linking the fake binary");
+                let canonical = std::fs::canonicalize(home.path()).expect("the home resolves");
+                HOME.set(canonical.clone()).expect("one Spawnable per test process");
+
+                let mut path = home.path().as_os_str().to_owned();
+                if let Some(rest) = std::env::var_os("PATH") {
+                    path.push(":");
+                    path.push(rest);
+                }
+                // SAFETY: set before the test spawns any thread of its own, and read
+                // only by the client's spawns and their children from here on.
+                unsafe { std::env::set_var("PATH", path) };
+                Self { home, canonical }
+            }
+
+            /// The home, canonical: the working directory of every spawned fake
+            /// that was lent it.
+            pub fn home(&self) -> &Path {
+                &self.canonical
+            }
+
+            /// The home as the guest's [`Self::MOUNT`], for the harness to preopen;
+            /// a `Spawnable` stands before any guest runs.
+            pub fn mount() -> omnia::Mount {
+                omnia::Mount {
+                    name: Self::MOUNT.to_owned(),
+                    path: HOME.get().expect("a Spawnable stands before any guest runs").clone(),
+                    writable: false,
+                }
+            }
+
+            /// Everything every process recorded so far.
+            pub fn log(&self) -> Log {
+                Log::read(&self.home.path().join(LOG_FILE))
+            }
+
+            /// Requests held at `point` right now: parked and not yet released; a run
+            /// that left a `Stream` park through `CancelRun` still counts.
+            pub fn parked(&self, point: Point) -> usize {
+                self.log().parked(point).saturating_sub(self.released().count(point))
+            }
+
+            /// Wait until `count` requests are held at `point`; the bound is generous
+            /// because a guest's component is compiled on the way here.
+            pub async fn await_parked(&self, point: Point, count: usize) {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+                while self.parked(point) < count {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "timed out waiting for {count} request(s) parked at {point:?}; have {} — {}",
+                        self.parked(point),
+                        self.log().summary()
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+
+            /// Release the earliest request held at `point`; `false` when none is.
+            pub fn release_one(&self, point: Point) -> bool {
+                let mut releases = self.released();
+                if releases.count(point) >= self.log().parked(point) {
+                    return false;
+                }
+                releases.release(point, 1);
+                releases.write(&self.releases_path());
+                true
+            }
+
+            pub fn release_all(&self) {
+                let log = self.log();
+                let mut releases = self.released();
+                for point in log.parked_points() {
+                    let held = log.parked(point).saturating_sub(releases.count(point));
+                    releases.release(point, held);
+                }
+                releases.write(&self.releases_path());
+            }
+
+            fn released(&self) -> Releases {
+                Releases::read(&self.releases_path())
+            }
+
+            fn releases_path(&self) -> PathBuf {
+                self.home.path().join(RELEASES_FILE)
+            }
         }
     }
-
-    /// Everything every process recorded so far.
-    pub fn log(&self) -> Log {
-        Log::read(&self.home.path().join(LOG_FILE))
-    }
-
-    /// Requests held at `point` right now: parked and not yet released; a run
-    /// that left a `Stream` park through `CancelRun` still counts.
-    pub fn parked(&self, point: Point) -> usize {
-        self.log().parked(point).saturating_sub(self.released().count(point))
-    }
-
-    /// Wait until `count` requests are held at `point`; the bound is generous
-    /// because a guest's component is compiled on the way here.
-    pub async fn await_parked(&self, point: Point, count: usize) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        while self.parked(point) < count {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "timed out waiting for {count} request(s) parked at {point:?}; have {} — {}",
-                self.parked(point),
-                self.log().summary()
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    /// Release the earliest request held at `point`; `false` when none is.
-    pub fn release_one(&self, point: Point) -> bool {
-        let mut releases = self.released();
-        if releases.count(point) >= self.log().parked(point) {
-            return false;
-        }
-        releases.release(point, 1);
-        releases.write(&self.releases_path());
-        true
-    }
-
-    pub fn release_all(&self) {
-        let log = self.log();
-        let mut releases = self.released();
-        for point in log.parked_points() {
-            let held = log.parked(point).saturating_sub(releases.count(point));
-            releases.release(point, held);
-        }
-        releases.write(&self.releases_path());
-    }
-
-    fn released(&self) -> Releases {
-        Releases::read(&self.releases_path())
-    }
-
-    fn releases_path(&self) -> PathBuf {
-        self.home.path().join(RELEASES_FILE)
-    }
+    _ => {}
 }
 
 /// How many parked requests at each point the test has released, in

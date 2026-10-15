@@ -119,25 +119,29 @@ pub fn alive(pid: u32) -> bool {
     !zombie(pid)
 }
 
-#[cfg(target_os = "linux")]
-fn zombie(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|stat| proc_state(&stat))
-        == Some('Z')
-}
+cfg_select! {
+    target_os = "linux" => {
+        fn zombie(pid: u32) -> bool {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| proc_state(&stat))
+                == Some('Z')
+        }
 
-// Off Linux, what is reparented to pid 1 is reaped as it exits, so there
-// is no zombie to tell apart.
-#[cfg(not(target_os = "linux"))]
-const fn zombie(_pid: u32) -> bool {
-    false
-}
-
-// The state field of `/proc/<pid>/stat` follows the parenthesised command
-// name, which may itself hold spaces and parentheses: split from the right.
-#[cfg(target_os = "linux")]
-fn proc_state(stat: &str) -> Option<char> {
-    let (_, after_name) = stat.rsplit_once(") ")?;
-    after_name.chars().next()
+        // The state field of `/proc/<pid>/stat` follows the parenthesised command
+        // name, which may itself hold spaces and parentheses: split from the right.
+        fn proc_state(stat: &str) -> Option<char> {
+            let (_, after_name) = stat.rsplit_once(") ")?;
+            after_name.chars().next()
+        }
+    }
+    // Off Linux, what is reparented to pid 1 is reaped as it exits, so there
+    // is no zombie to tell apart.
+    _ => {
+        const fn zombie(_pid: u32) -> bool {
+            false
+        }
+    }
 }
 
 /// The pid a script wrote as text.

@@ -89,19 +89,12 @@ pub(crate) enum Wall {
 }
 
 impl Wall {
-    #[cfg(target_os = "linux")]
     async fn platform() -> Result<Self> {
-        Ok(Self::Landlock(Arc::new(linux::Linux::probe().await?)))
-    }
-
-    #[cfg(target_os = "macos")]
-    async fn platform() -> Result<Self> {
-        Ok(Self::Seatbelt(Arc::new(seatbelt::Seatbelt::probe().await?)))
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    async fn platform() -> Result<Self> {
-        bail!("no confinement substrate runs on this platform")
+        cfg_select! {
+            target_os = "linux" => Ok(Self::Landlock(Arc::new(linux::Linux::probe().await?))),
+            target_os = "macos" => Ok(Self::Seatbelt(Arc::new(seatbelt::Seatbelt::probe().await?))),
+            _ => bail!("no confinement substrate runs on this platform"),
+        }
     }
 }
 

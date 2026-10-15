@@ -359,19 +359,22 @@ fn program_of(command: &Command) -> String {
 }
 
 // The program a substrate's launcher runs in its place, after its `--`.
-#[cfg(target_os = "macos")]
-fn launched(command: &std::process::Command) -> Option<&OsStr> {
-    if command.get_program() == seatbelt::SANDBOX_EXEC {
-        let mut args = command.get_args();
-        args.find(|arg| *arg == "--")?;
-        return args.next();
+cfg_select! {
+    target_os = "macos" => {
+        fn launched(command: &std::process::Command) -> Option<&OsStr> {
+            if command.get_program() == seatbelt::SANDBOX_EXEC {
+                let mut args = command.get_args();
+                args.find(|arg| *arg == "--")?;
+                return args.next();
+            }
+            None
+        }
     }
-    None
-}
-
-#[cfg(not(target_os = "macos"))]
-const fn launched(_command: &std::process::Command) -> Option<&OsStr> {
-    None
+    _ => {
+        const fn launched(_command: &std::process::Command) -> Option<&OsStr> {
+            None
+        }
+    }
 }
 
 fn executable(path: &Path) -> bool {

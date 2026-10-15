@@ -221,12 +221,11 @@ async fn kernel() -> String {
         .map_or_else(|_| "[unknown]".to_owned(), |release| release.trim().to_owned())
 }
 
-#[cfg(target_arch = "x86_64")]
-const ARCH: Option<TargetArch> = Some(TargetArch::x86_64);
-#[cfg(target_arch = "aarch64")]
-const ARCH: Option<TargetArch> = Some(TargetArch::aarch64);
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-const ARCH: Option<TargetArch> = None;
+const ARCH: Option<TargetArch> = cfg_select! {
+    target_arch = "x86_64" => Some(TargetArch::x86_64),
+    target_arch = "aarch64" => Some(TargetArch::aarch64),
+    _ => None,
+};
 
 fn compile(
     rules: BTreeMap<i64, Vec<SeccompRule>>, matched: SeccompAction, arch: TargetArch,

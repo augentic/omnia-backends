@@ -517,6 +517,10 @@ criteria = "safe-to-deploy"
 version = "0.8.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.deranged]]
+version = "0.5.9"
+criteria = "safe-to-deploy"
+
 [[exemptions.derive-syn-parse]]
 version = "0.2.0"
 criteria = "safe-to-deploy"
@@ -579,6 +583,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.enumflags2_derive]]
 version = "0.7.12"
+criteria = "safe-to-deploy"
+
+[[exemptions.equivalent]]
+version = "1.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.error-chain]]
@@ -1366,11 +1374,11 @@ version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]
-version = "0.23.37"
+version = "0.23.46"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-native-certs]]
-version = "0.8.4"
+version = "0.8.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-pki-types]]
@@ -1842,11 +1850,11 @@ version = "0.8.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerocopy]]
-version = "0.8.62"
+version = "0.8.63"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerocopy-derive]]
-version = "0.8.62"
+version = "0.8.63"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerofrom]]

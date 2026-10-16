@@ -175,10 +175,10 @@ async fn path_in_the_ask() {
 #[tokio::test]
 async fn inherit_refused() {
     const HELD: &[(&str, &str)] = &[
-        ("HOME", "the boundary's to set"),
-        ("TMPDIR", "the boundary's to set"),
-        ("HTTPS_PROXY", "the boundary's to set"),
-        ("no_proxy", "the boundary's to set"),
+        ("HOME", "the compartment's to set"),
+        ("TMPDIR", "the compartment's to set"),
+        ("HTTPS_PROXY", "the compartment's to set"),
+        ("no_proxy", "the compartment's to set"),
         ("NODE_USE_SYSTEM_CA", "refused"),
         ("BUN_OPTIONS", "refused"),
         ("LD_PRELOAD", "the dynamic loader's"),
@@ -327,7 +327,7 @@ fn read_root_credential_store_refused() {
 }
 
 // An ask's variables reach the process, a leading `~/` spelling the home.
-// A name the boundary holds, one the backend inherits, or no name at all
+// A name the compartment holds, one the backend inherits, or no name at all
 // is refused as an `inherit` is.
 #[test]
 fn env_set_and_home_expanded() {
@@ -354,8 +354,8 @@ fn env_set_and_home_expanded() {
         assert_eq!(seen.get("TILDE").map(String::as_str), Some("a~/b"), "only a leading `~/`");
 
         for (name, why) in [
-            ("HOME", "the boundary's to set"),
-            ("https_proxy", "the boundary's to set"),
+            ("HOME", "the compartment's to set"),
+            ("https_proxy", "the compartment's to set"),
             ("NODE_USE_SYSTEM_CA", "refused"),
             ("BUN_OPTIONS", "refused"),
             ("NODE_OPTIONS", "refused"),

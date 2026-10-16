@@ -81,27 +81,27 @@ impl Airlock {
     ///
     /// Returns an error when:
     ///
-    /// - `inherit` names a variable the boundary sets itself, one in
+    /// - `inherit` names a variable the compartment sets itself, one in
     ///   `refused`, one of the dynamic loader's, or a `GIT_DIR` sibling
     /// - no kernel substrate runs on this host
     pub async fn connect(mut options: Options) -> Result<Self> {
+        // check options
         for name in options.inherit {
-            if let Some(held) = Held::of(name, options.refused) {
-                bail!("inherit `{name}` {held}");
+            if let Some(why) = reserved(name, options.refused) {
+                bail!("inherit `{name}` {why}");
             }
         }
-
-        // resolve the roots to absolute paths
         for root in &mut options.shell_roots {
             *root = path::absolute(&*root)
                 .with_context(|| format!("resolving shell root {}", root.display()))?;
         }
 
+        let inherited =
+            env::vars_os().filter(|(name, _)| inherits(name, options.inherit)).collect();
         let home = match env::var_os("HOME") {
             Some(home) => tokio::fs::canonicalize(home).await.ok(),
             None => None,
         };
-        let inherited = env::vars_os().filter(|(name, _)| inherits(name, options.inherit)).collect();
 
         Ok(Self {
             options,
@@ -247,8 +247,8 @@ impl Airlock {
             if !is_name(name) {
                 deny!("`{name}` is not an environment variable name");
             }
-            if let Some(held) = Held::of(name, self.options.refused) {
-                deny!("env `{name}` {held}");
+            if let Some(why) = reserved(name, self.options.refused) {
+                deny!("env `{name}` {why}");
             }
             if self.options.inherit.contains(&name.as_str()) {
                 deny!("env `{name}` is inherited from the host");
@@ -300,7 +300,7 @@ pub struct Options {
     pub refused: &'static [&'static str],
 }
 
-/// What one process may reach beyond the boundary's defaults.
+/// What one process may reach beyond the compartment's defaults.
 ///
 /// Sealed with the process by [`Airlock::seal`], which holds each entry to the
 /// host before the process runs.
@@ -363,38 +363,18 @@ impl Wall {
     }
 }
 
-// Why a variable is neither the backend's to inherit nor an ask's to set.
-enum Held {
-    Own,
-    Refused,
-    Loader,
-    Git,
-}
-
-impl Held {
-    fn of(name: &str, refused: &[&str]) -> Option<Self> {
-        if [SCRATCH, PROXY, NO_PROXY].iter().any(|own| own.contains(&name)) {
-            Some(Self::Own)
-        } else if REFUSED.contains(&name) || refused.contains(&name) {
-            Some(Self::Refused)
-        } else if LOADER.iter().any(|prefix| name.starts_with(prefix)) {
-            Some(Self::Loader)
-        } else if GIT.contains(&name) {
-            Some(Self::Git)
-        } else {
-            None
-        }
-    }
-}
-
-impl fmt::Display for Held {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Own => "is the boundary's to set",
-            Self::Refused => "is refused",
-            Self::Loader => "is the dynamic loader's",
-            Self::Git => "selects a repository",
-        })
+// Why a name is neither the backend's to inherit nor an ask's to set.
+fn reserved(name: &str, refused: &[&str]) -> Option<&'static str> {
+    if [SCRATCH, PROXY, NO_PROXY].iter().any(|own| own.contains(&name)) {
+        Some("is the compartment's to set")
+    } else if REFUSED.contains(&name) || refused.contains(&name) {
+        Some("is refused")
+    } else if LOADER.iter().any(|prefix| name.starts_with(prefix)) {
+        Some("is the dynamic loader's")
+    } else if GIT.contains(&name) {
+        Some("selects a repository")
+    } else {
+        None
     }
 }
 

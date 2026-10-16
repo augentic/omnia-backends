@@ -66,7 +66,7 @@ impl Relay {
             .context("binding the relay listener on the IPv6 loopback")?;
         let addr = listener.local_addr().context("reading the relay address")?;
 
-        // accept until the `Relay` drops, one connection task per worker socket
+        // handle relay requests
         let server = tokio::spawn(async move {
             let mut connections = JoinSet::new();
 
@@ -76,7 +76,7 @@ impl Relay {
                     Err(error) => {
                         tracing::warn!(%error, "relay accept error");
 
-                        // do not spin on a persistent failure such as fd exhaustion
+                        // do not spin on a persistent failure
                         time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
@@ -118,7 +118,6 @@ impl Drop for Relay {
 }
 
 struct Upstreams {
-    // The backend as the bridge concatenates a path onto it: no trailing slash.
     backend: String,
     client: reqwest::Client,
 }

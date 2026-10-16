@@ -48,8 +48,7 @@ let clearance = Clearance {
     read: vec!["~/.nvm/versions/node".into()],
     env: vec![("VOLTA_HOME".into(), "~/.volta".into())],
 };
-let chamber = airlock.prepare(lend).await?;
-let compartment = airlock.seal(chamber, &clearance).await?;
+let compartment = airlock.seal(lend, &clearance).await?;
 let mut command = compartment.command("cursor-sdk-bridge")?;
 command.arg("--state-root").arg(compartment.scratch());
 let mut child = compartment.spawn(command, Some("cursor-sdk-bridge ready "))?;

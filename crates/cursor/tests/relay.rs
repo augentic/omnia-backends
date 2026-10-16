@@ -1,7 +1,8 @@
 //! The relay the bridge's API goes through: a worker is pointed at it in
 //! place of the host's `CURSOR_BACKEND_URL`, and what it is sent reaches the
-//! backend the client was configured with — path and query kept, hop-by-hop
-//! headers dropped, bodies streamed both ways, an unreachable backend `502`.
+//! backend the client was configured with — path and query kept,
+//! connection-specific headers dropped, bodies streamed both ways, an
+//! unreachable backend `502`.
 //! The relay's address is read back from the fake bridge's `CreateAgent`
 //! record, as the only place the client tells it.
 
@@ -89,7 +90,7 @@ async fn backend_url_must_be_http() {
 // --- The backend's side ---
 
 // Method, path, query and the end-to-end headers reach the backend; the
-// hop-by-hop set, what `Connection` names, and the relay's own `Host` do
+// connection-specific set, what `Connection` names, and the relay's own `Host` do
 // not, and the backend's `Connection` is not handed back.
 #[tokio::test]
 async fn path_query_and_headers() {

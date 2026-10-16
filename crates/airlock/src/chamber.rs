@@ -25,10 +25,7 @@ use crate::seatbelt;
 use crate::valve::Valve;
 use crate::{Options, Wall};
 
-/// The place one process is put: the tree it works in and its scratch.
-///
-/// Built once per process by [`Airlock::prepare`](crate::Airlock::prepare)
-/// and sealed into a [`Compartment`] by [`Airlock::seal`](crate::Airlock::seal).
+// The place one process is put: the tree it works in and its scratch.
 pub struct Chamber {
     tree: Tree,
     scratch: TempDir,
@@ -90,27 +87,19 @@ impl Chamber {
         })
     }
 
-    /// The directory the process works in, canonical.
-    #[must_use]
-    pub fn tree(&self) -> &Path {
+    pub(crate) fn tree(&self) -> &Path {
         self.tree.path()
     }
 
-    /// The process's own scratch directory, canonical: its `HOME` and `TMPDIR`.
-    #[must_use]
-    pub fn scratch(&self) -> &Path {
+    pub(crate) fn scratch(&self) -> &Path {
         &self.scratch_path
     }
 
-    /// Whether the tree was lent, rather than a private directory.
-    #[must_use]
-    pub const fn lent(&self) -> bool {
+    pub(crate) const fn lent(&self) -> bool {
         matches!(self.tree, Tree::Lent(_))
     }
 
-    /// Whether the process runs with a shell: a lent tree under a shell root.
-    #[must_use]
-    pub const fn shell(&self) -> bool {
+    pub(crate) const fn shell(&self) -> bool {
         self.shell
     }
 }

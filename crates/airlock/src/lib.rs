@@ -16,7 +16,8 @@ use std::{fmt, io};
 
 use anyhow::{Context as _, Result, bail};
 
-pub use crate::chamber::{Chamber, Compartment};
+use crate::chamber::Chamber;
+pub use crate::chamber::Compartment;
 pub use crate::child::{Child, Exit};
 use crate::valve::Valve;
 
@@ -233,35 +234,24 @@ impl Airlock {
         &self.options
     }
 
-    /// Puts a process at `lend`, or in a private directory when nothing is lent.
+    /// Seals a compartment around one process at `lend`, granting what
+    /// `clearance` names.
     ///
-    /// A lent tree is created and canonicalised; the process runs with a
+    /// A lent tree is created and canonicalised, and the process runs with a
     /// shell when the tree is at or beneath one of the connected
-    /// `shell_roots`. The scratch directory, which serves the process as its
-    /// `HOME` and `TMPDIR`, is removed once the process has exited. The
-    /// [`Chamber`] is sealed into a [`Compartment`] by [`Airlock::seal`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the lent tree or the scratch cannot be created.
-    pub async fn prepare(&self, lend: Option<&Path>) -> Result<Chamber> {
-        Chamber::prepare(lend, &self.options).await
-    }
-
-    /// Seals a compartment around one process, where `chamber` put it,
-    /// granting what `clearance` names.
-    ///
-    /// The process's environment is what connecting inherited, its `HOME`
-    /// and `TMPDIR` the chamber's scratch, its proxy variables an egress
-    /// proxy bound for it alone and admitting the clearance's `egress`, with
-    /// the host's own loopback excepted, and the clearance's `env` over them.
-    /// Each of the clearance's `read` roots is resolved against the operator's
-    /// home; one that does not exist is logged at WARN and granted nothing. A
-    /// root that overlaps a credential store of the home, at it, beneath it, or
-    /// above it, as spelled or as either resolves, is denied whatever the
-    /// clearance: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.kube`,
-    /// `~/.docker`, `~/.config/gh`, `~/.config/gcloud`, `~/.password-store`,
-    /// and `~/Library/Keychains`.
+    /// `shell_roots`; nothing lent puts it in a private directory. Its
+    /// environment is what connecting inherited, its `HOME` and `TMPDIR` a
+    /// scratch directory of its own, removed once it has exited, its proxy
+    /// variables an egress proxy bound for it alone and admitting the
+    /// clearance's `egress`, with the host's own loopback excepted, and the
+    /// clearance's `env` over them. Each of the clearance's `read` roots is
+    /// resolved against the operator's home; one that does not exist is
+    /// logged at WARN and granted nothing. A root that overlaps a credential
+    /// store of the home, at it, beneath it, or above it, as spelled or as
+    /// either resolves, is denied whatever the clearance: `~/.ssh`,
+    /// `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.kube`, `~/.docker`,
+    /// `~/.config/gh`, `~/.config/gcloud`, `~/.password-store`, and
+    /// `~/Library/Keychains`.
     ///
     /// # Errors
     ///
@@ -271,8 +261,10 @@ impl Airlock {
     /// not a variable name or is one the
     /// compartment holds (its own, a refused one, the dynamic loader's, a
     /// `GIT_DIR` sibling, or a `passthrough` of the host's); and a plain
-    /// error when a root cannot be read or the proxy cannot be bound.
-    pub async fn seal(&self, chamber: Chamber, clearance: &Clearance) -> Result<Compartment> {
+    /// error when the lent tree or the scratch cannot be created, a root
+    /// cannot be read, or the proxy cannot be bound.
+    pub async fn seal(&self, lend: Option<&Path>, clearance: &Clearance) -> Result<Compartment> {
+        let chamber = Chamber::prepare(lend, &self.options).await?;
         let read = self.roots(&clearance.read).await?;
         let valve = Valve::bind(&clearance.egress).await?;
         let env = self.environment(&chamber, &valve, &clearance.env)?;

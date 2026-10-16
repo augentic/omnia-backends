@@ -45,16 +45,18 @@ pub fn flatten(doc: &Document) -> anyhow::Result<Value> {
         serde_json::from_slice(&doc.data).context("document body is not valid JSON")?;
     let src = body.as_object().ok_or_else(|| anyhow!("document body must be a JSON object"))?;
 
-    let mut entity = Map::new();
-    entity.insert("PartitionKey".into(), Value::String(pk.to_owned()));
-    entity.insert("RowKey".into(), Value::String(rk.to_owned()));
-
-    for (key, value) in src {
-        if is_metadata_key(key) {
-            continue;
-        }
-        insert_typed_property(&mut entity, key, value)?;
-    }
+    let properties = src
+        .iter()
+        .filter(|(key, _)| !is_metadata_key(key))
+        .map(|(key, value)| typed_property(key, value))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let entity: Map<String, Value> = [
+        ("PartitionKey".to_owned(), Value::String(pk.to_owned())),
+        ("RowKey".to_owned(), Value::String(rk.to_owned())),
+    ]
+    .into_iter()
+    .chain(properties.into_iter().flatten())
+    .collect();
 
     Ok(Value::Object(entity))
 }
@@ -129,45 +131,38 @@ fn is_metadata_key(key: &str) -> bool {
 
 // Annotate what the service cannot infer from raw JSON: doubles, and
 // integers past the i32 range, which travel as strings.
-fn insert_typed_property(
-    entity: &mut Map<String, Value>, key: &str, value: &Value,
-) -> anyhow::Result<()> {
-    match value {
-        Value::Null => {}
-        Value::Bool(_) | Value::String(_) => {
-            entity.insert(key.into(), value.clone());
-        }
+fn typed_property(key: &str, value: &Value) -> anyhow::Result<Vec<(String, Value)>> {
+    let plain = |value: Value| vec![(key.to_owned(), value)];
+    let annotated = |value: Value, edm_type: &str| {
+        vec![(key.to_owned(), value), (format!("{key}@odata.type"), Value::String(edm_type.into()))]
+    };
+    Ok(match value {
+        Value::Null => Vec::new(),
+        Value::Bool(_) | Value::String(_) => plain(value.clone()),
         Value::Number(n) => {
             if n.is_f64() && !n.is_i64() {
-                entity.insert(key.into(), value.clone());
-                entity.insert(format!("{key}@odata.type"), Value::String("Edm.Double".into()));
+                annotated(value.clone(), "Edm.Double")
             } else if let Some(v) = n.as_i64() {
                 if (i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&v) {
-                    entity.insert(key.into(), value.clone());
+                    plain(value.clone())
                 } else {
-                    entity.insert(key.into(), Value::String(v.to_string()));
-                    entity.insert(format!("{key}@odata.type"), Value::String("Edm.Int64".into()));
+                    annotated(Value::String(v.to_string()), "Edm.Int64")
                 }
             } else if let Some(u) = n.as_u64() {
-                if let Ok(v) = i64::try_from(u) {
-                    entity.insert(key.into(), Value::String(v.to_string()));
-                    entity.insert(format!("{key}@odata.type"), Value::String("Edm.Int64".into()));
-                } else {
-                    return Err(anyhow!(
-                        "numeric value for key `{key}` exceeds Azure Table integer range"
-                    ));
-                }
+                let v = i64::try_from(u).map_err(|_overflow| {
+                    anyhow!("numeric value for key `{key}` exceeds Azure Table integer range")
+                })?;
+                annotated(Value::String(v.to_string()), "Edm.Int64")
             } else {
-                entity.insert(key.into(), value.clone());
+                plain(value.clone())
             }
         }
         Value::Array(_) | Value::Object(_) => {
             let serialized =
                 serde_json::to_string(value).context("serializing nested value to JSON string")?;
-            entity.insert(key.into(), Value::String(serialized));
+            plain(Value::String(serialized))
         }
-    }
-    Ok(())
+    })
 }
 
 // The codec and its rejections; the service accepting the flatten mappings

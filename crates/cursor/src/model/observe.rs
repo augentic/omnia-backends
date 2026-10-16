@@ -595,7 +595,7 @@ mod tests {
 
     use super::{Bill, Completion, EventLog, Phase};
     use crate::failure::Outcome;
-    use crate::protocol::{SdkMessage, TokenUsage};
+    use crate::protocol::{RunStreamMessage, TokenUsage};
 
     fn wire(input: i64, output: i64, reasoning: Option<i64>) -> TokenUsage {
         TokenUsage {
@@ -693,18 +693,15 @@ mod tests {
     }
 
     fn observe_all(events: &[Value]) -> EventLog {
-        let mut log = EventLog::default();
-        for event in events {
-            observe_one(&mut log, event);
-        }
-        log
+        events.iter().fold(EventLog::default(), |mut log, event| {
+            log.observe_message(&frame(event));
+            log
+        })
     }
 
-    fn observe_one(log: &mut EventLog, event: &Value) {
-        let message: SdkMessage =
-            serde_json::from_value(event.clone()).expect("test events are SdkMessages");
-        log.frames += 1;
-        log.observe(&message);
+    // The stream frame carrying one SDK event, as the bridge sends it.
+    fn frame(event: &Value) -> RunStreamMessage {
+        serde_json::from_value(json!({ "sdkMessage": event })).expect("test events are frames")
     }
 
     // `cursor-sdk-bridge`'s frame: the tool's name and arguments at the top
@@ -762,7 +759,7 @@ mod tests {
                 Some(json!({ "status": "success", "value": { "content": "" } })),
             ),
         ] {
-            observe_one(&mut log, &event);
+            log.observe_message(&frame(&event));
         }
         assert_eq!(log.run_id(), Some("run-1"));
         assert_eq!(log.tool_calls(), 3);
@@ -788,20 +785,22 @@ mod tests {
         let mut log = EventLog::default();
         assert_eq!(log.phase(), Phase::Opening);
 
-        observe_one(&mut log, &json!({ "type": "status", "message": { "status": "RUNNING" } }));
+        log.observe_message(&frame(
+            &json!({ "type": "status", "message": { "status": "RUNNING" } }),
+        ));
         assert_eq!(log.phase(), Phase::Model);
 
         let read = json!({ "path": "a.ts" });
         let grep = json!({ "pattern": "fn" });
-        observe_one(&mut log, &flat("read", "c1", &read, None));
-        observe_one(&mut log, &flat("grep", "c2", &grep, None));
+        log.observe_message(&frame(&flat("read", "c1", &read, None)));
+        log.observe_message(&frame(&flat("grep", "c2", &grep, None)));
         assert_eq!(log.phase(), Phase::Tool("grep".to_owned()), "the latest started call");
 
         let done = json!({ "status": "success", "value": {} });
-        observe_one(&mut log, &flat("grep", "c2", &grep, Some(done.clone())));
+        log.observe_message(&frame(&flat("grep", "c2", &grep, Some(done.clone()))));
         assert_eq!(log.phase(), Phase::Tool("read".to_owned()), "the one still pending");
 
-        observe_one(&mut log, &flat("read", "c1", &read, Some(done)));
+        log.observe_message(&frame(&flat("read", "c1", &read, Some(done))));
         assert_eq!(log.phase(), Phase::Model);
         assert_eq!(log.frames(), 5);
 
@@ -818,25 +817,27 @@ mod tests {
     #[test]
     fn shell_phase() {
         let mut log = EventLog::default();
-        observe_one(&mut log, &flat("shell", "c1", &json!({ "command": "cargo test" }), None));
+        log.observe_message(&frame(&flat(
+            "shell",
+            "c1",
+            &json!({ "command": "cargo test" }),
+            None,
+        )));
         assert_eq!(log.phase(), Phase::Shell);
         assert_eq!(log.phase().to_string(), "the shell");
-        observe_one(&mut log, &resultless("shell", "c1", &json!({}), "completed"));
+        log.observe_message(&frame(&resultless("shell", "c1", &json!({}), "completed")));
 
         let custom = json!({ "providerIdentifier": "custom-user-tools", "toolName": "shell",
             "args": { "command": "cargo test" } });
-        observe_one(&mut log, &flat("mcp", "c2", &custom, None));
+        log.observe_message(&frame(&flat("mcp", "c2", &custom, None)));
         assert_eq!(log.phase(), Phase::Tool("shell".to_owned()));
         assert!(log.phase().bounded());
-        observe_one(&mut log, &resultless("mcp", "c2", &custom, "completed"));
+        log.observe_message(&frame(&resultless("mcp", "c2", &custom, "completed")));
 
-        observe_one(
-            &mut log,
-            &json!({ "type": "tool_call", "message": {
-                "subtype": "started", "call_id": "c3",
-                "tool_call": { "shellToolCall": { "args": { "command": "ls" } } },
-            }}),
-        );
+        log.observe_message(&frame(&json!({ "type": "tool_call", "message": {
+            "subtype": "started", "call_id": "c3",
+            "tool_call": { "shellToolCall": { "args": { "command": "ls" } } },
+        }})));
         assert_eq!(log.phase(), Phase::Shell);
     }
 
@@ -849,35 +850,29 @@ mod tests {
         let read = json!({ "path": "a.ts" });
         let grep = json!({ "pattern": "fn" });
 
-        observe_one(&mut log, &flat("read", "c1", &read, None));
-        observe_one(&mut log, &resultless("read", "c1", &read, "completed"));
+        log.observe_message(&frame(&flat("read", "c1", &read, None)));
+        log.observe_message(&frame(&resultless("read", "c1", &read, "completed")));
         assert_eq!(log.phase(), Phase::Model);
 
-        observe_one(&mut log, &flat("read", "c2", &read, None));
-        observe_one(&mut log, &resultless("read", "c2", &read, "error"));
+        log.observe_message(&frame(&flat("read", "c2", &read, None)));
+        log.observe_message(&frame(&resultless("read", "c2", &read, "error")));
         assert_eq!(log.phase(), Phase::Model);
 
-        observe_one(&mut log, &flat("read", "c3", &read, None));
-        observe_one(&mut log, &flat("grep", "c4", &grep, None));
-        observe_one(&mut log, &resultless("read", "c3", &read, "completed"));
+        log.observe_message(&frame(&flat("read", "c3", &read, None)));
+        log.observe_message(&frame(&flat("grep", "c4", &grep, None)));
+        log.observe_message(&frame(&resultless("read", "c3", &read, "completed")));
         assert_eq!(log.phase(), Phase::Tool("grep".to_owned()), "the one still pending");
-        observe_one(&mut log, &resultless("grep", "c4", &grep, "error"));
+        log.observe_message(&frame(&resultless("grep", "c4", &grep, "error")));
         assert_eq!(log.phase(), Phase::Model);
 
-        observe_one(
-            &mut log,
-            &json!({ "type": "tool_call", "message": {
-                "subtype": "started", "call_id": "c5",
-                "tool_call": { "readToolCall": { "args": &read } },
-            }}),
-        );
-        observe_one(
-            &mut log,
-            &json!({ "type": "tool_call", "message": {
-                "subtype": "completed", "call_id": "c5",
-                "tool_call": { "readToolCall": { "args": &read } },
-            }}),
-        );
+        log.observe_message(&frame(&json!({ "type": "tool_call", "message": {
+            "subtype": "started", "call_id": "c5",
+            "tool_call": { "readToolCall": { "args": &read } },
+        }})));
+        log.observe_message(&frame(&json!({ "type": "tool_call", "message": {
+            "subtype": "completed", "call_id": "c5",
+            "tool_call": { "readToolCall": { "args": &read } },
+        }})));
         assert_eq!(log.phase(), Phase::Model);
 
         assert_eq!(log.tool_calls(), 5);
@@ -893,23 +888,20 @@ mod tests {
         let read = |file: &str| json!({ "path": file });
         let done = json!({ "status": "success", "value": {} });
 
-        observe_one(&mut log, &flat("read", "c1", &read("a.ts"), None));
-        observe_one(&mut log, &flat("read", "c2", &read("b.ts"), None));
-        observe_one(&mut log, &flat("read", "c3", &read("c.ts"), None));
-        observe_one(&mut log, &flat("read", "c1", &read("a.ts"), Some(done)));
+        log.observe_message(&frame(&flat("read", "c1", &read("a.ts"), None)));
+        log.observe_message(&frame(&flat("read", "c2", &read("b.ts"), None)));
+        log.observe_message(&frame(&flat("read", "c3", &read("c.ts"), None)));
+        log.observe_message(&frame(&flat("read", "c1", &read("a.ts"), Some(done))));
         assert_eq!(log.phase(), Phase::Tool("read".to_owned()), "two still pending");
 
-        observe_one(&mut log, &json!({ "type": "thinking", "message": { "text": "Now" } }));
+        log.observe_message(&frame(&json!({ "type": "thinking", "message": { "text": "Now" } })));
         assert_eq!(log.phase(), Phase::Model, "the model resumed, so nothing is pending");
 
-        observe_one(&mut log, &flat("grep", "c4", &json!({ "pattern": "fn" }), None));
+        log.observe_message(&frame(&flat("grep", "c4", &json!({ "pattern": "fn" }), None)));
         assert_eq!(log.phase(), Phase::Tool("grep".to_owned()), "a later call is pending again");
-        observe_one(
-            &mut log,
-            &json!({ "type": "assistant", "message": {
-                "message": { "content": [{ "text": "The", "type": "text" }], "role": "assistant" },
-            }}),
-        );
+        log.observe_message(&frame(&json!({ "type": "assistant", "message": {
+            "message": { "content": [{ "text": "The", "type": "text" }], "role": "assistant" },
+        }})));
         assert_eq!(log.phase(), Phase::Model);
 
         assert_eq!(log.tool_calls(), 4);

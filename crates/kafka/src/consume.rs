@@ -231,7 +231,7 @@ pub async fn run(
                 None => break,
             },
         };
-        delivery.admit(record, slot, place, &mut tasks);
+        tasks.spawn(Arc::clone(&delivery).admit(record, slot, place));
     }
     while let Some(finished) = tasks.join_next().await {
         finished.context("delivery task panicked")??;
@@ -255,10 +255,12 @@ struct Delivery {
 }
 
 impl Delivery {
+    // The record's delivery, to be spawned: its offset and lane are taken
+    // here, before the caller can wait on anything.
     fn admit(
-        self: &Arc<Self>, record: OwnedMessage, slot: OwnedSemaphorePermit,
-        place: OwnedSemaphorePermit, tasks: &mut JoinSet<Result<()>>,
-    ) {
+        self: Arc<Self>, record: OwnedMessage, slot: OwnedSemaphorePermit,
+        place: OwnedSemaphorePermit,
+    ) -> impl Future<Output = Result<()>> + Send {
         // the tracker holds the offset's place before anything can wait on
         // it, so a later offset cannot resolve past it
         let ticket = self.shared.insert(&record);
@@ -267,7 +269,7 @@ impl Delivery {
         // a record behind its key waits without a slot and takes one when
         // its turn comes
         let slot = lane.as_ref().is_none_or(Lane::is_head).then_some(slot);
-        tasks.spawn(Arc::clone(self).deliver(record, ticket, lane, slot, place));
+        self.deliver(record, ticket, lane, slot, place)
     }
 
     async fn deliver(

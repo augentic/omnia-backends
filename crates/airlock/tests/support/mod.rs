@@ -63,15 +63,13 @@ pub async fn compartment(airlock: &Airlock, lend: Option<&Path>) -> Compartment 
 
 /// A compartment around `lend` under `airlock`, granted `clearance`.
 pub async fn sealing(airlock: &Airlock, lend: Option<&Path>, clearance: &Clearance) -> Compartment {
-    let chamber = airlock.prepare(lend).await.expect("the lend holds");
-    airlock.seal(chamber, clearance).await.expect("the clearance holds")
+    airlock.seal(lend, clearance).await.expect("the clearance holds")
 }
 
 /// What `airlock` denies `clearance` for, around a private directory: the
 /// `Denied` the seal's error carries, since the clearance's fault is typed.
 pub async fn denied(airlock: &Airlock, clearance: &Clearance) -> String {
-    let chamber = airlock.prepare(None).await.expect("the lend holds");
-    let error = airlock.seal(chamber, clearance).await.expect_err("the clearance is denied");
+    let error = airlock.seal(None, clearance).await.expect_err("the clearance is denied");
     error
         .downcast_ref::<Denied>()
         .unwrap_or_else(|| panic!("a clearance's fault is typed `Denied`: {error:#}"))

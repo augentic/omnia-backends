@@ -232,7 +232,7 @@ async fn shell_on_shell_root() {
 async fn worker_grant_needs_a_shell() {
     let fake = Spawnable::new(&Config::echo());
     let client = spawning(&fake, 1).await;
-    let grant = ["env:OMNIA_TEST_TOOLS=~/tools", "refused:under no shell root"];
+    let grant = ["env:OMNIA_TEST_TOOLS=~/tools", "refused:not under a shell root"];
     run_guest(test_programs::MODEL_WORKER, &grant, &client).await;
 
     assert!(fake.log().events.is_empty(), "a refused grant spawned: {}", fake.log().summary());

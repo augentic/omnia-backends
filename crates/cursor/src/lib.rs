@@ -23,7 +23,6 @@ use tracing::instrument;
 
 use crate::model::Deadlines;
 use crate::pool::Pool;
-use crate::relay::Relay;
 use crate::worker::Worker;
 
 /// Cursor model backend.
@@ -149,7 +148,7 @@ pub use config::ConnectOptions;
 impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env()
-            .backend_url(Relay::BACKEND.to_owned())
+            .backend_url(relay::BACKEND_URL.to_owned())
             .finalize()
             .context("issue loading connection options")
     }

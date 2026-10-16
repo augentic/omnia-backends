@@ -82,8 +82,7 @@ impl Client {
         let api_key =
             self.api_key.as_deref().ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))?;
 
-        // the compartment is sealed before the slot is taken, so a lend that
-        // cannot be entered, or a clearance the host denies, costs no wait
+        // sealed before the slot is taken, so a bad lend or clearance costs no wait
         let compartment = self.seal(request, tool_host.local_path()).await?;
         let turn = Turn::prepare(request, &compartment, &self.model, api_key)?;
         let lease = self.pool.lease(compartment).await?;
@@ -98,26 +97,26 @@ impl Client {
 
     // A worker grant needs a shell: a worker reaches beyond its lend through
     // the commands it runs there, so one over a read-only lend is the
-    // request's fault, denied before anything is sealed.
+    // request's fault.
     async fn seal(&self, request: &Request, lend: Option<&Path>) -> anyhow::Result<Compartment> {
-        let chamber = self.airlock.prepare(lend).await?;
-        let clearance = match request.grants.worker.as_ref() {
-            None => Clearance::default(),
-            Some(_) if !chamber.shell() => {
-                let lend = if chamber.lent() { "is under no shell root" } else { "is nothing" };
-                return Err(Error::InvalidRequest(format!(
-                    "worker grant: the workspace lent {lend}, so the worker runs no command that \
-                     could use it"
-                ))
-                .into());
-            }
-            Some(grant) => Clearance {
-                egress: grant.egress.clone(),
-                read: grant.read.clone(),
-                env: grant.env.clone(),
-            },
-        };
-        self.airlock.seal(chamber, &clearance).await.map_err(refusal)
+        let grant = request.grants.worker.as_ref();
+        let clearance = grant.map_or_else(Clearance::default, |grant| Clearance {
+            egress: grant.egress.clone(),
+            read: grant.read.clone(),
+            env: grant.env.clone(),
+        });
+        let compartment = self.airlock.seal(lend, &clearance).await.map_err(refusal)?;
+
+        if grant.is_some() && !compartment.shell() {
+            let detail = if compartment.lent() {
+                "worker grant needs a shell: the workspace is not under a shell root"
+            } else {
+                "worker grant needs a workspace"
+            };
+            return Err(Error::InvalidRequest(detail.to_owned()).into());
+        }
+
+        Ok(compartment)
     }
 }
 

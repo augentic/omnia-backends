@@ -136,9 +136,9 @@ Unreleased
   trust domain: `Airlock::connect` holds the backend's `Options` to the
   host once — `shell_roots`, `passthrough`, `refused` — reads the
   operator's `HOME` as what a `~/` spells, and probes the kernel
-  substrate, refusing to connect where none runs; `Airlock::prepare` puts
-  one process at a lend, or in a private directory when nothing is lent;
-  `Airlock::seal` seals a `Compartment` under the process's own `Clearance`` —
+  substrate, refusing to connect where none runs; `Airlock::seal` puts
+  one process at a lend, or in a private directory when nothing is lent,
+  and seals a `Compartment` under the process's own `Clearance` —
   `egress`, the hosts its commands may reach; `read`, the roots beneath
   the home it may read, each spelled `~/<path>`, one the home lacks
   logged at WARN and granted nothing, and the stores the operator's

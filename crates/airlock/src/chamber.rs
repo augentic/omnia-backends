@@ -25,112 +25,6 @@ use crate::seatbelt;
 use crate::valve::Valve;
 use crate::{Options, Wall};
 
-// The place one process is put: the tree it works in and its scratch.
-pub struct Chamber {
-    tree: Tree,
-    scratch: TempDir,
-    scratch_path: PathBuf,
-    shell: bool,
-    dir: File,
-}
-
-enum Tree {
-    Lent(PathBuf),
-    Private(PathBuf),
-}
-
-impl Tree {
-    fn path(&self) -> &Path {
-        match self {
-            Self::Lent(path) | Self::Private(path) => path,
-        }
-    }
-}
-
-impl Chamber {
-    pub(crate) async fn prepare(lend: Option<&Path>, options: &Options) -> Result<Self> {
-        // `tempfile` has no async API; one `mkdir` under the temp root is
-        // not worth a blocking thread
-        let scratch = tempfile::Builder::new()
-            .prefix("omnia-airlock-")
-            .tempdir()
-            .context("creating a scratch directory")?;
-        let scratch_path = tokio::fs::canonicalize(scratch.path())
-            .await
-            .with_context(|| format!("canonicalizing {}", scratch.path().display()))?;
-
-        let (tree, shell) = if let Some(path) = lend {
-            tokio::fs::create_dir_all(path)
-                .await
-                .with_context(|| format!("creating {}", path.display()))?;
-            let path = tokio::fs::canonicalize(path)
-                .await
-                .with_context(|| format!("canonicalizing {}", path.display()))?;
-            let shell = beneath_any(&path, &options.shell_roots).await;
-            (Tree::Lent(path), shell)
-        } else {
-            let path = scratch_path.join("cwd");
-            tokio::fs::create_dir(&path)
-                .await
-                .with_context(|| format!("creating {}", path.display()))?;
-            (Tree::Private(path), false)
-        };
-
-        let dir = File::open(tree.path())
-            .with_context(|| format!("opening {}", tree.path().display()))?;
-        Ok(Self {
-            tree,
-            scratch,
-            scratch_path,
-            shell,
-            dir,
-        })
-    }
-
-    pub(crate) fn tree(&self) -> &Path {
-        self.tree.path()
-    }
-
-    pub(crate) fn scratch(&self) -> &Path {
-        &self.scratch_path
-    }
-
-    pub(crate) const fn lent(&self) -> bool {
-        matches!(self.tree, Tree::Lent(_))
-    }
-
-    pub(crate) const fn shell(&self) -> bool {
-        self.shell
-    }
-}
-
-impl fmt::Debug for Chamber {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Chamber")
-            .field("tree", &self.tree.path())
-            .field("lent", &self.lent())
-            .field("shell", &self.shell)
-            .field("scratch", &self.scratch_path)
-            .finish_non_exhaustive()
-    }
-}
-
-// A root is compared as spelled and as it resolves, since `path` is
-// canonical and a root may be a symlink away from it.
-pub async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
-    for root in roots {
-        if path.starts_with(root) {
-            return true;
-        }
-        if let Ok(root) = tokio::fs::canonicalize(root).await
-            && path.starts_with(&root)
-        {
-            return true;
-        }
-    }
-    false
-}
-
 /// The sealed compartment around one process: where it runs, what it
 /// inherits, and what its clearance granted.
 ///
@@ -319,6 +213,96 @@ impl Compartment {
     }
 }
 
+// The place one process is put: the tree it works in and its scratch.
+pub struct Chamber {
+    tree: Tree,
+    scratch: TempDir,
+    scratch_path: PathBuf,
+    shell: bool,
+    dir: File,
+}
+
+impl Chamber {
+    pub(crate) async fn prepare(lend: Option<&Path>, options: &Options) -> Result<Self> {
+        // `tempfile` has no async API; one `mkdir` under the temp root is
+        // not worth a blocking thread
+        let scratch = tempfile::Builder::new()
+            .prefix("omnia-airlock-")
+            .tempdir()
+            .context("creating a scratch directory")?;
+        let scratch_path = tokio::fs::canonicalize(scratch.path())
+            .await
+            .with_context(|| format!("canonicalizing {}", scratch.path().display()))?;
+
+        let (tree, shell) = if let Some(path) = lend {
+            tokio::fs::create_dir_all(path)
+                .await
+                .with_context(|| format!("creating {}", path.display()))?;
+            let path = tokio::fs::canonicalize(path)
+                .await
+                .with_context(|| format!("canonicalizing {}", path.display()))?;
+            let shell = beneath_any(&path, &options.shell_roots).await;
+            (Tree::Lent(path), shell)
+        } else {
+            let path = scratch_path.join("cwd");
+            tokio::fs::create_dir(&path)
+                .await
+                .with_context(|| format!("creating {}", path.display()))?;
+            (Tree::Private(path), false)
+        };
+
+        let dir = File::open(tree.path())
+            .with_context(|| format!("opening {}", tree.path().display()))?;
+        Ok(Self {
+            tree,
+            scratch,
+            scratch_path,
+            shell,
+            dir,
+        })
+    }
+
+    pub(crate) fn tree(&self) -> &Path {
+        self.tree.path()
+    }
+
+    pub(crate) fn scratch(&self) -> &Path {
+        &self.scratch_path
+    }
+
+    pub(crate) const fn lent(&self) -> bool {
+        matches!(self.tree, Tree::Lent(_))
+    }
+
+    pub(crate) const fn shell(&self) -> bool {
+        self.shell
+    }
+}
+
+impl fmt::Debug for Chamber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Chamber")
+            .field("tree", &self.tree.path())
+            .field("lent", &self.lent())
+            .field("shell", &self.shell)
+            .field("scratch", &self.scratch_path)
+            .finish_non_exhaustive()
+    }
+}
+
+enum Tree {
+    Lent(PathBuf),
+    Private(PathBuf),
+}
+
+impl Tree {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Lent(path) | Self::Private(path) => path,
+        }
+    }
+}
+
 // A session of its own: a kill reaches everything the process forks, and
 // `/dev/tty` opens nothing inside.
 fn launch(mut command: Command) -> Result<Box<dyn ChildWrapper>> {
@@ -378,4 +362,20 @@ async fn read<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> io::Resu
         pipe.read_to_end(&mut bytes).await?;
     }
     Ok(bytes)
+}
+
+// A root is compared as spelled and as it resolves, since `path` is
+// canonical and a root may be a symlink away from it.
+pub async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
+    for root in roots {
+        if path.starts_with(root) {
+            return true;
+        }
+        if let Ok(root) = tokio::fs::canonicalize(root).await
+            && path.starts_with(&root)
+        {
+            return true;
+        }
+    }
+    false
 }

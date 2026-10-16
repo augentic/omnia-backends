@@ -21,83 +21,10 @@ pub use crate::chamber::Compartment;
 pub use crate::child::{Child, Exit};
 use crate::valve::Valve;
 
-/// What every confined process may reach, as plain data.
-///
-/// A backend fills it from its own configuration; nothing here names an
-/// environment variable of the crate's own. What one process asks beyond
-/// it is its [`Clearance`].
-#[derive(Debug, Clone, Default)]
-pub struct Options {
-    /// Trees a lend at or beneath which runs with a shell.
-    pub shell_roots: Vec<PathBuf>,
-    /// Host environment variables copied into a confined process, by name.
-    pub passthrough: &'static [&'static str],
-    /// Environment variable names that must never reach a confined process.
-    pub refused: &'static [&'static str],
-}
-
-/// What one process may reach beyond the boundary's defaults.
-///
-/// Sealed with the process by [`Airlock::seal`], which holds each entry to the
-/// host before the process runs.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Clearance {
-    /// Hosts the process may reach through its egress proxy.
-    ///
-    /// A name matches whole, `*.suffix` matches the suffix and every name
-    /// beneath it, and an IP literal matches itself. Every address, resolved
-    /// or literal, is held to [`valve::Refusal`] before the tunnel opens,
-    /// a loopback literal alone excepted.
-    pub egress: Vec<String>,
-    /// Trees the process may read beside the system's own, each spelled
-    /// `~/<path>`: a directory beneath the operator's home, apart from the
-    /// credential stores [`Airlock::seal`] denies whatever the clearance names.
-    pub read: Vec<String>,
-    /// Environment variables set for the process, a value's leading `~/`
-    /// spelling the operator's home.
-    pub env: Vec<(String, String)>,
-}
-
-/// A [`Clearance`] the host denies: an entry that breaks a rule of the seal.
-///
-/// [`Airlock::seal`] fails with one of these, downcastable from its error,
-/// where the clearance itself is at fault, and with a plain error where the
-/// host failed it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Denied(String);
-
-impl fmt::Display for Denied {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Denied {}
-
 macro_rules! deny {
     ($($arg:tt)*) => {
         return Err(anyhow::Error::new(Denied(format!($($arg)*))))
     };
-}
-
-// Kernel wall every laid boundary shares: Landlock and seccomp on Linux,
-// Seatbelt on macOS.
-#[derive(Debug, Clone)]
-pub(crate) enum Wall {
-    #[cfg(target_os = "linux")]
-    Landlock(Arc<linux::Linux>),
-    #[cfg(target_os = "macos")]
-    Seatbelt(Arc<seatbelt::Seatbelt>),
-}
-
-impl Wall {
-    async fn platform() -> Result<Self> {
-        cfg_select! {
-            target_os = "linux" => Ok(Self::Landlock(Arc::new(linux::Linux::probe().await?))),
-            target_os = "macos" => Ok(Self::Seatbelt(Arc::new(seatbelt::Seatbelt::probe().await?))),
-            _ => bail!("no chamber substrate runs on this platform"),
-        }
-    }
 }
 
 /// What a connected backend connects once and lays around every process it spawns.
@@ -398,6 +325,79 @@ impl fmt::Debug for Airlock {
             .field("wall", &self.wall)
             .field("home", &self.home)
             .finish()
+    }
+}
+
+/// What every confined process may reach, as plain data.
+///
+/// A backend fills it from its own configuration; nothing here names an
+/// environment variable of the crate's own. What one process asks beyond
+/// it is its [`Clearance`].
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    /// Trees a lend at or beneath which runs with a shell.
+    pub shell_roots: Vec<PathBuf>,
+    /// Host environment variables copied into a confined process, by name.
+    pub passthrough: &'static [&'static str],
+    /// Environment variable names that must never reach a confined process.
+    pub refused: &'static [&'static str],
+}
+
+/// What one process may reach beyond the boundary's defaults.
+///
+/// Sealed with the process by [`Airlock::seal`], which holds each entry to the
+/// host before the process runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Clearance {
+    /// Hosts the process may reach through its egress proxy.
+    ///
+    /// A name matches whole, `*.suffix` matches the suffix and every name
+    /// beneath it, and an IP literal matches itself. Every address, resolved
+    /// or literal, is held to [`valve::Refusal`] before the tunnel opens,
+    /// a loopback literal alone excepted.
+    pub egress: Vec<String>,
+    /// Trees the process may read beside the system's own, each spelled
+    /// `~/<path>`: a directory beneath the operator's home, apart from the
+    /// credential stores [`Airlock::seal`] denies whatever the clearance names.
+    pub read: Vec<String>,
+    /// Environment variables set for the process, a value's leading `~/`
+    /// spelling the operator's home.
+    pub env: Vec<(String, String)>,
+}
+
+/// A [`Clearance`] the host denies: an entry that breaks a rule of the seal.
+///
+/// [`Airlock::seal`] fails with one of these, downcastable from its error,
+/// where the clearance itself is at fault, and with a plain error where the
+/// host failed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Denied(String);
+
+impl fmt::Display for Denied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Denied {}
+
+// Kernel wall every laid boundary shares: Landlock and seccomp on Linux,
+// Seatbelt on macOS.
+#[derive(Debug, Clone)]
+pub(crate) enum Wall {
+    #[cfg(target_os = "linux")]
+    Landlock(Arc<linux::Linux>),
+    #[cfg(target_os = "macos")]
+    Seatbelt(Arc<seatbelt::Seatbelt>),
+}
+
+impl Wall {
+    async fn platform() -> Result<Self> {
+        cfg_select! {
+            target_os = "linux" => Ok(Self::Landlock(Arc::new(linux::Linux::probe().await?))),
+            target_os = "macos" => Ok(Self::Seatbelt(Arc::new(seatbelt::Seatbelt::probe().await?))),
+            _ => bail!("no chamber substrate runs on this platform"),
+        }
     }
 }
 

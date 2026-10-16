@@ -28,6 +28,37 @@ const METADATA: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200)),
 ];
 
+/// The bound valve; dropping it stops serving.
+#[derive(Debug)]
+pub struct Valve {
+    address: SocketAddr,
+    server: JoinHandle<()>,
+}
+
+impl Valve {
+    pub(crate) async fn bind(hosts: &[String]) -> Result<Self> {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).await.context("binding the egress proxy")?;
+        let address = listener.local_addr().context("reading the egress proxy's address")?;
+        let allowlist = Arc::new(Allowlist(hosts.iter().map(|host| Entry::parse(host)).collect()));
+        tracing::debug!(%address, hosts = ?allowlist, "egress proxy bound");
+        let server = tokio::spawn(serve(listener, allowlist));
+        Ok(Self { address, server })
+    }
+
+    /// The proxy's address, which every boundary's `HTTPS_PROXY` names.
+    #[must_use]
+    pub const fn address(&self) -> SocketAddr {
+        self.address
+    }
+}
+
+impl Drop for Valve {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
 /// Why an address a listed host names or resolves to is not connected.
 ///
 /// A name on the allowlist is resolved once and every address it answers
@@ -167,6 +198,31 @@ pub fn own_addresses() -> Result<Vec<IpAddr>> {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct Allowlist(Vec<Entry>);
+
+impl Allowlist {
+    fn admits(&self, host: &str) -> Option<Admission> {
+        let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+        let literal = host.parse::<IpAddr>().ok();
+        self.0.iter().find_map(|entry| match (entry, literal) {
+            (Entry::Literal(listed), Some(asked)) if *listed == asked => {
+                Some(Admission::Literal(asked))
+            }
+            (Entry::Exact(name), None) if *name == host => Some(Admission::Name),
+            (Entry::Suffix(suffix), None)
+                if host == *suffix
+                    || host
+                        .strip_suffix(suffix.as_str())
+                        .is_some_and(|rest| rest.ends_with('.')) =>
+            {
+                Some(Admission::Name)
+            }
+            _ => None,
+        })
+    }
+}
+
 // One allowlist entry as the ask spelled it.
 #[derive(Debug, Clone)]
 enum Entry {
@@ -195,62 +251,6 @@ enum Admission {
     Name,
     // A listed literal: vet as written.
     Literal(IpAddr),
-}
-
-#[derive(Debug, Clone, Default)]
-struct Allowlist(Vec<Entry>);
-
-impl Allowlist {
-    fn admits(&self, host: &str) -> Option<Admission> {
-        let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
-        let literal = host.parse::<IpAddr>().ok();
-        self.0.iter().find_map(|entry| match (entry, literal) {
-            (Entry::Literal(listed), Some(asked)) if *listed == asked => {
-                Some(Admission::Literal(asked))
-            }
-            (Entry::Exact(name), None) if *name == host => Some(Admission::Name),
-            (Entry::Suffix(suffix), None)
-                if host == *suffix
-                    || host
-                        .strip_suffix(suffix.as_str())
-                        .is_some_and(|rest| rest.ends_with('.')) =>
-            {
-                Some(Admission::Name)
-            }
-            _ => None,
-        })
-    }
-}
-
-/// The bound valve; dropping it stops serving.
-#[derive(Debug)]
-pub struct Valve {
-    address: SocketAddr,
-    server: JoinHandle<()>,
-}
-
-impl Valve {
-    pub(crate) async fn bind(hosts: &[String]) -> Result<Self> {
-        let listener =
-            TcpListener::bind(("127.0.0.1", 0)).await.context("binding the egress proxy")?;
-        let address = listener.local_addr().context("reading the egress proxy's address")?;
-        let allowlist = Arc::new(Allowlist(hosts.iter().map(|host| Entry::parse(host)).collect()));
-        tracing::debug!(%address, hosts = ?allowlist, "egress proxy bound");
-        let server = tokio::spawn(serve(listener, allowlist));
-        Ok(Self { address, server })
-    }
-
-    /// The proxy's address, which every boundary's `HTTPS_PROXY` names.
-    #[must_use]
-    pub const fn address(&self) -> SocketAddr {
-        self.address
-    }
-}
-
-impl Drop for Valve {
-    fn drop(&mut self) {
-        self.server.abort();
-    }
 }
 
 // Accept until the `Valve` drops, one connection task per client socket.

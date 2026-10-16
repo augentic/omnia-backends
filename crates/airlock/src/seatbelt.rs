@@ -90,15 +90,6 @@ pub struct Seatbelt {
     system: Vec<PathBuf>,
 }
 
-// Where one process is put, every path canonical, and the directories its
-// ask was granted to read.
-pub struct Place<'a> {
-    pub tree: &'a Path,
-    pub scratch: &'a Path,
-    pub program: &'a Path,
-    pub read: &'a [PathBuf],
-}
-
 impl Seatbelt {
     pub async fn probe() -> Result<Self> {
         ensure!(Path::new(SANDBOX_EXEC).exists(), "`{SANDBOX_EXEC}` is not available");
@@ -216,6 +207,15 @@ impl Seatbelt {
         command.arg("--").arg(program);
         Ok(command)
     }
+}
+
+// Where one process is put, every path canonical, and the directories its
+// ask was granted to read.
+pub struct Place<'a> {
+    pub tree: &'a Path,
+    pub scratch: &'a Path,
+    pub program: &'a Path,
+    pub read: &'a [PathBuf],
 }
 
 #[derive(Default)]

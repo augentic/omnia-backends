@@ -189,9 +189,22 @@ impl fmt::Debug for Child {
     }
 }
 
-struct Stop {
-    ask: Pin<Box<dyn Future<Output = ()> + Send>>,
-    wait: Duration,
+/// How a supervised process ended.
+#[derive(Clone, Copy, Debug)]
+pub struct Exit {
+    /// The exit status, when the wait reported one.
+    pub status: Option<ExitStatus>,
+    /// The process id.
+    pub pid: u32,
+}
+
+impl fmt::Display for Exit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.status {
+            Some(status) => status.fmt(f),
+            None => f.write_str("status unknown"),
+        }
+    }
 }
 
 // waits on the process, tears it down on request, and publishes its exit
@@ -259,6 +272,11 @@ impl Supervisor {
     }
 }
 
+struct Stop {
+    ask: Pin<Box<dyn Future<Output = ()> + Send>>,
+    wait: Duration,
+}
+
 // what the child, its caller and its supervisor all see of one process
 struct State {
     pid: u32,
@@ -300,24 +318,6 @@ impl fmt::Display for Tail {
             write!(f, "  {line}")?;
         }
         Ok(())
-    }
-}
-
-/// How a supervised process ended.
-#[derive(Clone, Copy, Debug)]
-pub struct Exit {
-    /// The exit status, when the wait reported one.
-    pub status: Option<ExitStatus>,
-    /// The process id.
-    pub pid: u32,
-}
-
-impl fmt::Display for Exit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.status {
-            Some(status) => status.fmt(f),
-            None => f.write_str("status unknown"),
-        }
     }
 }
 

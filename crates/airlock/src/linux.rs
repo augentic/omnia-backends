@@ -36,24 +36,9 @@ const EXECUTABLE: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib3
 const READABLE: [&str; 4] = ["/etc", "/proc", "/sys", "/run"];
 const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
 
-// Where one process is put, every path canonical, and the directories its
-// ask was granted to read.
-pub struct Place<'a> {
-    pub tree: &'a Path,
-    pub scratch: &'a Path,
-    pub program: &'a Path,
-    pub read: &'a [PathBuf],
-}
-
 // The substrate as probed: the filters every process gets, compiled once.
 pub struct Linux {
     filters: Filters,
-}
-
-impl std::fmt::Debug for Linux {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Linux").finish_non_exhaustive()
-    }
 }
 
 impl Linux {
@@ -151,33 +136,26 @@ impl Linux {
     }
 }
 
-// A system path the distribution may lack, which is then no rule at all.
-fn optional(ruleset: &mut RulesetCreated, path: &Path, access: BitFlags<AccessFs>) -> Result<()> {
-    match PathFd::new(path) {
-        Ok(fd) => grant(ruleset, path, fd, access),
-        Err(_absent) => Ok(()),
+impl std::fmt::Debug for Linux {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Linux").finish_non_exhaustive()
     }
 }
 
-// A path the boundary stands on: absent, the rule would match nothing and
-// the process would run with less than it was promised.
-fn required(ruleset: &mut RulesetCreated, path: &Path, access: BitFlags<AccessFs>) -> Result<()> {
-    let fd = PathFd::new(path).with_context(|| format!("opening {}", path.display()))?;
-    grant(ruleset, path, fd, access)
+// Where one process is put, every path canonical, and the directories its
+// ask was granted to read.
+pub struct Place<'a> {
+    pub tree: &'a Path,
+    pub scratch: &'a Path,
+    pub program: &'a Path,
+    pub read: &'a [PathBuf],
 }
 
-// Landlock refuses a directory right on a file, so a rule over a file keeps
-// the file rights alone.
-fn grant(
-    ruleset: &mut RulesetCreated, path: &Path, fd: PathFd, access: BitFlags<AccessFs>,
-) -> Result<()> {
-    let access = if path.is_dir() { access } else { access & AccessFs::from_file(REQUIRED) };
-    ensure!(!access.is_empty(), "{} is a file and takes no directory right", path.display());
-    ruleset
-        .add_rule(PathBeneath::new(fd, access))
-        .map(|_ruleset| ())
-        .with_context(|| format!("Landlock refused the rule over {}", path.display()))
-}
+const ARCH: Option<TargetArch> = cfg_select! {
+    target_arch = "x86_64" => Some(TargetArch::x86_64),
+    target_arch = "aarch64" => Some(TargetArch::aarch64),
+    _ => None,
+};
 
 // The seccomp programs every process gets: a deny list answering `EPERM`,
 // and `clone3` answering `ENOSYS` apart from it, since glibc issues
@@ -211,6 +189,34 @@ impl Filters {
     }
 }
 
+// A system path the distribution may lack, which is then no rule at all.
+fn optional(ruleset: &mut RulesetCreated, path: &Path, access: BitFlags<AccessFs>) -> Result<()> {
+    match PathFd::new(path) {
+        Ok(fd) => grant(ruleset, path, fd, access),
+        Err(_absent) => Ok(()),
+    }
+}
+
+// A path the boundary stands on: absent, the rule would match nothing and
+// the process would run with less than it was promised.
+fn required(ruleset: &mut RulesetCreated, path: &Path, access: BitFlags<AccessFs>) -> Result<()> {
+    let fd = PathFd::new(path).with_context(|| format!("opening {}", path.display()))?;
+    grant(ruleset, path, fd, access)
+}
+
+// Landlock refuses a directory right on a file, so a rule over a file keeps
+// the file rights alone.
+fn grant(
+    ruleset: &mut RulesetCreated, path: &Path, fd: PathFd, access: BitFlags<AccessFs>,
+) -> Result<()> {
+    let access = if path.is_dir() { access } else { access & AccessFs::from_file(REQUIRED) };
+    ensure!(!access.is_empty(), "{} is a file and takes no directory right", path.display());
+    ruleset
+        .add_rule(PathBeneath::new(fd, access))
+        .map(|_ruleset| ())
+        .with_context(|| format!("Landlock refused the rule over {}", path.display()))
+}
+
 const fn errno(code: i32) -> u32 {
     code.unsigned_abs()
 }
@@ -220,12 +226,6 @@ async fn kernel() -> String {
         .await
         .map_or_else(|_| "[unknown]".to_owned(), |release| release.trim().to_owned())
 }
-
-const ARCH: Option<TargetArch> = cfg_select! {
-    target_arch = "x86_64" => Some(TargetArch::x86_64),
-    target_arch = "aarch64" => Some(TargetArch::aarch64),
-    _ => None,
-};
 
 fn compile(
     rules: BTreeMap<i64, Vec<SeccompRule>>, matched: SeccompAction, arch: TargetArch,

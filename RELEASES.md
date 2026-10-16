@@ -134,7 +134,7 @@ Unreleased
   now sits beside it as a knob of the same backend.
 - `omnia-airlock`, the crate that owns a host process in the model's
   trust domain: `Airlock::connect` holds the backend's `Options` to the
-  host once — `shell_roots`, `passthrough`, `refused` — reads the
+  host once — `shell_roots`, `inherit`, `refused` — reads the
   operator's `HOME` as what a `~/` spells, and probes the kernel
   substrate, refusing to connect where none runs; `Airlock::seal` puts
   one process at a lend, or in a private directory when nothing is lent,
@@ -152,12 +152,12 @@ Unreleased
   egress proxy for that boundary alone, and answering an ask that breaks
   a rule of the seal (a root spelled otherwise, overlapping a credential
   store, resolving outside the home, or a file; a variable the boundary
-  holds, one the dynamic loader or a runtime reads at startup, one the
-  host passes through, or no name at all) with the typed `Denied`, which
+  holds, one the dynamic loader or a runtime reads at startup, one
+  inherited from the host, or no name at all) with the typed `Denied`, which
   a backend tells from a host failure. The
   `Compartment`'s `command` runs a program inside with an environment built
   from nothing (`PATH`, `LANG`, `LC_*`, `TZ`, `TERM`, a private `HOME`
-  and `TMPDIR`, the proxy variables, the `passthrough`, and the ask's
+  and `TMPDIR`, the proxy variables, the `inherit`, and the ask's
   `env`), the bare program resolved against the host's `PATH` rather
   than the ask's, in the
   tree's open directory handle, as a session leader, and its `spawn`
@@ -237,8 +237,8 @@ Unreleased
   `grants.worker` `env`, with `CURSOR_API_KEY` riding the handshake
   alone and `NODE_USE_SYSTEM_CA`, `CURSOR_BACKEND_URL`, the proxy
   variables, the dynamic loader's `LD_*` and `DYLD_*`, `BUN_OPTIONS`,
-  `NODE_OPTIONS`, and every `GIT_DIR` sibling refused as a passthrough
-  or a grant, and a grant that names one of the bridge's passthroughs
+  `NODE_OPTIONS`, and every `GIT_DIR` sibling refused as an inherit
+  or a grant, and a grant that names one the bridge inherits
   refused as well. A grant's `PATH` reaches the commands the worker
   runs, while `cursor-sdk-bridge` is resolved against the host's.
   Workers are session leaders

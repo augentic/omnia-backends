@@ -1,6 +1,8 @@
-//! The boundary suite's probe: copied into a lent tree and run inside the
-//! boundary, it makes one attempt per row and exits 0 when the attempt
-//! succeeded, 1 when the kernel refused it, with the reason on stderr.
+//! The compartment suite's probe, copied into a lent tree and run inside the
+//! boundary.
+//!
+//! It makes one attempt per row. It exits 0 when the attempt succeeded, and
+//! 1 with the reason on stderr when the kernel refused it.
 
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
@@ -64,8 +66,7 @@ fn procargs(pid: &str) -> Result<String, String> {
     }
 }
 
-// The environment of another process, as `/proc` (or the sysctl behind
-// `ps -E` on macOS) shows it.
+// The environment of another process, as `/proc` shows it.
 fn environ(pid: &str) -> Result<String, String> {
     let bytes = std::fs::read(format!("/proc/{pid}/environ"))
         .map_err(|error| format!("/proc/{pid}/environ: {error}"))?;
@@ -139,7 +140,7 @@ fn loopback() -> Result<String, String> {
     }
 }
 
-// One syscall per row through libc, the way an escape would make it; an
+// One syscall per row through libc, the way an escape would make it. An
 // attempt the kernel refused names the errno it answered.
 #[cfg(target_os = "linux")]
 #[expect(unsafe_code, reason = "each row is the one syscall it is about")]
@@ -220,8 +221,8 @@ mod syscall {
         outcome(unsafe { libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0) })
     }
 
-    // A null parameter block: refused by the filter before the kernel reads
-    // it, `EFAULT` where it is not.
+    // A null parameter block. The filter refuses it before the kernel reads
+    // it, and the kernel answers `EFAULT` where the filter is not in the way.
     fn io_uring() -> Result<String, String> {
         // SAFETY: the kernel validates the pointer before any write.
         outcome(unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, ptr::null_mut::<u8>()) })
@@ -253,7 +254,7 @@ mod syscall {
     }
 
     // The request with its high bits set, which the kernel truncates and a
-    // filter comparing the whole register would miss; stdin is `/dev/null`,
+    // filter comparing the whole register would miss. Stdin is `/dev/null`,
     // which answers `ENOTTY` where nothing stands in the way.
     fn ioctl(request: &str) -> Result<String, String> {
         let request: u64 = match request {

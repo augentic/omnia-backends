@@ -1,6 +1,8 @@
-//! What a build's toolchain does inside the kernel boundary: `node` serving
-//! and fetching on loopback, `node --test` with a worker thread, and `npm`
-//! installing from the tree with its cache in the scratch.
+//! What a build's toolchain does inside the kernel boundary:
+//!
+//! - `node` serving and fetching on loopback
+//! - `node --test` with a worker thread
+//! - `npm` installing from the tree with its cache in the scratch
 //!
 //! The rows need `node` and `npm` on `PATH`, as omnia-git's need `git`. A
 //! toolchain under `$HOME` is asked for as a `~/` read root, as a target
@@ -102,9 +104,9 @@ async fn connect() -> Airlock {
     support::connect(Options::default()).await
 }
 
-// The install prefix of each tool under the host's `$HOME`, which the
-// scratch `HOME` hides, spelled `~/`-relative: `<prefix>/bin/<tool>` as
-// nvm, volta, and fnm lay it.
+// The install prefix of each tool under the host's `$HOME`, spelled
+// `~/`-relative. The scratch `HOME` hides it, and `<prefix>/bin/<tool>` is
+// how nvm, volta, and fnm lay a tool.
 fn toolchain_roots() -> Vec<String> {
     let home = home();
     let mut roots = Vec::new();
@@ -208,10 +210,10 @@ async fn npm_installs_a_local_dependency() {
     assert!(tree.join("package-lock.json").exists(), "package-lock.json in the tree");
 }
 
-// The registry through the proxy: `npm install` of a pinned `typescript`
-// and `tsc --noEmit` over a source, the toolchain's own checks as a build
-// turn runs them. Needs the network; run by hand, reading `log stream`
-// for denials on macOS.
+// The registry through the proxy: `npm install` of a pinned `typescript` and
+// `tsc --noEmit` over a source, the toolchain's own checks as a build turn
+// runs them. Needs the network, so run by hand, reading `log stream` for
+// denials on macOS.
 #[tokio::test]
 #[ignore = "reaches registry.npmjs.org through the proxy"]
 async fn live_toolchain_through_the_proxy() {

@@ -24,7 +24,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const READY_PREFIX: &str = "cursor-sdk-bridge ready ";
 
-pub const PASSTHROUGH: &[&str] = &[
+pub const INHERIT: &[&str] = &[
     "SHELL",
     "USER",
     "LOGNAME",

@@ -1,6 +1,9 @@
-//! The supervised process over `/bin/sh`: what a child's death sweeps, what
-//! its exit publishes, how a stop and a future under its life see it, and
-//! that it has no terminal.
+//! The supervised process over `/bin/sh`:
+//!
+//! - what a child's death sweeps
+//! - what its exit publishes
+//! - how a stop and a future under its life see it
+//! - that it has no terminal
 
 mod support;
 
@@ -123,7 +126,7 @@ async fn fail_on_exit_sees_the_exit() {
     assert_eq!(code(&exit), Some(7), "{exit}");
 }
 
-// The future fails first; the exit lands within the grace and wins.
+// The future fails first. The exit lands within the grace and wins.
 #[tokio::test]
 async fn fail_on_exit_outruns_a_failure() {
     let confine = connect(Options::default()).await;
@@ -164,8 +167,8 @@ async fn fail_on_exit_passes_a_value() {
 // --- Terminal ---
 
 // The session is the boundary's own: `/dev/tty` opens nothing inside, and
-// `ps`, run from the test process since the kernel substrate never runs it
-// (it is setuid on macOS), shows the child no controlling terminal.
+// `ps` shows the child no controlling terminal. `ps` runs from the test
+// process, since it is setuid on macOS and the kernel substrate never runs it.
 #[tokio::test]
 async fn tty_opens_nothing() {
     let confine = connect(Options::default()).await;
@@ -218,7 +221,7 @@ async fn output_killed_past_the_bound() {
 
 // --- Output ---
 
-// Both pipes are read to EOF whatever the bytes: a line in anything but
+// Both pipes are read to EOF whatever the bytes. A line in anything but
 // UTF-8 ahead of the ready line neither hides it nor closes stdout under
 // the write behind it.
 #[tokio::test]

@@ -1,5 +1,5 @@
-//! The egress proxy: what it admits, what it refuses, and the tunnel it
-//! carries; and the vetting every resolved address goes through.
+//! The egress proxy: what it admits, what it refuses, the tunnel it carries,
+//! and the vetting every address goes through.
 
 mod support;
 
@@ -228,9 +228,9 @@ async fn proxy_in_the_environment() {
 
 // --- Inside the boundary (macOS) ---
 
-// With the kernel closing the network to loopback, the proxy is the one
-// way out: nothing resolves inside and a direct connect fails, while a
-// tunnel to a listed host carries bytes.
+// With the kernel closing the network to loopback, the proxy is the one way
+// out. Nothing resolves inside, a direct connect fails, and a tunnel to a
+// listed host carries bytes.
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn egress_through_the_proxy_alone() {

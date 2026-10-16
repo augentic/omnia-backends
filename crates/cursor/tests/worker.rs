@@ -282,7 +282,7 @@ fn worker_grant_laid() {
             ("env:CURSOR_API_KEY=k", "is refused"),
             ("env:BUN_OPTIONS=--preload=./x.js", "is refused"),
             ("env:LD_PRELOAD=./x.so", "the dynamic loader's"),
-            ("env:SSL_CERT_FILE=./ca.pem", "the host's to pass through"),
+            ("env:SSL_CERT_FILE=./ca.pem", "inherited from the host"),
             ("env:GIT_DIR=.git", "selects a repository"),
         ] {
             let refused = format!("refused:{why}");

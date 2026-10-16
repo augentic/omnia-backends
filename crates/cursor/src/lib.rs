@@ -60,7 +60,7 @@ impl Backend for Client {
 
         let airlock = Airlock::connect(Options {
             shell_roots: options.shell_roots,
-            passthrough: worker::PASSTHROUGH,
+            inherit: worker::INHERIT,
             refused: worker::REFUSED,
         })
         .await?;

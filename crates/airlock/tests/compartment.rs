@@ -1,5 +1,5 @@
-//! What a process inside the boundary sees — its working directory and its
-//! environment — what connecting refuses, and what an ask is held to.
+//! What a process inside the boundary sees of its working directory and its
+//! environment, what connecting refuses, and what an ask is held to.
 
 mod support;
 
@@ -57,7 +57,7 @@ fn environment_rebuilt() {
         }
 
         let confine = connect(Options {
-            passthrough: &[PLANTED],
+            inherit: &[PLANTED],
             ..Options::default()
         })
         .await;
@@ -144,7 +144,7 @@ async fn program_resolved_on_path() {
     assert_eq!(output.stdout, b"found\n");
 }
 
-// An ask's `PATH` reaches the process, so a toolchain is found inside; the
+// An ask's `PATH` reaches the process, so a toolchain is found inside. The
 // program the backend names is resolved against the host's `PATH`, so the
 // `sh` planted first on the ask's is never the one spawned.
 #[tokio::test]
@@ -173,7 +173,7 @@ async fn path_in_the_ask() {
 // --- Connect ---
 
 #[tokio::test]
-async fn passthrough_refused() {
+async fn inherit_refused() {
     const HELD: &[(&str, &str)] = &[
         ("HOME", "the boundary's to set"),
         ("TMPDIR", "the boundary's to set"),
@@ -189,7 +189,7 @@ async fn passthrough_refused() {
     ];
     for (name, why) in HELD {
         let error = Airlock::connect(Options {
-            passthrough: std::slice::from_ref(name),
+            inherit: std::slice::from_ref(name),
             refused: &["CURSOR_API_KEY"],
             ..Options::default()
         })
@@ -226,7 +226,7 @@ impl tracing::field::Visit for Flatten<'_> {
     }
 }
 
-// A root the home lacks grants nothing and ends nothing: a toolchain the
+// A root the home lacks grants nothing and ends nothing. A toolchain the
 // adapter names and this machine does not have is no reason to refuse the
 // turn. The roots that exist are granted beside it, canonical.
 #[test]
@@ -270,10 +270,10 @@ fn read_root_held_to_the_home() {
         let confine = connect(Options::default()).await;
 
         for (root, why) in [
-            (home.join("tools").display().to_string(), "spelled `~/<path>`"),
-            ("~/".to_owned(), "spelled `~/<path>`"),
-            ("~".to_owned(), "spelled `~/<path>`"),
-            ("tools".to_owned(), "spelled `~/<path>`"),
+            (home.join("tools").display().to_string(), "beneath the home, `~/<path>`"),
+            ("~/".to_owned(), "beneath the home, `~/<path>`"),
+            ("~".to_owned(), "beneath the home, `~/<path>`"),
+            ("tools".to_owned(), "beneath the home, `~/<path>`"),
             ("~/note.txt".to_owned(), "is not a directory"),
             ("~/tools/..".to_owned(), "outside the home"),
             ("~/away".to_owned(), "outside the home"),
@@ -285,9 +285,9 @@ fn read_root_held_to_the_home() {
 }
 
 // Nothing of the host bounds what an ask reads of the home but the
-// credential stores: a toolchain anywhere beneath the home is granted with
-// nothing set, and a store is refused as spelled, through a link, from
-// above, and on a machine that lacks it.
+// credential stores. A toolchain anywhere beneath the home is granted with
+// nothing set. A store is refused as spelled, through a link, from above,
+// and on a machine that lacks it.
 #[test]
 fn read_root_credential_store_refused() {
     support::under_home(async |home| {
@@ -326,14 +326,14 @@ fn read_root_credential_store_refused() {
     });
 }
 
-// An ask's variables reach the process, a leading `~/` spelling the home;
-// a name the boundary holds, one the host passes through, or no name at
-// all, is refused as a passthrough is.
+// An ask's variables reach the process, a leading `~/` spelling the home.
+// A name the boundary holds, one the backend inherits, or no name at all
+// is refused as an `inherit` is.
 #[test]
 fn env_set_and_home_expanded() {
     support::under_home(async |home| {
         let confine = connect(Options {
-            passthrough: &["SSL_CERT_FILE"],
+            inherit: &["SSL_CERT_FILE"],
             refused: &["CURSOR_API_KEY"],
             ..Options::default()
         })
@@ -363,7 +363,7 @@ fn env_set_and_home_expanded() {
             ("LD_PRELOAD", "the dynamic loader's"),
             ("DYLD_INSERT_LIBRARIES", "the dynamic loader's"),
             ("GIT_DIR", "selects a repository"),
-            ("SSL_CERT_FILE", "the host's to pass through"),
+            ("SSL_CERT_FILE", "inherited from the host"),
             ("1ST", "not an environment variable name"),
             ("A=B", "not an environment variable name"),
             ("", "not an environment variable name"),
@@ -529,7 +529,7 @@ mod seatbelt {
             let output = run(support::compartment(&confine, Some(&tree)).await, attempt).await;
             refused(&output, attempt);
         }
-        // `rm -f` swallows the refusal; what it removed is the check
+        // `rm -f` swallows the refusal, so what it removed is the check
         let output =
             run(support::compartment(&confine, Some(&tree)).await, "rm -rf .git .emery").await;
         passed(&output, "rm -rf reports nothing");
@@ -580,9 +580,9 @@ mod seatbelt {
         passed(&output, "the copy's own files");
     }
 
-    // The host process's arguments carry the callback token: neither `ps`,
-    // which is setuid and so never runs inside, nor the sysctl it reads them
-    // through answers for a process outside.
+    // The host process's arguments carry the callback token. Neither `ps` nor
+    // the sysctl it reads them through answers for a process outside. `ps` is
+    // setuid, so it never runs inside at all.
     #[tokio::test]
     async fn outside_process_invisible() {
         let (_lend, tree) = tree();

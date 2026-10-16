@@ -28,11 +28,13 @@ use crate::{Options, Wall};
 /// The sealed compartment around one process: where it runs, what it
 /// inherits, and what its clearance granted.
 ///
-/// [`Compartment::command`] builds a command inside it, [`Compartment::spawn`]
-/// starts a supervised [`Child`] there, and [`Compartment::output`] runs a
-/// one-shot command inside it and captures what it wrote. The valve the
-/// process's `HTTPS_PROXY` names is the compartment's own, serving until the
-/// process it was sealed for has exited.
+/// - [`Compartment::command`] builds a command inside it.
+/// - [`Compartment::spawn`] starts a supervised [`Child`] there.
+/// - [`Compartment::output`] runs a one-shot command there and captures what
+///   it wrote.
+///
+/// The valve the process's proxy variables name is the compartment's own.
+/// It serves until the process it was sealed for has exited.
 #[derive(Debug)]
 pub struct Compartment {
     chamber: Chamber,
@@ -64,8 +66,9 @@ impl Compartment {
         self.chamber.tree()
     }
 
-    /// The trees the process reads beside the system, its tree, and its
-    /// scratch: the ask's `read` roots that exist, canonical.
+    /// The trees the process reads beside the system's, its tree, and its scratch.
+    ///
+    /// These are the clearance's `read` roots that exist, canonical.
     #[must_use]
     pub fn read(&self) -> &[PathBuf] {
         &self.read
@@ -107,20 +110,23 @@ impl Compartment {
 
     /// A command running `program` inside the boundary.
     ///
-    /// The command's environment is the boundary's and nothing of the
-    /// host's; what the caller adds to it rides. A bare `program` is
-    /// resolved here against the host's `PATH` as connecting read it, never
-    /// one the ask set, so an absent one is refused before any spawn and no
-    /// ask chooses the program. Under Seatbelt the command is the
-    /// substrate's launcher, which applies the boundary and runs `program`
-    /// in its place, so the arguments the caller adds are the program's;
-    /// under Landlock the rules are applied in the child before `program`
-    /// runs.
+    /// - The command's environment is the boundary's and nothing of the
+    ///   host's. What the caller adds to it rides.
+    /// - A bare `program` is resolved here against the host's `PATH` as
+    ///   connecting read it, never one the ask set. An absent one is refused
+    ///   before any spawn, and no ask chooses the program.
+    /// - Under Seatbelt the command is the substrate's launcher, which
+    ///   applies the boundary and runs `program` in its place. The arguments
+    ///   the caller adds are still the program's.
+    /// - Under Landlock the rules are applied in the child before `program`
+    ///   runs.
     ///
     /// # Errors
     ///
-    /// Returns an error when a bare `program` is not on the host's `PATH`,
-    /// or when the substrate cannot lay its rules over the tree.
+    /// Returns an error when:
+    ///
+    /// - a bare `program` is not on the host's `PATH`
+    /// - the substrate cannot lay its rules over the tree
     pub fn command(&self, program: &str) -> Result<Command> {
         let program = self.locate(program)?;
         let mut command = match &self.wall {
@@ -164,11 +170,12 @@ impl Compartment {
 
     /// Spawns `command` inside the boundary as a supervised [`Child`].
     ///
-    /// The child reads nothing on stdin, and what it writes is read by the
-    /// supervisor: stdout drained to DEBUG, stderr kept as the child's tail.
-    /// A stderr line starting with `ready` is the handshake the child
-    /// answers [`Child::ready`] with; it is never logged. The scratch and
-    /// the egress proxy live as long as the process.
+    /// - The child reads nothing on stdin.
+    /// - Its stdout is drained to DEBUG.
+    /// - Its stderr is logged at DEBUG and kept as the child's tail.
+    /// - A stderr line starting with `ready` is the handshake the child
+    ///   answers [`Child::ready`] with. It is never logged.
+    /// - The scratch and the egress proxy live as long as the process.
     ///
     /// # Errors
     ///
@@ -183,9 +190,12 @@ impl Compartment {
     ///
     /// # Errors
     ///
-    /// Returns an error when the process cannot be spawned, when its output
-    /// cannot be read, or when it has not exited within `bound`, in which
-    /// case it is killed with everything it forked.
+    /// Returns an error when:
+    ///
+    /// - the process cannot be spawned
+    /// - its output cannot be read
+    /// - it has not exited within `bound`, in which case it is killed with
+    ///   everything it forked
     pub async fn output(self, command: Command, bound: Duration) -> Result<Output> {
         let program = program_of(&command);
         let mut child = launch(command)?;
@@ -224,8 +234,7 @@ pub struct Chamber {
 
 impl Chamber {
     pub(crate) async fn prepare(lend: Option<&Path>, options: &Options) -> Result<Self> {
-        // `tempfile` has no async API; one `mkdir` under the temp root is
-        // not worth a blocking thread
+        // `tempfile` has no async API, and one `mkdir` is not worth a blocking thread
         let scratch = tempfile::Builder::new()
             .prefix("omnia-airlock-")
             .tempdir()

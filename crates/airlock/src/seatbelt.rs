@@ -3,8 +3,10 @@
 
 // Lifted from heel 0.3.0, `src/platform/macos/{mod,profile}.rs` and
 // `templates/sandbox.txt`, Copyright (c) 2025 Lexo Liu, MIT OR Apache-2.0:
-// the launcher by absolute path, the three-pass rule order, and every path
-// resolved before the kernel sees it.
+//
+// - the launcher by absolute path
+// - the three-pass rule order
+// - every path resolved before the kernel sees it
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -21,10 +23,10 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 const BASE: &str = include_str!("seatbelt/base.sbpl");
 
-// `(deny default)` leaves `process-info` open on recent macOS, so the
-// same-sandbox allow is restated after the deny for the last match to keep
-// it. `system-fcntl` 80 and 110 (`F_MAKECOMPRESSED`, `F_TRANSFEREXTENTS`)
-// change a file through a read-only descriptor.
+// `(deny default)` leaves `process-info` open on recent macOS, so it is
+// denied here, then allowed for the same sandbox, since the last match wins.
+// `system-fcntl` 80 and 110 are `F_MAKECOMPRESSED` and `F_TRANSFEREXTENTS`,
+// which change a file through a read-only descriptor.
 const PROTECTIONS: &str = "
 ; --- protections ---
 (deny process-info*)
@@ -49,10 +51,9 @@ const DEVICES: &str = "
 (allow file-read-metadata (literal \"/dev\"))
 ";
 
-// Loopback alone: the egress proxy and the callback endpoint are there,
-// and a tree's own tests serve and connect there. No unix socket is
-// reachable, so no name resolves inside: every way out goes through the
-// proxy by name.
+// Loopback alone: the egress proxy and the callback endpoint are there, and
+// a tree's own tests serve and connect there. No unix socket is reachable,
+// so no name resolves inside. Every way out goes through the proxy by name.
 const NETWORK: &str = "
 ; --- network ---
 (deny network*)
@@ -76,7 +77,7 @@ const SYSTEM: [&str; 11] = [
     "/opt/homebrew",
     "/usr/local",
 ];
-// The symlinks every resolution passes through; `realpath` fails without
+// The symlinks every resolution passes through. `realpath` fails without
 // their metadata.
 const NODES: [&str; 3] = ["/tmp", "/etc", "/var"];
 
@@ -183,11 +184,10 @@ impl Seatbelt {
         }
         profile.push_str(")\n");
 
-        // the tree's ancestors, listed: a Bun program (`cursor-sdk-bridge`)
-        // reads every directory on the way to its working directory before
-        // it reads its environment, and runs with none when one is closed;
-        // an allow with no filter would open every file, so a tree with
-        // nothing above it lists nothing
+        // the tree's ancestors, readable: a Bun program reads every directory
+        // on the way to its working directory before it reads its environment,
+        // and runs with none when one is closed. An allow with no filter would
+        // open every file, so a tree with nothing above it lists nothing
         if !listed.is_empty() {
             profile.push_str("(allow file-read-data");
             for param in &listed {

@@ -1,6 +1,8 @@
-//! What the `child`, `boundary`, `valve`, and `toolchain` suites share: a
-//! connected [`Airlock`] over `/bin/sh`, a boundary around a lend, and the
-//! liveness probes a process-death row ends on.
+//! What the `child`, `compartment`, `valve`, and `toolchain` suites share:
+//!
+//! - a connected [`Airlock`] over `/bin/sh`
+//! - a compartment around a lend
+//! - the liveness probes a process-death row ends on
 
 #![allow(dead_code, reason = "each suite uses its own subset")]
 
@@ -18,8 +20,9 @@ pub async fn connect(options: Options) -> Airlock {
     Airlock::connect(options).await.expect("the options hold")
 }
 
-/// Runs `test` with the process's `HOME` pointed at a fresh directory, so a
-/// row grants `~/` roots without touching the operator's home. The runtime
+/// Runs `test` with the process's `HOME` pointed at a fresh directory.
+///
+/// A row grants `~/` roots without touching the operator's home. The runtime
 /// is built after the write, on the test's one thread.
 #[expect(unsafe_code, reason = "the home is set on the one thread of the test")]
 pub fn under_home(test: impl AsyncFnOnce(&Path)) {
@@ -39,8 +42,7 @@ pub fn reading(roots: &[&str]) -> Clearance {
     }
 }
 
-/// The probe binary copied into `tree` as `probe`, where the boundary may
-/// run it; the path it has inside.
+/// The probe binary's path inside `tree`, copied there as `probe` for the boundary to run.
 pub fn probe(tree: &Path) -> PathBuf {
     let probe = tree.join("probe");
     std::fs::copy(env!("CARGO_BIN_EXE_airlock-probe"), &probe).expect("the probe copies");
@@ -66,8 +68,7 @@ pub async fn sealing(airlock: &Airlock, lend: Option<&Path>, clearance: &Clearan
     airlock.seal(lend, clearance).await.expect("the clearance holds")
 }
 
-/// What `airlock` denies `clearance` for, around a private directory: the
-/// `Denied` the seal's error carries, since the clearance's fault is typed.
+/// The `Denied` reason `airlock` refuses `clearance` with, around a private directory.
 pub async fn denied(airlock: &Airlock, clearance: &Clearance) -> String {
     let error = airlock.seal(None, clearance).await.expect_err("the clearance is denied");
     error
@@ -103,8 +104,7 @@ pub async fn await_gone(pid: u32) {
     poll(|| !alive(pid), GONE, &format!("pid {pid} gone")).await;
 }
 
-/// Whether `pid` is still running: it answers a probe and is not a zombie (a
-/// forked child, reparented to a pid 1 that never reaps it).
+/// Whether `pid` is still running: it answers a probe and is not a zombie.
 #[expect(unsafe_code, reason = "a signal-0 probe is the one portable liveness check for a pid")]
 pub fn alive(pid: u32) -> bool {
     let Ok(signed) = i32::try_from(pid) else {
@@ -119,6 +119,7 @@ pub fn alive(pid: u32) -> bool {
 
 cfg_select! {
     target_os = "linux" => {
+        // A forked child reparented to a pid 1 that never reaps it stays a zombie.
         fn zombie(pid: u32) -> bool {
             std::fs::read_to_string(format!("/proc/{pid}/stat"))
                 .ok()
@@ -126,8 +127,8 @@ cfg_select! {
                 == Some('Z')
         }
 
-        // The state field of `/proc/<pid>/stat` follows the parenthesised command
-        // name, which may itself hold spaces and parentheses: split from the right.
+        // The command name before the state field may hold spaces and
+        // parentheses, so the split is from the right.
         fn proc_state(stat: &str) -> Option<char> {
             let (_, after_name) = stat.rsplit_once(") ")?;
             after_name.chars().next()

@@ -28,7 +28,7 @@ const METADATA: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200)),
 ];
 
-/// The bound valve; dropping it stops serving.
+/// The bound valve. Dropping it stops serving.
 #[derive(Debug)]
 pub struct Valve {
     address: SocketAddr,
@@ -61,11 +61,13 @@ impl Drop for Valve {
 
 /// Why an address a listed host names or resolves to is not connected.
 ///
-/// A name on the allowlist is resolved once and every address it answers
-/// is held to these classes; a listed IP literal is held to them as
-/// written, loopback alone admitted. So no listed host leads the tunnel
-/// back to the host itself, its network segment, or a cloud's metadata
-/// service.
+/// - A name on the allowlist is resolved once, and every address it answers
+///   is held to these classes.
+/// - A listed IP literal is held to them as written, loopback alone
+///   admitted.
+///
+/// So no listed host leads the tunnel back to the host itself, its network
+/// segment, or a cloud's metadata service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refusal {
@@ -86,12 +88,10 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    /// The class `address` falls in, if any, against `own`, the host's
-    /// own addresses.
+    /// The class `address` falls in, if any, against the host's `own` addresses.
     ///
-    /// A v4 address carried in v6, mapped (`::ffff:a.b.c.d`) or
-    /// v4-compatible (`::a.b.c.d`), is classed as the v4 address it
-    /// carries.
+    /// A v4 address carried in v6 is classed as the v4 address it carries,
+    /// whether mapped as `::ffff:a.b.c.d` or v4-compatible as `::a.b.c.d`.
     #[must_use]
     pub fn of(address: IpAddr, own: &[IpAddr]) -> Option<Self> {
         let address = match address {
@@ -284,10 +284,8 @@ async fn serve(listener: TcpListener, allowlist: Arc<Allowlist>) {
     }
 }
 
-// `CONNECT host:port` alone: the host held to the allowlist and every
-// address vetted, a name resolved once and each answer classed, a literal
-// classed as written, the tunnel opened before the client hears `200`, so
-// a refusal is a status and never a closed tunnel.
+// The tunnel is opened before the client hears `200`, so a refusal is a
+// status and never a closed tunnel.
 async fn handle(request: Request<Incoming>, allowlist: &Allowlist) -> Response<Full<Bytes>> {
     if request.method() != Method::CONNECT {
         return answer(StatusCode::METHOD_NOT_ALLOWED, "only CONNECT is proxied");
@@ -341,8 +339,8 @@ async fn handle(request: Request<Incoming>, allowlist: &Allowlist) -> Response<F
     Response::new(Full::default())
 }
 
-// A listed literal as written, unless it is of a refused class; loopback
-// is admitted, the mirror a literal exists to name.
+// A listed literal as written, unless it is of a refused class. Loopback is
+// admitted: the mirror a literal exists to name.
 fn literal(address: IpAddr, port: u16) -> std::result::Result<Vec<SocketAddr>, Refusal> {
     match Refusal::of(address, &own()) {
         None | Some(Refusal::Loopback) => Ok(vec![SocketAddr::new(address, port)]),
@@ -350,8 +348,8 @@ fn literal(address: IpAddr, port: u16) -> std::result::Result<Vec<SocketAddr>, R
     }
 }
 
-// The addresses a listed name resolved to that pass the vetting; `Err`
-// names what the last refused one was when none pass.
+// The addresses a listed name resolved to that pass the vetting. When none
+// pass, `Err` names the class of the last refused one.
 async fn vetted(host: &str, port: u16) -> std::result::Result<Vec<SocketAddr>, Refusal> {
     let own = own();
     let mut admitted = Vec::new();

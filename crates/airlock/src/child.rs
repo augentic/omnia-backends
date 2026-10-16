@@ -1,9 +1,9 @@
 //! One supervised process: watched to its exit, stopped on request, and
 //! killed with everything it forked.
 //!
-//! The process leads a session of its own, so the one kill reaches the
-//! processes it forks, and whatever it left in its session when it exited is
-//! swept as the exit is seen: nothing of a child outlives it.
+//! The process leads a session of its own, so one kill reaches everything
+//! it forked. Whatever it left in its session is swept as its exit is seen.
+//! Nothing of a child outlives it.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -33,10 +33,13 @@ const LINE_BYTES: u64 = 64 * 1024;
 /// A spawned process under supervision. Dropping it kills the process.
 ///
 /// The supervisor waits on the process, publishes its [`Exit`], and sweeps
-/// the session it led: a drop, or a [`Child::stop`] that goes unanswered,
-/// kills the whole session before the process is reaped. What the process
-/// writes to stderr is logged at DEBUG and kept as a tail of its last lines;
-/// an exit nobody asked for is logged at WARN with the tail behind it.
+/// the session it led:
+///
+/// - A drop, or a [`Child::stop`] that goes unanswered, kills the whole
+///   session before the process is reaped.
+/// - What the process writes to stderr is logged at DEBUG and kept as a
+///   tail of its last lines.
+/// - An exit nobody asked for is logged at WARN with the tail behind it.
 pub struct Child {
     state: Arc<State>,
     exit: watch::Receiver<Option<Exit>>,
@@ -111,11 +114,13 @@ impl Child {
         async move { wait_exit(&mut exit, pid).await }
     }
 
-    /// The payload of the ready line: what followed the prefix [`Compartment::spawn`]
-    /// was given, the first time the process wrote it to stderr.
+    /// The payload of the ready line.
     ///
-    /// Resolves to `None` when the process ends, or stderr closes, before a
-    /// ready line, or when the line was already taken.
+    /// What followed the prefix [`Compartment::spawn`] was given, the first
+    /// time the process wrote it to stderr. Resolves to `None` when:
+    ///
+    /// - the process ends, or stderr closes, before a ready line
+    /// - the line was already taken
     ///
     /// [`Compartment::spawn`]: crate::Compartment::spawn
     pub fn ready(&mut self) -> impl Future<Output = Option<String>> + Send + 'static {
@@ -131,14 +136,14 @@ impl Child {
     /// Runs `future` under the process's life.
     ///
     /// Resolves with the future's outcome, unless the process exits first.
-    /// An error the future answers under a process that exits within a short
-    /// grace is the exit, so a connection reset by a dying process is
-    /// reported as the death and never as the reset.
+    /// A failure the future answers while the process is dying is reported
+    /// as the exit, so a connection reset by a dying process is the death,
+    /// never the reset.
     ///
     /// # Errors
     ///
     /// Returns the [`Exit`] when the process exited before the future
-    /// resolved, or as it failed.
+    /// resolved, or within a short grace of its failure.
     pub async fn fail_on_exit<T, E>(
         &self, future: impl Future<Output = Result<T, E>>,
     ) -> Result<Result<T, E>, Exit> {
@@ -162,10 +167,10 @@ impl Child {
 
     /// Asks the process to go, and kills it when the ask goes unanswered.
     ///
-    /// `ask` is run, then the exit it brings waited for, both within `wait`;
-    /// past it, or once `ask` is done without an exit, the process is killed
-    /// with its session. Only the first `stop` counts; a drop after it kills
-    /// nothing before the ask has had its say.
+    /// `ask` is run, then the exit it brings is waited for, both within
+    /// `wait`. Past `wait`, or once `ask` is done without an exit, the
+    /// process is killed with its session. Only the first `stop` counts. A
+    /// drop after it kills nothing before the ask has had its say.
     pub fn stop(&self, ask: impl Future<Output = ()> + Send + 'static, wait: Duration) {
         let _ = self.stop.try_send(Stop {
             ask: Box::pin(ask),
@@ -207,7 +212,7 @@ impl fmt::Display for Exit {
     }
 }
 
-// waits on the process, tears it down on request, and publishes its exit
+// Waits on the process, tears it down on request, and publishes its exit.
 struct Supervisor {
     child: Box<dyn ChildWrapper>,
     held: (TempDir, Valve),
@@ -237,7 +242,7 @@ impl Supervisor {
         let status = self.child.wait().await.ok();
         let uptime_ms = elapsed_ms(self.state.started_at);
 
-        // a forked process may still hold the stderr pipe; do not wait on it
+        // a forked process may still hold the stderr pipe, so it is not waited on
         if timeout(EXIT_GRACE, &mut self.stderr).await.is_err() {
             self.stderr.abort();
         }
@@ -277,7 +282,7 @@ struct Stop {
     wait: Duration,
 }
 
-// what the child, its caller and its supervisor all see of one process
+// What the child, its caller, and its supervisor all see of one process.
 struct State {
     pid: u32,
     program: String,
@@ -286,8 +291,8 @@ struct State {
 }
 
 impl State {
-    // The tail is untrusted subprocess output (paths, provider context,
-    // session fragments), so it is logged at DEBUG only.
+    // The tail may carry paths, provider context, or session fragments, so it
+    // is logged at DEBUG only.
     fn log_tail(&self) {
         let tail = self.tail.to_string();
         if !tail.is_empty() {
@@ -321,8 +326,8 @@ impl fmt::Display for Tail {
     }
 }
 
-// A closed channel means the supervisor is gone, and the process with it
-// (`kill_on_drop`). The exit is real even if its status never arrives.
+// A closed channel means the supervisor is gone, and the process with it by
+// `KillOnDrop`. The exit is real even if its status never arrives.
 async fn wait_exit(exit: &mut watch::Receiver<Option<Exit>>, pid: u32) -> Exit {
     exit.wait_for(Option::is_some)
         .await
@@ -332,7 +337,7 @@ async fn wait_exit(exit: &mut watch::Receiver<Option<Exit>>, pid: u32) -> Exit {
 }
 
 // The pipe is held to EOF however the handshake goes, so an abandoned
-// handshake never closes it under a live writer; an EOF before the ready
+// handshake never closes it under a live writer. An EOF before the ready
 // line reaches the caller as the dropped sender.
 fn read_stderr(
     stderr: ChildStderr, state: Arc<State>, ready: Option<&'static str>,
@@ -374,9 +379,9 @@ fn drain_stdout(stdout: ChildStdout, state: Arc<State>) {
     );
 }
 
-// Every line to EOF, decoded lossily and cut at `LINE_BYTES`: what the
-// child writes is untrusted, and nothing in it may end the read and close
-// the pipe under a live writer.
+// Every line to EOF, decoded lossily and cut at `LINE_BYTES`. What the child
+// writes is untrusted, and nothing in it may end the read and close the pipe
+// under a live writer.
 async fn each_line(reader: impl AsyncRead + Unpin, mut each: impl FnMut(String)) {
     let mut reader = BufReader::new(reader);
     let mut line = Vec::new();

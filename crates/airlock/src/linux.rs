@@ -4,10 +4,12 @@
 
 // Lifted from heel 0.3.0, `src/platform/linux/{mod,landlock_rules,
 // seccomp_filter}.rs`, Copyright (c) 2025 Lexo Liu, MIT OR Apache-2.0:
-// support probed by creating a ruleset rather than forking, the ruleset a
-// hard requirement with anything short of full enforcement a failure, a
-// system path skipped when absent and a granted one refused, and
-// `clone3` refused with `ENOSYS` in a filter of its own.
+//
+// - support probed by creating a ruleset rather than forking
+// - the ruleset a hard requirement, anything short of full enforcement a
+//   failure
+// - a system path skipped when absent, a granted one refused
+// - `clone3` refused with `ENOSYS` in a filter of its own
 
 use std::collections::BTreeMap;
 use std::io;
@@ -24,14 +26,14 @@ use seccompiler::{
 };
 use tokio::process::Command;
 
-// The first ABI that fences TCP, which the follow-ups build on; its kernel
-// (6.7) carries every filesystem right the ruleset handles.
+// The first ABI that fences TCP, which the follow-ups build on. Its kernel,
+// 6.7, carries every filesystem right the ruleset handles.
 const REQUIRED: ABI = ABI::V4;
 const OSRELEASE: &str = "/proc/sys/kernel/osrelease";
 const PTRACE_SCOPE: &str = "/proc/sys/kernel/yama/ptrace_scope";
 
-// Where programs and their libraries live, read and executed, and the
-// state they read; each skipped when the distribution lacks it.
+// Where programs and their libraries live, read and executed, and the state
+// they read. Each is skipped when the distribution lacks it.
 const EXECUTABLE: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32"];
 const READABLE: [&str; 4] = ["/etc", "/proc", "/sys", "/run"];
 const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
@@ -73,9 +75,9 @@ impl Linux {
         Ok(Self { filters })
     }
 
-    // The ruleset over `place` and the filters, applied in the child once
-    // it has entered the tree: `restrict_self` sets `no_new_privs` and
-    // nothing short of full enforcement runs the program.
+    // The ruleset over `place` and the filters, applied in the child once it
+    // has entered the tree. `restrict_self` sets `no_new_privs`, and nothing
+    // short of full enforcement runs the program.
     #[expect(
         unsafe_code,
         reason = "`pre_exec` runs in the forked child; it applies rules built here and allocates \
@@ -123,9 +125,8 @@ impl Linux {
             optional(&mut ruleset, Path::new(device), AccessFs::from_file(abi))?;
         }
 
-        // the process's own: its tree, its scratch, its program, and the
-        // roots its ask was granted, which run as they read since a
-        // toolchain lives there
+        // the process's own, a granted root executable too since a toolchain
+        // lives there
         required(&mut ruleset, place.tree, AccessFs::from_all(abi))?;
         required(&mut ruleset, place.scratch, AccessFs::from_all(abi))?;
         required(&mut ruleset, place.program, AccessFs::ReadFile | AccessFs::Execute)?;
@@ -157,9 +158,9 @@ const ARCH: Option<TargetArch> = cfg_select! {
     _ => None,
 };
 
-// The seccomp programs every process gets: a deny list answering `EPERM`,
-// and `clone3` answering `ENOSYS` apart from it, since glibc issues
-// `clone3` for every thread and falls back to `clone` on `ENOSYS` alone.
+// The seccomp programs every process gets: a deny list answering `EPERM`, and
+// `clone3` answering `ENOSYS` apart from it. glibc issues `clone3` for every
+// thread and falls back to `clone` on `ENOSYS` alone.
 #[derive(Clone)]
 struct Filters {
     denied: BpfProgram,
@@ -241,8 +242,8 @@ fn compile(
 const TIOCSTI: u64 = 0x5412;
 const TIOCLINUX: u64 = 0x541C;
 
-// What a confined process has no use for: an empty rule list matches the
-// syscall whole, a condition narrows it to the arguments named.
+// What a confined process has no use for. An empty rule list matches the
+// syscall whole, and a condition narrows it to the arguments named.
 fn denied() -> Result<BTreeMap<i64, Vec<SeccompRule>>> {
     const OUTRIGHT: &[i64] = &[
         libc::SYS_ptrace,
@@ -313,9 +314,13 @@ fn request(value: u64) -> Result<SeccompCondition> {
         .context("a seccomp condition")
 }
 
-// Landlock sees TCP alone: a raw or datagram socket, a packet socket, and
-// netlink past the route family `getifaddrs` reads are refused here. The
-// type is compared under its mask, so `SOCK_NONBLOCK` and `SOCK_CLOEXEC`
+// Landlock sees TCP alone, so the rest is refused here:
+//
+// - a raw or datagram socket
+// - a packet socket
+// - netlink past the route family `getifaddrs` reads
+//
+// The type is compared under its mask, so `SOCK_NONBLOCK` and `SOCK_CLOEXEC`
 // do not slip a rule.
 fn sockets() -> Result<Vec<SeccompRule>> {
     // The obsolete type the kernel still turns into a packet socket when

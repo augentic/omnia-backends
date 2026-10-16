@@ -278,10 +278,10 @@ fn worker_grant_laid() {
             ("read:~/away", "outside the home"),
             ("read:~/.ssh", "a credential store"),
             ("read:~/tools/marker.txt", "is not a directory"),
-            ("env:HOME=/elsewhere", "the compartment's to set"),
+            ("env:HOME=/elsewhere", "is set by the sandbox"),
             ("env:CURSOR_API_KEY=k", "is refused"),
             ("env:BUN_OPTIONS=--preload=./x.js", "is refused"),
-            ("env:LD_PRELOAD=./x.so", "the dynamic loader's"),
+            ("env:LD_PRELOAD=./x.so", "is read by the dynamic loader"),
             ("env:SSL_CERT_FILE=./ca.pem", "inherited from the host"),
             ("env:GIT_DIR=.git", "selects a repository"),
         ] {

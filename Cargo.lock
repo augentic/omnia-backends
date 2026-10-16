@@ -3700,26 +3700,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnia-airlock"
-version = "0.31.0"
-dependencies = [
- "anyhow",
- "bytes",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "landlock",
- "libc",
- "process-wrap",
- "seccompiler",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "omnia-azure-blob"
 version = "0.31.0"
 dependencies = [
@@ -3848,7 +3828,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "omnia",
- "omnia-airlock",
+ "omnia-sandbox",
  "omnia-test",
  "omnia-wasi-model",
  "prost 0.14.4",
@@ -4074,6 +4054,26 @@ dependencies = [
  "redis",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "omnia-sandbox"
+version = "0.31.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "landlock",
+ "libc",
+ "process-wrap",
+ "seccompiler",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

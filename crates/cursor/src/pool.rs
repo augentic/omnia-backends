@@ -2,7 +2,7 @@
 //!
 //! A completion takes a [`Lease`] before it creates its agent: a permit for
 //! one of the `max_agents` slots plus the worker the agent runs on — a
-//! freshly spawned process inside the boundary the completion laid,
+//! freshly spawned process inside the session the completion prepared,
 //! registered with the callback endpoint under its own token so its
 //! callbacks route to its own agent, and pointed at the relay its API goes
 //! through. A task of the pool's holds the permit and the token until the
@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use omnia_airlock::Compartment;
+use omnia_sandbox::Session;
 use omnia_wasi_model::ToolHost;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
@@ -44,8 +44,8 @@ impl Pool {
     }
 
     // Wait for a slot, in arrival order, then for the worker to run on,
-    // spawned inside `boundary`.
-    pub async fn lease(&self, compartment: Compartment) -> Result<Lease> {
+    // spawned inside `session`.
+    pub async fn lease(&self, session: Session) -> Result<Lease> {
         let queued = Instant::now();
         let permit =
             Arc::clone(&self.permits).acquire_owned().await.context("the agent pool is closed")?;
@@ -56,7 +56,7 @@ impl Pool {
         }
 
         let registration = Arc::new(self.endpoint.register()?);
-        let spawned = Worker::spawn(&registration, self.relay.url(), compartment)?;
+        let spawned = Worker::spawn(&registration, self.relay.url(), session)?;
 
         // slot and token are held until the process is gone, however the lease ends
         let exited = spawned.exited();

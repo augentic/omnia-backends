@@ -5,7 +5,7 @@
 //! The bridge's runtime cannot stream a request body through a `CONNECT`
 //! proxy, so its API never goes through the egress proxy: the relay is the
 //! bridge's one route to Cursor, and the proxy carries the shell's commands
-//! alone. The server binds `[::1]:0`, the `::1` loopback, which the boundary's
+//! alone. The server binds `[::1]:0`, the `::1` loopback, which the sandbox's
 //! `NO_PROXY` excepts and which the bridge does not read as `localhost` — a
 //! backend at `localhost` or `127.0.0.1` makes it turn TLS verification off
 //! for itself and every command it runs. It speaks HTTP/1.1, what the bridge

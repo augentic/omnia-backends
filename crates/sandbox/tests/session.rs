@@ -1,5 +1,5 @@
-//! What a process inside the boundary sees of its working directory and its
-//! environment, what connecting refuses, and what an ask is held to.
+//! What a process inside a session sees of its working directory and its
+//! environment, what connecting refuses, and what a grant is held to.
 
 mod support;
 
@@ -8,15 +8,14 @@ use std::env;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
-use omnia_airlock::{Airlock, Clearance, Compartment, Options};
-use support::{BOUND, Captured, compartment, connect, sh};
+use omnia_sandbox::{Access, Grant, Options, Sandbox, Session};
+use support::{BOUND, Captured, connect, proxy_of, session, sh};
 use tracing_subscriber::layer::SubscriberExt as _;
 
-const PLANTED: &str = "OMNIA_CONFINE_PLANTED";
+const PLANTED: &str = "OMNIA_SANDBOX_PLANTED";
 
-async fn environment(boundary: Compartment) -> BTreeMap<String, String> {
-    let command = sh(&boundary, "env");
-    let output = boundary.output(command, BOUND).await.expect("env answers");
+async fn environment(session: Session) -> BTreeMap<String, String> {
+    let output = sh(session, "env").output(BOUND).await.expect("env answers");
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.split_once('='))
@@ -24,10 +23,13 @@ async fn environment(boundary: Compartment) -> BTreeMap<String, String> {
         .collect()
 }
 
-async fn pwd(boundary: Compartment) -> String {
-    let command = sh(&boundary, "pwd");
-    let output = boundary.output(command, BOUND).await.expect("pwd answers");
+async fn pwd(session: Session) -> String {
+    let output = sh(session, "pwd").output(BOUND).await.expect("pwd answers");
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+async fn access(sandbox: &Sandbox, workspace: Option<&Path>) -> Access {
+    session(sandbox, workspace).await.access()
 }
 
 // --- Environment ---
@@ -40,10 +42,10 @@ fn environment_rebuilt() {
     unsafe { env::set_var(PLANTED, "leaked") };
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
     runtime.block_on(async {
-        let confine = connect(Options::default()).await;
-        let boundary = compartment(&confine, None).await;
-        let scratch = boundary.scratch().to_string_lossy().into_owned();
-        let seen = environment(boundary).await;
+        let sandbox = connect(Options::default()).await;
+        let session = session(&sandbox, None).await;
+        let scratch = session.scratch().to_string_lossy().into_owned();
+        let seen = environment(session).await;
 
         assert!(seen.contains_key("PATH"), "PATH is inherited: {seen:#?}");
         assert_eq!(seen.get("HOME"), Some(&scratch), "HOME is the scratch: {seen:#?}");
@@ -53,13 +55,12 @@ fn environment_rebuilt() {
             assert!(!seen.contains_key(name), "{name} reached the process: {seen:#?}");
         }
 
-        let confine = connect(Options {
+        let sandbox = connect(Options {
             inherit: &[PLANTED],
             ..Options::default()
         })
         .await;
-        let passed = support::compartment(&confine, None).await;
-        let seen = environment(passed).await;
+        let seen = environment(support::session(&sandbox, None).await).await;
         assert_eq!(seen.get(PLANTED).map(String::as_str), Some("leaked"), "{seen:#?}");
     });
 }
@@ -67,34 +68,33 @@ fn environment_rebuilt() {
 // --- Working directory ---
 
 #[tokio::test]
-async fn cwd_is_the_lend() {
-    let lend = tempfile::tempdir().expect("a lend");
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, Some(&lend.path().join("tree"))).await;
+async fn cwd_is_the_workspace() {
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, Some(&workspace.path().join("tree"))).await;
 
-    assert!(boundary.lent());
-    assert!(!boundary.shell());
-    let tree = boundary.tree().to_owned();
+    assert_eq!(session.access(), Access::Read);
+    assert!(session.access().is_lent());
+    let cwd = session.cwd().to_owned();
     assert_eq!(
-        tree,
-        std::fs::canonicalize(lend.path().join("tree")).expect("the lend was created"),
-        "the lend is created and canonical"
+        cwd,
+        std::fs::canonicalize(workspace.path().join("tree")).expect("the workspace was created"),
+        "the workspace is created and canonical"
     );
-    assert_eq!(boundary.cwd().expect("utf-8"), tree.to_str().expect("utf-8"));
-    assert_eq!(pwd(boundary).await, tree.to_string_lossy());
+    assert_eq!(pwd(session).await, cwd.to_string_lossy());
 }
 
 #[tokio::test]
-async fn cwd_is_private_without_a_lend() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
+async fn cwd_is_private_without_a_workspace() {
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
 
-    assert!(!boundary.lent());
-    assert!(!boundary.shell());
-    let tree = boundary.tree().to_owned();
-    let scratch = std::fs::canonicalize(boundary.scratch()).expect("the scratch exists");
-    assert!(tree.starts_with(&scratch), "{} is under the scratch", tree.display());
-    assert_eq!(pwd(boundary).await, tree.to_string_lossy());
+    assert_eq!(session.access(), Access::Private);
+    assert!(!session.access().is_lent());
+    let cwd = session.cwd().to_owned();
+    let scratch = std::fs::canonicalize(session.scratch()).expect("the scratch exists");
+    assert!(cwd.starts_with(&scratch), "{} is under the scratch", cwd.display());
+    assert_eq!(pwd(session).await, cwd.to_string_lossy());
 }
 
 // --- Shell by location ---
@@ -107,64 +107,76 @@ async fn shell_under_a_root() {
     std::fs::create_dir(&a).expect("root a");
     std::os::unix::fs::symlink(&a, &link).expect("a symlink to root a");
 
-    let confine = connect(Options {
+    let sandbox = connect(Options {
         shell_roots: vec![a.clone(), Path::new("relative/root").to_path_buf()],
         ..Options::default()
     })
     .await;
     assert!(
-        confine.options().shell_roots.iter().all(|root| root.is_absolute()),
+        sandbox.options().shell_roots.iter().all(|root| root.is_absolute()),
         "shell roots are made absolute: {:?}",
-        confine.options().shell_roots
+        sandbox.options().shell_roots
     );
 
-    assert!(compartment(&confine, Some(&a.join("x"))).await.shell(), "beneath the root");
-    assert!(compartment(&confine, Some(&a)).await.shell(), "at the root");
-    assert!(compartment(&confine, Some(&link.join("y"))).await.shell(), "through a symlink");
-    assert!(!compartment(&confine, Some(&roots.path().join("b"))).await.shell(), "beside it");
-    assert!(!compartment(&confine, None).await.shell(), "private");
+    assert_eq!(access(&sandbox, Some(&a.join("x"))).await, Access::Shell, "beneath the root");
+    assert_eq!(access(&sandbox, Some(&a)).await, Access::Shell, "at the root");
+    assert_eq!(access(&sandbox, Some(&link.join("y"))).await, Access::Shell, "through a symlink");
+    assert_eq!(access(&sandbox, Some(&roots.path().join("b"))).await, Access::Read, "beside it");
+    assert_eq!(access(&sandbox, None).await, Access::Private, "private");
 }
 
 // --- Programs ---
 
 #[tokio::test]
 async fn program_resolved_on_path() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
+    let sandbox = connect(Options::default()).await;
 
-    let error = boundary.command("omnia-airlock-no-such-program").expect_err("not on PATH");
+    let error = session(&sandbox, None)
+        .await
+        .command("omnia-sandbox-no-such-program")
+        .expect_err("not on PATH");
     assert!(error.to_string().contains("is not on PATH"), "{error:#}");
 
-    let mut command = boundary.command("sh").expect("sh is on PATH");
+    let mut command = session(&sandbox, None).await.command("sh").expect("sh is on PATH");
     command.args(["-c", "echo found"]);
-    let output = boundary.output(command, BOUND).await.expect("sh answers");
+    let output = command.output(BOUND).await.expect("sh answers");
     assert_eq!(output.stdout, b"found\n");
 }
 
-// An ask's `PATH` reaches the process, so a toolchain is found inside. The
+// A grant's `PATH` reaches the process, so a toolchain is found inside. The
 // program the backend names is resolved against the host's `PATH`, so the
-// `sh` planted first on the ask's is never the one spawned.
+// `sh` planted first on the grant's is never the one spawned.
 #[tokio::test]
-async fn path_in_the_ask() {
-    let lend = tempfile::tempdir().expect("a lend");
-    let tree = lend.path().join("tree");
+async fn path_in_the_grant() {
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let tree = workspace.path().join("tree");
     let bin = tree.join("bin");
     std::fs::create_dir_all(&bin).expect("a bin directory");
     std::fs::write(bin.join("sh"), "#!/bin/sh\necho planted\n").expect("a planted sh");
     std::fs::set_permissions(bin.join("sh"), std::fs::Permissions::from_mode(0o755))
         .expect("the planted sh is executable");
     let path = format!("{}:{}", bin.display(), env::var("PATH").expect("the host has a PATH"));
-    let confine = connect(Options::default()).await;
-    let ask = Clearance {
+    let sandbox = connect(Options::default()).await;
+    let grant = Grant {
         env: vec![("PATH".to_owned(), path.clone())],
-        ..Clearance::default()
+        ..Grant::default()
     };
-    let boundary = support::sealing(&confine, Some(&tree), &ask).await;
+    let session = support::granted(&sandbox, Some(&tree), &grant).await;
 
-    let mut command = boundary.command("sh").expect("sh is on the host's PATH");
+    let mut command = session.command("sh").expect("sh is on the host's PATH");
     command.args(["-c", "echo found && printf '%s' \"$PATH\""]);
-    let output = boundary.output(command, BOUND).await.expect("sh answers");
+    let output = command.output(BOUND).await.expect("sh answers");
     assert_eq!(String::from_utf8_lossy(&output.stdout), format!("found\n{path}"));
+}
+
+// A variable set on the command reaches the process beside the grant's.
+#[tokio::test]
+async fn env_on_the_command() {
+    let sandbox = connect(Options::default()).await;
+    let mut command = sh(session(&sandbox, None).await, "printf '%s' \"$ANSWER\"");
+    command.env("ANSWER", "42");
+    let output = command.output(BOUND).await.expect("sh answers");
+    assert_eq!(output.stdout, b"42");
 }
 
 // --- Connect ---
@@ -172,20 +184,20 @@ async fn path_in_the_ask() {
 #[tokio::test]
 async fn inherit_refused() {
     const HELD: &[(&str, &str)] = &[
-        ("HOME", "the compartment's to set"),
-        ("TMPDIR", "the compartment's to set"),
-        ("HTTPS_PROXY", "the compartment's to set"),
-        ("no_proxy", "the compartment's to set"),
-        ("NODE_USE_SYSTEM_CA", "refused"),
-        ("BUN_OPTIONS", "refused"),
-        ("LD_PRELOAD", "the dynamic loader's"),
-        ("DYLD_INSERT_LIBRARIES", "the dynamic loader's"),
+        ("HOME", "is set by the sandbox"),
+        ("TMPDIR", "is set by the sandbox"),
+        ("HTTPS_PROXY", "is set by the sandbox"),
+        ("no_proxy", "is set by the sandbox"),
+        ("NODE_USE_SYSTEM_CA", "is refused"),
+        ("BUN_OPTIONS", "is refused"),
+        ("LD_PRELOAD", "is read by the dynamic loader"),
+        ("DYLD_INSERT_LIBRARIES", "is read by the dynamic loader"),
         ("GIT_DIR", "selects a repository"),
         ("GIT_INDEX_FILE", "selects a repository"),
-        ("CURSOR_API_KEY", "refused"),
+        ("CURSOR_API_KEY", "is refused"),
     ];
     for (name, why) in HELD {
-        let error = Airlock::connect(Options {
+        let error = Sandbox::connect(Options {
             inherit: std::slice::from_ref(name),
             refused: &["CURSOR_API_KEY"],
             ..Options::default()
@@ -198,7 +210,7 @@ async fn inherit_refused() {
     }
 }
 
-// --- The ask ---
+// --- The grant ---
 
 // A root the home lacks grants nothing and ends nothing. A toolchain the
 // adapter names and this machine does not have is no reason to refuse the
@@ -211,15 +223,15 @@ fn read_root_absent_skipped() {
     support::under_home(async |home| {
         std::fs::create_dir(home.join("present")).expect("a read root");
         std::os::unix::fs::symlink(home.join("present"), home.join("link")).expect("a link");
-        let confine = connect(Options::default()).await;
+        let sandbox = connect(Options::default()).await;
 
-        let boundary = support::sealing(
-            &confine,
+        let session = support::granted(
+            &sandbox,
             None,
             &support::reading(&["~/missing", "~/present", "~/link"]),
         )
         .await;
-        assert_eq!(boundary.read(), [home.join("present")], "present once, canonical");
+        assert_eq!(session.read_roots(), [home.join("present")], "present once, canonical");
 
         let events = captured.events();
         let missing = home.join("missing");
@@ -234,6 +246,8 @@ fn read_root_absent_skipped() {
     });
 }
 
+// A root that steps through `.` or `..` is refused as spelled, before it
+// resolves, so no spelling reaches around the credential-store check.
 #[test]
 fn read_root_held_to_the_home() {
     support::under_home(async |home| {
@@ -241,7 +255,7 @@ fn read_root_held_to_the_home() {
         std::fs::write(home.join("note.txt"), "a file\n").expect("a file");
         let outside = tempfile::tempdir().expect("outside the home");
         std::os::unix::fs::symlink(outside.path(), home.join("away")).expect("a link out");
-        let confine = connect(Options::default()).await;
+        let sandbox = connect(Options::default()).await;
 
         for (root, why) in [
             (home.join("tools").display().to_string(), "beneath the home, `~/<path>`"),
@@ -249,16 +263,18 @@ fn read_root_held_to_the_home() {
             ("~".to_owned(), "beneath the home, `~/<path>`"),
             ("tools".to_owned(), "beneath the home, `~/<path>`"),
             ("~/note.txt".to_owned(), "is not a directory"),
-            ("~/tools/..".to_owned(), "outside the home"),
+            ("~/tools/..".to_owned(), "must not step through `.` or `..`"),
+            ("~/./tools".to_owned(), "must not step through `.` or `..`"),
+            ("~/tools/../.ssh".to_owned(), "must not step through `.` or `..`"),
             ("~/away".to_owned(), "outside the home"),
         ] {
-            let error = support::denied(&confine, &support::reading(&[&root])).await;
+            let error = support::denied(&sandbox, &support::reading(&[&root])).await;
             assert!(error.contains(why), "`{root}`: {error}");
         }
     });
 }
 
-// Nothing of the host bounds what an ask reads of the home but the
+// Nothing of the host bounds what a grant reads of the home but the
 // credential stores. A toolchain anywhere beneath the home is granted with
 // nothing set. A store is refused as spelled, through a link, from above,
 // and on a machine that lacks it.
@@ -274,12 +290,12 @@ fn read_root_credential_store_refused() {
             .expect("a link to a store");
         std::os::unix::fs::symlink(home.join("dotfiles"), home.join(".gnupg"))
             .expect("a store that is a link");
-        let confine = connect(Options::default()).await;
+        let sandbox = connect(Options::default()).await;
 
-        let ask = support::reading(&["~/tools", "~/tools/node", "~/link", "~/.config/nvim"]);
-        let boundary = support::sealing(&confine, None, &ask).await;
+        let grant = support::reading(&["~/tools", "~/tools/node", "~/link", "~/.config/nvim"]);
+        let session = support::granted(&sandbox, None, &grant).await;
         assert_eq!(
-            boundary.read(),
+            session.read_roots(),
             [home.join("tools"), home.join("tools/node"), home.join(".config/nvim")]
         );
 
@@ -291,62 +307,61 @@ fn read_root_credential_store_refused() {
             "~/.config",
             "~/Library",
             "~/keys",
-            "~/tools/../.ssh",
             "~/dotfiles",
         ] {
-            let error = support::denied(&confine, &support::reading(&[root])).await;
+            let error = support::denied(&sandbox, &support::reading(&[root])).await;
             assert!(error.contains("a credential store"), "`{root}`: {error}");
         }
     });
 }
 
-// An ask's variables reach the process, a leading `~/` spelling the home.
-// A name the compartment holds, one the backend inherits, or no name at all
-// is refused as an `inherit` is.
+// A grant's variables reach the process, a leading `~/` spelling the home.
+// A name the sandbox sets, one the backend inherits, or no name at all is
+// refused as an `inherit` is.
 #[test]
 fn env_set_and_home_expanded() {
     support::under_home(async |home| {
-        let confine = connect(Options {
+        let sandbox = connect(Options {
             inherit: &["SSL_CERT_FILE"],
             refused: &["CURSOR_API_KEY"],
             ..Options::default()
         })
         .await;
 
-        let ask = Clearance {
+        let grant = Grant {
             env: vec![
                 ("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned()),
                 ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
                 ("TILDE".to_owned(), "a~/b".to_owned()),
             ],
-            ..Clearance::default()
+            ..Grant::default()
         };
-        let seen = environment(support::sealing(&confine, None, &ask).await).await;
+        let seen = environment(support::granted(&sandbox, None, &grant).await).await;
         let rustup = home.join(".rustup").display().to_string();
         assert_eq!(seen.get("RUSTUP_HOME"), Some(&rustup), "{seen:#?}");
         assert_eq!(seen.get("CARGO_TERM_COLOR").map(String::as_str), Some("never"));
         assert_eq!(seen.get("TILDE").map(String::as_str), Some("a~/b"), "only a leading `~/`");
 
         for (name, why) in [
-            ("HOME", "the compartment's to set"),
-            ("https_proxy", "the compartment's to set"),
-            ("NODE_USE_SYSTEM_CA", "refused"),
-            ("BUN_OPTIONS", "refused"),
-            ("NODE_OPTIONS", "refused"),
-            ("CURSOR_API_KEY", "refused"),
-            ("LD_PRELOAD", "the dynamic loader's"),
-            ("DYLD_INSERT_LIBRARIES", "the dynamic loader's"),
+            ("HOME", "is set by the sandbox"),
+            ("https_proxy", "is set by the sandbox"),
+            ("NODE_USE_SYSTEM_CA", "is refused"),
+            ("BUN_OPTIONS", "is refused"),
+            ("NODE_OPTIONS", "is refused"),
+            ("CURSOR_API_KEY", "is refused"),
+            ("LD_PRELOAD", "is read by the dynamic loader"),
+            ("DYLD_INSERT_LIBRARIES", "is read by the dynamic loader"),
             ("GIT_DIR", "selects a repository"),
             ("SSL_CERT_FILE", "inherited from the host"),
             ("1ST", "not an environment variable name"),
             ("A=B", "not an environment variable name"),
             ("", "not an environment variable name"),
         ] {
-            let ask = Clearance {
+            let grant = Grant {
                 env: vec![(name.to_owned(), "x".to_owned())],
-                ..Clearance::default()
+                ..Grant::default()
             };
-            let error = support::denied(&confine, &ask).await;
+            let error = support::denied(&sandbox, &grant).await;
             assert!(error.contains(name) && error.contains(why), "`{name}`: {error}");
         }
     });
@@ -360,35 +375,35 @@ fn home_required_for_tilde() {
     unsafe { env::remove_var("HOME") };
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
     runtime.block_on(async {
-        let confine = connect(Options::default()).await;
-        let error = support::denied(&confine, &support::reading(&["~/tools"])).await;
+        let sandbox = connect(Options::default()).await;
+        let error = support::denied(&sandbox, &support::reading(&["~/tools"])).await;
         assert!(error.contains("names the home, which the host has none of"), "{error}");
 
-        let ask = Clearance {
+        let grant = Grant {
             env: vec![("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned())],
-            ..Clearance::default()
+            ..Grant::default()
         };
-        let error = support::denied(&confine, &ask).await;
+        let error = support::denied(&sandbox, &grant).await;
         assert!(error.contains("names the home, which the host has none of"), "{error}");
 
         // nothing `~/` asked, nothing missed
-        let seen = environment(compartment(&confine, None).await).await;
+        let seen = environment(session(&sandbox, None).await).await;
         assert!(seen.contains_key("PATH"), "{seen:#?}");
     });
 }
 
-// Each boundary binds a proxy of its own, admitting its ask alone.
+// Each session binds a proxy of its own, admitting its grant alone.
 #[tokio::test]
-async fn proxy_per_boundary() {
-    let confine = connect(Options::default()).await;
-    let first = compartment(&confine, None).await;
-    let second = compartment(&confine, None).await;
-    assert_ne!(first.valve().address(), second.valve().address());
+async fn proxy_per_session() {
+    let sandbox = connect(Options::default()).await;
+    let (first, _first_child) = proxy_of(session(&sandbox, None).await).await;
+    let (second, _second_child) = proxy_of(session(&sandbox, None).await).await;
+    assert_ne!(first, second);
 
-    let proxy = format!("http://{}", first.valve().address());
-    let seen = environment(first).await;
-    assert_eq!(seen.get("HTTPS_PROXY"), Some(&proxy), "{seen:#?}");
-    assert_ne!(seen.get("HTTPS_PROXY"), Some(&format!("http://{}", second.valve().address())));
+    let seen = environment(session(&sandbox, None).await).await;
+    let third = seen.get("HTTPS_PROXY").expect("the proxy is in the environment");
+    assert_ne!(third, &format!("http://{first}"));
+    assert_ne!(third, &format!("http://{second}"));
 }
 
 // --- Seatbelt (macOS) ---
@@ -398,14 +413,14 @@ mod seatbelt {
     use std::path::{Path, PathBuf};
     use std::process::Output;
 
-    use omnia_airlock::Options;
+    use omnia_sandbox::Options;
 
     use super::support::{self, passed, run, text};
 
-    // A lent tree with a source file, a repository, and the engine's store.
+    // A workspace with a source file, a repository, and the engine's store.
     fn tree() -> (tempfile::TempDir, PathBuf) {
-        let lend = tempfile::tempdir().expect("a lend");
-        let tree = lend.path().join("tree");
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let tree = workspace.path().join("tree");
         for (path, text) in [
             ("src/main.rs", "fn main() {}\n"),
             (".git/HEAD", "ref: refs/heads/main\n"),
@@ -415,7 +430,7 @@ mod seatbelt {
             std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
             std::fs::write(path, text).expect("the file");
         }
-        (lend, tree)
+        (workspace, tree)
     }
 
     #[track_caller]
@@ -425,13 +440,13 @@ mod seatbelt {
 
     #[tokio::test]
     async fn write_outside_the_tree_refused() {
-        let (_lend, tree) = tree();
+        let (_workspace, tree) = tree();
         let outside = tempfile::tempdir().expect("outside");
         let escape = outside.path().join("escape");
-        let confine = support::connect(Options::default()).await;
+        let sandbox = support::connect(Options::default()).await;
 
         let inside = run(
-            support::compartment(&confine, Some(&tree)).await,
+            support::session(&sandbox, Some(&tree)).await,
             "echo made > made.txt && cat made.txt && mkdir -p deep/er && rm -r deep",
         )
         .await;
@@ -439,25 +454,25 @@ mod seatbelt {
         assert_eq!(text(&inside.stdout), "made");
 
         let script = format!("echo x > '{}'", escape.display());
-        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
         refused(&output, "writing outside the tree");
         assert!(!escape.exists(), "the write landed");
 
         let script = format!("echo x > '{}'", outside.path().join("sibling").display());
-        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
         refused(&output, "creating beside the tree's parent");
     }
 
     #[tokio::test]
     async fn host_home_unreadable() {
-        let (_lend, tree) = tree();
+        let (_workspace, tree) = tree();
         let home = std::env::var("HOME").expect("the host has a home");
-        let confine = support::connect(Options::default()).await;
-        let boundary = support::compartment(&confine, Some(&tree)).await;
-        let scratch = std::fs::canonicalize(boundary.scratch()).expect("the scratch");
+        let sandbox = support::connect(Options::default()).await;
+        let session = support::session(&sandbox, Some(&tree)).await;
+        let scratch = std::fs::canonicalize(session.scratch()).expect("the scratch");
 
         let script = format!("cd \"$HOME\" && pwd && ls '{home}'");
-        let output = run(boundary, &script).await;
+        let output = run(session, &script).await;
         refused(&output, "listing the host's home");
         assert_eq!(
             text(&output.stdout),
@@ -468,11 +483,10 @@ mod seatbelt {
 
     #[tokio::test]
     async fn engine_directories_closed() {
-        let (_lend, tree) = tree();
-        let confine = support::connect(Options::default()).await;
+        let (_workspace, tree) = tree();
+        let sandbox = support::connect(Options::default()).await;
 
-        let output =
-            run(support::compartment(&confine, Some(&tree)).await, "cat src/main.rs").await;
+        let output = run(support::session(&sandbox, Some(&tree)).await, "cat src/main.rs").await;
         passed(&output, "reading a source file");
         assert_eq!(text(&output.stdout), "fn main() {}");
 
@@ -486,12 +500,12 @@ mod seatbelt {
             "mv .git elsewhere",
             "rm -r .emery",
         ] {
-            let output = run(support::compartment(&confine, Some(&tree)).await, attempt).await;
+            let output = run(support::session(&sandbox, Some(&tree)).await, attempt).await;
             refused(&output, attempt);
         }
         // `rm -f` swallows the refusal, so what it removed is the check
         let output =
-            run(support::compartment(&confine, Some(&tree)).await, "rm -rf .git .emery").await;
+            run(support::session(&sandbox, Some(&tree)).await, "rm -rf .git .emery").await;
         passed(&output, "rm -rf reports nothing");
         assert_eq!(
             std::fs::read_to_string(tree.join(".git/HEAD")).expect("HEAD stays"),
@@ -506,9 +520,9 @@ mod seatbelt {
 
     #[tokio::test]
     async fn linked_copy_finds_no_repository() {
-        let lend = tempfile::tempdir().expect("a lend");
-        let repository = lend.path().join("repository");
-        let copy = lend.path().join("copy");
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let repository = workspace.path().join("repository");
+        let copy = workspace.path().join("copy");
         let git = |args: &[&str], cwd: &Path| {
             let output = std::process::Command::new("git")
                 .args(args)
@@ -528,15 +542,15 @@ mod seatbelt {
         git(&["worktree", "add", "-q", copy.to_str().expect("utf-8")], &repository);
         std::fs::write(copy.join("note.txt"), "a linked copy\n").expect("a file in the copy");
 
-        let confine = support::connect(Options::default()).await;
-        let output = run(support::compartment(&confine, Some(&copy)).await, "git --version").await;
+        let sandbox = support::connect(Options::default()).await;
+        let output = run(support::session(&sandbox, Some(&copy)).await, "git --version").await;
         passed(&output, "git itself runs inside");
 
-        let output = run(support::compartment(&confine, Some(&copy)).await, "git status").await;
+        let output = run(support::session(&sandbox, Some(&copy)).await, "git status").await;
         refused(&output, "git status in the linked copy");
         assert!(text(&output.stderr).contains("not a git repository"), "{}", text(&output.stderr));
 
-        let output = run(support::compartment(&confine, Some(&copy)).await, "cat note.txt").await;
+        let output = run(support::session(&sandbox, Some(&copy)).await, "cat note.txt").await;
         passed(&output, "the copy's own files");
     }
 
@@ -545,16 +559,16 @@ mod seatbelt {
     // setuid, so it never runs inside at all.
     #[tokio::test]
     async fn outside_process_invisible() {
-        let (_lend, tree) = tree();
+        let (_workspace, tree) = tree();
         support::probe(&tree);
-        let confine = support::connect(Options::default()).await;
+        let sandbox = support::connect(Options::default()).await;
         let host = std::process::id();
 
         let probe = support::probe_outside(&tree, &["procargs", &host.to_string()]);
-        passed(&probe, "the sysctl answers outside the boundary");
+        passed(&probe, "the sysctl answers outside the session");
 
         let script = format!("ps -o command= -p {host}");
-        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
         assert!(
             !output.status.success() || text(&output.stdout).is_empty(),
             "the host process is visible to ps: {}",
@@ -562,50 +576,49 @@ mod seatbelt {
         );
 
         let script = format!("./probe procargs {host}");
-        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
         refused(&output, "the host process's arguments");
     }
 
     #[tokio::test]
     async fn loopback_server_answers() {
-        let (_lend, tree) = tree();
+        let (_workspace, tree) = tree();
         support::probe(&tree);
-        let confine = support::connect(Options::default()).await;
-        let output =
-            run(support::compartment(&confine, Some(&tree)).await, "./probe loopback").await;
+        let sandbox = support::connect(Options::default()).await;
+        let output = run(support::session(&sandbox, Some(&tree)).await, "./probe loopback").await;
         passed(&output, "a server on port 0 over loopback");
         assert!(text(&output.stdout).parse::<u16>().is_ok(), "{}", text(&output.stdout));
     }
 
-    // A root is one boundary's: the one asking reads it, one asking
+    // A root is one session's: the one granted it reads it, one granted
     // nothing does not.
     #[test]
     fn read_root_readable() {
         support::under_home(async |home| {
-            let (_lend, tree) = tree();
+            let (_workspace, tree) = tree();
             let shared = home.join("shared");
             let private = home.join("private");
             std::fs::create_dir_all(&shared).expect("shared");
             std::fs::create_dir_all(&private).expect("private");
             std::fs::write(shared.join("note.txt"), "shared\n").expect("a shared file");
             std::fs::write(private.join("secret.txt"), "secret\n").expect("a private file");
-            let confine = support::connect(Options::default()).await;
-            let ask = support::reading(&["~/shared"]);
+            let sandbox = support::connect(Options::default()).await;
+            let grant = support::reading(&["~/shared"]);
 
             let script = format!("cat '{}'", shared.join("note.txt").display());
-            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             passed(&output, "reading a read root");
             assert_eq!(text(&output.stdout), "shared");
 
-            let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
-            refused(&output, "reading a root another boundary asked");
+            let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+            refused(&output, "reading a root another session was granted");
 
             let script = format!("echo x > '{}'", shared.join("written").display());
-            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             refused(&output, "writing a read root");
 
             let script = format!("cat '{}'", private.join("secret.txt").display());
-            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             refused(&output, "reading beside a read root");
         });
     }
@@ -618,18 +631,18 @@ mod landlock {
     use std::path::PathBuf;
     use std::process::Output;
 
-    use omnia_airlock::Options;
+    use omnia_sandbox::Options;
 
     use super::support::{self, passed, run, text};
 
-    // A lent tree holding the probe.
+    // A workspace holding the probe.
     fn tree() -> (tempfile::TempDir, PathBuf) {
-        let lend = tempfile::tempdir().expect("a lend");
-        let tree = lend.path().join("tree");
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let tree = workspace.path().join("tree");
         std::fs::create_dir_all(tree.join("src")).expect("the tree");
         std::fs::write(tree.join("src/main.rs"), "fn main() {}\n").expect("a source file");
         support::probe(&tree);
-        (lend, tree)
+        (workspace, tree)
     }
 
     #[track_caller]
@@ -642,8 +655,8 @@ mod landlock {
     // the filter where the kernel alone would answer otherwise.
     #[tokio::test]
     async fn syscalls_refused() {
-        let (_lend, tree) = tree();
-        let confine = support::connect(Options::default()).await;
+        let (_workspace, tree) = tree();
+        let sandbox = support::connect(Options::default()).await;
 
         let control = support::probe_outside(&tree, &["syscall", "socket", "inet", "dgram"]);
         passed(&control, "a datagram socket opens on the host");
@@ -665,22 +678,22 @@ mod landlock {
             "ioctl tioclinux",
         ] {
             let script = format!("./probe syscall {row}");
-            let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
+            let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
             refused(&output, row, "EPERM");
         }
     }
 
     #[tokio::test]
     async fn sockets_admitted() {
-        let (_lend, tree) = tree();
-        let confine = support::connect(Options::default()).await;
+        let (_workspace, tree) = tree();
+        let sandbox = support::connect(Options::default()).await;
         for row in [
             "socket inet stream",
             "socket inet6 stream+nonblock+cloexec",
             "socket netlink-route raw",
         ] {
             let script = format!("./probe syscall {row}");
-            let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
+            let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
             passed(&output, row);
         }
     }
@@ -689,31 +702,31 @@ mod landlock {
     // `ENOSYS` alone, so the filter's answer is what keeps threads running.
     #[tokio::test]
     async fn clone3_unsupported_and_threads_run() {
-        let (_lend, tree) = tree();
-        let confine = support::connect(Options::default()).await;
+        let (_workspace, tree) = tree();
+        let sandbox = support::connect(Options::default()).await;
 
         let control = support::probe_outside(&tree, &["syscall", "clone3"]);
         refused(&control, "clone3 with too small a block outside", "EINVAL");
 
         let output =
-            run(support::compartment(&confine, Some(&tree)).await, "./probe syscall clone3").await;
+            run(support::session(&sandbox, Some(&tree)).await, "./probe syscall clone3").await;
         refused(&output, "clone3", "ENOSYS");
 
         let output =
-            run(support::compartment(&confine, Some(&tree)).await, "./probe syscall thread").await;
+            run(support::session(&sandbox, Some(&tree)).await, "./probe syscall thread").await;
         passed(&output, "a thread inside");
         assert_eq!(text(&output.stdout), "thread joined with 2");
     }
 
     #[tokio::test]
     async fn write_outside_the_tree_refused() {
-        let (_lend, tree) = tree();
+        let (_workspace, tree) = tree();
         let outside = tempfile::tempdir().expect("outside");
         let escape = outside.path().join("escape");
-        let confine = support::connect(Options::default()).await;
+        let sandbox = support::connect(Options::default()).await;
 
         let inside = run(
-            support::compartment(&confine, Some(&tree)).await,
+            support::session(&sandbox, Some(&tree)).await,
             "echo made > made.txt && cat made.txt && mkdir -p deep/er && rm -r deep",
         )
         .await;
@@ -721,86 +734,85 @@ mod landlock {
         assert_eq!(text(&inside.stdout), "made");
 
         let script = format!("echo x > '{}'", escape.display());
-        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
         refused(&output, "writing outside the tree", "Permission denied");
         assert!(!escape.exists(), "the write landed");
     }
 
     #[tokio::test]
     async fn host_home_unreadable() {
-        let (_lend, tree) = tree();
+        let (_workspace, tree) = tree();
         let home = std::env::var("HOME").expect("the host has a home");
-        let confine = support::connect(Options::default()).await;
-        let boundary = support::compartment(&confine, Some(&tree)).await;
-        let scratch = boundary.scratch().to_path_buf();
+        let sandbox = support::connect(Options::default()).await;
+        let session = support::session(&sandbox, Some(&tree)).await;
+        let scratch = session.scratch().to_path_buf();
 
         let script = format!("cd \"$HOME\" && pwd && ls '{home}'");
-        let output = run(boundary, &script).await;
+        let output = run(session, &script).await;
         refused(&output, "listing the host's home", "Permission denied");
         assert_eq!(text(&output.stdout), scratch.to_string_lossy(), "the process's own home");
     }
 
-    // A root is one boundary's: the one asking reads it, one asking
+    // A root is one session's: the one granted it reads it, one granted
     // nothing does not.
     #[test]
     fn read_root_readable_and_kept() {
         support::under_home(async |home| {
-            let (_lend, tree) = tree();
+            let (_workspace, tree) = tree();
             let shared = home.join("shared");
             std::fs::create_dir_all(&shared).expect("shared");
             std::fs::write(shared.join("note.txt"), "shared\n").expect("a shared file");
             std::fs::write(home.join("secret.txt"), "secret\n").expect("a private file");
-            let confine = support::connect(Options::default()).await;
-            let ask = support::reading(&["~/shared"]);
+            let sandbox = support::connect(Options::default()).await;
+            let grant = support::reading(&["~/shared"]);
 
             let script = format!("cat '{}'", shared.join("note.txt").display());
-            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             passed(&output, "reading a read root");
             assert_eq!(text(&output.stdout), "shared");
 
-            let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
-            refused(&output, "reading a root another boundary asked", "Permission denied");
+            let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+            refused(&output, "reading a root another session was granted", "Permission denied");
 
             let script = format!("echo x > '{}'", shared.join("written").display());
-            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             refused(&output, "writing a read root", "Permission denied");
 
             let script = format!("cat '{}'", home.join("secret.txt").display());
-            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             refused(&output, "reading beside a read root", "Permission denied");
 
             // a rename out of the root is a removal there, which read does not grant
             let script = format!("mv '{}' ./taken.txt", shared.join("note.txt").display());
-            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             assert!(!output.status.success(), "the file was moved out: {}", text(&output.stdout));
             assert!(shared.join("note.txt").exists(), "the read root kept its file");
         });
     }
 
     // The host sets itself non-dumpable at connect, so its `/proc/<pid>`
-    // is root's from then on, inside the boundary and out.
+    // is root's from then on, inside the session and out.
     #[tokio::test]
     async fn host_process_closed() {
-        let (_lend, tree) = tree();
+        let (_workspace, tree) = tree();
         let host = std::process::id().to_string();
         let before = support::probe_outside(&tree, &["environ", &host]);
         passed(&before, "the host's environment reads before connecting");
 
-        let confine = support::connect(Options::default()).await;
+        let sandbox = support::connect(Options::default()).await;
         let after = support::probe_outside(&tree, &["environ", &host]);
         refused(&after, "the host's environment after connecting", "Permission denied");
 
         let script = format!("./probe environ {host}");
-        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
         refused(&output, "the host's environment inside", "Permission denied");
     }
 
     #[tokio::test]
     async fn loopback_server_answers() {
-        let (_lend, tree) = tree();
-        let confine = support::connect(Options::default()).await;
-        let output =
-            run(support::compartment(&confine, Some(&tree)).await, "./probe loopback").await;
+        let (_workspace, tree) = tree();
+        let sandbox = support::connect(Options::default()).await;
+        let output = run(support::session(&sandbox, Some(&tree)).await, "./probe loopback").await;
         passed(&output, "a server on port 0 over loopback");
         assert!(text(&output.stdout).parse::<u16>().is_ok(), "{}", text(&output.stdout));
     }

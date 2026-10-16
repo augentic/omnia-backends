@@ -1,4 +1,4 @@
-//! The Linux substrate: a Landlock ruleset over the filesystem and two
+//! The Linux kernel boundary: a Landlock ruleset over the filesystem and two
 //! seccomp filters over the syscalls, built in the parent and applied in
 //! the child before it runs the program.
 
@@ -26,7 +26,7 @@ use seccompiler::{
 };
 use tokio::process::Command;
 
-use crate::chamber::Place;
+use crate::session::Place;
 
 // The first ABI that fences TCP, which the follow-ups build on. Its kernel,
 // 6.7, carries every filesystem right the ruleset handles.
@@ -40,7 +40,7 @@ const EXECUTABLE: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib3
 const READABLE: [&str; 4] = ["/etc", "/proc", "/sys", "/run"];
 const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
 
-// The substrate as probed: the filters every process gets, compiled once.
+// The boundary as probed: the filters every process gets, compiled once.
 pub struct Linux {
     filters: Filters,
 }
@@ -85,8 +85,8 @@ impl Linux {
     }
 
     // The ruleset over `place` and the filters, applied in the child once it
-    // has entered the tree. `restrict_self` sets `no_new_privs`, and nothing
-    // short of full enforcement runs the program.
+    // has entered its working directory. `restrict_self` sets
+    // `no_new_privs`, and nothing short of full enforcement runs the program.
     #[expect(
         unsafe_code,
         reason = "`pre_exec` runs in the forked child; it applies rules built here and allocates \
@@ -136,7 +136,7 @@ impl Linux {
 
         // the process's own, a granted root executable too since a toolchain
         // lives there
-        required(&mut ruleset, place.tree, AccessFs::from_all(abi))?;
+        required(&mut ruleset, place.cwd, AccessFs::from_all(abi))?;
         required(&mut ruleset, place.scratch, AccessFs::from_all(abi))?;
         required(&mut ruleset, place.program, AccessFs::ReadFile | AccessFs::Execute)?;
         for root in place.read {

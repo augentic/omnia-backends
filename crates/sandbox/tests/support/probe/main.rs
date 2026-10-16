@@ -1,5 +1,5 @@
-//! The compartment suite's probe, copied into a lent tree and run inside the
-//! boundary.
+//! The session suite's probe, copied into a workspace and run inside the
+//! session.
 //!
 //! It makes one attempt per row. It exits 0 when the attempt succeeded, and
 //! 1 with the reason on stderr when the kernel refused it.

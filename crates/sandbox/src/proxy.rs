@@ -1,5 +1,5 @@
-//! The valve: the one way out of the boundary, a loopback `CONNECT` proxy
-//! admitting the hosts the clearance named and nothing else.
+//! The egress proxy: the one way out of the sandbox, a loopback `CONNECT`
+//! proxy admitting the hosts the grant named and nothing else.
 
 use std::convert::Infallible;
 use std::fmt;
@@ -15,9 +15,11 @@ use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
+use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 
 const CONNECT_BOUND: Duration = Duration::from_secs(10);
@@ -28,15 +30,15 @@ const METADATA: [IpAddr; 2] = [
     IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200)),
 ];
 
-/// The bound valve. Dropping it stops serving.
+// The bound proxy. Dropping it stops serving, open tunnels included.
 #[derive(Debug)]
-pub struct Valve {
+pub struct Proxy {
     address: SocketAddr,
     server: JoinHandle<()>,
 }
 
-impl Valve {
-    pub(crate) async fn bind(hosts: &[String]) -> Result<Self> {
+impl Proxy {
+    pub async fn bind(hosts: &[String]) -> Result<Self> {
         let listener =
             TcpListener::bind(("127.0.0.1", 0)).await.context("binding the egress proxy")?;
         let address = listener.local_addr().context("reading the egress proxy's address")?;
@@ -46,54 +48,41 @@ impl Valve {
         Ok(Self { address, server })
     }
 
-    /// The proxy's address, which every boundary's `HTTPS_PROXY` names.
-    #[must_use]
     pub const fn address(&self) -> SocketAddr {
         self.address
     }
 }
 
-impl Drop for Valve {
+impl Drop for Proxy {
     fn drop(&mut self) {
         self.server.abort();
     }
 }
 
-/// Why an address a listed host names or resolves to is not connected.
-///
-/// - A name on the allowlist is resolved once, and every address it answers
-///   is held to these classes.
-/// - A listed IP literal is held to them as written, loopback alone
-///   admitted.
-///
-/// So no listed host leads the tunnel back to the host itself, its network
-/// segment, or a cloud's metadata service.
+// Why an address a listed host names or resolves to is not connected: no
+// listed host leads the tunnel back to the host itself, its network
+// segment, or a cloud's metadata service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Refusal {
-    /// `0.0.0.0` or `::`.
+enum DeniedAddress {
+    // `0.0.0.0` or `::`.
     Unspecified,
-    /// `127.0.0.0/8` or `::1`.
+    // `127.0.0.0/8` or `::1`.
     Loopback,
-    /// `169.254.0.0/16` or `fe80::/10`.
+    // `169.254.0.0/16` or `fe80::/10`.
     LinkLocal,
-    /// A multicast group.
     Multicast,
-    /// `255.255.255.255`.
+    // `255.255.255.255`.
     Broadcast,
-    /// A cloud instance metadata endpoint.
+    // A cloud instance metadata endpoint.
     Metadata,
-    /// An address one of the host's own interfaces holds.
+    // An address one of the host's own interfaces holds.
     Own,
 }
 
-impl Refusal {
-    /// The class `address` falls in, if any, against the host's `own` addresses.
-    ///
-    /// A v4 address carried in v6 is classed as the v4 address it carries,
-    /// whether mapped as `::ffff:a.b.c.d` or v4-compatible as `::a.b.c.d`.
-    #[must_use]
-    pub fn of(address: IpAddr, own: &[IpAddr]) -> Option<Self> {
+impl DeniedAddress {
+    // A v4 address carried in v6 is classed as the v4 address it carries,
+    // whether mapped as `::ffff:a.b.c.d` or v4-compatible as `::a.b.c.d`.
+    fn of(address: IpAddr, own: &[IpAddr]) -> Option<Self> {
         let address = match address {
             IpAddr::V6(v6) if !v6.is_unspecified() && !v6.is_loopback() => {
                 v6.to_ipv4().map_or(address, IpAddr::V4)
@@ -144,7 +133,7 @@ impl Refusal {
     }
 }
 
-impl fmt::Display for Refusal {
+impl fmt::Display for DeniedAddress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Unspecified => "an unspecified address",
@@ -158,13 +147,9 @@ impl fmt::Display for Refusal {
     }
 }
 
-/// The addresses the host's own interfaces hold right now.
-///
-/// # Errors
-///
-/// Returns an error when the interfaces cannot be enumerated.
+// The addresses the host's own interfaces hold right now.
 #[expect(unsafe_code, reason = "`getifaddrs` has no safe wrapper among the crate's dependencies")]
-pub fn own_addresses() -> Result<Vec<IpAddr>> {
+fn own_addresses() -> Result<Vec<IpAddr>> {
     let mut head = MaybeUninit::<*mut libc::ifaddrs>::uninit();
     // SAFETY: `getifaddrs` writes `head` as it succeeds, a list `freeifaddrs`
     // releases; the list is walked before it is released and never after.
@@ -223,14 +208,14 @@ impl Allowlist {
     }
 }
 
-// One allowlist entry as the ask spelled it.
+// One allowlist entry as the grant spelled it.
 #[derive(Debug, Clone)]
 enum Entry {
     // A host name, matched whole and without regard to case.
     Exact(String),
     // `*.suffix`: the suffix and every name beneath it.
     Suffix(String),
-    // An IP literal, vetted as written: how an ask names a loopback mirror.
+    // An IP literal, vetted as written: how a grant names a loopback mirror.
     Literal(IpAddr),
 }
 
@@ -253,8 +238,33 @@ enum Admission {
     Literal(IpAddr),
 }
 
-// Accept until the `Valve` drops, one connection task per client socket.
+// A tunnel a `CONNECT` opened, carried by the connection that asked for it
+// once its request is answered, so the tunnel ends with the proxy.
+struct Tunnel {
+    client: OnUpgrade,
+    upstream: TcpStream,
+}
+
+impl Tunnel {
+    async fn carry(self) {
+        match self.client.await {
+            Ok(upgraded) => {
+                let mut client = TokioIo::new(upgraded);
+                let mut upstream = self.upstream;
+                if let Err(error) = tokio::io::copy_bidirectional(&mut client, &mut upstream).await
+                {
+                    tracing::debug!(%error, "egress tunnel ended");
+                }
+            }
+            Err(error) => tracing::debug!(%error, "egress upgrade failed"),
+        }
+    }
+}
+
+// Accept until the `Proxy` drops, one task per client connection. The
+// tasks are the proxy's, so an open tunnel ends with it.
 async fn serve(listener: TcpListener, allowlist: Arc<Allowlist>) {
+    let mut connections = JoinSet::new();
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -267,26 +277,39 @@ async fn serve(listener: TcpListener, allowlist: Arc<Allowlist>) {
             }
         };
 
-        let allowlist = Arc::clone(&allowlist);
-        tokio::spawn(async move {
-            let service = service_fn(move |request| {
-                let allowlist = Arc::clone(&allowlist);
-                async move { Ok::<_, Infallible>(handle(request, &allowlist).await) }
-            });
-            let served = http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), service)
-                .with_upgrades()
-                .await;
-            if let Err(error) = served {
-                tracing::debug!(%error, "egress connection ended");
-            }
-        });
+        while connections.try_join_next().is_some() {}
+        connections.spawn(connection(stream, Arc::clone(&allowlist)));
     }
 }
 
-// The tunnel is opened before the client hears `200`, so a refusal is a
-// status and never a closed tunnel.
-async fn handle(request: Request<Incoming>, allowlist: &Allowlist) -> Response<Full<Bytes>> {
+// One client connection: its requests, then the tunnel a `CONNECT` opened.
+// The upgrade resolves once the connection has been served, so the tunnel
+// is carried after it.
+async fn connection(stream: TcpStream, allowlist: Arc<Allowlist>) {
+    let (tunnels_tx, mut tunnels) = mpsc::unbounded_channel();
+    let service = service_fn(move |request| {
+        let allowlist = Arc::clone(&allowlist);
+        let tunnels = tunnels_tx.clone();
+        async move { Ok::<_, Infallible>(handle(request, &allowlist, &tunnels).await) }
+    });
+    let served = http1::Builder::new()
+        .serve_connection(TokioIo::new(stream), service)
+        .with_upgrades()
+        .await;
+    if let Err(error) = served {
+        tracing::debug!(%error, "egress connection ended");
+    }
+
+    while let Some(tunnel) = tunnels.recv().await {
+        tunnel.carry().await;
+    }
+}
+
+// The upstream is connected before the client hears `200`, so a refusal is
+// a status and never a closed tunnel.
+async fn handle(
+    request: Request<Incoming>, allowlist: &Allowlist, tunnels: &mpsc::UnboundedSender<Tunnel>,
+) -> Response<Full<Bytes>> {
     if request.method() != Method::CONNECT {
         return answer(StatusCode::METHOD_NOT_ALLOWED, "only CONNECT is proxied");
     }
@@ -301,10 +324,10 @@ async fn handle(request: Request<Incoming>, allowlist: &Allowlist) -> Response<F
     let admitted = match allowlist.admits(&host) {
         None => Err("is not on the allowlist".to_owned()),
         Some(Admission::Literal(address)) => {
-            literal(address, port).map_err(|refusal| format!("is {refusal}"))
+            literal(address, port).map_err(|denied| format!("is {denied}"))
         }
         Some(Admission::Name) => {
-            vetted(&host, port).await.map_err(|refusal| format!("resolves to {refusal}"))
+            vetted(&host, port).await.map_err(|denied| format!("resolves to {denied}"))
         }
     };
     let addresses = match admitted {
@@ -323,47 +346,38 @@ async fn handle(request: Request<Incoming>, allowlist: &Allowlist) -> Response<F
     };
 
     tracing::debug!(host, port, "egress tunnel opened");
-    tokio::spawn(async move {
-        match hyper::upgrade::on(request).await {
-            Ok(upgraded) => {
-                let mut client = TokioIo::new(upgraded);
-                let mut upstream = upstream;
-                if let Err(error) = tokio::io::copy_bidirectional(&mut client, &mut upstream).await
-                {
-                    tracing::debug!(%error, "egress tunnel ended");
-                }
-            }
-            Err(error) => tracing::debug!(%error, "egress upgrade failed"),
-        }
+    let _ = tunnels.send(Tunnel {
+        client: hyper::upgrade::on(request),
+        upstream,
     });
     Response::new(Full::default())
 }
 
-// A listed literal as written, unless it is of a refused class. Loopback is
+// A listed literal as written, unless it is of a denied class. Loopback is
 // admitted: the mirror a literal exists to name.
-fn literal(address: IpAddr, port: u16) -> std::result::Result<Vec<SocketAddr>, Refusal> {
-    match Refusal::of(address, &own()) {
-        None | Some(Refusal::Loopback) => Ok(vec![SocketAddr::new(address, port)]),
-        Some(refusal) => Err(refusal),
+fn literal(address: IpAddr, port: u16) -> std::result::Result<Vec<SocketAddr>, DeniedAddress> {
+    match DeniedAddress::of(address, &own()) {
+        None | Some(DeniedAddress::Loopback) => Ok(vec![SocketAddr::new(address, port)]),
+        Some(denied) => Err(denied),
     }
 }
 
 // The addresses a listed name resolved to that pass the vetting. When none
-// pass, `Err` names the class of the last refused one.
-async fn vetted(host: &str, port: u16) -> std::result::Result<Vec<SocketAddr>, Refusal> {
+// pass, `Err` names the class of the last denied one.
+async fn vetted(host: &str, port: u16) -> std::result::Result<Vec<SocketAddr>, DeniedAddress> {
     let own = own();
     let mut admitted = Vec::new();
-    let mut refused = None;
+    let mut denied = None;
     if let Ok(resolved) = tokio::net::lookup_host((host, port)).await {
         for address in resolved {
-            match Refusal::of(address.ip(), &own) {
-                Some(refusal) => refused = Some(refusal),
+            match DeniedAddress::of(address.ip(), &own) {
+                Some(class) => denied = Some(class),
                 None => admitted.push(address),
             }
         }
     }
-    match (admitted.is_empty(), refused) {
-        (true, Some(refusal)) => Err(refusal),
+    match (admitted.is_empty(), denied) {
+        (true, Some(denied)) => Err(denied),
         _ => Ok(admitted),
     }
 }
@@ -394,4 +408,62 @@ fn answer(status: StatusCode, reason: &str) -> Response<Full<Bytes>> {
     let mut response = Response::new(Full::from(Bytes::from(format!("{reason}\n"))));
     *response.status_mut() = status;
     response
+}
+
+// The vetting alone, a pure classification; what the proxy admits, refuses
+// and carries is `tests/proxy.rs`'s, over a session the suite prepares.
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use super::{DeniedAddress, own_addresses};
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("an address")
+    }
+
+    #[test]
+    fn vetting_table() {
+        let table = [
+            ("0.0.0.0", Some(DeniedAddress::Unspecified)),
+            ("::", Some(DeniedAddress::Unspecified)),
+            ("127.0.0.1", Some(DeniedAddress::Loopback)),
+            ("127.8.9.10", Some(DeniedAddress::Loopback)),
+            ("::1", Some(DeniedAddress::Loopback)),
+            ("169.254.169.254", Some(DeniedAddress::Metadata)),
+            ("fd00:ec2::254", Some(DeniedAddress::Metadata)),
+            ("100.100.100.200", Some(DeniedAddress::Metadata)),
+            ("169.254.1.1", Some(DeniedAddress::LinkLocal)),
+            ("fe80::1", Some(DeniedAddress::LinkLocal)),
+            ("224.0.0.1", Some(DeniedAddress::Multicast)),
+            ("ff02::1", Some(DeniedAddress::Multicast)),
+            ("255.255.255.255", Some(DeniedAddress::Broadcast)),
+            // IPv4 carried in IPv6 is classed as the IPv4 it carries
+            ("::ffff:127.0.0.1", Some(DeniedAddress::Loopback)),
+            ("::ffff:169.254.169.254", Some(DeniedAddress::Metadata)),
+            ("::127.0.0.1", Some(DeniedAddress::Loopback)),
+            ("::ffff:0.0.0.0", Some(DeniedAddress::Unspecified)),
+            ("::ffff:93.184.215.14", None),
+            // public addresses pass
+            ("93.184.215.14", None),
+            ("2606:2800:21f:cb07:6820:80da:af6b:8b2c", None),
+            // a private range is the operator's to list: an internal registry is a legitimate host
+            ("10.0.0.1", None),
+            ("192.168.1.1", None),
+            ("fd12::1", None),
+        ];
+        for (address, expected) in table {
+            assert_eq!(DeniedAddress::of(ip(address), &[]), expected, "{address}");
+        }
+    }
+
+    #[test]
+    fn own_addresses_denied() {
+        let own = own_addresses().expect("the host's interfaces");
+        assert!(own.contains(&ip("127.0.0.1")), "a loopback interface among {own:?}");
+        let public = ip("93.184.215.14");
+        assert_eq!(DeniedAddress::of(public, &[public]), Some(DeniedAddress::Own));
+        assert_eq!(DeniedAddress::of(ip("::ffff:93.184.215.14"), &[public]), Some(DeniedAddress::Own));
+        assert_eq!(DeniedAddress::of(public, &own), None);
+    }
 }

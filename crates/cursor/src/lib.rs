@@ -15,8 +15,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 pub use failure::Failure;
 use omnia::Backend;
-pub use omnia_airlock::Exit;
-use omnia_airlock::{Airlock, Options};
+pub use omnia_sandbox::Exit;
+use omnia_sandbox::{Options, Sandbox};
 pub use protocol::{RpcError, RunStatus};
 use tokio::time::Instant;
 use tracing::instrument;
@@ -31,7 +31,7 @@ pub struct Client {
     model: String,
     api_key: Option<String>,
     pool: Arc<Pool>,
-    airlock: Arc<Airlock>,
+    sandbox: Arc<Sandbox>,
     max_tool_calls: u32,
 }
 
@@ -42,7 +42,7 @@ impl std::fmt::Debug for Client {
             .field("model", &self.model)
             .field("max_agents", &self.pool.max_agents())
             .field("max_tool_calls", &self.max_tool_calls)
-            .field("airlock", &self.airlock.options())
+            .field("sandbox", &self.sandbox.options())
             .finish_non_exhaustive()
     }
 }
@@ -58,7 +58,7 @@ impl Backend for Client {
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
 
-        let airlock = Airlock::connect(Options {
+        let sandbox = Sandbox::connect(Options {
             shell_roots: options.shell_roots,
             inherit: worker::INHERIT,
             refused: worker::REFUSED,
@@ -74,7 +74,7 @@ impl Backend for Client {
             model: options.model,
             api_key,
             pool: Arc::new(pool),
-            airlock: Arc::new(airlock),
+            sandbox: Arc::new(sandbox),
             max_tool_calls: options.max_tool_calls,
         })
     }
@@ -126,7 +126,7 @@ mod config {
         /// `:`-separated and relative to the invocation directory; a
         /// workspace lent elsewhere is read-only. What a worker reaches
         /// beyond its workspace — hosts, `~/` roots, variables — is the
-        /// completion's `grants.worker`, held to the boundary's own rules
+        /// completion's `grants.worker`, held to the sandbox's own rules
         /// and to nothing of the deployment's.
         #[env(from = "CURSOR_SHELL_ROOTS", default = "", with = paths)]
         pub shell_roots: Vec<PathBuf>,

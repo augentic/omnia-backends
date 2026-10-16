@@ -1,35 +1,34 @@
 #![doc = include_str!("../README.md")]
 
-mod chamber;
 mod child;
-pub mod valve;
+mod proxy;
+mod session;
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::net::SocketAddr;
 use std::path::{self, Path, PathBuf};
 use std::sync::Arc;
 use std::{env, fmt, io};
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::chamber::Chamber;
-pub use crate::chamber::Compartment;
 pub use crate::child::{Child, Exit};
-use crate::valve::Valve;
+pub use crate::session::{Access, Command, Session};
 
-// The bulkhead between a process and the host: the kernel substrate, Landlock
-// and seccomp on Linux, Seatbelt on macOS.
+// The kernel boundary around a process: Landlock and seccomp on Linux,
+// Seatbelt on macOS.
 cfg_select! {
     target_os = "linux" => {
         mod linux;
-        use linux::Linux as Bulkhead;
+        use linux::Linux as Kernel;
     }
     target_os = "macos" => {
         mod seatbelt;
-        use seatbelt::Seatbelt as Bulkhead;
+        use seatbelt::Seatbelt as Kernel;
     }
     _ => {
-        compile_error!("omnia-airlock only runs on Linux or macOS");
+        compile_error!("omnia-sandbox only runs on Linux or macOS");
     }
 }
 
@@ -39,22 +38,22 @@ macro_rules! deny {
     };
 }
 
-// Inherited by every confined process, beside `LC_*` and the backend's `inherit`.
+// Host variables every process inherits, beside `LC_*` and the backend's `inherit`.
 const INHERITED: &[&str] = &["PATH", "LANG", "TZ", "TERM"];
-// Set to a scratch directory of the process's own, removed once it has exited.
+// Set to the process's own scratch directory, removed once it has exited.
 const SCRATCH: &[&str] = &["HOME", "TMPDIR"];
-// Set to the egress proxy bound for the process alone, its one way out.
+// Set to the egress proxy bound for the process alone.
 const PROXY: &[&str] =
     &["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"];
 const NO_PROXY: &[&str] = &["NO_PROXY", "no_proxy"];
 // Bun matches an entry as the URL spells the host, so the IPv6 loopback is listed bracketed too.
 const LOOPBACK: &str = "127.0.0.1,localhost,::1,[::1]";
-// Each lets an ask run code inside the program, or switch its trust store.
+// Each lets a grant run code inside the program, or switch its trust store.
 const REFUSED: &[&str] = &["NODE_USE_SYSTEM_CA", "BUN_OPTIONS", "NODE_OPTIONS"];
 const LOADER: &[&str] = &["LD_", "DYLD_"];
 // Exported by a shell, each would point every git the model runs at the operator's repository.
 const GIT: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
-// The stores the operator's credentials live in, `~/`-relative, denied whatever the clearance.
+// Where the operator's credentials live, relative to the home, denied whatever the grant.
 const STORES: &[&str] = &[
     ".ssh",
     ".gnupg",
@@ -68,35 +67,38 @@ const STORES: &[&str] = &[
     "Library/Keychains",
 ];
 
-/// What a backend connects once and lays around every process it spawns.
+/// The host's sandbox policy, connected once and applied to every process a
+/// backend spawns.
 ///
-/// [`Airlock::connect`] holds the [`Options`] to the host and reads what a
-/// process inherits. [`Airlock::seal`] then holds each process's
-/// [`Clearance`] to the host and seals a [`Compartment`] around it.
-pub struct Airlock {
+/// [`Sandbox::connect`] validates the [`Options`] against the host and reads
+/// what a process inherits. [`Sandbox::prepare`] then validates one
+/// process's [`Grant`] and prepares the [`Session`] it runs in.
+pub struct Sandbox {
     options: Options,
     inherited: BTreeMap<OsString, OsString>,
-    bulkhead: Arc<Bulkhead>,
+    kernel: Arc<Kernel>,
     home: Option<PathBuf>,
 }
 
-impl Airlock {
-    /// Connects: holds `options` to the host and reads what a process inherits.
+impl Sandbox {
+    /// Connects to the host: validates `options` and reads what a process
+    /// inherits.
     ///
-    /// - `shell_roots` are made absolute against the current directory, so a
-    ///   lend is compared with them however they were spelled.
-    /// - The kernel substrate is probed.
-    /// - The operator's `HOME` is read, canonical, as what a [`Clearance`]'s
+    /// - Each of `shell_roots` is resolved: canonical where the directory
+    ///   exists, absolute otherwise.
+    /// - The kernel boundary is probed.
+    /// - The operator's `HOME` is read, canonical, as what a [`Grant`]'s
     ///   `~/` spells.
-    /// - The host's environment is read, keeping what a process inherits.
+    /// - The host's environment is read, keeping the variables a process
+    ///   inherits.
     ///
     /// # Errors
     ///
     /// Returns an error when:
     ///
-    /// - `inherit` names a variable the compartment sets itself, one in
-    ///   `refused`, one of the dynamic loader's, or a `GIT_DIR` sibling
-    /// - no kernel substrate runs on this host
+    /// - `inherit` names a variable the sandbox sets itself, one in
+    ///   `refused`, one the dynamic loader reads, or a `GIT_DIR` sibling
+    /// - the host cannot enforce a kernel boundary
     pub async fn connect(mut options: Options) -> Result<Self> {
         // check options
         for name in options.inherit {
@@ -105,8 +107,9 @@ impl Airlock {
             }
         }
         for root in &mut options.shell_roots {
-            *root = path::absolute(&*root)
+            let absolute = path::absolute(&*root)
                 .with_context(|| format!("resolving shell root {}", root.display()))?;
+            *root = tokio::fs::canonicalize(&absolute).await.unwrap_or(absolute);
         }
 
         let inherited =
@@ -116,23 +119,25 @@ impl Airlock {
         Ok(Self {
             options,
             inherited,
-            bulkhead: Arc::new(Bulkhead::probe().await?),
+            kernel: Arc::new(Kernel::probe().await?),
             home,
         })
     }
 
-    /// The options as connected: absolute `shell_roots`.
+    /// The options as connected: resolved `shell_roots`.
     #[must_use]
     pub const fn options(&self) -> &Options {
         &self.options
     }
 
-    /// Seals a compartment around one process at `lend`, granting what
-    /// `clearance` names.
+    /// Prepares the [`Session`] one process runs in: its working directory,
+    /// its environment, and what `grant` opens to it.
     ///
-    /// The process works in `lend`, created and canonicalised, or in a
-    /// private directory when nothing is lent. A lend at or beneath one of
-    /// the connected `shell_roots` runs with a shell.
+    /// The process works in `workspace`, created and canonicalised, or in a
+    /// private directory when none is given. A workspace at or beneath one
+    /// of the connected `shell_roots` runs with [`Access::Shell`], any other
+    /// workspace with [`Access::Read`], and a private directory with
+    /// [`Access::Private`].
     ///
     /// Its environment is built from nothing:
     ///
@@ -140,13 +145,13 @@ impl Airlock {
     /// - `HOME` and `TMPDIR`, a scratch directory of its own, removed once
     ///   it has exited
     /// - the proxy variables, naming an egress proxy bound for it alone that
-    ///   admits the clearance's `egress`
+    ///   admits the grant's `egress`
     /// - `NO_PROXY`, excepting the host's own loopback
-    /// - the clearance's `env`, over all of the above
+    /// - the grant's `env`, over all of the above
     ///
     /// Each `read` root is resolved against the operator's home. One that
     /// does not exist is logged at WARN and granted nothing. One that
-    /// overlaps a credential store is denied whatever the clearance: at it,
+    /// overlaps a credential store is denied whatever the grant: at it,
     /// beneath it, or above it, as spelled or as either resolves. The stores
     /// are `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.kube`,
     /// `~/.docker`, `~/.config/gh`, `~/.config/gcloud`, `~/.password-store`,
@@ -154,44 +159,38 @@ impl Airlock {
     ///
     /// # Errors
     ///
-    /// Returns a [`Denied`] where the clearance is at fault:
+    /// Returns a [`Denied`] where the grant is at fault:
     ///
-    /// - a `read` root not spelled `~/<path>`, overlapping a credential
-    ///   store, or resolving outside the home or to a file
-    /// - an `env` name that is not a variable name, or one the compartment
-    ///   holds: its own, a refused one, the dynamic loader's, a `GIT_DIR`
-    ///   sibling, or one in `inherit`
+    /// - a `read` root not spelled `~/<path>`, stepping through `.` or
+    ///   `..`, overlapping a credential store, or resolving outside the
+    ///   home or to a file
+    /// - an `env` name that is not a variable name, or one the sandbox
+    ///   reserves: its own, a refused one, the dynamic loader's, a
+    ///   `GIT_DIR` sibling, or one in `inherit`
     /// - a `~/` where the host has no home
     ///
     /// Returns a plain error where the host failed:
     ///
-    /// - the lent tree or the scratch cannot be created
+    /// - the workspace or the scratch cannot be created
     /// - a `read` root cannot be read
     /// - the proxy cannot be bound
-    pub async fn seal(&self, lend: Option<&Path>, clearance: &Clearance) -> Result<Compartment> {
-        let chamber = Chamber::prepare(lend, &self.options).await?;
-        let read = self.roots(&clearance.read).await?;
-        let valve = Valve::bind(&clearance.egress).await?;
-        let env = self.environment(&chamber, &valve, &clearance.env)?;
-        Ok(Compartment {
-            chamber,
-            env,
-            path: self.path(),
-            bulkhead: Arc::clone(&self.bulkhead),
-            read,
-            valve,
-        })
+    pub async fn prepare(&self, workspace: Option<&Path>, grant: &Grant) -> Result<Session> {
+        Session::prepare(self, workspace, grant).await
     }
 
-    // A bare program resolves against the host's `PATH`, never one the ask set.
-    fn path(&self) -> OsString {
+    pub(crate) const fn kernel(&self) -> &Arc<Kernel> {
+        &self.kernel
+    }
+
+    // A bare program resolves against the host's `PATH`, never one the grant set.
+    pub(crate) fn host_path(&self) -> OsString {
         self.inherited.get(OsStr::new("PATH")).cloned().unwrap_or_default()
     }
 
-    async fn roots(&self, read: &[String]) -> Result<Vec<PathBuf>> {
+    pub(crate) async fn read_roots(&self, read: &[String]) -> Result<Vec<PathBuf>> {
         let mut roots = Vec::new();
         for entry in read {
-            if let Some(root) = self.root(entry).await?
+            if let Some(root) = self.read_root(entry).await?
                 && !roots.contains(&root)
             {
                 roots.push(root);
@@ -201,11 +200,14 @@ impl Airlock {
     }
 
     // `None` for a root the home lacks, which is granted nothing rather than denied.
-    async fn root(&self, entry: &str) -> Result<Option<PathBuf>> {
+    async fn read_root(&self, entry: &str) -> Result<Option<PathBuf>> {
         // as spelled
         let Some(rest) = entry.strip_prefix("~/").filter(|rest| !rest.is_empty()) else {
             deny!("read root `{entry}` must be a directory beneath the home, `~/<path>`");
         };
+        if rest.split('/').any(|segment| matches!(segment, "." | "..")) {
+            deny!("read root `{entry}` must not step through `.` or `..`");
+        }
         if STORES.iter().any(|store| overlaps(Path::new(rest), Path::new(store))) {
             deny!("read root `{entry}` is a credential store");
         }
@@ -244,20 +246,20 @@ impl Airlock {
         Ok(Some(root))
     }
 
-    fn environment(
-        &self, chamber: &Chamber, bound: &Valve, asked: &[(String, String)],
+    pub(crate) fn environment(
+        &self, scratch: &Path, proxy: SocketAddr, granted: &[(String, String)],
     ) -> Result<BTreeMap<OsString, OsString>> {
-        let scratch = chamber.scratch().as_os_str();
-        let proxy = OsString::from(format!("http://{}", bound.address()));
+        let scratch = scratch.as_os_str();
+        let proxy = OsString::from(format!("http://{proxy}"));
 
         let mut env = self.inherited.clone();
         env.extend(SCRATCH.iter().map(|&name| (name.into(), scratch.to_owned())));
         env.extend(PROXY.iter().map(|&name| (name.into(), proxy.clone())));
         env.extend(NO_PROXY.iter().map(|&name| (name.into(), LOOPBACK.into())));
 
-        // the ask's variables over them, never over the backend's `inherit`:
+        // the grant's variables over them, never over the backend's `inherit`:
         // those are the program's own settings, read of the host
-        for (name, value) in asked {
+        for (name, value) in granted {
             if !is_name(name) {
                 deny!("`{name}` is not an environment variable name");
             }
@@ -285,52 +287,58 @@ impl Airlock {
     }
 }
 
-impl fmt::Debug for Airlock {
+impl fmt::Debug for Sandbox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Airlock")
+        f.debug_struct("Sandbox")
             .field("options", &self.options)
             .field("inherited", &self.inherited.keys())
-            .field("bulkhead", &self.bulkhead)
+            .field("kernel", &self.kernel)
             .field("home", &self.home)
             .finish()
     }
 }
 
-/// What every confined process may reach, as plain data.
+/// What every sandboxed process may reach, as plain data.
 ///
-/// A backend fills it from its own configuration. Nothing here names an
-/// environment variable of the crate's own. What one process asks beyond
-/// it is its [`Clearance`].
+/// A backend fills it from its own configuration. What one process needs
+/// beyond it is its [`Grant`].
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// Trees a lend at or beneath which runs with a shell.
+    /// Directories a workspace at or beneath which runs with
+    /// [`Access::Shell`].
+    ///
+    /// Resolved at connect: canonical where the directory exists, absolute
+    /// otherwise.
     pub shell_roots: Vec<PathBuf>,
-    /// Host environment variables a confined process inherits, by name.
+    /// Host environment variables a sandboxed process inherits, by name.
     pub inherit: &'static [&'static str],
-    /// Environment variable names that must never reach a confined process.
+    /// Environment variable names that must never reach a sandboxed process.
     pub refused: &'static [&'static str],
 }
 
-/// What one process may reach beyond the compartment's defaults.
+/// What one process may reach beyond the sandbox's defaults.
 ///
-/// Sealed with the process by [`Airlock::seal`], which holds each entry to the
-/// host before the process runs.
+/// Validated against the host by [`Sandbox::prepare`] before the process
+/// runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Clearance {
+pub struct Grant {
     /// Hosts the process may reach through its egress proxy.
     ///
     /// - A name matches whole.
     /// - `*.suffix` matches the suffix and every name beneath it.
     /// - An IP literal matches itself.
     ///
-    /// Every address, resolved or literal, is held to [`valve::Refusal`]
-    /// before the tunnel opens, a loopback literal alone excepted.
+    /// Every address is vetted before the tunnel opens, a listed name once
+    /// resolved and a listed literal as written: the unspecified, loopback,
+    /// link-local, multicast and broadcast ranges, the cloud metadata
+    /// addresses, and the host's own addresses are refused. A loopback
+    /// literal alone is connected as written.
     pub egress: Vec<String>,
-    /// Trees the process may read beside the system's own.
+    /// Directories the process may read beside the system's own.
     ///
     /// Each is spelled `~/<path>`, a directory beneath the operator's home.
-    /// The credential stores [`Airlock::seal`] lists are denied whatever the
-    /// clearance names.
+    /// The credential stores [`Sandbox::prepare`] lists are denied whatever
+    /// the grant names.
     pub read: Vec<String>,
     /// Environment variables set for the process.
     ///
@@ -338,11 +346,12 @@ pub struct Clearance {
     pub env: Vec<(String, String)>,
 }
 
-/// A [`Clearance`] the host denies: an entry that breaks a rule of the seal.
+/// A [`Grant`] the sandbox refuses: an entry that breaks a rule of
+/// [`Sandbox::prepare`].
 ///
-/// [`Airlock::seal`] fails with one of these, downcastable from its error,
-/// where the clearance itself is at fault. Where the host failed, it fails
-/// with a plain error.
+/// [`Sandbox::prepare`] fails with one of these, downcastable from its
+/// error, where the grant itself is at fault. Where the host failed, it
+/// fails with a plain error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Denied(String);
 
@@ -354,14 +363,14 @@ impl fmt::Display for Denied {
 
 impl std::error::Error for Denied {}
 
-// Why a name is neither the backend's to inherit nor an ask's to set.
+// Why a name is neither the backend's to inherit nor a grant's to set.
 fn reserved(name: &str, refused: &[&str]) -> Option<&'static str> {
     if [SCRATCH, PROXY, NO_PROXY].iter().any(|own| own.contains(&name)) {
-        Some("is the compartment's to set")
+        Some("is set by the sandbox")
     } else if REFUSED.contains(&name) || refused.contains(&name) {
         Some("is refused")
     } else if LOADER.iter().any(|prefix| name.starts_with(prefix)) {
-        Some("is the dynamic loader's")
+        Some("is read by the dynamic loader")
     } else if GIT.contains(&name) {
         Some("selects a repository")
     } else {
@@ -375,8 +384,8 @@ fn inherits(name: &OsStr, inherit: &[&str]) -> bool {
     })
 }
 
-// The spelling may hide a store behind a `..` or a link, so the canonical
-// root is held to each store as spelled and as it resolves.
+// The spelling may hide a store behind a link, so the canonical root is
+// held to each store as spelled and as it resolves.
 async fn overlaps_store(home: &Path, root: &Path) -> bool {
     for store in STORES {
         let spelled = home.join(store);
@@ -393,8 +402,8 @@ async fn overlaps_store(home: &Path, root: &Path) -> bool {
     false
 }
 
-// A grant of a tree grants every store within it, so a root above a store
-// is as refused as one beneath it.
+// A grant of a directory grants every store within it, so a root above a
+// store is as refused as one beneath it.
 fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }

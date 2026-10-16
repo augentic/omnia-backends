@@ -1,10 +1,10 @@
-//! One process in a compartment: launched, watched to its exit, stopped on
+//! One process in a session: launched, watched to its exit, stopped on
 //! request, and killed with everything it forked.
 //!
-//! The process leads a session of its own, so one kill reaches everything
-//! it forked. Whatever it left in its session is swept as its exit is seen.
-//! Nothing of a child outlives it. A one-shot runs the same way, held to a
-//! bound and killed past it.
+//! The process leads a process group of its own, so one kill reaches
+//! everything it forked. Whatever it left in its group is swept as its exit
+//! is seen. Nothing of a child outlives it. A one-shot runs the same way,
+//! held to a bound and killed past it.
 
 use std::collections::VecDeque;
 use std::ffi::OsStr;
@@ -13,11 +13,10 @@ use std::pin::Pin;
 use std::process::{ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
-use std::{fmt, io};
+use std::fmt;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessSession};
-use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, BufReader};
 use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -27,21 +26,23 @@ use tracing::{Instrument as _, Span};
 
 #[cfg(target_os = "macos")]
 use crate::seatbelt;
-use crate::valve::Valve;
+use crate::session::Session;
 
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
 const TAIL_LINES: usize = 20;
 // A line is cut here, so an endless one is read in pieces and never held whole.
 const LINE_BYTES: u64 = 64 * 1024;
+// A one-shot's stream is kept to this much, so a runaway process never fills the host's memory.
+const OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// A spawned process under supervision. Dropping it kills the process.
 ///
 /// The supervisor waits on the process, publishes its [`Exit`], and sweeps
-/// the session it led:
+/// the process group it led:
 ///
 /// - A drop, or a [`Child::stop`] that goes unanswered, kills the whole
-///   session before the process is reaped.
+///   group before the process is reaped.
 /// - What the process writes to stderr is logged at DEBUG and kept as a
 ///   tail of its last lines.
 /// - An exit nobody asked for is logged at WARN with the tail behind it.
@@ -54,10 +55,10 @@ pub struct Child {
 
 impl Child {
     // The tasks run under the caller's span, so what the process says and
-    // how it exits are reported under the work that spawned it. `held` is
-    // what the process needs for its life: its scratch and its proxy.
+    // how it exits are reported under the work that spawned it. The session
+    // is held for the process's life: its scratch and its proxy go with it.
     pub(crate) fn spawn(
-        command: Command, held: (TempDir, Valve), ready: Option<&'static str>,
+        command: Command, session: Session, ready: Option<&'static str>,
     ) -> Result<Self> {
         let program = program_of(&command);
         let mut child = launch(command)?;
@@ -83,7 +84,7 @@ impl Child {
         tokio::spawn(
             Supervisor {
                 child,
-                held,
+                session,
                 stderr,
                 state: Arc::clone(&state),
                 stop,
@@ -122,13 +123,14 @@ impl Child {
 
     /// The payload of the ready line.
     ///
-    /// What followed the prefix [`Compartment::spawn`] was given, the first
+    /// What followed the prefix [`Command::ready_prefix`] named, the first
     /// time the process wrote it to stderr. Resolves to `None` when:
     ///
+    /// - no prefix was named
     /// - the process ends, or stderr closes, before a ready line
     /// - the line was already taken
     ///
-    /// [`Compartment::spawn`]: crate::Compartment::spawn
+    /// [`Command::ready_prefix`]: crate::Command::ready_prefix
     pub fn ready(&mut self) -> impl Future<Output = Option<String>> + Send + 'static {
         let ready = self.ready.take();
         async move {
@@ -171,11 +173,12 @@ impl Child {
         }
     }
 
-    /// Asks the process to go, and kills it when the ask goes unanswered.
+    /// Asks the process to exit through `ask`, and kills it when the ask
+    /// goes unanswered.
     ///
     /// `ask` is run, then the exit it brings is waited for, both within
     /// `wait`. Past `wait`, or once `ask` is done without an exit, the
-    /// process is killed with its session. Only the first `stop` counts. A
+    /// process is killed with its group. Only the first `stop` counts. A
     /// drop after it kills nothing before the ask has had its say.
     pub fn stop(&self, ask: impl Future<Output = ()> + Send + 'static, wait: Duration) {
         let _ = self.stop.try_send(Stop {
@@ -218,37 +221,58 @@ impl fmt::Display for Exit {
     }
 }
 
-// Past `bound` the process is killed with everything it forked.
+impl std::error::Error for Exit {}
+
+// Past `bound` the process is killed with everything it forked. Once it has
+// exited on its own, what it forked is killed too, so a pipe left to a fork
+// closes with it.
 pub async fn output(command: Command, bound: Duration) -> Result<Output> {
     let program = program_of(&command);
     let mut child = launch(command)?;
-    let mut stdout = child.stdout().take();
-    let mut stderr = child.stderr().take();
+    let stdout = child.stdout().take();
+    let stderr = child.stderr().take();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut captured = Box::pin(async {
+        tokio::join!(capture(stdout, &mut out), capture(stderr, &mut err));
+    });
 
-    let collected = async {
-        let (status, stdout, stderr) =
-            tokio::try_join!(child.wait(), read(&mut stdout), read(&mut stderr))?;
-        io::Result::Ok(Output {
-            status,
-            stdout,
-            stderr,
-        })
+    // the exit, with the pipes drained meanwhile so a full one never blocks it
+    let exited = async {
+        tokio::select! {
+            status = child.wait() => (status, false),
+            () = &mut captured => (child.wait().await, true),
+        }
     };
-
-    match timeout(bound, collected).await {
-        Ok(output) => output.with_context(|| format!("running `{program}`")),
+    let (status, drained) = match timeout(bound, exited).await {
+        Ok((status, drained)) => {
+            (status.with_context(|| format!("waiting on `{program}`"))?, drained)
+        }
         Err(_elapsed) => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            Err(anyhow!("`{program}` did not exit within {bound:?}"))
+            bail!("`{program}` did not exit within {bound:?}");
         }
+    };
+
+    // the sweep, then what the pipes still hold
+    let _ = child.start_kill();
+    if !drained {
+        let _ = timeout(EXIT_GRACE, &mut captured).await;
     }
+    drop(captured);
+
+    Ok(Output {
+        status,
+        stdout: out,
+        stderr: err,
+    })
 }
 
 // Waits on the process, tears it down on request, and publishes its exit.
 struct Supervisor {
     child: Box<dyn ChildWrapper>,
-    held: (TempDir, Valve),
+    session: Session,
     stderr: JoinHandle<()>,
     state: Arc<State>,
     stop: mpsc::Receiver<Stop>,
@@ -270,7 +294,7 @@ impl Supervisor {
             }
         };
 
-        // the one kill of the session: nothing of the process outlives it
+        // the one kill of the group: nothing of the process outlives it
         let _ = self.child.start_kill();
         let status = self.child.wait().await.ok();
         let uptime_ms = elapsed_ms(self.state.started_at);
@@ -298,7 +322,7 @@ impl Supervisor {
         }
 
         let _ = self.exit.send(Some(exit));
-        drop(self.held);
+        drop(self.session);
     }
 
     async fn ask(&mut self, stop: Stop) {
@@ -359,8 +383,8 @@ impl fmt::Display for Tail {
     }
 }
 
-// A session of its own: a kill reaches everything the process forks, and
-// `/dev/tty` opens nothing inside.
+// A process group of its own under `setsid`: a kill reaches everything the
+// process forks, and `/dev/tty` opens nothing inside.
 fn launch(mut command: Command) -> Result<Box<dyn ChildWrapper>> {
     let program = program_of(&command);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -377,7 +401,7 @@ fn program_of(command: &Command) -> String {
     Path::new(program).file_name().unwrap_or(program).to_string_lossy().into_owned()
 }
 
-// The program a substrate's launcher runs in its place, after its `--`.
+// The program the kernel's launcher runs in its place, after its `--`.
 cfg_select! {
     target_os = "macos" => {
         fn launched(command: &std::process::Command) -> Option<&OsStr> {
@@ -471,12 +495,15 @@ async fn each_line(reader: impl AsyncRead + Unpin, mut each: impl FnMut(String))
     }
 }
 
-async fn read<R: AsyncRead + Unpin>(pipe: &mut Option<R>) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    if let Some(pipe) = pipe {
-        pipe.read_to_end(&mut bytes).await?;
+// Up to `OUTPUT_BYTES` of the pipe, the rest read and dropped so the
+// process never blocks on a full pipe.
+async fn capture(pipe: Option<impl AsyncRead + Unpin>, into: &mut Vec<u8>) {
+    let Some(mut pipe) = pipe else {
+        return;
+    };
+    if (&mut pipe).take(OUTPUT_BYTES).read_to_end(into).await.is_ok() {
+        let _ = tokio::io::copy(&mut pipe, &mut tokio::io::sink()).await;
     }
-    Ok(bytes)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

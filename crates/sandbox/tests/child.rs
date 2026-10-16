@@ -4,6 +4,7 @@
 //! - what its exit publishes
 //! - how a stop and a future under its life see it
 //! - that it has no terminal
+//! - what a one-shot captures, and what it sweeps
 
 mod support;
 
@@ -12,8 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use omnia_airlock::{Exit, Options};
-use support::{BOUND, Captured, alive, await_gone, compartment, connect, pid_of, sh, spawn_sh};
+use omnia_sandbox::{Exit, Options};
+use support::{BOUND, Captured, alive, await_gone, connect, pid_of, session, sh, spawn_sh};
 use tokio::time::Instant;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -38,9 +39,9 @@ fn terminate(pid: u32) {
 
 #[tokio::test]
 async fn grandchild_swept_on_exit() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
-    let mut child = spawn_sh(boundary, "sleep 600 & echo \"ready $!\" >&2; exit 3", Some(READY));
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
+    let mut child = spawn_sh(session, "sleep 600 & echo \"ready $!\" >&2; exit 3", Some(READY));
 
     let grandchild = pid_of(&child.ready().await.expect("the ready line names the fork"));
     assert!(alive(grandchild));
@@ -54,9 +55,9 @@ async fn grandchild_swept_on_exit() {
 
 #[tokio::test]
 async fn grandchild_swept_on_drop() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
-    let mut child = spawn_sh(boundary, "sleep 600 & echo \"ready $!\" >&2; wait", Some(READY));
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
+    let mut child = spawn_sh(session, "sleep 600 & echo \"ready $!\" >&2; wait", Some(READY));
 
     let grandchild = pid_of(&child.ready().await.expect("the ready line names the fork"));
     let pid = child.pid();
@@ -73,10 +74,10 @@ async fn grandchild_swept_on_drop() {
 
 #[tokio::test]
 async fn stop_answered() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
     let script = "trap 'exit 0' TERM; echo \"ready $$\" >&2; while :; do sleep 1; done";
-    let mut child = spawn_sh(boundary, script, Some(READY));
+    let mut child = spawn_sh(session, script, Some(READY));
 
     let pid = pid_of(&child.ready().await.expect("the ready line names the shell"));
     assert_eq!(pid, child.pid());
@@ -91,9 +92,9 @@ async fn stop_answered() {
 
 #[tokio::test]
 async fn stop_unanswered() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
-    let mut child = spawn_sh(boundary, "echo \"ready $$\" >&2; exec sleep 600", Some(READY));
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
+    let mut child = spawn_sh(session, "echo \"ready $$\" >&2; exec sleep 600", Some(READY));
     child.ready().await.expect("the ready line");
 
     let asked = Arc::new(AtomicBool::new(false));
@@ -114,9 +115,9 @@ async fn stop_unanswered() {
 
 #[tokio::test]
 async fn fail_on_exit_sees_the_exit() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
-    let child = spawn_sh(boundary, "exit 7", None);
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
+    let child = spawn_sh(session, "exit 7", None);
 
     let exit = child
         .fail_on_exit(std::future::pending::<Result<(), ()>>())
@@ -128,9 +129,9 @@ async fn fail_on_exit_sees_the_exit() {
 // The future fails first. The exit lands within the grace and wins.
 #[tokio::test]
 async fn fail_on_exit_outruns_a_failure() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
-    let child = spawn_sh(boundary, "sleep 0.1; exit 7", None);
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
+    let child = spawn_sh(session, "sleep 0.1; exit 7", None);
 
     let exit = child
         .fail_on_exit(async { Err::<(), _>("connection reset") })
@@ -141,9 +142,9 @@ async fn fail_on_exit_outruns_a_failure() {
 
 #[tokio::test]
 async fn fail_on_exit_keeps_a_failure() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
-    let child = spawn_sh(boundary, "exec sleep 600", None);
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
+    let child = spawn_sh(session, "exec sleep 600", None);
 
     let outcome = child
         .fail_on_exit(async { Err::<(), _>("connection reset") })
@@ -155,9 +156,9 @@ async fn fail_on_exit_keeps_a_failure() {
 
 #[tokio::test]
 async fn fail_on_exit_passes_a_value() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
-    let child = spawn_sh(boundary, "exec sleep 600", None);
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
+    let child = spawn_sh(session, "exec sleep 600", None);
 
     let outcome = child.fail_on_exit(async { Ok::<_, ()>(5) }).await.expect("running");
     assert_eq!(outcome, Ok(5));
@@ -165,21 +166,20 @@ async fn fail_on_exit_passes_a_value() {
 
 // --- Terminal ---
 
-// The session is the boundary's own: `/dev/tty` opens nothing inside, and
-// `ps` shows the child no controlling terminal. `ps` runs from the test
-// process, since it is setuid on macOS and the kernel substrate never runs it.
+// The process group is the session's own: `/dev/tty` opens nothing inside,
+// and `ps` shows the child no controlling terminal. `ps` runs from the test
+// process, since it is setuid on macOS and the kernel boundary never runs it.
 #[tokio::test]
 async fn tty_opens_nothing() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
+    let sandbox = connect(Options::default()).await;
+    let session = support::session(&sandbox, None).await;
     // in a subshell, since dash exits on a special builtin's redirection failing
-    let command =
-        sh(&boundary, "if ( : </dev/tty ) 2>/dev/null; then echo open; else echo none; fi");
-    let output = boundary.output(command, BOUND).await.expect("sh answers");
+    let script = "if ( : </dev/tty ) 2>/dev/null; then echo open; else echo none; fi";
+    let output = sh(session, script).output(BOUND).await.expect("sh answers");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "none", "/dev/tty opened");
 
-    let boundary = support::compartment(&confine, None).await;
-    let child = spawn_sh(boundary, "exec sleep 600", None);
+    let session = support::session(&sandbox, None).await;
+    let child = spawn_sh(session, "exec sleep 600", None);
     let ps = std::process::Command::new("ps")
         .args(["-o", "tty=", "-p", &child.pid().to_string()])
         .output()
@@ -192,10 +192,10 @@ async fn tty_opens_nothing() {
 
 #[tokio::test]
 async fn output_captured() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
-    let command = sh(&boundary, "echo out; echo err >&2; exit 4");
-    let output = boundary.output(command, BOUND).await.expect("sh answers");
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
+    let command = sh(session, "echo out; echo err >&2; exit 4");
+    let output = command.output(BOUND).await.expect("sh answers");
 
     assert_eq!(output.status.code(), Some(4));
     assert_eq!(output.stdout, b"out\n");
@@ -204,18 +204,52 @@ async fn output_captured() {
 
 #[tokio::test]
 async fn output_killed_past_the_bound() {
-    let lend = tempfile::tempdir().expect("a lend");
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, Some(lend.path())).await;
-    let command = sh(&boundary, "sleep 600 & echo $! > pid; wait");
-    let error = boundary
-        .output(command, Duration::from_millis(500))
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, Some(workspace.path())).await;
+    let command = sh(session, "sleep 600 & echo $! > pid; wait");
+    let error = command
+        .output(Duration::from_millis(500))
         .await
         .expect_err("the shell waits on its fork");
 
     assert!(error.to_string().contains("did not exit within"), "{error:#}");
-    let grandchild = pid_of(&std::fs::read_to_string(lend.path().join("pid")).expect("the pid"));
+    let grandchild =
+        pid_of(&std::fs::read_to_string(workspace.path().join("pid")).expect("the pid"));
     await_gone(grandchild).await;
+}
+
+// A fork left holding the pipes neither delays the exit nor outlives it.
+#[tokio::test]
+async fn output_sweeps_a_fork() {
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, Some(workspace.path())).await;
+    let started = Instant::now();
+    let command = sh(session, "sleep 600 & echo $! > pid; echo done; exit 5");
+    let output = command.output(BOUND).await.expect("the shell answers");
+
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(output.stdout, b"done\n");
+    assert!(started.elapsed() < BOUND, "the exit waited on the fork: {:?}", started.elapsed());
+    let grandchild =
+        pid_of(&std::fs::read_to_string(workspace.path().join("pid")).expect("the pid"));
+    await_gone(grandchild).await;
+}
+
+// A stream is kept to its cap and the rest drained, so a process writing
+// past it neither fills the host's memory nor blocks on a full pipe.
+#[tokio::test]
+async fn output_capped() {
+    const CAP: usize = 16 * 1024 * 1024;
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
+    let script = format!("head -c {} /dev/zero; echo tail >&2", CAP + 1024 * 1024);
+    let output = sh(session, &script).output(BOUND).await.expect("the shell answers");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout.len(), CAP);
+    assert_eq!(output.stderr, b"tail\n");
 }
 
 // --- Output ---
@@ -225,11 +259,11 @@ async fn output_killed_past_the_bound() {
 // the write behind it.
 #[tokio::test]
 async fn ready_behind_binary_output() {
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
     let script = "printf '\\377\\376 binary\\n' >&2; printf '\\377\\376 binary\\n'; \
                   echo 'ready token' >&2; echo after; exit 0";
-    let mut child = spawn_sh(boundary, script, Some(READY));
+    let mut child = spawn_sh(session, script, Some(READY));
 
     assert_eq!(child.ready().await.as_deref(), Some("token"));
     let exit = child.exited().await;
@@ -246,10 +280,10 @@ async fn crash_logged_with_tail() {
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(captured.clone()))
         .expect("this test owns the process's subscriber");
 
-    let confine = connect(Options::default()).await;
-    let boundary = compartment(&confine, None).await;
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
     let script = "echo 'ready secret-token' >&2; echo 'line one' >&2; echo 'line two' >&2; exit 2";
-    let mut child = spawn_sh(boundary, script, Some(READY));
+    let mut child = spawn_sh(session, script, Some(READY));
     assert_eq!(child.ready().await.as_deref(), Some("secret-token"));
     let exit = child.exited().await;
     assert_eq!(code(&exit), Some(2), "{exit}");

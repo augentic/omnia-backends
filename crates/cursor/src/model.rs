@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub use agent::Deadlines;
 use agent::{Attempt, Unanswered};
 use anyhow::anyhow;
-use omnia_airlock::{Clearance, Compartment, Denied};
+use omnia_sandbox::{Access, Denied, Grant, Session};
 use omnia_wasi_model::{
     Answer, Error, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx,
 };
@@ -82,10 +82,10 @@ impl Client {
         let api_key =
             self.api_key.as_deref().ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))?;
 
-        // sealed before the slot is taken, so a bad lend or clearance costs no wait
-        let compartment = self.seal(request, tool_host.local_path()).await?;
-        let turn = Turn::prepare(request, &compartment, &self.model, api_key)?;
-        let lease = self.pool.lease(compartment).await?;
+        // prepared before the slot is taken, so a bad workspace or grant costs no wait
+        let session = self.prepare(request, tool_host.local_path()).await?;
+        let turn = Turn::prepare(request, &session, &self.model, api_key)?;
+        let lease = self.pool.lease(session).await?;
 
         Ok(Attempt {
             lease,
@@ -95,20 +95,22 @@ impl Client {
         })
     }
 
-    // A worker grant needs a shell: a worker reaches beyond its lend through
-    // the commands it runs there, so one over a read-only lend is the
-    // request's fault.
-    async fn seal(&self, request: &Request, lend: Option<&Path>) -> anyhow::Result<Compartment> {
-        let grant = request.grants.worker.as_ref();
-        let clearance = grant.map_or_else(Clearance::default, |grant| Clearance {
-            egress: grant.egress.clone(),
-            read: grant.read.clone(),
-            env: grant.env.clone(),
+    // A worker grant needs a shell: a worker reaches beyond its workspace
+    // through the commands it runs there, so one over a read-only workspace
+    // is the request's fault.
+    async fn prepare(
+        &self, request: &Request, workspace: Option<&Path>,
+    ) -> anyhow::Result<Session> {
+        let worker = request.grants.worker.as_ref();
+        let grant = worker.map_or_else(Grant::default, |worker| Grant {
+            egress: worker.egress.clone(),
+            read: worker.read.clone(),
+            env: worker.env.clone(),
         });
-        let compartment = self.airlock.seal(lend, &clearance).await.map_err(refusal)?;
+        let session = self.sandbox.prepare(workspace, &grant).await.map_err(refusal)?;
 
-        if grant.is_some() && !compartment.shell() {
-            let detail = if compartment.lent() {
+        if worker.is_some() && session.access() != Access::Shell {
+            let detail = if session.access().is_lent() {
                 "worker grant needs a shell: the workspace is not under a shell root"
             } else {
                 "worker grant needs a workspace"
@@ -116,11 +118,11 @@ impl Client {
             return Err(Error::InvalidRequest(detail.to_owned()).into());
         }
 
-        Ok(compartment)
+        Ok(session)
     }
 }
 
-// A seal the boundary denied for the clearance's fault is the request's; a host
+// A session the sandbox denied for the grant's fault is the request's; a host
 // failure stays the backend's.
 fn refusal(error: anyhow::Error) -> anyhow::Error {
     match error.downcast::<Denied>() {

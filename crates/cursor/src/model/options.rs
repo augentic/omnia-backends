@@ -1,13 +1,13 @@
 //! Translate one host-validated request into a [`Turn`]: guest function
 //! tools become SDK custom tools, MCP grants ride inline as `mcp_servers`,
-//! the boundary's working directory becomes the agent's `cwd` and what it
-//! grants the agent's tool list, and the prompt gains the format's
+//! the session's working directory becomes the agent's `cwd` and its
+//! access the agent's tool list, and the prompt gains the format's
 //! final-answer instruction and a hint naming the granted MCP servers.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result};
-use omnia_airlock::Compartment;
+use omnia_sandbox::{Access, Session};
 use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::Value;
 
@@ -36,51 +36,29 @@ pub struct AgentSpec {
     pub operation: AgentOperationOptions,
 }
 
-// What the agent may do in its working directory: nothing of a private one,
-// read a lent tree, and run a shell in a lent tree under a shell root.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Access {
-    Private,
-    Read,
-    Shell,
-}
-
-impl Access {
-    const fn of(compartment: &Compartment) -> Self {
-        if compartment.shell() {
-            Self::Shell
-        } else if compartment.lent() {
-            Self::Read
-        } else {
-            Self::Private
-        }
-    }
-
-    const fn lent(self) -> bool {
-        !matches!(self, Self::Private)
-    }
-
-    fn tools(self) -> Vec<String> {
-        let names: &[&str] = match self {
-            Self::Private => &[],
-            Self::Read => &["glob", "grep", "ls", "mcp", "read"],
-            Self::Shell => &["glob", "grep", "ls", "mcp", "read", "shell"],
-        };
-        names.iter().map(ToString::to_string).collect()
-    }
+// The agent's tools for what it may do in its working directory: nothing of
+// a private one, read a lent workspace, and run a shell under a shell root.
+fn tools(access: Access) -> Vec<String> {
+    let names: &[&str] = match access {
+        Access::Private => &[],
+        Access::Read => &["glob", "grep", "ls", "mcp", "read"],
+        Access::Shell => &["glob", "grep", "ls", "mcp", "read", "shell"],
+    };
+    names.iter().map(ToString::to_string).collect()
 }
 
 impl Turn {
     pub fn prepare(
-        request: &Request, compartment: &Compartment, default_model: &str, api_key: &str,
+        request: &Request, session: &Session, default_model: &str, api_key: &str,
     ) -> Result<Self> {
         if request.generation.is_some() {
             tracing::debug!("request.generation is ignored (CreateAgent has no sampling controls)");
         }
 
-        let cwd = compartment.cwd()?;
-        let access = Access::of(compartment);
-        let options = agent_options(request, cwd, access, default_model, api_key)?;
+        let cwd = session.cwd().to_str().with_context(|| {
+            format!("working directory {} is not UTF-8", session.cwd().display())
+        })?;
+        let options = agent_options(request, cwd, session.access(), default_model, api_key)?;
         let operation = AgentOperationOptions {
             cwd: cwd.to_owned(),
             api_key: api_key.to_owned(),
@@ -134,12 +112,12 @@ fn agent_options(
         api_key: api_key.to_owned(),
         local: LocalAgentOptions {
             cwd: vec![cwd.to_owned()],
-            source: access.lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
+            source: access.is_lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
             custom_tools,
         },
         mcp_servers,
         tools: Some(ToolList {
-            names: access.tools(),
+            names: tools(access),
         }),
     })
 }
@@ -173,9 +151,10 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
 // accepted by `tests/live.rs`.
 #[cfg(test)]
 mod tests {
+    use omnia_sandbox::Access;
     use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};
 
-    use super::{Access, agent_options, with_mcp_hint};
+    use super::{agent_options, with_mcp_hint};
 
     fn names(access: Access) -> Vec<String> {
         agent_options(&request(), "/workspace", access, "auto", "test-key")

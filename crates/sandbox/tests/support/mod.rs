@@ -1,30 +1,31 @@
-//! What the `child`, `compartment`, `valve`, and `toolchain` suites share:
+//! What the `child`, `session`, `proxy`, and `toolchain` suites share:
 //!
-//! - a connected [`Airlock`] over `/bin/sh`
-//! - a compartment around a lend, and a script run inside it
+//! - a connected [`Sandbox`] over `/bin/sh`
+//! - a session around a workspace, and a script run inside it
+//! - the egress proxy a session's process is pointed at
 //! - the liveness probes a process-death row ends on
 //! - the log events a row reads back
 
 #![allow(dead_code, reason = "each suite uses its own subset")]
 
 use std::fmt::Write as _;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use omnia_airlock::{Airlock, Child, Clearance, Compartment, Denied, Options};
-use tokio::process::Command;
+use omnia_sandbox::{Child, Command, Denied, Grant, Options, Sandbox, Session};
 
 /// How long a process may take to be gone once its death was set in motion.
 pub const GONE: Duration = Duration::from_secs(8);
 
-/// How long a shell script inside a compartment may take to answer.
+/// How long a shell script inside a session may take to answer.
 pub const BOUND: Duration = Duration::from_secs(5);
 
-/// A connected `Airlock` over `options`.
-pub async fn connect(options: Options) -> Airlock {
-    Airlock::connect(options).await.expect("the options hold")
+/// A connected `Sandbox` over `options`.
+pub async fn connect(options: Options) -> Sandbox {
+    Sandbox::connect(options).await.expect("the options hold")
 }
 
 /// Runs `test` with the process's `HOME` pointed at a fresh directory.
@@ -41,66 +42,81 @@ pub fn under_home(test: impl AsyncFnOnce(&Path)) {
     runtime.block_on(test(&path));
 }
 
-/// A [`Clearance`] reading `roots`, each spelled `~/`-relative.
-pub fn reading(roots: &[&str]) -> Clearance {
-    Clearance {
+/// A [`Grant`] reading `roots`, each spelled `~/`-relative.
+pub fn reading(roots: &[&str]) -> Grant {
+    Grant {
         read: roots.iter().map(ToString::to_string).collect(),
-        ..Clearance::default()
+        ..Grant::default()
     }
 }
 
-/// The probe binary's path inside `tree`, copied there as `probe` for the boundary to run.
-pub fn probe(tree: &Path) -> PathBuf {
-    let probe = tree.join("probe");
-    std::fs::copy(env!("CARGO_BIN_EXE_airlock-probe"), &probe).expect("the probe copies");
+/// The probe binary's path inside `workspace`, copied there as `probe` for the session to run.
+pub fn probe(workspace: &Path) -> PathBuf {
+    let probe = workspace.join("probe");
+    std::fs::copy(env!("CARGO_BIN_EXE_sandbox-probe"), &probe).expect("the probe copies");
     probe
 }
 
-/// The probe run on the host, outside any boundary, as a row's control.
-pub fn probe_outside(tree: &Path, args: &[&str]) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_airlock-probe"))
+/// The probe run on the host, outside any session, as a row's control.
+pub fn probe_outside(workspace: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_sandbox-probe"))
         .args(args)
-        .current_dir(tree)
+        .current_dir(workspace)
         .output()
         .expect("the probe runs on the host")
 }
 
-/// A compartment around `lend` under `airlock`, with an empty clearance.
-pub async fn compartment(airlock: &Airlock, lend: Option<&Path>) -> Compartment {
-    sealing(airlock, lend, &Clearance::default()).await
+/// A session around `workspace` under `sandbox`, with an empty grant.
+pub async fn session(sandbox: &Sandbox, workspace: Option<&Path>) -> Session {
+    granted(sandbox, workspace, &Grant::default()).await
 }
 
-/// A compartment around `lend` under `airlock`, granted `clearance`.
-pub async fn sealing(airlock: &Airlock, lend: Option<&Path>, clearance: &Clearance) -> Compartment {
-    airlock.seal(lend, clearance).await.expect("the clearance holds")
+/// A session around `workspace` under `sandbox`, with `grant`.
+pub async fn granted(sandbox: &Sandbox, workspace: Option<&Path>, grant: &Grant) -> Session {
+    sandbox.prepare(workspace, grant).await.expect("the grant holds")
 }
 
-/// The `Denied` reason `airlock` refuses `clearance` with, around a private directory.
-pub async fn denied(airlock: &Airlock, clearance: &Clearance) -> String {
-    let error = airlock.seal(None, clearance).await.expect_err("the clearance is denied");
+/// The `Denied` reason `sandbox` refuses `grant` with, around a private directory.
+pub async fn denied(sandbox: &Sandbox, grant: &Grant) -> String {
+    let error = sandbox.prepare(None, grant).await.expect_err("the grant is denied");
     error
         .downcast_ref::<Denied>()
-        .unwrap_or_else(|| panic!("a clearance's fault is typed `Denied`: {error:#}"))
+        .unwrap_or_else(|| panic!("a grant's fault is typed `Denied`: {error:#}"))
         .to_string()
 }
 
-/// `/bin/sh -c <script>` inside `compartment`.
-pub fn sh(compartment: &Compartment, script: &str) -> Command {
-    let mut command = compartment.command("/bin/sh").expect("`/bin/sh` is a path");
+/// `/bin/sh -c <script>` inside `session`.
+pub fn sh(session: Session, script: &str) -> Command {
+    let mut command = session.command("/bin/sh").expect("`/bin/sh` is a path");
     command.args(["-c", script]);
     command
 }
 
-/// `/bin/sh -c <script>` spawned inside `compartment` under supervision.
-pub fn spawn_sh(compartment: Compartment, script: &str, ready: Option<&'static str>) -> Child {
-    let command = sh(&compartment, script);
-    compartment.spawn(command, ready).expect("sh spawns")
+/// `/bin/sh -c <script>` spawned inside `session` under supervision.
+pub fn spawn_sh(session: Session, script: &str, ready: Option<&'static str>) -> Child {
+    let mut command = sh(session, script);
+    if let Some(prefix) = ready {
+        command.ready_prefix(prefix);
+    }
+    command.spawn().expect("sh spawns")
 }
 
-/// `/bin/sh -c <script>` run once inside `compartment`, with what it wrote.
-pub async fn run(compartment: Compartment, script: &str) -> Output {
-    let command = sh(&compartment, script);
-    compartment.output(command, BOUND).await.expect("the shell answers")
+/// `/bin/sh -c <script>` run once inside `session`, with what it wrote.
+pub async fn run(session: Session, script: &str) -> Output {
+    sh(session, script).output(BOUND).await.expect("the shell answers")
+}
+
+/// The egress proxy `session`'s process is pointed at, read from inside,
+/// with the process that keeps it serving.
+pub async fn proxy_of(session: Session) -> (SocketAddr, Child) {
+    let script = "echo \"ready $HTTPS_PROXY\" >&2; exec sleep 600";
+    let mut child = spawn_sh(session, script, Some("ready "));
+    let url = child.ready().await.expect("the proxy is in the environment");
+    let address = url
+        .strip_prefix("http://")
+        .and_then(|address| address.parse().ok())
+        .unwrap_or_else(|| panic!("a proxy URL, not {url:?}"));
+    (address, child)
 }
 
 /// What a process wrote, trimmed.

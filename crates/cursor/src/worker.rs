@@ -1,9 +1,9 @@
 //! Spawn and supervise one `cursor-sdk-bridge` process — a worker — with
 //! `sdk.v1` bound over it.
 //!
-//! The process is a confined [`Child`]: it runs inside the [`Compartment`] the
-//! completion laid, leads a session of its own, and is killed with whatever
-//! it forked when it exits or the worker lets it go.
+//! The process is a sandboxed [`Child`]: it runs inside the [`Session`] the
+//! completion prepared, leads a process group of its own, and is killed with
+//! whatever it forked when it exits or the worker lets it go.
 
 mod discovery;
 
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
 use discovery::Discovery;
-use omnia_airlock::{Child, Compartment, Exit};
+use omnia_sandbox::{Child, Exit, Session};
 use tokio::time::{Instant, timeout};
 
 use crate::endpoint::Registration;
@@ -51,20 +51,18 @@ pub struct Worker {
 impl Worker {
     // The handshake is left to `Spawned::handshake`, so a pool lease can
     // occupy the slot first.
-    pub fn spawn(
-        callback: &Registration, relay: &str, compartment: Compartment,
-    ) -> Result<Spawned> {
-        let mut command = compartment.command("cursor-sdk-bridge")?;
+    pub fn spawn(callback: &Registration, relay: &str, session: Session) -> Result<Spawned> {
+        let state_root = session.scratch().to_owned();
+        let mut command = session.command("cursor-sdk-bridge")?;
         command
             .env("CURSOR_SDK_CLIENT_LANGUAGE", "rust")
             .env("CURSOR_BACKEND_URL", relay)
             .arg("--state-root")
-            .arg(compartment.scratch())
+            .arg(state_root)
             .args(["--tool-callback-url", callback.url()])
-            .args(["--tool-callback-auth-token", callback.token()]);
-        let child = compartment
-            .spawn(command, Some(READY_PREFIX))
-            .context("issue spawning `cursor-sdk-bridge`")?;
+            .args(["--tool-callback-auth-token", callback.token()])
+            .ready_prefix(READY_PREFIX);
+        let child = command.spawn().context("issue spawning `cursor-sdk-bridge`")?;
 
         Ok(Spawned { child })
     }

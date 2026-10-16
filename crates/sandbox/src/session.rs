@@ -1,8 +1,8 @@
-//! Where one process is put: its tree, its scratch, and the compartment that
-//! spawns there.
+//! The session one process runs in: its working directory, its scratch, its
+//! environment, and the command that spawns it there.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::os::fd::{AsRawFd as _, RawFd};
 use std::os::unix::fs::PermissionsExt as _;
@@ -15,111 +15,142 @@ use std::{env, fmt, io};
 use anyhow::{Context as _, Result};
 use tempfile::TempDir;
 use tokio::fs;
-use tokio::process::Command;
 
 use crate::child::{self, Child};
-use crate::valve::Valve;
-use crate::{Bulkhead, Options};
+use crate::proxy::Proxy;
+use crate::{Grant, Kernel, Sandbox};
 
-/// The sealed compartment around one process: where it runs, what it
-/// inherits, and what its clearance granted.
+/// The session one process runs in: where it works, what it inherits, and
+/// what its grant opened.
 ///
-/// - [`Compartment::command`] builds a command inside it.
-/// - [`Compartment::spawn`] starts a supervised [`Child`] there.
-/// - [`Compartment::output`] runs a one-shot command there and captures what
-///   it wrote.
-///
-/// The valve the process's proxy variables name is the compartment's own.
-/// It serves until the process it was sealed for has exited.
-#[derive(Debug)]
-pub struct Compartment {
-    pub(crate) chamber: Chamber,
-    pub(crate) env: BTreeMap<OsString, OsString>,
-    pub(crate) path: OsString,
-    pub(crate) bulkhead: Arc<Bulkhead>,
-    pub(crate) read: Vec<PathBuf>,
-    pub(crate) valve: Valve,
+/// [`Session::command`] builds the [`Command`] that runs a program inside
+/// it. The scratch directory and the egress proxy live as long as the
+/// process the command runs.
+pub struct Session {
+    cwd: PathBuf,
+    access: Access,
+    scratch: PathBuf,
+    // Removes the scratch as the session is dropped.
+    _scratch_dir: TempDir,
+    dir: File,
+    env: BTreeMap<OsString, OsString>,
+    path: OsString,
+    kernel: Arc<Kernel>,
+    read: Vec<PathBuf>,
+    proxy: Proxy,
 }
 
-impl Compartment {
-    /// The directory the process works in.
-    #[must_use]
-    pub fn tree(&self) -> &Path {
-        self.chamber.tree()
+impl Session {
+    pub(crate) async fn prepare(
+        sandbox: &Sandbox, workspace: Option<&Path>, grant: &Grant,
+    ) -> Result<Self> {
+        // `tempfile` has no async API, and one `mkdir` is not worth a blocking thread
+        let scratch_dir = tempfile::Builder::new()
+            .prefix("omnia-sandbox-")
+            .tempdir()
+            .context("creating a scratch directory")?;
+        let scratch = fs::canonicalize(scratch_dir.path())
+            .await
+            .with_context(|| format!("canonicalizing {}", scratch_dir.path().display()))?;
+
+        // the working directory, lent or private
+        let (cwd, access) = if let Some(path) = workspace {
+            fs::create_dir_all(path)
+                .await
+                .with_context(|| format!("creating {}", path.display()))?;
+            let cwd = fs::canonicalize(path)
+                .await
+                .with_context(|| format!("canonicalizing {}", path.display()))?;
+            let shell = sandbox.options().shell_roots.iter().any(|root| cwd.starts_with(root));
+            (cwd, if shell { Access::Shell } else { Access::Read })
+        } else {
+            let cwd = scratch.join("cwd");
+            fs::create_dir(&cwd).await.with_context(|| format!("creating {}", cwd.display()))?;
+            (cwd, Access::Private)
+        };
+        let dir = fs::File::open(&cwd)
+            .await
+            .with_context(|| format!("opening {}", cwd.display()))?
+            .into_std()
+            .await;
+
+        // what the grant opens
+        let read = sandbox.read_roots(&grant.read).await?;
+        let proxy = Proxy::bind(&grant.egress).await?;
+        let env = sandbox.environment(&scratch, proxy.address(), &grant.env)?;
+
+        Ok(Self {
+            cwd,
+            access,
+            scratch,
+            _scratch_dir: scratch_dir,
+            dir,
+            env,
+            path: sandbox.host_path(),
+            kernel: Arc::clone(sandbox.kernel()),
+            read,
+            proxy,
+        })
     }
 
-    /// The trees the process reads beside the system's, its tree, and its scratch.
-    ///
-    /// These are the clearance's `read` roots that exist, canonical.
+    /// The directory the process works in, canonical.
     #[must_use]
-    pub fn read(&self) -> &[PathBuf] {
-        &self.read
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
     }
 
-    /// The valve the process's proxy variables name.
+    /// What the process may do in its working directory.
     #[must_use]
-    pub const fn valve(&self) -> &Valve {
-        &self.valve
-    }
-
-    /// The working directory as text, for a wire that carries it as a string.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the path is not UTF-8.
-    pub fn cwd(&self) -> Result<&str> {
-        let path = self.tree();
-        path.to_str().with_context(|| format!("invalid working directory {}", path.display()))
-    }
-
-    /// Whether the tree was lent, rather than a private directory.
-    #[must_use]
-    pub const fn lent(&self) -> bool {
-        self.chamber.lent()
-    }
-
-    /// Whether the process runs with a shell: a lent tree under a shell root.
-    #[must_use]
-    pub const fn shell(&self) -> bool {
-        self.chamber.shell()
+    pub const fn access(&self) -> Access {
+        self.access
     }
 
     /// The process's own scratch directory: its `HOME` and `TMPDIR`.
     #[must_use]
     pub fn scratch(&self) -> &Path {
-        self.chamber.scratch()
+        &self.scratch
     }
 
-    /// A command running `program` inside the boundary.
+    /// The directories the process reads beside the system's, its working
+    /// directory, and its scratch.
     ///
-    /// - The command's environment is the boundary's and nothing of the
+    /// These are the grant's `read` roots that exist, canonical.
+    #[must_use]
+    pub fn read_roots(&self) -> &[PathBuf] {
+        &self.read
+    }
+
+    /// A command running `program` inside the session.
+    ///
+    /// - The command's environment is the session's and nothing of the
     ///   host's. What the caller adds to it rides.
-    /// - A bare `program` is resolved here against the host's `PATH` as
-    ///   connecting read it, never one the ask set. An absent one is refused
-    ///   before any spawn, and no ask chooses the program.
-    /// - Under Seatbelt the command is the substrate's launcher, which
-    ///   applies the boundary and runs `program` in its place. The arguments
-    ///   the caller adds are still the program's.
-    /// - Under Landlock the rules are applied in the child before `program`
-    ///   runs.
+    /// - The command's working directory is the session's, entered through
+    ///   its open descriptor before `program` runs.
+    /// - A bare `program` is resolved against the host's `PATH` as
+    ///   connecting read it, never one the grant set. An absent one is
+    ///   refused before any spawn, and no grant chooses the program.
     ///
     /// # Errors
     ///
     /// Returns an error when:
     ///
     /// - a bare `program` is not on the host's `PATH`
-    /// - the substrate cannot lay its rules over the tree
-    pub fn command(&self, program: &str) -> Result<Command> {
+    /// - the kernel boundary cannot be laid over the working directory
+    pub fn command(self, program: &str) -> Result<Command> {
         let program = self.locate(program)?;
-        let mut command = self.bulkhead.command(&Place {
-            tree: self.tree(),
-            scratch: self.scratch(),
+        let mut inner = self.kernel.command(&Place {
+            cwd: &self.cwd,
+            scratch: &self.scratch,
             program: &program,
             read: &self.read,
-            dir: self.chamber.dir.as_raw_fd(),
+            dir: self.dir.as_raw_fd(),
         })?;
-        command.env_clear().envs(&self.env);
-        Ok(command)
+        inner.env_clear().envs(&self.env);
+        Ok(Command {
+            session: self,
+            inner,
+            ready: None,
+        })
     }
 
     fn locate(&self, program: &str) -> Result<PathBuf> {
@@ -131,130 +162,138 @@ impl Compartment {
             .find(|path| executable(path))
             .with_context(|| format!("`{program}` is not on PATH"))
     }
+}
 
-    /// Spawns `command` inside the boundary as a supervised [`Child`].
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Session")
+            .field("cwd", &self.cwd)
+            .field("access", &self.access)
+            .field("scratch", &self.scratch)
+            .field("read", &self.read)
+            .field("proxy", &self.proxy)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a process may do in its working directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// No workspace was lent: the process works in a private directory
+    /// under its scratch.
+    Private,
+    /// A workspace lent outside every shell root: for reading, with no
+    /// shell.
+    Read,
+    /// A workspace lent at or beneath a shell root: a shell may run in it.
+    Shell,
+}
+
+impl Access {
+    /// Whether a workspace was lent, rather than a private directory.
+    #[must_use]
+    pub const fn is_lent(self) -> bool {
+        !matches!(self, Self::Private)
+    }
+}
+
+/// A command running inside a [`Session`], built by [`Session::command`].
+///
+/// Its environment and working directory are the session's;
+/// [`Command::env`], [`Command::arg`] and [`Command::args`] add to them.
+/// [`Command::spawn`] starts a supervised [`Child`], and
+/// [`Command::output`] runs the program once and captures what it wrote.
+/// Either takes the session with it, which lives as long as the process.
+pub struct Command {
+    session: Session,
+    inner: tokio::process::Command,
+    ready: Option<&'static str>,
+}
+
+impl Command {
+    /// Adds an argument for the program.
+    pub fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
+        self.inner.arg(arg);
+        self
+    }
+
+    /// Adds arguments for the program.
+    pub fn args<I, S>(&mut self, args: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.inner.args(args);
+        self
+    }
+
+    /// Sets an environment variable for the program, over the session's.
+    pub fn env(&mut self, name: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Self {
+        self.inner.env(name, value);
+        self
+    }
+
+    /// Names the stderr line the program writes once it is ready.
+    ///
+    /// The first stderr line starting with `prefix` is the handshake
+    /// [`Child::ready`] resolves with, carrying what followed the prefix.
+    /// It is never logged.
+    pub const fn ready_prefix(&mut self, prefix: &'static str) -> &mut Self {
+        self.ready = Some(prefix);
+        self
+    }
+
+    /// Spawns the program as a supervised [`Child`].
     ///
     /// - The child reads nothing on stdin.
     /// - Its stdout is drained to DEBUG.
     /// - Its stderr is logged at DEBUG and kept as the child's tail.
-    /// - A stderr line starting with `ready` is the handshake the child
-    ///   answers [`Child::ready`] with. It is never logged.
-    /// - The scratch and the egress proxy live as long as the process.
+    /// - The session lives as long as the process.
     ///
     /// # Errors
     ///
     /// Returns an error when the process cannot be spawned.
-    pub fn spawn(self, command: Command, ready: Option<&'static str>) -> Result<Child> {
-        Child::spawn(command, (self.chamber.scratch, self.valve), ready)
+    pub fn spawn(self) -> Result<Child> {
+        Child::spawn(self.inner, self.session, self.ready)
     }
 
-    /// Runs `command` inside the boundary once and captures what it wrote.
+    /// Runs the program once and captures what it wrote.
+    ///
+    /// Each stream is kept to sixteen mebibytes; what the process writes
+    /// past that is read and dropped. Once the process has exited,
+    /// everything it forked is killed.
     ///
     /// # Errors
     ///
     /// Returns an error when:
     ///
     /// - the process cannot be spawned
-    /// - its output cannot be read
     /// - it has not exited within `bound`, in which case it is killed with
     ///   everything it forked
-    pub async fn output(self, command: Command, bound: Duration) -> Result<Output> {
-        child::output(command, bound).await
+    pub async fn output(self, bound: Duration) -> Result<Output> {
+        // the session outlives the run
+        let Self {
+            session: _session,
+            inner,
+            ..
+        } = self;
+        child::output(inner, bound).await
     }
 }
 
-// The place one process is put: the tree it works in and its scratch.
-pub struct Chamber {
-    tree: PathBuf,
-    lent: bool,
-    scratch: TempDir,
-    scratch_path: PathBuf,
-    shell: bool,
-    dir: File,
-}
-
-impl Chamber {
-    pub(crate) async fn prepare(lend: Option<&Path>, options: &Options) -> Result<Self> {
-        // `tempfile` has no async API, and one `mkdir` is not worth a blocking thread
-        let scratch = tempfile::Builder::new()
-            .prefix("omnia-airlock-")
-            .tempdir()
-            .context("creating a scratch directory")?;
-        let scratch_path = fs::canonicalize(scratch.path())
-            .await
-            .with_context(|| format!("canonicalizing {}", scratch.path().display()))?;
-
-        let (tree, shell) = if let Some(path) = lend {
-            // create or update the process's working directory
-            fs::create_dir_all(path)
-                .await
-                .with_context(|| format!("creating {}", path.display()))?;
-            let path = fs::canonicalize(path)
-                .await
-                .with_context(|| format!("canonicalizing {}", path.display()))?;
-
-            // is path beneath any of the shell roots?
-            let mut shell = false;
-            for root in &options.shell_roots {
-                let root = fs::canonicalize(root).await.unwrap_or_else(|_| root.clone());
-                if path.starts_with(root) {
-                    shell = true;
-                    break;
-                }
-            }
-
-            (path, shell)
-        } else {
-            // create process's working directory
-            let path = scratch_path.join("cwd");
-            fs::create_dir(&path).await.with_context(|| format!("creating {}", path.display()))?;
-            (path, false)
-        };
-
-        let dir = File::open(&tree).with_context(|| format!("opening {}", tree.display()))?;
-
-        Ok(Self {
-            tree,
-            lent: lend.is_some(),
-            scratch,
-            scratch_path,
-            shell,
-            dir,
-        })
-    }
-
-    pub(crate) fn tree(&self) -> &Path {
-        &self.tree
-    }
-
-    pub(crate) fn scratch(&self) -> &Path {
-        &self.scratch_path
-    }
-
-    pub(crate) const fn lent(&self) -> bool {
-        self.lent
-    }
-
-    pub(crate) const fn shell(&self) -> bool {
-        self.shell
-    }
-}
-
-impl fmt::Debug for Chamber {
+impl fmt::Debug for Command {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Chamber")
-            .field("tree", &self.tree)
-            .field("lent", &self.lent)
-            .field("shell", &self.shell)
-            .field("scratch", &self.scratch_path)
+        f.debug_struct("Command")
+            .field("session", &self.session)
+            .field("ready", &self.ready)
             .finish_non_exhaustive()
     }
 }
 
-// Where the substrate puts one process: its tree, open and as a path, its
-// scratch, the program, and the directories its ask was granted to read.
+// Where the kernel puts one process: its working directory, open and as a
+// path, its scratch, the program, and the directories its grant opened.
 pub struct Place<'a> {
-    pub tree: &'a Path,
+    pub cwd: &'a Path,
     pub scratch: &'a Path,
     pub program: &'a Path,
     pub read: &'a [PathBuf],
@@ -262,13 +301,13 @@ pub struct Place<'a> {
 }
 
 impl Place<'_> {
-    // The child enters the tree by its open descriptor. Hooks run in the order
-    // registered, so a substrate calls this before its rules.
+    // The child enters the working directory by its open descriptor. Hooks
+    // run in the order registered, so the kernel calls this before its rules.
     #[expect(
         unsafe_code,
         reason = "`pre_exec` runs in the forked child; `fchdir` is async-signal-safe"
     )]
-    pub fn enter(&self, command: &mut Command) {
+    pub fn enter(&self, command: &mut tokio::process::Command) {
         let dir = self.dir;
         unsafe {
             command.pre_exec(move || {

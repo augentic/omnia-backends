@@ -1,12 +1,14 @@
 //! Where one process is put: its tree, its scratch, and the compartment that
 //! spawns there.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::os::fd::{AsRawFd as _, RawFd};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 use std::{env, fmt, io};
 
@@ -18,12 +20,10 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::child::Child;
-#[cfg(target_os = "linux")]
-use crate::linux;
 #[cfg(target_os = "macos")]
 use crate::seatbelt;
 use crate::valve::Valve;
-use crate::{Options, Wall};
+use crate::{Bulkhead, Options};
 
 /// The sealed compartment around one process: where it runs, what it
 /// inherits, and what its clearance granted.
@@ -37,29 +37,15 @@ use crate::{Options, Wall};
 /// It serves until the process it was sealed for has exited.
 #[derive(Debug)]
 pub struct Compartment {
-    chamber: Chamber,
-    env: Vec<(OsString, OsString)>,
-    path: OsString,
-    wall: Wall,
-    read: Vec<PathBuf>,
-    valve: Valve,
+    pub(crate) chamber: Chamber,
+    pub(crate) env: BTreeMap<OsString, OsString>,
+    pub(crate) path: OsString,
+    pub(crate) bulkhead: Arc<Bulkhead>,
+    pub(crate) read: Vec<PathBuf>,
+    pub(crate) valve: Valve,
 }
 
 impl Compartment {
-    pub(crate) const fn new(
-        chamber: Chamber, env: Vec<(OsString, OsString)>, path: OsString, wall: Wall,
-        read: Vec<PathBuf>, valve: Valve,
-    ) -> Self {
-        Self {
-            chamber,
-            env,
-            path,
-            wall,
-            read,
-            valve,
-        }
-    }
-
     /// The directory the process works in.
     #[must_use]
     pub fn tree(&self) -> &Path {
@@ -129,32 +115,14 @@ impl Compartment {
     /// - the substrate cannot lay its rules over the tree
     pub fn command(&self, program: &str) -> Result<Command> {
         let program = self.locate(program)?;
-        let mut command = match &self.wall {
-            #[cfg(target_os = "linux")]
-            Wall::Landlock(_) => Command::new(&program),
-            #[cfg(target_os = "macos")]
-            Wall::Seatbelt(seatbelt) => seatbelt.command(&seatbelt::Place {
-                tree: self.tree(),
-                scratch: self.scratch(),
-                program: &program,
-                read: &self.read,
-            })?,
-        };
-        enter(&mut command, self.chamber.dir.as_raw_fd());
-        #[cfg(target_os = "linux")]
-        {
-            let Wall::Landlock(linux) = &self.wall;
-            linux.restrain(
-                &mut command,
-                &linux::Place {
-                    tree: self.tree(),
-                    scratch: self.scratch(),
-                    program: &program,
-                    read: &self.read,
-                },
-            )?;
-        }
-        command.env_clear().envs(self.env.iter().map(|(name, value)| (name, value)));
+        let mut command = self.bulkhead.command(&Place {
+            tree: self.tree(),
+            scratch: self.scratch(),
+            program: &program,
+            read: &self.read,
+            dir: self.chamber.dir.as_raw_fd(),
+        })?;
+        command.env_clear().envs(&self.env);
         Ok(command)
     }
 
@@ -225,7 +193,8 @@ impl Compartment {
 
 // The place one process is put: the tree it works in and its scratch.
 pub struct Chamber {
-    tree: Tree,
+    tree: PathBuf,
+    lent: bool,
     scratch: TempDir,
     scratch_path: PathBuf,
     shell: bool,
@@ -251,19 +220,19 @@ impl Chamber {
                 .await
                 .with_context(|| format!("canonicalizing {}", path.display()))?;
             let shell = beneath_any(&path, &options.shell_roots).await;
-            (Tree::Lent(path), shell)
+            (path, shell)
         } else {
             let path = scratch_path.join("cwd");
             tokio::fs::create_dir(&path)
                 .await
                 .with_context(|| format!("creating {}", path.display()))?;
-            (Tree::Private(path), false)
+            (path, false)
         };
 
-        let dir = File::open(tree.path())
-            .with_context(|| format!("opening {}", tree.path().display()))?;
+        let dir = File::open(&tree).with_context(|| format!("opening {}", tree.display()))?;
         Ok(Self {
             tree,
+            lent: lend.is_some(),
             scratch,
             scratch_path,
             shell,
@@ -272,7 +241,7 @@ impl Chamber {
     }
 
     pub(crate) fn tree(&self) -> &Path {
-        self.tree.path()
+        &self.tree
     }
 
     pub(crate) fn scratch(&self) -> &Path {
@@ -280,7 +249,7 @@ impl Chamber {
     }
 
     pub(crate) const fn lent(&self) -> bool {
-        matches!(self.tree, Tree::Lent(_))
+        self.lent
     }
 
     pub(crate) const fn shell(&self) -> bool {
@@ -291,23 +260,37 @@ impl Chamber {
 impl fmt::Debug for Chamber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Chamber")
-            .field("tree", &self.tree.path())
-            .field("lent", &self.lent())
+            .field("tree", &self.tree)
+            .field("lent", &self.lent)
             .field("shell", &self.shell)
             .field("scratch", &self.scratch_path)
             .finish_non_exhaustive()
     }
 }
 
-enum Tree {
-    Lent(PathBuf),
-    Private(PathBuf),
+// Where the substrate puts one process: its tree, open and as a path, its
+// scratch, the program, and the directories its ask was granted to read.
+pub struct Place<'a> {
+    pub tree: &'a Path,
+    pub scratch: &'a Path,
+    pub program: &'a Path,
+    pub read: &'a [PathBuf],
+    pub dir: RawFd,
 }
 
-impl Tree {
-    fn path(&self) -> &Path {
-        match self {
-            Self::Lent(path) | Self::Private(path) => path,
+impl Place<'_> {
+    // The child enters the tree by its open descriptor. Hooks run in the order
+    // registered, so a substrate calls this before its rules.
+    #[expect(
+        unsafe_code,
+        reason = "`pre_exec` runs in the forked child; `fchdir` is async-signal-safe"
+    )]
+    pub fn enter(&self, command: &mut Command) {
+        let dir = self.dir;
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fchdir(dir) == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+            });
         }
     }
 }
@@ -353,18 +336,6 @@ fn executable(path: &Path) -> bool {
     path.metadata().is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
-#[expect(
-    unsafe_code,
-    reason = "`pre_exec` runs in the forked child; `fchdir` is async-signal-safe"
-)]
-fn enter(command: &mut Command, dir: RawFd) {
-    unsafe {
-        command.pre_exec(move || {
-            if libc::fchdir(dir) == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
-        });
-    }
-}
-
 async fn read<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     if let Some(pipe) = pipe {
@@ -375,7 +346,7 @@ async fn read<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> io::Resu
 
 // A root is compared as spelled and as it resolves, since `path` is
 // canonical and a root may be a symlink away from it.
-pub async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
+async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
     for root in roots {
         if path.starts_with(root) {
             return true;

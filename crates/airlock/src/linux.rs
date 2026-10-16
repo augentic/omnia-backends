@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use landlock::{
@@ -25,6 +25,8 @@ use seccompiler::{
     SeccompRule, TargetArch,
 };
 use tokio::process::Command;
+
+use crate::chamber::Place;
 
 // The first ABI that fences TCP, which the follow-ups build on. Its kernel,
 // 6.7, carries every filesystem right the ruleset handles.
@@ -75,6 +77,13 @@ impl Linux {
         Ok(Self { filters })
     }
 
+    pub fn command(&self, place: &Place<'_>) -> Result<Command> {
+        let mut command = Command::new(place.program);
+        place.enter(&mut command);
+        self.restrain(&mut command, place)?;
+        Ok(command)
+    }
+
     // The ruleset over `place` and the filters, applied in the child once it
     // has entered the tree. `restrict_self` sets `no_new_privs`, and nothing
     // short of full enforcement runs the program.
@@ -83,7 +92,7 @@ impl Linux {
         reason = "`pre_exec` runs in the forked child; it applies rules built here and allocates \
                   only on its failure path"
     )]
-    pub fn restrain(&self, command: &mut Command, place: &Place<'_>) -> Result<()> {
+    fn restrain(&self, command: &mut Command, place: &Place<'_>) -> Result<()> {
         let mut ruleset = Some(Self::ruleset(place)?);
         let mut filters = Some(self.filters.clone());
         unsafe {
@@ -141,15 +150,6 @@ impl std::fmt::Debug for Linux {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Linux").finish_non_exhaustive()
     }
-}
-
-// Where one process is put, every path canonical, and the directories its
-// ask was granted to read.
-pub struct Place<'a> {
-    pub tree: &'a Path,
-    pub scratch: &'a Path,
-    pub program: &'a Path,
-    pub read: &'a [PathBuf],
 }
 
 const ARCH: Option<TargetArch> = cfg_select! {

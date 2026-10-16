@@ -18,6 +18,8 @@ use anyhow::{Context as _, Result, ensure};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::chamber::Place;
+
 // Named by absolute path, so no `PATH` of the operator's can stand in for it.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
@@ -205,17 +207,9 @@ impl Seatbelt {
             command.arg(definition);
         }
         command.arg("--").arg(program);
+        place.enter(&mut command);
         Ok(command)
     }
-}
-
-// Where one process is put, every path canonical, and the directories its
-// ask was granted to read.
-pub struct Place<'a> {
-    pub tree: &'a Path,
-    pub scratch: &'a Path,
-    pub program: &'a Path,
-    pub read: &'a [PathBuf],
 }
 
 #[derive(Default)]
@@ -249,6 +243,7 @@ fn canonical(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::os::fd::AsRawFd as _;
     use std::path::Path;
 
     use super::{Place, Seatbelt};
@@ -257,14 +252,17 @@ mod tests {
     // denied `.git` among them, since the last matching rule settles a read.
     #[tokio::test]
     async fn tree_under_root() {
+        let tree = Path::new("/Users");
+        let dir = std::fs::File::open(tree).expect("the tree opens");
         let scratch = tempfile::tempdir().expect("a scratch");
         let seatbelt = Seatbelt::probe().await.expect("sandbox-exec answers");
         let command = seatbelt
             .command(&Place {
-                tree: Path::new("/Users"),
+                tree,
                 scratch: scratch.path(),
                 program: Path::new("/usr/bin/true"),
                 read: &[],
+                dir: dir.as_raw_fd(),
             })
             .expect("the profile renders");
 

@@ -2,12 +2,9 @@
 
 mod chamber;
 mod child;
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "macos")]
-mod seatbelt;
 pub mod valve;
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{self, Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +16,22 @@ use crate::chamber::Chamber;
 pub use crate::chamber::Compartment;
 pub use crate::child::{Child, Exit};
 use crate::valve::Valve;
+
+// The bulkhead between a process and the host: the kernel substrate, Landlock
+// and seccomp on Linux, Seatbelt on macOS.
+cfg_select! {
+    target_os = "linux" => {
+        mod linux;
+        use linux::Linux as Bulkhead;
+    }
+    target_os = "macos" => {
+        mod seatbelt;
+        use seatbelt::Seatbelt as Bulkhead;
+    }
+    _ => {
+        compile_error!("omnia-airlock only runs on Linux or macOS");
+    }
+}
 
 macro_rules! deny {
     ($($arg:tt)*) => {
@@ -62,8 +75,8 @@ const STORES: &[&str] = &[
 /// [`Clearance`] to the host and seals a [`Compartment`] around it.
 pub struct Airlock {
     options: Options,
-    inherited: Vec<(OsString, OsString)>,
-    wall: Wall,
+    inherited: BTreeMap<OsString, OsString>,
+    bulkhead: Arc<Bulkhead>,
     home: Option<PathBuf>,
 }
 
@@ -98,15 +111,12 @@ impl Airlock {
 
         let inherited =
             env::vars_os().filter(|(name, _)| inherits(name, options.inherit)).collect();
-        let home = match env::var_os("HOME") {
-            Some(home) => tokio::fs::canonicalize(home).await.ok(),
-            None => None,
-        };
+        let home = async { tokio::fs::canonicalize(env::var_os("HOME")?).await.ok() }.await;
 
         Ok(Self {
             options,
             inherited,
-            wall: Wall::platform().await?,
+            bulkhead: Arc::new(Bulkhead::probe().await?),
             home,
         })
     }
@@ -163,16 +173,19 @@ impl Airlock {
         let read = self.roots(&clearance.read).await?;
         let valve = Valve::bind(&clearance.egress).await?;
         let env = self.environment(&chamber, &valve, &clearance.env)?;
-        Ok(Compartment::new(chamber, env, self.path(), self.wall.clone(), read, valve))
+        Ok(Compartment {
+            chamber,
+            env,
+            path: self.path(),
+            bulkhead: Arc::clone(&self.bulkhead),
+            read,
+            valve,
+        })
     }
 
     // A bare program resolves against the host's `PATH`, never one the ask set.
     fn path(&self) -> OsString {
-        self.inherited
-            .iter()
-            .find(|(name, _)| name == "PATH")
-            .map(|(_, value)| value.clone())
-            .unwrap_or_default()
+        self.inherited.get(OsStr::new("PATH")).cloned().unwrap_or_default()
     }
 
     async fn roots(&self, read: &[String]) -> Result<Vec<PathBuf>> {
@@ -212,7 +225,7 @@ impl Airlock {
             }
         };
 
-        // check if the root is outside the home or a store beneath it
+        // outside the home, or a store
         if root == home || !root.starts_with(home) {
             deny!("read root `{entry}` resolves to {}, outside the home", root.display());
         }
@@ -221,10 +234,11 @@ impl Airlock {
         }
 
         // a directory
-        let metadata = tokio::fs::metadata(&root)
+        if !tokio::fs::metadata(&root)
             .await
-            .with_context(|| format!("reading read root {}", root.display()))?;
-        if !metadata.is_dir() {
+            .with_context(|| format!("reading read root {}", root.display()))?
+            .is_dir()
+        {
             deny!("read root `{entry}` is not a directory");
         }
         Ok(Some(root))
@@ -232,7 +246,7 @@ impl Airlock {
 
     fn environment(
         &self, chamber: &Chamber, bound: &Valve, asked: &[(String, String)],
-    ) -> Result<Vec<(OsString, OsString)>> {
+    ) -> Result<BTreeMap<OsString, OsString>> {
         let scratch = chamber.scratch().as_os_str();
         let proxy = OsString::from(format!("http://{}", bound.address()));
 
@@ -257,8 +271,7 @@ impl Airlock {
                 Some(rest) => self.home(value)?.join(rest).into_os_string(),
                 None => OsString::from(value),
             };
-            env.retain(|(held, _)| held != name.as_str());
-            env.push((OsString::from(name), value));
+            env.insert(name.into(), value);
         }
 
         Ok(env)
@@ -274,12 +287,10 @@ impl Airlock {
 
 impl fmt::Debug for Airlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let inherited: Vec<&OsStr> =
-            self.inherited.iter().map(|(name, _)| name.as_os_str()).collect();
         f.debug_struct("Airlock")
             .field("options", &self.options)
-            .field("inherited", &inherited)
-            .field("wall", &self.wall)
+            .field("inherited", &self.inherited.keys())
+            .field("bulkhead", &self.bulkhead)
             .field("home", &self.home)
             .finish()
     }
@@ -342,26 +353,6 @@ impl fmt::Display for Denied {
 }
 
 impl std::error::Error for Denied {}
-
-// Kernel wall every laid boundary shares: Landlock and seccomp on Linux,
-// Seatbelt on macOS.
-#[derive(Debug, Clone)]
-pub(crate) enum Wall {
-    #[cfg(target_os = "linux")]
-    Landlock(Arc<linux::Linux>),
-    #[cfg(target_os = "macos")]
-    Seatbelt(Arc<seatbelt::Seatbelt>),
-}
-
-impl Wall {
-    async fn platform() -> Result<Self> {
-        cfg_select! {
-            target_os = "linux" => Ok(Self::Landlock(Arc::new(linux::Linux::probe().await?))),
-            target_os = "macos" => Ok(Self::Seatbelt(Arc::new(seatbelt::Seatbelt::probe().await?))),
-            _ => bail!("no chamber substrate runs on this platform"),
-        }
-    }
-}
 
 // Why a name is neither the backend's to inherit nor an ask's to set.
 fn reserved(name: &str, refused: &[&str]) -> Option<&'static str> {

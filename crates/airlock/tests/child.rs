@@ -8,17 +8,16 @@
 mod support;
 
 use std::os::unix::process::ExitStatusExt as _;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use omnia_airlock::{Exit, Options};
-use support::{alive, await_gone, compartment, connect, pid_of, sh, spawn_sh};
+use support::{BOUND, Captured, alive, await_gone, compartment, connect, pid_of, sh, spawn_sh};
 use tokio::time::Instant;
 use tracing_subscriber::layer::SubscriberExt as _;
 
 const READY: &str = "ready ";
-const BOUND: Duration = Duration::from_secs(5);
 
 fn code(exit: &Exit) -> Option<i32> {
     exit.status.and_then(|status| status.code())
@@ -238,35 +237,6 @@ async fn ready_behind_binary_output() {
 }
 
 // --- Logging ---
-
-// Every event's fields, flattened to text.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<String>>>);
-
-impl Captured {
-    fn events(&self) -> Vec<String> {
-        self.0.lock().expect("captured lock").clone()
-    }
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
-    fn on_event(
-        &self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let mut text = String::new();
-        event.record(&mut Flatten(&mut text));
-        self.0.lock().expect("captured lock").push(text);
-    }
-}
-
-struct Flatten<'a>(&'a mut String);
-
-impl tracing::field::Visit for Flatten<'_> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        use std::fmt::Write as _;
-        let _ = write!(self.0, "{}={value:?} ", field.name());
-    }
-}
 
 // An exit nobody asked for is a crash: warned with its status, its tail
 // behind it at DEBUG, and the ready line in neither.

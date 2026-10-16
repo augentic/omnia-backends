@@ -1,12 +1,16 @@
 //! What the `child`, `compartment`, `valve`, and `toolchain` suites share:
 //!
 //! - a connected [`Airlock`] over `/bin/sh`
-//! - a compartment around a lend
+//! - a compartment around a lend, and a script run inside it
 //! - the liveness probes a process-death row ends on
+//! - the log events a row reads back
 
 #![allow(dead_code, reason = "each suite uses its own subset")]
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Output;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use omnia_airlock::{Airlock, Child, Clearance, Compartment, Denied, Options};
@@ -14,6 +18,9 @@ use tokio::process::Command;
 
 /// How long a process may take to be gone once its death was set in motion.
 pub const GONE: Duration = Duration::from_secs(8);
+
+/// How long a shell script inside a compartment may take to answer.
+pub const BOUND: Duration = Duration::from_secs(5);
 
 /// A connected `Airlock` over `options`.
 pub async fn connect(options: Options) -> Airlock {
@@ -88,6 +95,52 @@ pub fn sh(compartment: &Compartment, script: &str) -> Command {
 pub fn spawn_sh(compartment: Compartment, script: &str, ready: Option<&'static str>) -> Child {
     let command = sh(&compartment, script);
     compartment.spawn(command, ready).expect("sh spawns")
+}
+
+/// `/bin/sh -c <script>` run once inside `compartment`, with what it wrote.
+pub async fn run(compartment: Compartment, script: &str) -> Output {
+    let command = sh(&compartment, script);
+    compartment.output(command, BOUND).await.expect("the shell answers")
+}
+
+/// What a process wrote, trimmed.
+pub fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).trim().to_owned()
+}
+
+/// Asserts `output` succeeded, naming `what` and its stderr otherwise.
+#[track_caller]
+pub fn passed(output: &Output, what: &str) {
+    assert!(output.status.success(), "{what}: {}", text(&output.stderr));
+}
+
+/// Every log event as text: its level, then its message and fields.
+#[derive(Clone, Default)]
+pub struct Captured(Arc<Mutex<Vec<String>>>);
+
+impl Captured {
+    /// The events recorded so far.
+    pub fn events(&self) -> Vec<String> {
+        self.0.lock().expect("captured lock").clone()
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
+    fn on_event(
+        &self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut text = format!("{} ", event.metadata().level());
+        event.record(&mut Flatten(&mut text));
+        self.0.lock().expect("captured lock").push(text);
+    }
+}
+
+struct Flatten<'a>(&'a mut String);
+
+impl tracing::field::Visit for Flatten<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let _ = write!(self.0, "{}={value:?} ", field.name());
+    }
 }
 
 /// Poll `ready` every 10ms until it holds, or fail after `within`.

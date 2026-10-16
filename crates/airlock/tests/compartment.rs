@@ -7,14 +7,11 @@ use std::collections::BTreeMap;
 use std::env;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use omnia_airlock::{Airlock, Clearance, Compartment, Options};
-use support::{compartment, connect, sh};
+use support::{BOUND, Captured, compartment, connect, sh};
 use tracing_subscriber::layer::SubscriberExt as _;
 
-const BOUND: Duration = Duration::from_secs(5);
 const PLANTED: &str = "OMNIA_CONFINE_PLANTED";
 
 async fn environment(boundary: Compartment) -> BTreeMap<String, String> {
@@ -203,29 +200,6 @@ async fn inherit_refused() {
 
 // --- The ask ---
 
-// Every event's message and fields, flattened to text.
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<String>>>);
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Captured {
-    fn on_event(
-        &self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let mut text = format!("{} ", event.metadata().level());
-        event.record(&mut Flatten(&mut text));
-        self.0.lock().expect("captured lock").push(text);
-    }
-}
-
-struct Flatten<'a>(&'a mut String);
-
-impl tracing::field::Visit for Flatten<'_> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        use std::fmt::Write as _;
-        let _ = write!(self.0, "{}={value:?} ", field.name());
-    }
-}
-
 // A root the home lacks grants nothing and ends nothing. A toolchain the
 // adapter names and this machine does not have is no reason to refuse the
 // turn. The roots that exist are granted beside it, canonical.
@@ -247,7 +221,7 @@ fn read_root_absent_skipped() {
         .await;
         assert_eq!(boundary.read(), [home.join("present")], "present once, canonical");
 
-        let events = captured.0.lock().expect("captured lock").clone();
+        let events = captured.events();
         let missing = home.join("missing");
         assert!(
             events.iter().any(|event| {
@@ -424,9 +398,9 @@ mod seatbelt {
     use std::path::{Path, PathBuf};
     use std::process::Output;
 
-    use omnia_airlock::{Compartment, Options};
+    use omnia_airlock::Options;
 
-    use super::{BOUND, support};
+    use super::support::{self, passed, run, text};
 
     // A lent tree with a source file, a repository, and the engine's store.
     fn tree() -> (tempfile::TempDir, PathBuf) {
@@ -442,20 +416,6 @@ mod seatbelt {
             std::fs::write(path, text).expect("the file");
         }
         (lend, tree)
-    }
-
-    async fn run(boundary: Compartment, script: &str) -> Output {
-        let command = support::sh(&boundary, script);
-        boundary.output(command, BOUND).await.expect("the shell answers")
-    }
-
-    fn text(bytes: &[u8]) -> String {
-        String::from_utf8_lossy(bytes).trim().to_owned()
-    }
-
-    #[track_caller]
-    fn passed(output: &Output, what: &str) {
-        assert!(output.status.success(), "{what}: {}", text(&output.stderr));
     }
 
     #[track_caller]
@@ -658,9 +618,9 @@ mod landlock {
     use std::path::PathBuf;
     use std::process::Output;
 
-    use omnia_airlock::{Compartment, Options};
+    use omnia_airlock::Options;
 
-    use super::{BOUND, support};
+    use super::support::{self, passed, run, text};
 
     // A lent tree holding the probe.
     fn tree() -> (tempfile::TempDir, PathBuf) {
@@ -670,20 +630,6 @@ mod landlock {
         std::fs::write(tree.join("src/main.rs"), "fn main() {}\n").expect("a source file");
         support::probe(&tree);
         (lend, tree)
-    }
-
-    async fn run(boundary: Compartment, script: &str) -> Output {
-        let command = support::sh(&boundary, script);
-        boundary.output(command, BOUND).await.expect("the shell answers")
-    }
-
-    fn text(bytes: &[u8]) -> String {
-        String::from_utf8_lossy(bytes).trim().to_owned()
-    }
-
-    #[track_caller]
-    fn passed(output: &Output, what: &str) {
-        assert!(output.status.success(), "{what}: {}", text(&output.stderr));
     }
 
     #[track_caller]

@@ -8,12 +8,12 @@
 
 use std::collections::VecDeque;
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::{ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
-use std::fmt;
 
 use anyhow::{Context as _, Result, bail};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessSession};

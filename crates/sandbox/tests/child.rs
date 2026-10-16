@@ -208,10 +208,8 @@ async fn output_killed_past_the_bound() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, Some(workspace.path())).await;
     let command = sh(session, "sleep 600 & echo $! > pid; wait");
-    let error = command
-        .output(Duration::from_millis(500))
-        .await
-        .expect_err("the shell waits on its fork");
+    let error =
+        command.output(Duration::from_millis(500)).await.expect_err("the shell waits on its fork");
 
     assert!(error.to_string().contains("did not exit within"), "{error:#}");
     let grandchild =

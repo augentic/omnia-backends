@@ -292,10 +292,8 @@ async fn connection(stream: TcpStream, allowlist: Arc<Allowlist>) {
         let tunnels = tunnels_tx.clone();
         async move { Ok::<_, Infallible>(handle(request, &allowlist, &tunnels).await) }
     });
-    let served = http1::Builder::new()
-        .serve_connection(TokioIo::new(stream), service)
-        .with_upgrades()
-        .await;
+    let served =
+        http1::Builder::new().serve_connection(TokioIo::new(stream), service).with_upgrades().await;
     if let Err(error) = served {
         tracing::debug!(%error, "egress connection ended");
     }
@@ -463,7 +461,10 @@ mod tests {
         assert!(own.contains(&ip("127.0.0.1")), "a loopback interface among {own:?}");
         let public = ip("93.184.215.14");
         assert_eq!(DeniedAddress::of(public, &[public]), Some(DeniedAddress::Own));
-        assert_eq!(DeniedAddress::of(ip("::ffff:93.184.215.14"), &[public]), Some(DeniedAddress::Own));
+        assert_eq!(
+            DeniedAddress::of(ip("::ffff:93.184.215.14"), &[public]),
+            Some(DeniedAddress::Own)
+        );
         assert_eq!(DeniedAddress::of(public, &own), None);
     }
 }

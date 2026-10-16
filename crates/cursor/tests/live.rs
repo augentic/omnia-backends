@@ -497,7 +497,7 @@ async fn check_exhausts() -> Result<()> {
     Ok(())
 }
 
-// --- Airlockd ---
+// --- Sandboxed ---
 
 // The bridge inside the kernel boundary: with the network closed to
 // loopback on macOS and no Cursor host on the egress list, its backend is

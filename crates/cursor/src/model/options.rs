@@ -116,9 +116,7 @@ fn agent_options(
             custom_tools,
         },
         mcp_servers,
-        tools: Some(ToolList {
-            names: tools(access),
-        }),
+        tools: Some(ToolList { names: tools(access) }),
     })
 }
 

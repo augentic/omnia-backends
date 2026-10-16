@@ -504,8 +504,7 @@ mod seatbelt {
             refused(&output, attempt);
         }
         // `rm -f` swallows the refusal, so what it removed is the check
-        let output =
-            run(support::session(&sandbox, Some(&tree)).await, "rm -rf .git .emery").await;
+        let output = run(support::session(&sandbox, Some(&tree)).await, "rm -rf .git .emery").await;
         passed(&output, "rm -rf reports nothing");
         assert_eq!(
             std::fs::read_to_string(tree.join(".git/HEAD")).expect("HEAD stays"),

@@ -213,12 +213,11 @@ fn bad_gateway(message: String) -> Response<Body> {
     response.map(|body| body.map_err(Into::into).boxed())
 }
 
+// The REST split alone; what the relay forwards, drops and streams is
+// `tests/relay.rs`'s, over a backend the suite owns.
 #[cfg(test)]
 mod tests {
-    use http::header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
-    use http::{HeaderMap, HeaderName};
-
-    use super::{is_api, permitted};
+    use super::is_api;
 
     #[test]
     fn api_paths() {
@@ -227,20 +226,5 @@ mod tests {
         assert!(!is_api("/v10/models"));
         assert!(!is_api("/auth/exchange_user_api_key"));
         assert!(!is_api("/aiserver.v1.DashboardService/GetUserPrivacyMode"));
-    }
-
-    #[test]
-    fn connection_named_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert(HOST, "[::1]:9".parse().unwrap());
-        headers.insert(CONNECTION, "keep-alive, X-Session".parse().unwrap());
-        headers.insert("x-session", "1".parse().unwrap());
-        headers.insert(TRANSFER_ENCODING, "chunked".parse().unwrap());
-        headers.insert(CONTENT_LENGTH, "2".parse().unwrap());
-        headers.insert("x-kept", "yes".parse().unwrap());
-        let kept = permitted(headers);
-        let mut names: Vec<&str> = kept.keys().map(HeaderName::as_str).collect();
-        names.sort_unstable();
-        assert_eq!(names, ["content-length", "x-kept"]);
     }
 }

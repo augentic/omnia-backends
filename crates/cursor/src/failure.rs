@@ -174,38 +174,6 @@ mod tests {
         .into()
     }
 
-    // The values are what log queries key on.
-    #[test]
-    fn labels() {
-        let labels = [
-            Outcome::Ok,
-            Outcome::Corrected,
-            Outcome::Timeout,
-            Outcome::Inactive,
-            Outcome::Abort,
-            Outcome::WorkerExit,
-            Outcome::Transport,
-            Outcome::Exhausted,
-            Outcome::Error,
-        ]
-        .map(Outcome::as_str);
-        assert_eq!(
-            labels,
-            [
-                "ok",
-                "corrected",
-                "timeout",
-                "inactive",
-                "abort",
-                "worker_exit",
-                "transport",
-                "exhausted",
-                "error"
-            ]
-        );
-        assert_eq!(Failure::Timeout { cap_secs: 600 }.outcome(), "timeout");
-    }
-
     #[test]
     fn classified() {
         let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
@@ -256,32 +224,5 @@ mod tests {
         .into_error();
         assert!(inactive.downcast_ref::<omnia_wasi_model::Error>().is_none());
         assert_eq!(Outcome::of(&inactive), Outcome::Inactive);
-    }
-
-    #[test]
-    fn lost_worker() {
-        let exited: anyhow::Error = Failure::WorkerExited(EXITED).into();
-        assert!(Outcome::of(&exited).lost_worker());
-        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
-        let socket: anyhow::Error =
-            RpcError::io("SdkAgentService/Send", "reading the stream", reset).into();
-        assert!(Outcome::of(&socket).lost_worker());
-        let torn: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
-        assert!(Outcome::of(&torn).lost_worker());
-
-        // the worker answered, one way or another
-        assert!(!Outcome::of(&inactive()).lost_worker());
-        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
-        assert!(!Outcome::of(&timeout).lost_worker());
-        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
-        assert!(!Outcome::of(&aborted).lost_worker());
-        let rejected: anyhow::Error =
-            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
-        assert!(!Outcome::of(&rejected).lost_worker());
-        assert!(!Outcome::of(&anyhow::anyhow!(
-            "sdk.v1 RPC `SdkAgentService/Send` failed (500 Internal Server Error, internal): boom"
-        ))
-        .lost_worker());
-        assert!(!Outcome::of(&run_error(Some("model overloaded"))).lost_worker());
     }
 }

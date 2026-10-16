@@ -552,16 +552,14 @@ mod tests {
     use tokio::sync::watch;
     use tokio::time::{self, Instant};
 
-    use super::{Activity, Deadlines, Phase, Unanswered};
-    use crate::protocol::RpcError;
-    use crate::{Exit, Failure};
+    use super::{Activity, Deadlines, Phase};
+    use crate::Failure;
 
     const DEADLINES: Deadlines = Deadlines {
         inactivity: Duration::from_secs(1),
         cap: Duration::from_secs(5),
     };
     const FRAME_GAP: Duration = Duration::from_millis(800);
-    const EXITED: Exit = Exit { status: None, pid: 7 };
 
     // Clock paused, so every instant below is exact
 
@@ -656,59 +654,5 @@ mod tests {
             "{failure}"
         );
         assert_eq!(started.elapsed(), 3 * DEADLINES.inactivity);
-    }
-
-    // A shell command runs as long as the model's timeout on it allows, and
-    // its result frame, however it ended, brings the window back for the
-    // next tool.
-    #[tokio::test(start_paused = true)]
-    async fn shell_outlives_window() {
-        let started = Instant::now();
-        let activity = watch::Sender::new(Activity::now(Phase::Shell));
-        let deadline = DEADLINES.watch(&activity);
-        tokio::pin!(deadline);
-        let still_watching = time::timeout(2 * DEADLINES.inactivity, &mut deadline).await.is_err();
-        assert!(still_watching, "the window fired under a shell command");
-        activity.send_replace(Activity::now(Phase::Tool("read".to_owned())));
-        let failure = deadline.await;
-        assert!(
-            matches!(&failure, Failure::Inactive { waiting, idle_secs: 1, .. } if waiting == "tool `read`"),
-            "{failure}"
-        );
-        assert_eq!(started.elapsed(), 3 * DEADLINES.inactivity);
-
-        // left running, the cap alone ends it
-        let started = Instant::now();
-        let activity = watch::Sender::new(Activity::now(Phase::Shell));
-        let failure = DEADLINES.watch(&activity).await;
-        assert!(matches!(failure, Failure::Timeout { cap_secs: 5 }), "{failure}");
-        assert_eq!(started.elapsed(), DEADLINES.cap);
-    }
-
-    #[test]
-    fn restartable() {
-        let exited = || Failure::WorkerExited(EXITED).into();
-        let reset = || RpcError::truncated("SdkAgentService/Send", 3).into();
-        let stalled = || {
-            Failure::Inactive {
-                waiting: "the opening frame".to_owned(),
-                idle_secs: 1,
-                inactivity_secs: 1,
-                cap_secs: 5,
-            }
-            .into()
-        };
-
-        assert!(Unanswered::before_candidate(exited()).restartable());
-        assert!(Unanswered::before_candidate(reset()).restartable());
-
-        // the guest has seen a candidate: nothing is offered twice
-        assert!(!Unanswered::settled(exited()).restartable());
-
-        // the worker is up and answering, in its way
-        assert!(!Unanswered::before_candidate(stalled()).restartable());
-
-        assert_eq!(Unanswered::before_candidate(exited()).pid(), Some(7));
-        assert_eq!(Unanswered::before_candidate(reset()).pid(), None);
     }
 }

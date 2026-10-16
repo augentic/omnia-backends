@@ -31,9 +31,9 @@ pub struct Options {
     /// Trees a lend at or beneath which runs with a shell.
     pub shell_roots: Vec<PathBuf>,
     /// Host environment variables copied into a confined process, by name.
-    pub passthrough: Vec<String>,
+    pub passthrough: &'static [&'static str],
     /// Environment variable names that must never reach a confined process.
-    pub refused: Vec<String>,
+    pub refused: &'static [&'static str],
 }
 
 /// What one process may reach beyond the boundary's defaults.
@@ -174,8 +174,8 @@ impl Airlock {
     /// sets itself, one in `refused`, one of the dynamic loader's, or a
     /// `GIT_DIR` sibling, or when no kernel substrate runs on this host.
     pub async fn connect(mut options: Options) -> Result<Self> {
-        for name in &options.passthrough {
-            if let Err(why) = Self::settable(name, &options.refused) {
+        for name in options.passthrough {
+            if let Err(why) = Self::settable(name, options.refused) {
                 bail!("passthrough {why}");
             }
         }
@@ -192,7 +192,7 @@ impl Airlock {
             None => None,
         };
         let inherited = std::env::vars_os()
-            .filter(|(name, _)| Self::passes(name, &options.passthrough))
+            .filter(|(name, _)| Self::passes(name, options.passthrough))
             .collect();
         Ok(Self {
             options,
@@ -202,21 +202,21 @@ impl Airlock {
         })
     }
 
-    fn passes(name: &OsStr, passthrough: &[String]) -> bool {
+    fn passes(name: &OsStr, passthrough: &[&str]) -> bool {
         name.to_str().is_some_and(|name| {
             Self::INHERITED.contains(&name)
                 || name.starts_with("LC_")
-                || passthrough.iter().any(|passed| passed == name)
+                || passthrough.contains(&name)
         })
     }
 
     // Whether a value under `name` may reach a process, whoever puts it
     // there; the `Err` is why not.
-    fn settable(name: &str, refused: &[String]) -> Result<(), String> {
+    fn settable(name: &str, refused: &[&str]) -> Result<(), String> {
         if Self::OWN.contains(&name) {
             return Err(format!("`{name}` is the boundary's to set"));
         }
-        if Self::REFUSED.contains(&name) || refused.iter().any(|refused| refused == name) {
+        if Self::REFUSED.contains(&name) || refused.contains(&name) {
             return Err(format!("`{name}` is refused"));
         }
         if Self::LOADER.iter().any(|prefix| name.starts_with(prefix)) {
@@ -364,10 +364,10 @@ impl Airlock {
             if !is_name(name) {
                 deny!("`{name}` is not an environment variable name");
             }
-            if let Err(why) = Self::settable(name, &self.options.refused) {
+            if let Err(why) = Self::settable(name, self.options.refused) {
                 deny!("env {why}");
             }
-            if self.options.passthrough.iter().any(|passed| passed == name) {
+            if self.options.passthrough.contains(&name.as_str()) {
                 deny!("env `{name}` is the host's to pass through");
             }
             let value = match value.strip_prefix("~/") {

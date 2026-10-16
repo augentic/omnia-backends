@@ -23,7 +23,6 @@ use tracing::instrument;
 
 use crate::model::Deadlines;
 use crate::pool::Pool;
-use crate::worker::Worker;
 
 /// Cursor model backend.
 #[derive(Clone)]
@@ -59,7 +58,12 @@ impl Backend for Client {
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
 
-        let airlock = Airlock::connect((&options).into()).await?;
+        let airlock = Airlock::connect(Options {
+            shell_roots: options.shell_roots,
+            passthrough: worker::PASSTHROUGH,
+            refused: worker::REFUSED,
+        })
+        .await?;
         let pool = Pool::connect(options.max_agents, &options.backend_url).await?;
 
         Ok(Self {
@@ -73,16 +77,6 @@ impl Backend for Client {
             airlock: Arc::new(airlock),
             max_tool_calls: options.max_tool_calls,
         })
-    }
-}
-
-impl From<&ConnectOptions> for Options {
-    fn from(options: &ConnectOptions) -> Self {
-        Self {
-            shell_roots: options.shell_roots.clone(),
-            passthrough: Worker::PASSTHROUGH.iter().map(ToString::to_string).collect(),
-            refused: Worker::REFUSED.iter().map(ToString::to_string).collect(),
-        }
     }
 }
 

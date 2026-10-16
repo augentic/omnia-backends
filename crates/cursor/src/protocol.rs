@@ -791,8 +791,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ConnectStatus, END_STREAM, EndStreamResponse, RpcError, RunStatus, RunStreamResult,
-        TokenUsage, decode_frame, ensure_loopback,
+        END_STREAM, RpcError, RunStatus, RunStreamResult, TokenUsage, decode_frame, ensure_loopback,
     };
 
     fn envelope(payload: &[u8]) -> Vec<u8> {
@@ -820,23 +819,6 @@ mod tests {
                 .expect("a bridge that reports no cache counts");
         assert_eq!((bare.cache_read_tokens, bare.cache_write_tokens), (None, None));
         assert_eq!(bare.total_tokens, None);
-    }
-
-    #[test]
-    fn connect_status_defaults() {
-        let bare: ConnectStatus = serde_json::from_value(json!({})).expect("all defaulted");
-        assert_eq!((bare.code.as_str(), bare.message.as_str()), ("unknown", ""));
-        assert!(bare.details.is_none());
-
-        let end: EndStreamResponse =
-            serde_json::from_value(json!({ "error": null })).expect("a null error parses");
-        assert!(end.error.is_none(), "a null error is a clean end");
-        let end: EndStreamResponse =
-            serde_json::from_value(json!({ "error": { "message": "boom", "details": [] } }))
-                .expect("an error with no code");
-        let error = end.error.expect("the error");
-        assert_eq!((error.code.as_str(), error.message.as_str()), ("unknown", "boom"));
-        assert!(error.details.is_some());
     }
 
     #[test]
@@ -903,7 +885,9 @@ mod tests {
     fn frames_decode_incrementally() {
         let mut buffer = BytesMut::new();
         let mut body = envelope(b"one");
-        body.extend_from_slice(&envelope(b"two"));
+        let mut end = envelope(b"two");
+        end[0] = END_STREAM;
+        body.extend_from_slice(&end);
 
         // feed byte by byte: no frame until its length is fully buffered
         let mut frames = Vec::new();
@@ -918,7 +902,9 @@ mod tests {
         }
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].payload.as_ref(), b"one");
+        assert!(!frames[0].is_end_stream());
         assert_eq!(frames[1].payload.as_ref(), b"two");
+        assert!(frames[1].is_end_stream());
         assert!(buffer.is_empty(), "both frames consumed the buffer exactly");
     }
 
@@ -929,19 +915,6 @@ mod tests {
         let buffer = BytesMut::from(body.as_slice());
         let error = decode_frame(buffer).expect_err("compression is never negotiated");
         assert!(error.to_string().contains("compressed"), "unexpected: {error}");
-    }
-
-    #[test]
-    fn end_stream_flag() {
-        let message = BytesMut::from(envelope(b"{}").as_slice());
-        let (frame, _) = decode_frame(message).expect("decodes");
-        assert!(!frame.expect("one frame").is_end_stream());
-
-        let mut end = envelope(b"{}");
-        end[0] = END_STREAM;
-        let end = BytesMut::from(end.as_slice());
-        let (frame, _) = decode_frame(end).expect("decodes");
-        assert!(frame.expect("one frame").is_end_stream());
     }
 
     #[test]

@@ -57,7 +57,7 @@ fn environment_rebuilt() {
         }
 
         let confine = connect(Options {
-            passthrough: vec![PLANTED.to_owned()],
+            passthrough: &[PLANTED],
             ..Options::default()
         })
         .await;
@@ -174,7 +174,7 @@ async fn path_in_the_ask() {
 
 #[tokio::test]
 async fn passthrough_refused() {
-    for (name, why) in [
+    const HELD: &[(&str, &str)] = &[
         ("HOME", "the boundary's to set"),
         ("TMPDIR", "the boundary's to set"),
         ("HTTPS_PROXY", "the boundary's to set"),
@@ -186,10 +186,11 @@ async fn passthrough_refused() {
         ("GIT_DIR", "selects a repository"),
         ("GIT_INDEX_FILE", "selects a repository"),
         ("CURSOR_API_KEY", "refused"),
-    ] {
+    ];
+    for (name, why) in HELD {
         let error = Airlock::connect(Options {
-            passthrough: vec![name.to_owned()],
-            refused: vec!["CURSOR_API_KEY".to_owned()],
+            passthrough: std::slice::from_ref(name),
+            refused: &["CURSOR_API_KEY"],
             ..Options::default()
         })
         .await
@@ -332,8 +333,8 @@ fn read_root_credential_store_refused() {
 fn env_set_and_home_expanded() {
     support::under_home(async |home| {
         let confine = connect(Options {
-            passthrough: vec!["SSL_CERT_FILE".to_owned()],
-            refused: vec!["CURSOR_API_KEY".to_owned()],
+            passthrough: &["SSL_CERT_FILE"],
+            refused: &["CURSOR_API_KEY"],
             ..Options::default()
         })
         .await;

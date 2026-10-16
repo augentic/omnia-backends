@@ -38,8 +38,8 @@ use omnia_airlock::{Airlock, Clearance, Options};
 
 let airlock = Airlock::connect(Options {
     shell_roots: vec![".emery/vcs".into()],
-    passthrough: vec!["CURSOR_SDK_BRIDGE_LOG".into()],
-    refused: vec!["CURSOR_API_KEY".into()],
+    passthrough: &["CURSOR_SDK_BRIDGE_LOG"],
+    refused: &["CURSOR_API_KEY"],
 })
 .await?;
 

@@ -213,12 +213,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_hint_skipped() {
-        assert_eq!(with_mcp_hint(&[], "hello".to_owned()), "hello");
-    }
-
-    #[test]
     fn mcp_hint_names_servers() {
+        assert_eq!(with_mcp_hint(&[], "Q".to_owned()), "Q", "no servers, no hint");
         let open = Mcp {
             name: "docs".to_owned(),
             tools: vec![],

@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tracing::{Instrument as _, Span};
 
-use crate::egress::Egress;
+use crate::valve::Valve;
 
 const EXIT_GRACE: Duration = Duration::from_millis(250);
 const EXIT_WAIT: Duration = EXIT_GRACE.saturating_mul(2);
@@ -49,7 +49,7 @@ impl Child {
     // how it exits are reported under the work that spawned it. `held` is
     // what the process needs for its life: its scratch and its proxy.
     pub(crate) fn supervise(
-        mut child: Box<dyn ChildWrapper>, program: String, held: (TempDir, Egress),
+        mut child: Box<dyn ChildWrapper>, program: String, held: (TempDir, Valve),
         ready: Option<&'static str>,
     ) -> Result<Self> {
         let started_at = Instant::now();
@@ -111,13 +111,13 @@ impl Child {
         async move { wait_exit(&mut exit, pid).await }
     }
 
-    /// The payload of the ready line: what followed the prefix [`Boundary::spawn`]
+    /// The payload of the ready line: what followed the prefix [`Compartment::spawn`]
     /// was given, the first time the process wrote it to stderr.
     ///
     /// Resolves to `None` when the process ends, or stderr closes, before a
     /// ready line, or when the line was already taken.
     ///
-    /// [`Boundary::spawn`]: crate::Boundary::spawn
+    /// [`Compartment::spawn`]: crate::Compartment::spawn
     pub fn ready(&mut self) -> impl Future<Output = Option<String>> + Send + 'static {
         let ready = self.ready.take();
         async move {
@@ -197,7 +197,7 @@ struct Stop {
 // waits on the process, tears it down on request, and publishes its exit
 struct Supervisor {
     child: Box<dyn ChildWrapper>,
-    held: (TempDir, Egress),
+    held: (TempDir, Valve),
     stderr: JoinHandle<()>,
     state: Arc<State>,
     stop: mpsc::Receiver<Stop>,

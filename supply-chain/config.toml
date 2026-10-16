@@ -43,7 +43,7 @@ audit-as-crates-io = false
 [policy.omnia-cli]
 audit-as-crates-io = false
 
-[policy.omnia-confine]
+[policy.omnia-airlock]
 audit-as-crates-io = false
 
 [policy.omnia-core]

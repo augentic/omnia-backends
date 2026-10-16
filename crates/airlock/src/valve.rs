@@ -1,5 +1,5 @@
-//! The egress proxy: the one way out of the boundary, a loopback `CONNECT`
-//! proxy admitting the hosts the ask named and nothing else.
+//! The valve: the one way out of the boundary, a loopback `CONNECT` proxy
+//! admitting the hosts the clearance named and nothing else.
 
 use std::convert::Infallible;
 use std::fmt;
@@ -222,14 +222,14 @@ impl Allowlist {
     }
 }
 
-/// The bound egress proxy; dropping it stops serving.
+/// The bound valve; dropping it stops serving.
 #[derive(Debug)]
-pub struct Egress {
+pub struct Valve {
     address: SocketAddr,
     server: JoinHandle<()>,
 }
 
-impl Egress {
+impl Valve {
     pub(crate) async fn bind(hosts: &[String]) -> Result<Self> {
         let listener =
             TcpListener::bind(("127.0.0.1", 0)).await.context("binding the egress proxy")?;
@@ -247,13 +247,13 @@ impl Egress {
     }
 }
 
-impl Drop for Egress {
+impl Drop for Valve {
     fn drop(&mut self) {
         self.server.abort();
     }
 }
 
-// Accept until the `Egress` drops, one connection task per client socket.
+// Accept until the `Valve` drops, one connection task per client socket.
 async fn serve(listener: TcpListener, allowlist: Arc<Allowlist>) {
     loop {
         let stream = match listener.accept().await {

@@ -1,5 +1,5 @@
-//! What the `child`, `boundary`, `egress`, and `toolchain` suites share: a
-//! connected [`Confine`] over `/bin/sh`, a boundary around a lend, and the
+//! What the `child`, `boundary`, `valve`, and `toolchain` suites share: a
+//! connected [`Airlock`] over `/bin/sh`, a boundary around a lend, and the
 //! liveness probes a process-death row ends on.
 
 #![allow(dead_code, reason = "each suite uses its own subset")]
@@ -7,15 +7,15 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use omnia_confine::{Ask, Boundary, Child, Confine, Confinement, Options, Refused};
+use omnia_airlock::{Airlock, Child, Clearance, Compartment, Denied, Options};
 use tokio::process::Command;
 
 /// How long a process may take to be gone once its death was set in motion.
 pub const GONE: Duration = Duration::from_secs(8);
 
-/// A connected `Confine` over `options`.
-pub async fn connect(options: Options) -> Confine {
-    Confine::connect(options).await.expect("the options hold")
+/// A connected `Airlock` over `options`.
+pub async fn connect(options: Options) -> Airlock {
+    Airlock::connect(options).await.expect("the options hold")
 }
 
 /// Runs `test` with the process's `HOME` pointed at a fresh directory, so a
@@ -31,11 +31,11 @@ pub fn under_home(test: impl AsyncFnOnce(&Path)) {
     runtime.block_on(test(&path));
 }
 
-/// An `Ask` reading `roots`, each spelled `~/`-relative.
-pub fn reading(roots: &[&str]) -> Ask {
-    Ask {
+/// A [`Clearance`] reading `roots`, each spelled `~/`-relative.
+pub fn reading(roots: &[&str]) -> Clearance {
+    Clearance {
         read: roots.iter().map(ToString::to_string).collect(),
-        ..Ask::default()
+        ..Clearance::default()
     }
 }
 
@@ -43,52 +43,52 @@ pub fn reading(roots: &[&str]) -> Ask {
 /// run it; the path it has inside.
 pub fn probe(tree: &Path) -> PathBuf {
     let probe = tree.join("probe");
-    std::fs::copy(env!("CARGO_BIN_EXE_confine-probe"), &probe).expect("the probe copies");
+    std::fs::copy(env!("CARGO_BIN_EXE_airlock-probe"), &probe).expect("the probe copies");
     probe
 }
 
 /// The probe run on the host, outside any boundary, as a row's control.
 pub fn probe_outside(tree: &Path, args: &[&str]) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_confine-probe"))
+    std::process::Command::new(env!("CARGO_BIN_EXE_airlock-probe"))
         .args(args)
         .current_dir(tree)
         .output()
         .expect("the probe runs on the host")
 }
 
-/// A boundary around `lend` under `confine`, asking nothing.
-pub async fn boundary(confine: &Confine, lend: Option<&Path>) -> Boundary {
-    asking(confine, lend, &Ask::default()).await
+/// A compartment around `lend` under `airlock`, with an empty clearance.
+pub async fn compartment(airlock: &Airlock, lend: Option<&Path>) -> Compartment {
+    sealing(airlock, lend, &Clearance::default()).await
 }
 
-/// A boundary around `lend` under `confine`, granted `ask`.
-pub async fn asking(confine: &Confine, lend: Option<&Path>, ask: &Ask) -> Boundary {
-    let confinement = Confinement::of(lend, confine.options()).await.expect("the lend holds");
-    confine.lay(confinement, ask).await.expect("the ask holds")
+/// A compartment around `lend` under `airlock`, granted `clearance`.
+pub async fn sealing(airlock: &Airlock, lend: Option<&Path>, clearance: &Clearance) -> Compartment {
+    let chamber = airlock.prepare(lend).await.expect("the lend holds");
+    airlock.seal(chamber, clearance).await.expect("the clearance holds")
 }
 
-/// What `confine` refuses `ask` for, around a private directory: the
-/// `Refused` the lay's error carries, since the ask's fault is typed.
-pub async fn refused(confine: &Confine, ask: &Ask) -> String {
-    let confinement = Confinement::of(None, confine.options()).await.expect("the lend holds");
-    let error = confine.lay(confinement, ask).await.expect_err("the ask is refused");
+/// What `airlock` denies `clearance` for, around a private directory: the
+/// `Denied` the seal's error carries, since the clearance's fault is typed.
+pub async fn denied(airlock: &Airlock, clearance: &Clearance) -> String {
+    let chamber = airlock.prepare(None).await.expect("the lend holds");
+    let error = airlock.seal(chamber, clearance).await.expect_err("the clearance is denied");
     error
-        .downcast_ref::<Refused>()
-        .unwrap_or_else(|| panic!("an ask's fault is typed `Refused`: {error:#}"))
+        .downcast_ref::<Denied>()
+        .unwrap_or_else(|| panic!("a clearance's fault is typed `Denied`: {error:#}"))
         .to_string()
 }
 
-/// `/bin/sh -c <script>` inside `boundary`.
-pub fn sh(boundary: &Boundary, script: &str) -> Command {
-    let mut command = boundary.command("/bin/sh").expect("`/bin/sh` is a path");
+/// `/bin/sh -c <script>` inside `compartment`.
+pub fn sh(compartment: &Compartment, script: &str) -> Command {
+    let mut command = compartment.command("/bin/sh").expect("`/bin/sh` is a path");
     command.args(["-c", script]);
     command
 }
 
-/// `/bin/sh -c <script>` spawned inside `boundary` under supervision.
-pub fn spawn_sh(boundary: Boundary, script: &str, ready: Option<&'static str>) -> Child {
-    let command = sh(&boundary, script);
-    boundary.spawn(command, ready).expect("sh spawns")
+/// `/bin/sh -c <script>` spawned inside `compartment` under supervision.
+pub fn spawn_sh(compartment: Compartment, script: &str, ready: Option<&'static str>) -> Child {
+    let command = sh(&compartment, script);
+    compartment.spawn(command, ready).expect("sh spawns")
 }
 
 /// Poll `ready` every 10ms until it holds, or fail after `within`.

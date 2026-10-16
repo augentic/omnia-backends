@@ -193,7 +193,7 @@ async fn keyless_complete() {
     assert!(fake.log().events.is_empty(), "a keyless completion spawned a process");
 }
 
-// --- Confinement ---
+// --- Chamber ---
 
 // The worker's working directory is the lend, and what the agent may do
 // there follows where the lend sits: a lend under a shell root runs with a

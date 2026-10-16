@@ -12,7 +12,7 @@ MSRV: Rust 1.99. Each release line pairs with a specific omnia line — the curr
 | [`omnia-azure-id`](crates/azure-id)           | `wasi-identity`                                     | Azure Managed Identity         |
 | [`omnia-azure-table`](crates/azure-table)     | `wasi-docstore`                                     | Azure Table Storage            |
 | [`omnia-azure-vault`](crates/azure-vault)     | `wasi-vault`                                        | Azure Key Vault                |
-| [`omnia-confine`](crates/confine)             | —                                                   | Seatbelt, Landlock and seccomp |
+| [`omnia-airlock`](crates/airlock)             | —                                                   | Seatbelt, Landlock and seccomp |
 | [`omnia-cursor`](crates/cursor)               | `wasi-model`                                        | `cursor-sdk-bridge`            |
 | [`omnia-genai`](crates/genai)                 | `wasi-model`                                        | LLM provider APIs (OpenAI, Anthropic, Gemini, ...) |
 | [`omnia-git`](crates/git)                     | `wasi-vcs`                                          | `git`                          |
@@ -25,7 +25,7 @@ MSRV: Rust 1.99. Each release line pairs with a specific omnia line — the curr
 
 ## Architecture
 
-Every backend crate implements the `omnia::Backend` trait (connection management, configured from environment variables) plus the `WasiXxxCtx` context trait for each WASI interface it serves. `omnia-confine` serves no interface: it is the library a backend that runs a program on the host (`omnia-cursor`) spawns it through, so the process runs in the lend, with an environment built from nothing, behind the platform's kernel boundary, and reaches the network through a vetting proxy alone. `omnia-azure-blob` additionally implements `omnia_plugin::PackageStore` (the store omnia's registry acquirer reads before any registry and writes what it fetches to; registry acquisition itself lives in omnia, as does the local `FsStore`). Backends are wired into a host runtime through the `omnia::runtime!` macro and connect at startup. See [`docs/Architecture.md`](docs/Architecture.md) for details, and the Omnia repo's [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md) for wiring instructions and configuration.
+Every backend crate implements the `omnia::Backend` trait (connection management, configured from environment variables) plus the `WasiXxxCtx` context trait for each WASI interface it serves. `omnia-airlock` serves no interface: it is the library a backend that runs a program on the host (`omnia-cursor`) spawns it through, so the process runs in the lend, with an environment built from nothing, behind the platform's kernel boundary, and reaches the network through a vetting proxy alone. `omnia-azure-blob` additionally implements `omnia_plugin::PackageStore` (the store omnia's registry acquirer reads before any registry and writes what it fetches to; registry acquisition itself lives in omnia, as does the local `FsStore`). Backends are wired into a host runtime through the `omnia::runtime!` macro and connect at startup. See [`docs/Architecture.md`](docs/Architecture.md) for details, and the Omnia repo's [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md) for wiring instructions and configuration.
 
 ## Testing
 

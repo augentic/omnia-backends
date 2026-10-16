@@ -1,6 +1,6 @@
 [package]
-name = "omnia-confine"
-description = "A confined host process in the model's trust domain: the supervised child, its environment and working directory, and the boundary around it"
+name = "omnia-airlock"
+description = "Host subprocess airlock for the model trust domain: supervised child, scrubbed environment, kernel boundary, and vetted egress"
 readme = "README.md"
 authors.workspace = true
 categories.workspace = true
@@ -40,7 +40,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true
 
 [[bin]]
-name = "confine-probe"
+name = "airlock-probe"
 path = "tests/support/probe/main.rs"
 test = false
 bench = false

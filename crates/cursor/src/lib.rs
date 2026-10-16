@@ -15,8 +15,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 pub use failure::Failure;
 use omnia::Backend;
-pub use omnia_confine::Exit;
-use omnia_confine::{Confine, Options};
+pub use omnia_airlock::Exit;
+use omnia_airlock::{Airlock, Options};
 pub use protocol::{RpcError, RunStatus};
 use tokio::time::Instant;
 use tracing::instrument;
@@ -33,7 +33,7 @@ pub struct Client {
     model: String,
     api_key: Option<String>,
     pool: Arc<Pool>,
-    confine: Arc<Confine>,
+    airlock: Arc<Airlock>,
     max_tool_calls: u32,
 }
 
@@ -44,7 +44,7 @@ impl std::fmt::Debug for Client {
             .field("model", &self.model)
             .field("max_agents", &self.pool.max_agents())
             .field("max_tool_calls", &self.max_tool_calls)
-            .field("confine", &self.confine.options())
+            .field("airlock", &self.airlock.options())
             .finish_non_exhaustive()
     }
 }
@@ -60,8 +60,9 @@ impl Backend for Client {
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
 
-        let confine = Confine::connect(options.confine()).await?;
+        let airlock = Airlock::connect((&options).into()).await?;
         let pool = Pool::connect(options.max_agents, &options.backend_url).await?;
+
         Ok(Self {
             deadlines: Deadlines {
                 inactivity: Duration::from_secs(options.inactivity_secs),
@@ -70,20 +71,16 @@ impl Backend for Client {
             model: options.model,
             api_key,
             pool: Arc::new(pool),
-            confine: Arc::new(confine),
+            airlock: Arc::new(airlock),
             max_tool_calls: options.max_tool_calls,
         })
     }
 }
 
-impl ConnectOptions {
-    // What every worker reaches: the bridge's own settings as the
-    // environment it reads of the host, and never the client's own
-    // credential or the backend address, which would point the bridge past
-    // the relay. What one worker reaches beyond is its completion's ask.
-    fn confine(&self) -> Options {
-        Options {
-            shell_roots: self.shell_roots.clone(),
+impl From<&ConnectOptions> for Options {
+    fn from(options: &ConnectOptions) -> Self {
+        Self {
+            shell_roots: options.shell_roots.clone(),
             passthrough: Worker::PASSTHROUGH.iter().map(ToString::to_string).collect(),
             refused: Worker::REFUSED.iter().map(ToString::to_string).collect(),
         }

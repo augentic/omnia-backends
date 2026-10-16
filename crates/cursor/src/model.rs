@@ -10,17 +10,18 @@ mod agent;
 mod observe;
 mod options;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use agent::Deadlines;
 use agent::{Attempt, Unanswered};
 use anyhow::anyhow;
-use omnia_confine::{Ask, Confinement, Refused};
+use omnia_airlock::{Clearance, Compartment, Denied};
 use omnia_wasi_model::{
-    Answer, Error, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx, WorkerGrant,
+    Answer, Error, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx,
 };
-use options::{Access, Turn};
+use options::Turn;
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
 
@@ -72,68 +73,59 @@ impl Client {
     async fn attempt(
         &self, request: &Request, tool_host: &Arc<dyn ToolHost>,
     ) -> Result<Answer, Unanswered> {
-        let api_key = self
-            .api_key
-            .as_deref()
-            .ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))
-            .map_err(Unanswered::settled)?;
+        self.stage(request, tool_host).await.map_err(Unanswered::settled)?.complete().await
+    }
 
-        // the boundary is laid before the slot is taken, so a lend that
-        // cannot be entered, or an ask the host refuses, costs no wait
-        let confinement = Confinement::of(tool_host.local_path(), self.confine.options())
-            .await
-            .map_err(Unanswered::settled)?;
-        let ask = ask(request.grants.worker.as_ref(), &confinement).map_err(Unanswered::settled)?;
-        let boundary = self
-            .confine
-            .lay(confinement, &ask)
-            .await
-            .map_err(|error| Unanswered::settled(refusal(error)))?;
-        let access = Access::of(&boundary);
-        let cwd = boundary.cwd().map_err(Unanswered::settled)?;
-        let turn = Turn::prepare(request, cwd, access, &self.model, api_key)
-            .map_err(Unanswered::settled)?;
-        let lease = self.pool.lease(boundary).await.map_err(Unanswered::settled)?;
+    async fn stage(
+        &self, request: &Request, tool_host: &Arc<dyn ToolHost>,
+    ) -> anyhow::Result<Attempt> {
+        let api_key =
+            self.api_key.as_deref().ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))?;
 
-        Attempt {
+        // the compartment is sealed before the slot is taken, so a lend that
+        // cannot be entered, or a clearance the host denies, costs no wait
+        let compartment = self.seal(request, tool_host.local_path()).await?;
+        let turn = Turn::prepare(request, &compartment, &self.model, api_key)?;
+        let lease = self.pool.lease(compartment).await?;
+
+        Ok(Attempt {
             lease,
             turn,
             tool_host: Arc::clone(tool_host),
             deadlines: self.deadlines,
-        }
-        .complete()
-        .await
+        })
+    }
+
+    // A worker grant needs a shell: a worker reaches beyond its lend through
+    // the commands it runs there, so one over a read-only lend is the
+    // request's fault, denied before anything is sealed.
+    async fn seal(&self, request: &Request, lend: Option<&Path>) -> anyhow::Result<Compartment> {
+        let chamber = self.airlock.prepare(lend).await?;
+        let clearance = match request.grants.worker.as_ref() {
+            None => Clearance::default(),
+            Some(_) if !chamber.shell() => {
+                let lend = if chamber.lent() { "is under no shell root" } else { "is nothing" };
+                return Err(Error::InvalidRequest(format!(
+                    "worker grant: the workspace lent {lend}, so the worker runs no command that \
+                     could use it"
+                ))
+                .into());
+            }
+            Some(grant) => Clearance {
+                egress: grant.egress.clone(),
+                read: grant.read.clone(),
+                env: grant.env.clone(),
+            },
+        };
+        self.airlock.seal(chamber, &clearance).await.map_err(refusal)
     }
 }
 
-// The ask a completion's worker grant makes of the boundary. A grant needs
-// a shell: a worker reaches beyond its lend through the commands it runs
-// there, so one over a read-only lend is the request's fault, refused before
-// anything is laid.
-fn ask(grant: Option<&WorkerGrant>, confinement: &Confinement) -> anyhow::Result<Ask> {
-    let Some(grant) = grant else {
-        return Ok(Ask::default());
-    };
-    if !confinement.shell() {
-        let lend = if confinement.lent() { "is under no shell root" } else { "is nothing" };
-        return Err(Error::InvalidRequest(format!(
-            "worker grant: the workspace lent {lend}, so the worker runs no command that could \
-             use it"
-        ))
-        .into());
-    }
-    Ok(Ask {
-        egress: grant.egress.clone(),
-        read: grant.read.clone(),
-        env: grant.env.clone(),
-    })
-}
-
-// A lay the boundary refused for the ask's fault is the request's; a host
+// A seal the boundary denied for the clearance's fault is the request's; a host
 // failure stays the backend's.
 fn refusal(error: anyhow::Error) -> anyhow::Error {
-    match error.downcast::<Refused>() {
-        Ok(refused) => Error::InvalidRequest(format!("worker grant: {refused}")).into(),
+    match error.downcast::<Denied>() {
+        Ok(denied) => Error::InvalidRequest(format!("worker grant: {denied}")).into(),
         Err(error) => error,
     }
 }

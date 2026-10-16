@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
-use omnia_confine::{Ask, Confine, Options};
+use omnia_airlock::{Airlock, Clearance, Options};
 
 const BOUND: Duration = Duration::from_secs(120);
 const LIVE_BOUND: Duration = Duration::from_secs(300);
@@ -98,7 +98,7 @@ fn home() -> PathBuf {
     std::fs::canonicalize(home).expect("the home resolves")
 }
 
-async fn connect() -> Confine {
+async fn connect() -> Airlock {
     support::connect(Options::default()).await
 }
 
@@ -123,16 +123,18 @@ fn toolchain_roots() -> Vec<String> {
 }
 
 // The toolchain's ask: its prefixes under the home, and `egress`.
-fn toolchain(egress: Vec<String>) -> Ask {
-    Ask {
+fn toolchain(egress: Vec<String>) -> Clearance {
+    Clearance {
         egress,
         read: toolchain_roots(),
-        ..Ask::default()
+        ..Clearance::default()
     }
 }
 
-async fn run(confine: &Confine, ask: &Ask, tree: &Path, script: &str, bound: Duration) -> Output {
-    let boundary = support::asking(confine, Some(tree), ask).await;
+async fn run(
+    confine: &Airlock, ask: &Clearance, tree: &Path, script: &str, bound: Duration,
+) -> Output {
+    let boundary = support::sealing(confine, Some(tree), ask).await;
     let command = support::sh(&boundary, script);
     boundary.output(command, bound).await.expect("the shell answers")
 }
@@ -189,7 +191,7 @@ async fn npm_installs_a_local_dependency() {
         ("index.js", "console.log(require(\"dep\"));\n"),
     ]);
     let confine = connect().await;
-    let boundary = support::asking(&confine, Some(&tree), &toolchain(vec![])).await;
+    let boundary = support::sealing(&confine, Some(&tree), &toolchain(vec![])).await;
     let cache = boundary.scratch().join(".npm");
 
     let script = "npm install --no-audit --no-fund >/dev/null && node index.js && npm config get \

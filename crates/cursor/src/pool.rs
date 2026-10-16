@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use omnia_confine::Boundary;
+use omnia_airlock::Compartment;
 use omnia_wasi_model::ToolHost;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
@@ -45,7 +45,7 @@ impl Pool {
 
     // Wait for a slot, in arrival order, then for the worker to run on,
     // spawned inside `boundary`.
-    pub async fn lease(&self, boundary: Boundary) -> Result<Lease> {
+    pub async fn lease(&self, compartment: Compartment) -> Result<Lease> {
         let queued = Instant::now();
         let permit =
             Arc::clone(&self.permits).acquire_owned().await.context("the agent pool is closed")?;
@@ -56,7 +56,7 @@ impl Pool {
         }
 
         let registration = Arc::new(self.endpoint.register()?);
-        let spawned = Worker::spawn(&registration, self.relay.url(), boundary)?;
+        let spawned = Worker::spawn(&registration, self.relay.url(), compartment)?;
 
         // slot and token are held until the process is gone, however the lease ends
         let exited = spawned.exited();

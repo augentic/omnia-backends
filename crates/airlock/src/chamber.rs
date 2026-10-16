@@ -1,5 +1,5 @@
-//! Where one process is put: its tree, its scratch, and the boundary that
-//! spawns it there.
+//! Where one process is put: its tree, its scratch, and the compartment that
+//! spawns there.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -18,18 +18,18 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::child::Child;
-use crate::egress::Egress;
 #[cfg(target_os = "linux")]
 use crate::linux;
 #[cfg(target_os = "macos")]
 use crate::seatbelt;
+use crate::valve::Valve;
 use crate::{Options, Wall};
 
 /// The place one process is put: the tree it works in and its scratch.
 ///
-/// Built once per process by [`Confinement::of`] and laid into a
-/// [`Boundary`] by [`Confine::lay`](crate::Confine::lay).
-pub struct Confinement {
+/// Built once per process by [`Airlock::prepare`](crate::Airlock::prepare)
+/// and sealed into a [`Compartment`] by [`Airlock::seal`](crate::Airlock::seal).
+pub struct Chamber {
     tree: Tree,
     scratch: TempDir,
     scratch_path: PathBuf,
@@ -50,22 +50,12 @@ impl Tree {
     }
 }
 
-impl Confinement {
-    /// Puts a process at `lend`, or in a private directory when nothing is lent.
-    ///
-    /// A lent tree is created and canonicalised; the process runs with a
-    /// shell when the tree is at or beneath one of the `shell_roots` of
-    /// `options`. The scratch directory, which serves the process as its
-    /// `HOME` and `TMPDIR`, is removed once the process has exited.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the lent tree or the scratch cannot be created.
-    pub async fn of(lend: Option<&Path>, options: &Options) -> Result<Self> {
+impl Chamber {
+    pub(crate) async fn prepare(lend: Option<&Path>, options: &Options) -> Result<Self> {
         // `tempfile` has no async API; one `mkdir` under the temp root is
         // not worth a blocking thread
         let scratch = tempfile::Builder::new()
-            .prefix("omnia-confine-")
+            .prefix("omnia-airlock-")
             .tempdir()
             .context("creating a scratch directory")?;
         let scratch_path = tokio::fs::canonicalize(scratch.path())
@@ -125,9 +115,9 @@ impl Confinement {
     }
 }
 
-impl fmt::Debug for Confinement {
+impl fmt::Debug for Chamber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Confinement")
+        f.debug_struct("Chamber")
             .field("tree", &self.tree.path())
             .field("lent", &self.lent())
             .field("shell", &self.shell)
@@ -152,43 +142,43 @@ pub async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
     false
 }
 
-/// The boundary around one process: where it runs, what it inherits, and
-/// what its ask was granted.
+/// The sealed compartment around one process: where it runs, what it
+/// inherits, and what its clearance granted.
 ///
-/// [`Boundary::command`] builds a command inside it, [`Boundary::spawn`]
-/// starts a supervised [`Child`] there, and [`Boundary::output`] runs a
-/// one-shot command inside it and captures what it wrote. The egress proxy
-/// the process's `HTTPS_PROXY` names is the boundary's own, serving until
-/// the process it was laid for has exited.
+/// [`Compartment::command`] builds a command inside it, [`Compartment::spawn`]
+/// starts a supervised [`Child`] there, and [`Compartment::output`] runs a
+/// one-shot command inside it and captures what it wrote. The valve the
+/// process's `HTTPS_PROXY` names is the compartment's own, serving until the
+/// process it was sealed for has exited.
 #[derive(Debug)]
-pub struct Boundary {
-    confinement: Confinement,
+pub struct Compartment {
+    chamber: Chamber,
     env: Vec<(OsString, OsString)>,
     path: OsString,
     wall: Wall,
     read: Vec<PathBuf>,
-    egress: Egress,
+    valve: Valve,
 }
 
-impl Boundary {
+impl Compartment {
     pub(crate) const fn new(
-        confinement: Confinement, env: Vec<(OsString, OsString)>, path: OsString, wall: Wall,
-        read: Vec<PathBuf>, egress: Egress,
+        chamber: Chamber, env: Vec<(OsString, OsString)>, path: OsString, wall: Wall,
+        read: Vec<PathBuf>, valve: Valve,
     ) -> Self {
         Self {
-            confinement,
+            chamber,
             env,
             path,
             wall,
             read,
-            egress,
+            valve,
         }
     }
 
     /// The directory the process works in.
     #[must_use]
     pub fn tree(&self) -> &Path {
-        self.confinement.tree()
+        self.chamber.tree()
     }
 
     /// The trees the process reads beside the system, its tree, and its
@@ -198,10 +188,10 @@ impl Boundary {
         &self.read
     }
 
-    /// The egress proxy the process's proxy variables name.
+    /// The valve the process's proxy variables name.
     #[must_use]
-    pub const fn egress(&self) -> &Egress {
-        &self.egress
+    pub const fn valve(&self) -> &Valve {
+        &self.valve
     }
 
     /// The working directory as text, for a wire that carries it as a string.
@@ -217,19 +207,19 @@ impl Boundary {
     /// Whether the tree was lent, rather than a private directory.
     #[must_use]
     pub const fn lent(&self) -> bool {
-        self.confinement.lent()
+        self.chamber.lent()
     }
 
     /// Whether the process runs with a shell: a lent tree under a shell root.
     #[must_use]
     pub const fn shell(&self) -> bool {
-        self.confinement.shell()
+        self.chamber.shell()
     }
 
     /// The process's own scratch directory: its `HOME` and `TMPDIR`.
     #[must_use]
     pub fn scratch(&self) -> &Path {
-        self.confinement.scratch()
+        self.chamber.scratch()
     }
 
     /// A command running `program` inside the boundary.
@@ -261,7 +251,7 @@ impl Boundary {
                 read: &self.read,
             })?,
         };
-        enter(&mut command, self.confinement.dir.as_raw_fd());
+        enter(&mut command, self.chamber.dir.as_raw_fd());
         #[cfg(target_os = "linux")]
         {
             let Wall::Landlock(linux) = &self.wall;
@@ -303,7 +293,7 @@ impl Boundary {
     pub fn spawn(self, command: Command, ready: Option<&'static str>) -> Result<Child> {
         let program = program_of(&command);
         let child = launch(command)?;
-        Child::supervise(child, program, (self.confinement.scratch, self.egress), ready)
+        Child::supervise(child, program, (self.chamber.scratch, self.valve), ready)
     }
 
     /// Runs `command` inside the boundary once and captures what it wrote.

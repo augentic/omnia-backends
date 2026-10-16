@@ -10,14 +10,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use omnia_confine::{Ask, Boundary, Confine, Options};
-use support::{boundary, connect, sh};
+use omnia_airlock::{Airlock, Clearance, Compartment, Options};
+use support::{compartment, connect, sh};
 use tracing_subscriber::layer::SubscriberExt as _;
 
 const BOUND: Duration = Duration::from_secs(5);
 const PLANTED: &str = "OMNIA_CONFINE_PLANTED";
 
-async fn environment(boundary: Boundary) -> BTreeMap<String, String> {
+async fn environment(boundary: Compartment) -> BTreeMap<String, String> {
     let command = sh(&boundary, "env");
     let output = boundary.output(command, BOUND).await.expect("env answers");
     String::from_utf8_lossy(&output.stdout)
@@ -27,7 +27,7 @@ async fn environment(boundary: Boundary) -> BTreeMap<String, String> {
         .collect()
 }
 
-async fn pwd(boundary: Boundary) -> String {
+async fn pwd(boundary: Compartment) -> String {
     let command = sh(&boundary, "pwd");
     let output = boundary.output(command, BOUND).await.expect("pwd answers");
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
@@ -44,7 +44,7 @@ fn environment_rebuilt() {
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
     runtime.block_on(async {
         let confine = connect(Options::default()).await;
-        let boundary = boundary(&confine, None).await;
+        let boundary = compartment(&confine, None).await;
         let scratch = boundary.scratch().to_string_lossy().into_owned();
         let seen = environment(boundary).await;
 
@@ -61,7 +61,7 @@ fn environment_rebuilt() {
             ..Options::default()
         })
         .await;
-        let passed = support::boundary(&confine, None).await;
+        let passed = support::compartment(&confine, None).await;
         let seen = environment(passed).await;
         assert_eq!(seen.get(PLANTED).map(String::as_str), Some("leaked"), "{seen:#?}");
     });
@@ -73,7 +73,7 @@ fn environment_rebuilt() {
 async fn cwd_is_the_lend() {
     let lend = tempfile::tempdir().expect("a lend");
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, Some(&lend.path().join("tree"))).await;
+    let boundary = compartment(&confine, Some(&lend.path().join("tree"))).await;
 
     assert!(boundary.lent());
     assert!(!boundary.shell());
@@ -90,7 +90,7 @@ async fn cwd_is_the_lend() {
 #[tokio::test]
 async fn cwd_is_private_without_a_lend() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
 
     assert!(!boundary.lent());
     assert!(!boundary.shell());
@@ -121,11 +121,11 @@ async fn shell_under_a_root() {
         confine.options().shell_roots
     );
 
-    assert!(boundary(&confine, Some(&a.join("x"))).await.shell(), "beneath the root");
-    assert!(boundary(&confine, Some(&a)).await.shell(), "at the root");
-    assert!(boundary(&confine, Some(&link.join("y"))).await.shell(), "through a symlink");
-    assert!(!boundary(&confine, Some(&roots.path().join("b"))).await.shell(), "beside it");
-    assert!(!boundary(&confine, None).await.shell(), "private");
+    assert!(compartment(&confine, Some(&a.join("x"))).await.shell(), "beneath the root");
+    assert!(compartment(&confine, Some(&a)).await.shell(), "at the root");
+    assert!(compartment(&confine, Some(&link.join("y"))).await.shell(), "through a symlink");
+    assert!(!compartment(&confine, Some(&roots.path().join("b"))).await.shell(), "beside it");
+    assert!(!compartment(&confine, None).await.shell(), "private");
 }
 
 // --- Programs ---
@@ -133,9 +133,9 @@ async fn shell_under_a_root() {
 #[tokio::test]
 async fn program_resolved_on_path() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
 
-    let error = boundary.command("omnia-confine-no-such-program").expect_err("not on PATH");
+    let error = boundary.command("omnia-airlock-no-such-program").expect_err("not on PATH");
     assert!(error.to_string().contains("is not on PATH"), "{error:#}");
 
     let mut command = boundary.command("sh").expect("sh is on PATH");
@@ -158,11 +158,11 @@ async fn path_in_the_ask() {
         .expect("the planted sh is executable");
     let path = format!("{}:{}", bin.display(), env::var("PATH").expect("the host has a PATH"));
     let confine = connect(Options::default()).await;
-    let ask = Ask {
+    let ask = Clearance {
         env: vec![("PATH".to_owned(), path.clone())],
-        ..Ask::default()
+        ..Clearance::default()
     };
-    let boundary = support::asking(&confine, Some(&tree), &ask).await;
+    let boundary = support::sealing(&confine, Some(&tree), &ask).await;
 
     let mut command = boundary.command("sh").expect("sh is on the host's PATH");
     command.args(["-c", "echo found && printf '%s' \"$PATH\""]);
@@ -187,7 +187,7 @@ async fn passthrough_refused() {
         ("GIT_INDEX_FILE", "selects a repository"),
         ("CURSOR_API_KEY", "refused"),
     ] {
-        let error = Confine::connect(Options {
+        let error = Airlock::connect(Options {
             passthrough: vec![name.to_owned()],
             refused: vec!["CURSOR_API_KEY".to_owned()],
             ..Options::default()
@@ -238,7 +238,7 @@ fn read_root_absent_skipped() {
         std::os::unix::fs::symlink(home.join("present"), home.join("link")).expect("a link");
         let confine = connect(Options::default()).await;
 
-        let boundary = support::asking(
+        let boundary = support::sealing(
             &confine,
             None,
             &support::reading(&["~/missing", "~/present", "~/link"]),
@@ -277,7 +277,7 @@ fn read_root_held_to_the_home() {
             ("~/tools/..".to_owned(), "outside the home"),
             ("~/away".to_owned(), "outside the home"),
         ] {
-            let error = support::refused(&confine, &support::reading(&[&root])).await;
+            let error = support::denied(&confine, &support::reading(&[&root])).await;
             assert!(error.contains(why), "`{root}`: {error}");
         }
     });
@@ -302,7 +302,7 @@ fn read_root_credential_store_refused() {
         let confine = connect(Options::default()).await;
 
         let ask = support::reading(&["~/tools", "~/tools/node", "~/link", "~/.config/nvim"]);
-        let boundary = support::asking(&confine, None, &ask).await;
+        let boundary = support::sealing(&confine, None, &ask).await;
         assert_eq!(
             boundary.read(),
             [home.join("tools"), home.join("tools/node"), home.join(".config/nvim")]
@@ -319,7 +319,7 @@ fn read_root_credential_store_refused() {
             "~/tools/../.ssh",
             "~/dotfiles",
         ] {
-            let error = support::refused(&confine, &support::reading(&[root])).await;
+            let error = support::denied(&confine, &support::reading(&[root])).await;
             assert!(error.contains("a credential store"), "`{root}`: {error}");
         }
     });
@@ -338,15 +338,15 @@ fn env_set_and_home_expanded() {
         })
         .await;
 
-        let ask = Ask {
+        let ask = Clearance {
             env: vec![
                 ("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned()),
                 ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
                 ("TILDE".to_owned(), "a~/b".to_owned()),
             ],
-            ..Ask::default()
+            ..Clearance::default()
         };
-        let seen = environment(support::asking(&confine, None, &ask).await).await;
+        let seen = environment(support::sealing(&confine, None, &ask).await).await;
         let rustup = home.join(".rustup").display().to_string();
         assert_eq!(seen.get("RUSTUP_HOME"), Some(&rustup), "{seen:#?}");
         assert_eq!(seen.get("CARGO_TERM_COLOR").map(String::as_str), Some("never"));
@@ -367,11 +367,11 @@ fn env_set_and_home_expanded() {
             ("A=B", "not an environment variable name"),
             ("", "not an environment variable name"),
         ] {
-            let ask = Ask {
+            let ask = Clearance {
                 env: vec![(name.to_owned(), "x".to_owned())],
-                ..Ask::default()
+                ..Clearance::default()
             };
-            let error = support::refused(&confine, &ask).await;
+            let error = support::denied(&confine, &ask).await;
             assert!(error.contains(name) && error.contains(why), "`{name}`: {error}");
         }
     });
@@ -386,18 +386,18 @@ fn home_required_for_tilde() {
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
     runtime.block_on(async {
         let confine = connect(Options::default()).await;
-        let error = support::refused(&confine, &support::reading(&["~/tools"])).await;
+        let error = support::denied(&confine, &support::reading(&["~/tools"])).await;
         assert!(error.contains("names the home, which the host has none of"), "{error}");
 
-        let ask = Ask {
+        let ask = Clearance {
             env: vec![("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned())],
-            ..Ask::default()
+            ..Clearance::default()
         };
-        let error = support::refused(&confine, &ask).await;
+        let error = support::denied(&confine, &ask).await;
         assert!(error.contains("names the home, which the host has none of"), "{error}");
 
         // nothing `~/` asked, nothing missed
-        let seen = environment(boundary(&confine, None).await).await;
+        let seen = environment(compartment(&confine, None).await).await;
         assert!(seen.contains_key("PATH"), "{seen:#?}");
     });
 }
@@ -406,14 +406,14 @@ fn home_required_for_tilde() {
 #[tokio::test]
 async fn proxy_per_boundary() {
     let confine = connect(Options::default()).await;
-    let first = boundary(&confine, None).await;
-    let second = boundary(&confine, None).await;
-    assert_ne!(first.egress().address(), second.egress().address());
+    let first = compartment(&confine, None).await;
+    let second = compartment(&confine, None).await;
+    assert_ne!(first.valve().address(), second.valve().address());
 
-    let proxy = format!("http://{}", first.egress().address());
+    let proxy = format!("http://{}", first.valve().address());
     let seen = environment(first).await;
     assert_eq!(seen.get("HTTPS_PROXY"), Some(&proxy), "{seen:#?}");
-    assert_ne!(seen.get("HTTPS_PROXY"), Some(&format!("http://{}", second.egress().address())));
+    assert_ne!(seen.get("HTTPS_PROXY"), Some(&format!("http://{}", second.valve().address())));
 }
 
 // --- Seatbelt (macOS) ---
@@ -423,7 +423,7 @@ mod seatbelt {
     use std::path::{Path, PathBuf};
     use std::process::Output;
 
-    use omnia_confine::{Boundary, Options};
+    use omnia_airlock::{Compartment, Options};
 
     use super::{BOUND, support};
 
@@ -443,7 +443,7 @@ mod seatbelt {
         (lend, tree)
     }
 
-    async fn run(boundary: Boundary, script: &str) -> Output {
+    async fn run(boundary: Compartment, script: &str) -> Output {
         let command = support::sh(&boundary, script);
         boundary.output(command, BOUND).await.expect("the shell answers")
     }
@@ -470,7 +470,7 @@ mod seatbelt {
         let confine = support::connect(Options::default()).await;
 
         let inside = run(
-            support::boundary(&confine, Some(&tree)).await,
+            support::compartment(&confine, Some(&tree)).await,
             "echo made > made.txt && cat made.txt && mkdir -p deep/er && rm -r deep",
         )
         .await;
@@ -478,12 +478,12 @@ mod seatbelt {
         assert_eq!(text(&inside.stdout), "made");
 
         let script = format!("echo x > '{}'", escape.display());
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
         refused(&output, "writing outside the tree");
         assert!(!escape.exists(), "the write landed");
 
         let script = format!("echo x > '{}'", outside.path().join("sibling").display());
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
         refused(&output, "creating beside the tree's parent");
     }
 
@@ -492,7 +492,7 @@ mod seatbelt {
         let (_lend, tree) = tree();
         let home = std::env::var("HOME").expect("the host has a home");
         let confine = support::connect(Options::default()).await;
-        let boundary = support::boundary(&confine, Some(&tree)).await;
+        let boundary = support::compartment(&confine, Some(&tree)).await;
         let scratch = std::fs::canonicalize(boundary.scratch()).expect("the scratch");
 
         let script = format!("cd \"$HOME\" && pwd && ls '{home}'");
@@ -510,7 +510,8 @@ mod seatbelt {
         let (_lend, tree) = tree();
         let confine = support::connect(Options::default()).await;
 
-        let output = run(support::boundary(&confine, Some(&tree)).await, "cat src/main.rs").await;
+        let output =
+            run(support::compartment(&confine, Some(&tree)).await, "cat src/main.rs").await;
         passed(&output, "reading a source file");
         assert_eq!(text(&output.stdout), "fn main() {}");
 
@@ -524,12 +525,12 @@ mod seatbelt {
             "mv .git elsewhere",
             "rm -r .emery",
         ] {
-            let output = run(support::boundary(&confine, Some(&tree)).await, attempt).await;
+            let output = run(support::compartment(&confine, Some(&tree)).await, attempt).await;
             refused(&output, attempt);
         }
         // `rm -f` swallows the refusal; what it removed is the check
         let output =
-            run(support::boundary(&confine, Some(&tree)).await, "rm -rf .git .emery").await;
+            run(support::compartment(&confine, Some(&tree)).await, "rm -rf .git .emery").await;
         passed(&output, "rm -rf reports nothing");
         assert_eq!(
             std::fs::read_to_string(tree.join(".git/HEAD")).expect("HEAD stays"),
@@ -567,14 +568,14 @@ mod seatbelt {
         std::fs::write(copy.join("note.txt"), "a linked copy\n").expect("a file in the copy");
 
         let confine = support::connect(Options::default()).await;
-        let output = run(support::boundary(&confine, Some(&copy)).await, "git --version").await;
+        let output = run(support::compartment(&confine, Some(&copy)).await, "git --version").await;
         passed(&output, "git itself runs inside");
 
-        let output = run(support::boundary(&confine, Some(&copy)).await, "git status").await;
+        let output = run(support::compartment(&confine, Some(&copy)).await, "git status").await;
         refused(&output, "git status in the linked copy");
         assert!(text(&output.stderr).contains("not a git repository"), "{}", text(&output.stderr));
 
-        let output = run(support::boundary(&confine, Some(&copy)).await, "cat note.txt").await;
+        let output = run(support::compartment(&confine, Some(&copy)).await, "cat note.txt").await;
         passed(&output, "the copy's own files");
     }
 
@@ -592,7 +593,7 @@ mod seatbelt {
         passed(&probe, "the sysctl answers outside the boundary");
 
         let script = format!("ps -o command= -p {host}");
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
         assert!(
             !output.status.success() || text(&output.stdout).is_empty(),
             "the host process is visible to ps: {}",
@@ -600,7 +601,7 @@ mod seatbelt {
         );
 
         let script = format!("./probe procargs {host}");
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
         refused(&output, "the host process's arguments");
     }
 
@@ -609,7 +610,8 @@ mod seatbelt {
         let (_lend, tree) = tree();
         support::probe(&tree);
         let confine = support::connect(Options::default()).await;
-        let output = run(support::boundary(&confine, Some(&tree)).await, "./probe loopback").await;
+        let output =
+            run(support::compartment(&confine, Some(&tree)).await, "./probe loopback").await;
         passed(&output, "a server on port 0 over loopback");
         assert!(text(&output.stdout).parse::<u16>().is_ok(), "{}", text(&output.stdout));
     }
@@ -630,19 +632,19 @@ mod seatbelt {
             let ask = support::reading(&["~/shared"]);
 
             let script = format!("cat '{}'", shared.join("note.txt").display());
-            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
             passed(&output, "reading a read root");
             assert_eq!(text(&output.stdout), "shared");
 
-            let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+            let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
             refused(&output, "reading a root another boundary asked");
 
             let script = format!("echo x > '{}'", shared.join("written").display());
-            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
             refused(&output, "writing a read root");
 
             let script = format!("cat '{}'", private.join("secret.txt").display());
-            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
             refused(&output, "reading beside a read root");
         });
     }
@@ -655,7 +657,7 @@ mod landlock {
     use std::path::PathBuf;
     use std::process::Output;
 
-    use omnia_confine::{Boundary, Options};
+    use omnia_airlock::{Compartment, Options};
 
     use super::{BOUND, support};
 
@@ -669,7 +671,7 @@ mod landlock {
         (lend, tree)
     }
 
-    async fn run(boundary: Boundary, script: &str) -> Output {
+    async fn run(boundary: Compartment, script: &str) -> Output {
         let command = support::sh(&boundary, script);
         boundary.output(command, BOUND).await.expect("the shell answers")
     }
@@ -716,7 +718,7 @@ mod landlock {
             "ioctl tioclinux",
         ] {
             let script = format!("./probe syscall {row}");
-            let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+            let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
             refused(&output, row, "EPERM");
         }
     }
@@ -731,7 +733,7 @@ mod landlock {
             "socket netlink-route raw",
         ] {
             let script = format!("./probe syscall {row}");
-            let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+            let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
             passed(&output, row);
         }
     }
@@ -747,11 +749,11 @@ mod landlock {
         refused(&control, "clone3 with too small a block outside", "EINVAL");
 
         let output =
-            run(support::boundary(&confine, Some(&tree)).await, "./probe syscall clone3").await;
+            run(support::compartment(&confine, Some(&tree)).await, "./probe syscall clone3").await;
         refused(&output, "clone3", "ENOSYS");
 
         let output =
-            run(support::boundary(&confine, Some(&tree)).await, "./probe syscall thread").await;
+            run(support::compartment(&confine, Some(&tree)).await, "./probe syscall thread").await;
         passed(&output, "a thread inside");
         assert_eq!(text(&output.stdout), "thread joined with 2");
     }
@@ -764,7 +766,7 @@ mod landlock {
         let confine = support::connect(Options::default()).await;
 
         let inside = run(
-            support::boundary(&confine, Some(&tree)).await,
+            support::compartment(&confine, Some(&tree)).await,
             "echo made > made.txt && cat made.txt && mkdir -p deep/er && rm -r deep",
         )
         .await;
@@ -772,7 +774,7 @@ mod landlock {
         assert_eq!(text(&inside.stdout), "made");
 
         let script = format!("echo x > '{}'", escape.display());
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
         refused(&output, "writing outside the tree", "Permission denied");
         assert!(!escape.exists(), "the write landed");
     }
@@ -782,7 +784,7 @@ mod landlock {
         let (_lend, tree) = tree();
         let home = std::env::var("HOME").expect("the host has a home");
         let confine = support::connect(Options::default()).await;
-        let boundary = support::boundary(&confine, Some(&tree)).await;
+        let boundary = support::compartment(&confine, Some(&tree)).await;
         let scratch = boundary.scratch().to_path_buf();
 
         let script = format!("cd \"$HOME\" && pwd && ls '{home}'");
@@ -805,24 +807,24 @@ mod landlock {
             let ask = support::reading(&["~/shared"]);
 
             let script = format!("cat '{}'", shared.join("note.txt").display());
-            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
             passed(&output, "reading a read root");
             assert_eq!(text(&output.stdout), "shared");
 
-            let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+            let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
             refused(&output, "reading a root another boundary asked", "Permission denied");
 
             let script = format!("echo x > '{}'", shared.join("written").display());
-            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
             refused(&output, "writing a read root", "Permission denied");
 
             let script = format!("cat '{}'", home.join("secret.txt").display());
-            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
             refused(&output, "reading beside a read root", "Permission denied");
 
             // a rename out of the root is a removal there, which read does not grant
             let script = format!("mv '{}' ./taken.txt", shared.join("note.txt").display());
-            let output = run(support::asking(&confine, Some(&tree), &ask).await, &script).await;
+            let output = run(support::sealing(&confine, Some(&tree), &ask).await, &script).await;
             assert!(!output.status.success(), "the file was moved out: {}", text(&output.stdout));
             assert!(shared.join("note.txt").exists(), "the read root kept its file");
         });
@@ -842,7 +844,7 @@ mod landlock {
         refused(&after, "the host's environment after connecting", "Permission denied");
 
         let script = format!("./probe environ {host}");
-        let output = run(support::boundary(&confine, Some(&tree)).await, &script).await;
+        let output = run(support::compartment(&confine, Some(&tree)).await, &script).await;
         refused(&output, "the host's environment inside", "Permission denied");
     }
 
@@ -850,7 +852,8 @@ mod landlock {
     async fn loopback_server_answers() {
         let (_lend, tree) = tree();
         let confine = support::connect(Options::default()).await;
-        let output = run(support::boundary(&confine, Some(&tree)).await, "./probe loopback").await;
+        let output =
+            run(support::compartment(&confine, Some(&tree)).await, "./probe loopback").await;
         passed(&output, "a server on port 0 over loopback");
         assert!(text(&output.stdout).parse::<u16>().is_ok(), "{}", text(&output.stdout));
     }

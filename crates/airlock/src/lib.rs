@@ -1,12 +1,12 @@
 #![doc = include_str!("../README.md")]
 
+mod chamber;
 mod child;
-mod confinement;
-pub mod egress;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod seatbelt;
+pub mod valve;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{self, Path, PathBuf};
@@ -16,15 +16,15 @@ use std::{fmt, io};
 
 use anyhow::{Context as _, Result, bail};
 
+pub use crate::chamber::{Chamber, Compartment};
 pub use crate::child::{Child, Exit};
-pub use crate::confinement::{Boundary, Confinement};
-use crate::egress::Egress;
+use crate::valve::Valve;
 
 /// What every confined process may reach, as plain data.
 ///
 /// A backend fills it from its own configuration; nothing here names an
 /// environment variable of the crate's own. What one process asks beyond
-/// it is its [`Ask`].
+/// it is its [`Clearance`].
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     /// Trees a lend at or beneath which runs with a shell.
@@ -35,51 +35,52 @@ pub struct Options {
     pub refused: Vec<String>,
 }
 
-/// What one process asks of the host beyond the boundary's own.
+/// What one process may reach beyond the boundary's defaults.
 ///
-/// Laid with the process by [`Confine::lay`], which holds each entry to the
+/// Sealed with the process by [`Airlock::seal`], which holds each entry to the
 /// host before the process runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Ask {
+pub struct Clearance {
     /// Hosts the process may reach through its egress proxy.
     ///
     /// A name matches whole, `*.suffix` matches the suffix and every name
     /// beneath it, and an IP literal matches itself. Every address, resolved
-    /// or literal, is held to [`egress::Refusal`] before the tunnel opens,
+    /// or literal, is held to [`valve::Refusal`] before the tunnel opens,
     /// a loopback literal alone excepted.
     pub egress: Vec<String>,
     /// Trees the process may read beside the system's own, each spelled
     /// `~/<path>`: a directory beneath the operator's home, apart from the
-    /// credential stores [`Confine::lay`] refuses whatever the ask.
+    /// credential stores [`Airlock::seal`] denies whatever the clearance names.
     pub read: Vec<String>,
     /// Environment variables set for the process, a value's leading `~/`
     /// spelling the operator's home.
     pub env: Vec<(String, String)>,
 }
 
-/// An [`Ask`] the host refuses: an entry that breaks a rule of the lay.
+/// A [`Clearance`] the host denies: an entry that breaks a rule of the seal.
 ///
-/// [`Confine::lay`] fails with one of these, downcastable from its error,
-/// where the ask itself is at fault, and with a plain error where the host
-/// failed it.
+/// [`Airlock::seal`] fails with one of these, downcastable from its error,
+/// where the clearance itself is at fault, and with a plain error where the
+/// host failed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Refused(String);
+pub struct Denied(String);
 
-impl fmt::Display for Refused {
+impl fmt::Display for Denied {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl std::error::Error for Refused {}
+impl std::error::Error for Denied {}
 
-macro_rules! refuse {
+macro_rules! deny {
     ($($arg:tt)*) => {
-        return Err(anyhow::Error::new(Refused(format!($($arg)*))))
+        return Err(anyhow::Error::new(Denied(format!($($arg)*))))
     };
 }
 
-// The substrate as connected, which every boundary laid shares.
+// Kernel wall every laid boundary shares: Landlock and seccomp on Linux,
+// Seatbelt on macOS.
 #[derive(Debug, Clone)]
 pub(crate) enum Wall {
     #[cfg(target_os = "linux")]
@@ -93,25 +94,25 @@ impl Wall {
         cfg_select! {
             target_os = "linux" => Ok(Self::Landlock(Arc::new(linux::Linux::probe().await?))),
             target_os = "macos" => Ok(Self::Seatbelt(Arc::new(seatbelt::Seatbelt::probe().await?))),
-            _ => bail!("no confinement substrate runs on this platform"),
+            _ => bail!("no chamber substrate runs on this platform"),
         }
     }
 }
 
-/// The confinement a connected backend lays around every process it spawns.
+/// What a connected backend connects once and lays around every process it spawns.
 ///
 /// Connecting holds the [`Options`] to the host once: the roots are
 /// resolved, the `passthrough` is checked, the kernel substrate is probed,
 /// the operator's home is read, and the environment a process inherits is
-/// read. [`Confine::lay`] then holds each process's [`Ask`] to the host.
-pub struct Confine {
+/// read. [`Airlock::seal`] then holds each process's [`Clearance`] to the host.
+pub struct Airlock {
     options: Options,
     inherited: Vec<(OsString, OsString)>,
     wall: Wall,
     home: Option<PathBuf>,
 }
 
-impl Confine {
+impl Airlock {
     // The repository selection a shell exports, which would point every git
     // the model runs at the operator's own repository.
     const GIT_SELECTION: [&str; 4] =
@@ -164,7 +165,7 @@ impl Confine {
     ///
     /// `shell_roots` are made absolute against the current directory, so a
     /// lend is compared with them however they were spelled. The operator's
-    /// `HOME` is read here, canonical, as what an [`Ask`]'s `~/` spells.
+    /// `HOME` is read here, canonical, as what an [`Clearance`]'s `~/` spells.
     ///
     /// # Errors
     ///
@@ -232,35 +233,50 @@ impl Confine {
         &self.options
     }
 
-    /// Lays the boundary around one process, where `confinement` put it,
-    /// granting what `ask` names.
+    /// Puts a process at `lend`, or in a private directory when nothing is lent.
+    ///
+    /// A lent tree is created and canonicalised; the process runs with a
+    /// shell when the tree is at or beneath one of the connected
+    /// `shell_roots`. The scratch directory, which serves the process as its
+    /// `HOME` and `TMPDIR`, is removed once the process has exited. The
+    /// [`Chamber`] is sealed into a [`Compartment`] by [`Airlock::seal`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lent tree or the scratch cannot be created.
+    pub async fn prepare(&self, lend: Option<&Path>) -> Result<Chamber> {
+        Chamber::prepare(lend, &self.options).await
+    }
+
+    /// Seals a compartment around one process, where `chamber` put it,
+    /// granting what `clearance` names.
     ///
     /// The process's environment is what connecting inherited, its `HOME`
-    /// and `TMPDIR` the confinement's scratch, its proxy variables an egress
-    /// proxy bound for it alone and admitting the ask's `egress`, with the
-    /// host's own loopback excepted, and the ask's `env` over them. Each of
-    /// the ask's `read` roots is resolved against the operator's home; one
-    /// that does not exist is logged at WARN and granted nothing. A root
-    /// that overlaps a credential store of the home, at it, beneath it, or
-    /// above it, as spelled or as either resolves, is refused whatever the
-    /// ask: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.kube`,
+    /// and `TMPDIR` the chamber's scratch, its proxy variables an egress
+    /// proxy bound for it alone and admitting the clearance's `egress`, with
+    /// the host's own loopback excepted, and the clearance's `env` over them.
+    /// Each of the clearance's `read` roots is resolved against the operator's
+    /// home; one that does not exist is logged at WARN and granted nothing. A
+    /// root that overlaps a credential store of the home, at it, beneath it, or
+    /// above it, as spelled or as either resolves, is denied whatever the
+    /// clearance: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.kube`,
     /// `~/.docker`, `~/.config/gh`, `~/.config/gcloud`, `~/.password-store`,
     /// and `~/Library/Keychains`.
     ///
     /// # Errors
     ///
-    /// Returns a [`Refused`] when a `read` root is not spelled `~/<path>`,
+    /// Returns a [`Denied`] when a `read` root is not spelled `~/<path>`,
     /// overlaps a credential store, resolves outside the home or to a
     /// file, or names a home the host has none of, or when an `env` name is
     /// not a variable name or is one the
-    /// boundary holds (its own, a refused one, the dynamic loader's, a
+    /// compartment holds (its own, a refused one, the dynamic loader's, a
     /// `GIT_DIR` sibling, or a `passthrough` of the host's); and a plain
     /// error when a root cannot be read or the proxy cannot be bound.
-    pub async fn lay(&self, confinement: Confinement, ask: &Ask) -> Result<Boundary> {
-        let read = self.roots(&ask.read).await?;
-        let egress = Egress::bind(&ask.egress).await?;
-        let env = self.environment(&confinement, &egress, &ask.env)?;
-        Ok(Boundary::new(confinement, env, self.path(), self.wall.clone(), read, egress))
+    pub async fn seal(&self, chamber: Chamber, clearance: &Clearance) -> Result<Compartment> {
+        let read = self.roots(&clearance.read).await?;
+        let valve = Valve::bind(&clearance.egress).await?;
+        let env = self.environment(&chamber, &valve, &clearance.env)?;
+        Ok(Compartment::new(chamber, env, self.path(), self.wall.clone(), read, valve))
     }
 
     // The host's `PATH` as connecting read it: what a bare program the
@@ -277,12 +293,12 @@ impl Confine {
         let mut roots = Vec::new();
         for entry in read {
             let Some(rest) = entry.strip_prefix("~/").filter(|rest| !rest.is_empty()) else {
-                refuse!(
+                deny!(
                     "read root `{entry}` must be a directory beneath the home, spelled `~/<path>`"
                 );
             };
             if Self::REFUSED_ROOTS.iter().any(|store| overlaps(Path::new(rest), Path::new(store))) {
-                refuse!("read root `{entry}` is a credential store");
+                deny!("read root `{entry}` is a credential store");
             }
             let home = self.home(entry)?;
             let asked = home.join(rest);
@@ -298,16 +314,16 @@ impl Confine {
                 }
             };
             if root == home || !root.starts_with(home) {
-                refuse!("read root `{entry}` resolves to {}, outside the home", root.display());
+                deny!("read root `{entry}` resolves to {}, outside the home", root.display());
             }
             if Self::overlaps_store(home, &root).await {
-                refuse!("read root `{entry}` resolves to {}, a credential store", root.display());
+                deny!("read root `{entry}` resolves to {}, a credential store", root.display());
             }
             let metadata = tokio::fs::metadata(&root)
                 .await
                 .with_context(|| format!("reading read root {}", root.display()))?;
             if !metadata.is_dir() {
-                refuse!("read root `{entry}` is not a directory");
+                deny!("read root `{entry}` is not a directory");
             }
             if !roots.contains(&root) {
                 roots.push(root);
@@ -335,10 +351,10 @@ impl Confine {
     }
 
     fn environment(
-        &self, confinement: &Confinement, egress: &Egress, asked: &[(String, String)],
+        &self, chamber: &Chamber, bound: &Valve, asked: &[(String, String)],
     ) -> Result<Vec<(OsString, OsString)>> {
-        let scratch = confinement.scratch().as_os_str().to_owned();
-        let proxy = OsString::from(format!("http://{}", egress.address()));
+        let scratch = chamber.scratch().as_os_str().to_owned();
+        let proxy = OsString::from(format!("http://{}", bound.address()));
         let mut env = self.inherited.clone();
         env.extend(Self::OWN.iter().map(|&name| {
             let value = match name {
@@ -354,13 +370,13 @@ impl Confine {
         // read of the host
         for (name, value) in asked {
             if !is_name(name) {
-                refuse!("`{name}` is not an environment variable name");
+                deny!("`{name}` is not an environment variable name");
             }
             if let Err(why) = Self::settable(name, &self.options.refused) {
-                refuse!("env {why}");
+                deny!("env {why}");
             }
             if self.options.passthrough.iter().any(|passed| passed == name) {
-                refuse!("env `{name}` is the host's to pass through");
+                deny!("env `{name}` is the host's to pass through");
             }
             let value = match value.strip_prefix("~/") {
                 Some(rest) => self.home(value)?.join(rest).into_os_string(),
@@ -375,16 +391,16 @@ impl Confine {
     fn home(&self, spelled: &str) -> Result<&Path> {
         match self.home.as_deref() {
             Some(home) => Ok(home),
-            None => refuse!("`{spelled}` names the home, which the host has none of"),
+            None => deny!("`{spelled}` names the home, which the host has none of"),
         }
     }
 }
 
-impl fmt::Debug for Confine {
+impl fmt::Debug for Airlock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inherited: Vec<&OsStr> =
             self.inherited.iter().map(|(name, _)| name.as_os_str()).collect();
-        f.debug_struct("Confine")
+        f.debug_struct("Airlock")
             .field("options", &self.options)
             .field("inherited", &inherited)
             .field("wall", &self.wall)

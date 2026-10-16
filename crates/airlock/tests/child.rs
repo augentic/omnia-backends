@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use omnia_confine::{Exit, Options};
-use support::{alive, await_gone, boundary, connect, pid_of, sh, spawn_sh};
+use omnia_airlock::{Exit, Options};
+use support::{alive, await_gone, compartment, connect, pid_of, sh, spawn_sh};
 use tokio::time::Instant;
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -37,7 +37,7 @@ fn terminate(pid: u32) {
 #[tokio::test]
 async fn grandchild_swept_on_exit() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let mut child = spawn_sh(boundary, "sleep 600 & echo \"ready $!\" >&2; exit 3", Some(READY));
 
     let grandchild = pid_of(&child.ready().await.expect("the ready line names the fork"));
@@ -53,7 +53,7 @@ async fn grandchild_swept_on_exit() {
 #[tokio::test]
 async fn grandchild_swept_on_drop() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let mut child = spawn_sh(boundary, "sleep 600 & echo \"ready $!\" >&2; wait", Some(READY));
 
     let grandchild = pid_of(&child.ready().await.expect("the ready line names the fork"));
@@ -72,7 +72,7 @@ async fn grandchild_swept_on_drop() {
 #[tokio::test]
 async fn stop_answered() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let script = "trap 'exit 0' TERM; echo \"ready $$\" >&2; while :; do sleep 1; done";
     let mut child = spawn_sh(boundary, script, Some(READY));
 
@@ -90,7 +90,7 @@ async fn stop_answered() {
 #[tokio::test]
 async fn stop_unanswered() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let mut child = spawn_sh(boundary, "echo \"ready $$\" >&2; exec sleep 600", Some(READY));
     child.ready().await.expect("the ready line");
 
@@ -113,7 +113,7 @@ async fn stop_unanswered() {
 #[tokio::test]
 async fn fail_on_exit_sees_the_exit() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let child = spawn_sh(boundary, "exit 7", None);
 
     let exit = child
@@ -127,7 +127,7 @@ async fn fail_on_exit_sees_the_exit() {
 #[tokio::test]
 async fn fail_on_exit_outruns_a_failure() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let child = spawn_sh(boundary, "sleep 0.1; exit 7", None);
 
     let exit = child
@@ -140,7 +140,7 @@ async fn fail_on_exit_outruns_a_failure() {
 #[tokio::test]
 async fn fail_on_exit_keeps_a_failure() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let child = spawn_sh(boundary, "exec sleep 600", None);
 
     let outcome = child
@@ -154,7 +154,7 @@ async fn fail_on_exit_keeps_a_failure() {
 #[tokio::test]
 async fn fail_on_exit_passes_a_value() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let child = spawn_sh(boundary, "exec sleep 600", None);
 
     let outcome = child.fail_on_exit(async { Ok::<_, ()>(5) }).await.expect("running");
@@ -169,14 +169,14 @@ async fn fail_on_exit_passes_a_value() {
 #[tokio::test]
 async fn tty_opens_nothing() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     // in a subshell, since dash exits on a special builtin's redirection failing
     let command =
         sh(&boundary, "if ( : </dev/tty ) 2>/dev/null; then echo open; else echo none; fi");
     let output = boundary.output(command, BOUND).await.expect("sh answers");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "none", "/dev/tty opened");
 
-    let boundary = support::boundary(&confine, None).await;
+    let boundary = support::compartment(&confine, None).await;
     let child = spawn_sh(boundary, "exec sleep 600", None);
     let ps = std::process::Command::new("ps")
         .args(["-o", "tty=", "-p", &child.pid().to_string()])
@@ -191,7 +191,7 @@ async fn tty_opens_nothing() {
 #[tokio::test]
 async fn output_captured() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let command = sh(&boundary, "echo out; echo err >&2; exit 4");
     let output = boundary.output(command, BOUND).await.expect("sh answers");
 
@@ -204,7 +204,7 @@ async fn output_captured() {
 async fn output_killed_past_the_bound() {
     let lend = tempfile::tempdir().expect("a lend");
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, Some(lend.path())).await;
+    let boundary = compartment(&confine, Some(lend.path())).await;
     let command = sh(&boundary, "sleep 600 & echo $! > pid; wait");
     let error = boundary
         .output(command, Duration::from_millis(500))
@@ -224,7 +224,7 @@ async fn output_killed_past_the_bound() {
 #[tokio::test]
 async fn ready_behind_binary_output() {
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let script = "printf '\\377\\376 binary\\n' >&2; printf '\\377\\376 binary\\n'; \
                   echo 'ready token' >&2; echo after; exit 0";
     let mut child = spawn_sh(boundary, script, Some(READY));
@@ -274,7 +274,7 @@ async fn crash_logged_with_tail() {
         .expect("this test owns the process's subscriber");
 
     let confine = connect(Options::default()).await;
-    let boundary = boundary(&confine, None).await;
+    let boundary = compartment(&confine, None).await;
     let script = "echo 'ready secret-token' >&2; echo 'line one' >&2; echo 'line two' >&2; exit 2";
     let mut child = spawn_sh(boundary, script, Some(READY));
     assert_eq!(child.ready().await.as_deref(), Some("secret-token"));

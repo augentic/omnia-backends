@@ -5,20 +5,20 @@ mod support;
 
 use std::net::{IpAddr, SocketAddr};
 
-use omnia_confine::egress::{Refusal, own_addresses};
-use omnia_confine::{Ask, Boundary, Options};
+use omnia_airlock::valve::{Refusal, own_addresses};
+use omnia_airlock::{Clearance, Compartment, Options};
 use support::connect;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
 // A boundary around a private directory whose proxy admits `hosts`.
-async fn proxy(hosts: &[&str]) -> Boundary {
+async fn proxy(hosts: &[&str]) -> Compartment {
     let confine = connect(Options::default()).await;
-    let ask = Ask {
+    let ask = Clearance {
         egress: hosts.iter().map(ToString::to_string).collect(),
-        ..Ask::default()
+        ..Clearance::default()
     };
-    support::asking(&confine, None, &ask).await
+    support::sealing(&confine, None, &ask).await
 }
 
 // One request to the proxy: the status line's code, the body, and the
@@ -120,12 +120,12 @@ fn own_addresses_refused() {
 #[tokio::test]
 async fn unlisted_host_refused() {
     let boundary = proxy(&["127.0.0.1", "registry.example.test"]).await;
-    let (status, body, _) = connect_to(boundary.egress().address(), "example.com:443").await;
+    let (status, body, _) = connect_to(boundary.valve().address(), "example.com:443").await;
     assert_eq!(status, 403, "{body}");
     assert!(body.contains("not on the allowlist"), "{body}");
 
     // a listed name is admitted whether or not it resolves: an unreachable one is a 502
-    let (status, _, _) = connect_to(boundary.egress().address(), "registry.example.test:443").await;
+    let (status, _, _) = connect_to(boundary.valve().address(), "registry.example.test:443").await;
     assert_eq!(status, 502);
 }
 
@@ -133,11 +133,11 @@ async fn unlisted_host_refused() {
 async fn suffix_matches_beneath() {
     let boundary = proxy(&["*.example.test"]).await;
     for target in ["example.test:443", "a.example.test:443", "b.a.example.test:443"] {
-        let (status, body, _) = connect_to(boundary.egress().address(), target).await;
+        let (status, body, _) = connect_to(boundary.valve().address(), target).await;
         assert_eq!(status, 502, "{target} is admitted: {body}");
     }
     for target in ["notexample.test:443", "example.test.evil:443", "test:443"] {
-        let (status, body, _) = connect_to(boundary.egress().address(), target).await;
+        let (status, body, _) = connect_to(boundary.valve().address(), target).await;
         assert_eq!(status, 403, "{target} is refused: {body}");
     }
 }
@@ -147,7 +147,7 @@ async fn listed_name_resolving_to_loopback_refused() {
     let server = echo_server().await;
     let boundary = proxy(&["localhost"]).await;
     let (status, body, _) =
-        connect_to(boundary.egress().address(), &format!("localhost:{}", server.port())).await;
+        connect_to(boundary.valve().address(), &format!("localhost:{}", server.port())).await;
     assert_eq!(status, 403, "{body}");
     assert!(body.contains("loopback"), "{body}");
 }
@@ -157,7 +157,7 @@ async fn tunnel_to_loopback_literal() {
     let server = echo_server().await;
     let boundary = proxy(&["127.0.0.1"]).await;
     let (status, _, mut tunnel) =
-        connect_to(boundary.egress().address(), &format!("127.0.0.1:{}", server.port())).await;
+        connect_to(boundary.valve().address(), &format!("127.0.0.1:{}", server.port())).await;
     assert_eq!(status, 200);
 
     tunnel.write_all(b"ping").await.expect("bytes into the tunnel");
@@ -189,7 +189,7 @@ async fn listed_literal_vetted() {
             IpAddr::V4(_) => format!("{address}:80"),
             IpAddr::V6(_) => format!("[{address}]:80"),
         };
-        let (status, body, _) = connect_to(boundary.egress().address(), &target).await;
+        let (status, body, _) = connect_to(boundary.valve().address(), &target).await;
         assert_eq!(status, 403, "{target}: {body}");
         assert!(body.contains(class), "{target}: {body}");
     }
@@ -199,21 +199,21 @@ async fn listed_literal_vetted() {
 async fn plain_get_refused() {
     let boundary = proxy(&["127.0.0.1", "example.com"]).await;
     let (status, body, _) = request(
-        boundary.egress().address(),
+        boundary.valve().address(),
         "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
     )
     .await;
     assert_eq!(status, 405, "{body}");
 
     let (status, body, _) =
-        request(boundary.egress().address(), "CONNECT example.com HTTP/1.1\r\n\r\n").await;
+        request(boundary.valve().address(), "CONNECT example.com HTTP/1.1\r\n\r\n").await;
     assert_eq!(status, 400, "{body}");
 }
 
 #[tokio::test]
 async fn proxy_in_the_environment() {
     let boundary = proxy(&[]).await;
-    let proxy = format!("http://{}", boundary.egress().address());
+    let proxy = format!("http://{}", boundary.valve().address());
     let command = support::sh(&boundary, "env");
     let output = boundary.output(command, std::time::Duration::from_secs(5)).await.expect("env");
     let env = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -240,28 +240,28 @@ async fn egress_through_the_proxy_alone() {
     support::probe(&tree);
     let server = echo_server().await;
     let confine = connect(Options::default()).await;
-    let ask = Ask {
+    let ask = Clearance {
         egress: vec!["127.0.0.1".to_owned()],
-        ..Ask::default()
+        ..Clearance::default()
     };
     let bound = std::time::Duration::from_secs(20);
 
     let control = support::probe_outside(&tree, &["resolve", "localhost"]);
     assert!(control.status.success(), "the resolver answers outside");
 
-    let boundary = support::asking(&confine, Some(&tree), &ask).await;
+    let boundary = support::sealing(&confine, Some(&tree), &ask).await;
     let command = support::sh(&boundary, "./probe resolve example.com");
     let output = boundary.output(command, bound).await.expect("the probe answers");
     assert!(!output.status.success(), "a name resolved inside: {output:?}");
 
-    let boundary = support::asking(&confine, Some(&tree), &ask).await;
+    let boundary = support::sealing(&confine, Some(&tree), &ask).await;
     let script = "env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY \
                   -u all_proxy curl -sS --max-time 10 https://example.com";
     let command = support::sh(&boundary, script);
     let output = boundary.output(command, bound).await.expect("curl answers");
     assert!(!output.status.success(), "a direct connect reached out: {output:?}");
 
-    let boundary = support::asking(&confine, Some(&tree), &ask).await;
+    let boundary = support::sealing(&confine, Some(&tree), &ask).await;
     let command = support::sh(&boundary, &format!("./probe tunnel 127.0.0.1:{}", server.port()));
     let output = boundary.output(command, bound).await.expect("the probe answers");
     assert!(output.status.success(), "the tunnel: {}", String::from_utf8_lossy(&output.stderr));

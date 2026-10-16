@@ -60,7 +60,7 @@ hyper-util = { version = "0.1.21", default-features = false }
 jsonschema = { version = "0.58.6", default-features = false }
 landlock = "0.4.7"
 libc = "0.2"
-omnia-confine = { version = "0.31.0", path = "crates/confine" }
+omnia-airlock = { version = "0.31.0", path = "crates/airlock" }
 process-wrap = { version = "10.0.1", default-features = false }
 prost = "0.14.4"
 prost-types = "0.14.4"

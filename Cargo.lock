@@ -3700,6 +3700,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "omnia-airlock"
+version = "0.31.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "landlock",
+ "libc",
+ "process-wrap",
+ "seccompiler",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "omnia-azure-blob"
 version = "0.31.0"
 dependencies = [
@@ -3787,26 +3807,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnia-confine"
-version = "0.31.0"
-dependencies = [
- "anyhow",
- "bytes",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "landlock",
- "libc",
- "process-wrap",
- "seccompiler",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "omnia-core"
 version = "0.37.0"
 source = "git+https://github.com/augentic/omnia#50c06c07d7ae553fee9919b0ae9a84e192f00f9d"
@@ -3848,7 +3848,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "omnia",
- "omnia-confine",
+ "omnia-airlock",
  "omnia-test",
  "omnia-wasi-model",
  "prost 0.14.4",

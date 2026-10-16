@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result};
-use omnia_confine::Boundary;
+use omnia_airlock::Compartment;
 use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::Value;
 
@@ -39,17 +39,17 @@ pub struct AgentSpec {
 // What the agent may do in its working directory: nothing of a private one,
 // read a lent tree, and run a shell in a lent tree under a shell root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Access {
+enum Access {
     Private,
     Read,
     Shell,
 }
 
 impl Access {
-    pub const fn of(boundary: &Boundary) -> Self {
-        if boundary.shell() {
+    const fn of(compartment: &Compartment) -> Self {
+        if compartment.shell() {
             Self::Shell
-        } else if boundary.lent() {
+        } else if compartment.lent() {
             Self::Read
         } else {
             Self::Private
@@ -72,12 +72,14 @@ impl Access {
 
 impl Turn {
     pub fn prepare(
-        request: &Request, cwd: &str, access: Access, default_model: &str, api_key: &str,
+        request: &Request, compartment: &Compartment, default_model: &str, api_key: &str,
     ) -> Result<Self> {
         if request.generation.is_some() {
             tracing::debug!("request.generation is ignored (CreateAgent has no sampling controls)");
         }
 
+        let cwd = compartment.cwd()?;
+        let access = Access::of(compartment);
         let options = agent_options(request, cwd, access, default_model, api_key)?;
         let operation = AgentOperationOptions {
             cwd: cwd.to_owned(),

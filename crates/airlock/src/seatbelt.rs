@@ -245,7 +245,7 @@ fn canonical(path: &Path) -> Result<PathBuf> {
 
 // The profile's rendering for a tree no boundary row can lend: one directly
 // under the root, with nothing above it to list. What a process at a lent
-// tree sees is `tests/boundary.rs`.
+// tree sees is `tests/compartment.rs`.
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;

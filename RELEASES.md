@@ -132,13 +132,13 @@ Unreleased
   that lays a tree one file a tool call ran past 32 before its wall-clock
   cap; the cap on the run is `CURSOR_TIMEOUT_SECS`, and the call budget
   now sits beside it as a knob of the same backend.
-- `omnia-confine`, the crate that owns a host process in the model's
-  trust domain: `Confine::connect` holds the backend's `Options` to the
+- `omnia-airlock`, the crate that owns a host process in the model's
+  trust domain: `Airlock::connect` holds the backend's `Options` to the
   host once — `shell_roots`, `passthrough`, `refused` — reads the
   operator's `HOME` as what a `~/` spells, and probes the kernel
-  substrate, refusing to connect where none runs; `Confinement::of` puts
+  substrate, refusing to connect where none runs; `Airlock::prepare` puts
   one process at a lend, or in a private directory when nothing is lent;
-  `Confine::lay` wraps it in a `Boundary` under the process's own `Ask` —
+  `Airlock::seal` seals a `Compartment` under the process's own `Clearance`` —
   `egress`, the hosts its commands may reach; `read`, the roots beneath
   the home it may read, each spelled `~/<path>`, one the home lacks
   logged at WARN and granted nothing, and the stores the operator's
@@ -150,12 +150,12 @@ Unreleased
   what a process reads of the home and none is needed to; `env`, the
   variables set for it, a value's leading `~/` the home — binding the
   egress proxy for that boundary alone, and answering an ask that breaks
-  a rule of the lay (a root spelled otherwise, overlapping a credential
+  a rule of the seal (a root spelled otherwise, overlapping a credential
   store, resolving outside the home, or a file; a variable the boundary
   holds, one the dynamic loader or a runtime reads at startup, one the
-  host passes through, or no name at all) with the typed `Refused`, which
+  host passes through, or no name at all) with the typed `Denied`, which
   a backend tells from a host failure. The
-  `Boundary`'s `command` runs a program inside with an environment built
+  `Compartment`'s `command` runs a program inside with an environment built
   from nothing (`PATH`, `LANG`, `LC_*`, `TZ`, `TERM`, a private `HOME`
   and `TMPDIR`, the proxy variables, the `passthrough`, and the ask's
   `env`), the bare program resolved against the host's `PATH` rather
@@ -187,12 +187,12 @@ Unreleased
   of a `file:` dependency with the cache in the scratch `HOME` — and, in
   an ignored row, `npm install typescript` and `tsc --noEmit` through the
   proxy.
-- `omnia-cursor` runs every `cursor-sdk-bridge` under `omnia-confine`:
+- `omnia-cursor` runs every `cursor-sdk-bridge` under `omnia-airlock`:
   `ConnectOptions` gains `shell_roots` (`CURSOR_SHELL_ROOTS`), and what
   a worker reaches beyond its lend is the completion's own ask —
   `grants.worker` of `omnia:model@0.2.0`, the `egress` hosts, `~/` `read`
   roots, and `env` the guest spells per request — laid as the boundary's
-  `Ask`: a grant over a lend under no shell root, or one the lay refuses
+  `Clearance`: a grant over a lend under no shell root, or one the lay refuses
   (`CURSOR_API_KEY` or `CURSOR_BACKEND_URL` as an `env`, a root outside
   the home or overlapping a credential store), is `invalid-request`
   before anything is spawned, and no setting of the deployment widens or
@@ -218,7 +218,7 @@ Unreleased
   does, and no Cursor host is on the egress list any more. The relay is
   addressed as `[::1]` and never `localhost` or `127.0.0.1`, which the
   bridge reads as a cue to turn TLS verification off for itself and every
-  command it runs; `omnia-confine`'s `NO_PROXY` lists the IPv6 loopback
+  command it runs; `omnia-airlock`'s `NO_PROXY` lists the IPv6 loopback
   bracketed as well as bare, since Bun matches an entry against the host
   as the URL spells it. `tests/relay.rs` holds the relay to a fake
   backend, and `tests/live.rs` gains two ignored rows: a turn completed

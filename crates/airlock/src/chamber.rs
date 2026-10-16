@@ -2,26 +2,22 @@
 //! spawns there.
 
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs::File;
 use std::os::fd::{AsRawFd as _, RawFd};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::Output;
 use std::sync::Arc;
 use std::time::Duration;
 use std::{env, fmt, io};
 
-use anyhow::{Context as _, Result, anyhow};
-use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessSession};
+use anyhow::{Context as _, Result};
 use tempfile::TempDir;
-use tokio::io::AsyncReadExt as _;
+use tokio::fs;
 use tokio::process::Command;
-use tokio::time::timeout;
 
-use crate::child::Child;
-#[cfg(target_os = "macos")]
-use crate::seatbelt;
+use crate::child::{self, Child};
 use crate::valve::Valve;
 use crate::{Bulkhead, Options};
 
@@ -132,7 +128,7 @@ impl Compartment {
         }
         env::split_paths(&self.path)
             .map(|dir| dir.join(program))
-            .find(|candidate| executable(candidate))
+            .find(|path| executable(path))
             .with_context(|| format!("`{program}` is not on PATH"))
     }
 
@@ -149,9 +145,7 @@ impl Compartment {
     ///
     /// Returns an error when the process cannot be spawned.
     pub fn spawn(self, command: Command, ready: Option<&'static str>) -> Result<Child> {
-        let program = program_of(&command);
-        let child = launch(command)?;
-        Child::supervise(child, program, (self.chamber.scratch, self.valve), ready)
+        Child::spawn(command, (self.chamber.scratch, self.valve), ready)
     }
 
     /// Runs `command` inside the boundary once and captures what it wrote.
@@ -165,29 +159,7 @@ impl Compartment {
     /// - it has not exited within `bound`, in which case it is killed with
     ///   everything it forked
     pub async fn output(self, command: Command, bound: Duration) -> Result<Output> {
-        let program = program_of(&command);
-        let mut child = launch(command)?;
-        let mut stdout = child.stdout().take();
-        let mut stderr = child.stderr().take();
-
-        let collected = async {
-            let (status, stdout, stderr) =
-                tokio::try_join!(child.wait(), read(&mut stdout), read(&mut stderr))?;
-            io::Result::Ok(Output {
-                status,
-                stdout,
-                stderr,
-            })
-        };
-
-        match timeout(bound, collected).await {
-            Ok(output) => output.with_context(|| format!("running `{program}`")),
-            Err(_elapsed) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                Err(anyhow!("`{program}` did not exit within {bound:?}"))
-            }
-        }
+        child::output(command, bound).await
     }
 }
 
@@ -208,28 +180,39 @@ impl Chamber {
             .prefix("omnia-airlock-")
             .tempdir()
             .context("creating a scratch directory")?;
-        let scratch_path = tokio::fs::canonicalize(scratch.path())
+        let scratch_path = fs::canonicalize(scratch.path())
             .await
             .with_context(|| format!("canonicalizing {}", scratch.path().display()))?;
 
         let (tree, shell) = if let Some(path) = lend {
-            tokio::fs::create_dir_all(path)
+            // create or update the process's working directory
+            fs::create_dir_all(path)
                 .await
                 .with_context(|| format!("creating {}", path.display()))?;
-            let path = tokio::fs::canonicalize(path)
+            let path = fs::canonicalize(path)
                 .await
                 .with_context(|| format!("canonicalizing {}", path.display()))?;
-            let shell = beneath_any(&path, &options.shell_roots).await;
+
+            // is path beneath any of the shell roots?
+            let mut shell = false;
+            for root in &options.shell_roots {
+                let root = fs::canonicalize(root).await.unwrap_or_else(|_| root.clone());
+                if path.starts_with(root) {
+                    shell = true;
+                    break;
+                }
+            }
+
             (path, shell)
         } else {
+            // create process's working directory
             let path = scratch_path.join("cwd");
-            tokio::fs::create_dir(&path)
-                .await
-                .with_context(|| format!("creating {}", path.display()))?;
+            fs::create_dir(&path).await.with_context(|| format!("creating {}", path.display()))?;
             (path, false)
         };
 
         let dir = File::open(&tree).with_context(|| format!("opening {}", tree.display()))?;
+
         Ok(Self {
             tree,
             lent: lend.is_some(),
@@ -295,67 +278,6 @@ impl Place<'_> {
     }
 }
 
-// A session of its own: a kill reaches everything the process forks, and
-// `/dev/tty` opens nothing inside.
-fn launch(mut command: Command) -> Result<Box<dyn ChildWrapper>> {
-    let program = program_of(&command);
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let mut command = CommandWrap::from(command);
-    command.wrap(KillOnDrop);
-    command.wrap(ProcessSession);
-    command.spawn().with_context(|| format!("spawning `{program}`"))
-}
-
-fn program_of(command: &Command) -> String {
-    let command = command.as_std();
-    let program = launched(command).unwrap_or_else(|| command.get_program());
-    Path::new(program).file_name().unwrap_or(program).to_string_lossy().into_owned()
-}
-
-// The program a substrate's launcher runs in its place, after its `--`.
-cfg_select! {
-    target_os = "macos" => {
-        fn launched(command: &std::process::Command) -> Option<&OsStr> {
-            if command.get_program() == seatbelt::SANDBOX_EXEC {
-                let mut args = command.get_args();
-                args.find(|arg| *arg == "--")?;
-                return args.next();
-            }
-            None
-        }
-    }
-    _ => {
-        const fn launched(_command: &std::process::Command) -> Option<&OsStr> {
-            None
-        }
-    }
-}
-
 fn executable(path: &Path) -> bool {
     path.metadata().is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-}
-
-async fn read<R: tokio::io::AsyncRead + Unpin>(pipe: &mut Option<R>) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    if let Some(pipe) = pipe {
-        pipe.read_to_end(&mut bytes).await?;
-    }
-    Ok(bytes)
-}
-
-// A root is compared as spelled and as it resolves, since `path` is
-// canonical and a root may be a symlink away from it.
-async fn beneath_any(path: &Path, roots: &[PathBuf]) -> bool {
-    for root in roots {
-        if path.starts_with(root) {
-            return true;
-        }
-        if let Ok(root) = tokio::fs::canonicalize(root).await
-            && path.starts_with(&root)
-        {
-            return true;
-        }
-    }
-    false
 }

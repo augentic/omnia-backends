@@ -1,27 +1,32 @@
-//! One supervised process: watched to its exit, stopped on request, and
-//! killed with everything it forked.
+//! One process in a compartment: launched, watched to its exit, stopped on
+//! request, and killed with everything it forked.
 //!
 //! The process leads a session of its own, so one kill reaches everything
 //! it forked. Whatever it left in its session is swept as its exit is seen.
-//! Nothing of a child outlives it.
+//! Nothing of a child outlives it. A one-shot runs the same way, held to a
+//! bound and killed past it.
 
 use std::collections::VecDeque;
-use std::fmt;
+use std::ffi::OsStr;
+use std::path::Path;
 use std::pin::Pin;
-use std::process::ExitStatus;
+use std::process::{ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+use std::{fmt, io};
 
-use anyhow::{Context as _, Result, bail};
-use process_wrap::tokio::ChildWrapper;
+use anyhow::{Context as _, Result, anyhow, bail};
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessSession};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, BufReader};
-use tokio::process::{ChildStderr, ChildStdout};
+use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tracing::{Instrument as _, Span};
 
+#[cfg(target_os = "macos")]
+use crate::seatbelt;
 use crate::valve::Valve;
 
 const EXIT_GRACE: Duration = Duration::from_millis(250);
@@ -51,10 +56,11 @@ impl Child {
     // The tasks run under the caller's span, so what the process says and
     // how it exits are reported under the work that spawned it. `held` is
     // what the process needs for its life: its scratch and its proxy.
-    pub(crate) fn supervise(
-        mut child: Box<dyn ChildWrapper>, program: String, held: (TempDir, Valve),
-        ready: Option<&'static str>,
+    pub(crate) fn spawn(
+        command: Command, held: (TempDir, Valve), ready: Option<&'static str>,
     ) -> Result<Self> {
+        let program = program_of(&command);
+        let mut child = launch(command)?;
         let started_at = Instant::now();
 
         let pid = child.id().with_context(|| format!("no pid for spawned `{program}`"))?;
@@ -212,6 +218,33 @@ impl fmt::Display for Exit {
     }
 }
 
+// Past `bound` the process is killed with everything it forked.
+pub async fn output(command: Command, bound: Duration) -> Result<Output> {
+    let program = program_of(&command);
+    let mut child = launch(command)?;
+    let mut stdout = child.stdout().take();
+    let mut stderr = child.stderr().take();
+
+    let collected = async {
+        let (status, stdout, stderr) =
+            tokio::try_join!(child.wait(), read(&mut stdout), read(&mut stderr))?;
+        io::Result::Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    };
+
+    match timeout(bound, collected).await {
+        Ok(output) => output.with_context(|| format!("running `{program}`")),
+        Err(_elapsed) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            Err(anyhow!("`{program}` did not exit within {bound:?}"))
+        }
+    }
+}
+
 // Waits on the process, tears it down on request, and publishes its exit.
 struct Supervisor {
     child: Box<dyn ChildWrapper>,
@@ -326,6 +359,43 @@ impl fmt::Display for Tail {
     }
 }
 
+// A session of its own: a kill reaches everything the process forks, and
+// `/dev/tty` opens nothing inside.
+fn launch(mut command: Command) -> Result<Box<dyn ChildWrapper>> {
+    let program = program_of(&command);
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut command = CommandWrap::from(command);
+    command.wrap(KillOnDrop);
+    command.wrap(ProcessSession);
+    command.spawn().with_context(|| format!("spawning `{program}`"))
+}
+
+fn program_of(command: &Command) -> String {
+    let command = command.as_std();
+    let program = launched(command).unwrap_or_else(|| command.get_program());
+    Path::new(program).file_name().unwrap_or(program).to_string_lossy().into_owned()
+}
+
+// The program a substrate's launcher runs in its place, after its `--`.
+cfg_select! {
+    target_os = "macos" => {
+        fn launched(command: &std::process::Command) -> Option<&OsStr> {
+            if command.get_program() == seatbelt::SANDBOX_EXEC {
+                let mut args = command.get_args();
+                args.find(|arg| *arg == "--")?;
+                return args.next();
+            }
+            None
+        }
+    }
+    _ => {
+        const fn launched(_command: &std::process::Command) -> Option<&OsStr> {
+            None
+        }
+    }
+}
+
 // A closed channel means the supervisor is gone, and the process with it by
 // `KillOnDrop`. The exit is real even if its status never arrives.
 async fn wait_exit(exit: &mut watch::Receiver<Option<Exit>>, pid: u32) -> Exit {
@@ -399,6 +469,14 @@ async fn each_line(reader: impl AsyncRead + Unpin, mut each: impl FnMut(String))
         }
         each(String::from_utf8_lossy(&line).into_owned());
     }
+}
+
+async fn read<R: AsyncRead + Unpin>(pipe: &mut Option<R>) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    if let Some(pipe) = pipe {
+        pipe.read_to_end(&mut bytes).await?;
+    }
+    Ok(bytes)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

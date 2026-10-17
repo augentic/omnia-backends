@@ -326,7 +326,7 @@ impl RegistrySubscriber {
             PartitionerScheme::KafkaJs,
             Some(ConsumerOptions {
                 topics: vec![topic.clone()],
-                group_id: Some(group.clone()),
+                group_id: group.clone(),
             }),
             Some(registry_options),
         );
@@ -469,7 +469,7 @@ async fn at_least_once() -> Result<()> {
         PartitionerScheme::KafkaJs,
         Some(ConsumerOptions {
             topics: vec![topic.clone()],
-            group_id: Some(group.clone()),
+            group_id: group.clone(),
         }),
         None,
     ))

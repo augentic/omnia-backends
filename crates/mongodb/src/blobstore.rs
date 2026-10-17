@@ -21,25 +21,30 @@ struct Blob {
     created_at: u64,
 }
 
-fn open_container(client: &mongodb::Client, name: String) -> anyhow::Result<Arc<dyn Container>> {
-    let db = client.default_database().ok_or_else(|| anyhow!("No default database"))?;
-    let collection = db.collection::<Blob>(&name);
-    Ok(Arc::new(MongoDbContainer { name, collection }))
-}
-
 impl WasiBlobstoreCtx for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("creating container: {name}");
         let client = self.0.clone();
 
-        async move { open_container(&client, name) }.boxed()
+        async move {
+            let db = client.default_database().ok_or_else(|| anyhow!("No default database"))?;
+            db.create_collection(&name).await.context("creating container")?;
+            let collection = db.collection::<Blob>(&name);
+            Ok(Arc::new(MongoDbContainer { name, collection }) as Arc<dyn Container>)
+        }
+        .boxed()
     }
 
     fn get_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("getting container: {name}");
         let client = self.0.clone();
 
-        async move { open_container(&client, name) }.boxed()
+        async move {
+            let db = client.default_database().ok_or_else(|| anyhow!("No default database"))?;
+            let collection = db.collection::<Blob>(&name);
+            Ok(Arc::new(MongoDbContainer { name, collection }) as Arc<dyn Container>)
+        }
+        .boxed()
     }
 
     fn delete_container(&self, name: String) -> FutureResult<()> {

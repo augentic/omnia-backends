@@ -24,8 +24,6 @@ use crate::consume::{KafkaConsumer, KafkaContext, Shared};
 use crate::partitioner::Partitioner;
 use crate::registry::Registry;
 
-const DEFAULT_GROUP: &str = "omnia-kafka-consumer";
-
 // Apache Kafka's own producer default (`delivery.timeout.ms`): long enough
 // to ride out a leader election or a rolling broker restart. librdkafka's is
 // 5 minutes. A record's offset is held until its sends resolve, so this also
@@ -95,18 +93,13 @@ impl Backend for Client {
                     && consumer_options.topics.iter().all(|topic| !topic.trim().is_empty()),
                 "KAFKA_TOPICS must contain at least one non-empty topic"
             );
-            let group_id = consumer_options.group_id.as_deref().unwrap_or(DEFAULT_GROUP);
-            config.set("group.id", group_id);
-            // the tracker decides when a record is done; librdkafka commits
-            // the stored offsets on its own thread
+
+            config.set("group.id", consumer_options.group_id);
+            // the tracker stores resolved offsets for librdkafka to auto-commit
             config.set("enable.auto.offset.store", "false");
             config.set("enable.auto.commit", "true");
             config.set("auto.commit.interval.ms", options.commit_interval_ms.to_string());
-            // librdkafka queues a partition's fetch whole before the next
-            // partition's. At the 1 MiB default one partition's few repeated
-            // keys fill the backlog before any other partition is seen; at
-            // 64 KiB each contributes a short run and the keys interleave. A
-            // record larger than this is still fetched whole.
+            // 64 KiB so one partition's fetch cannot fill the backlog before the next
             config.set("max.partition.fetch.bytes", "65536");
 
             let consumer: KafkaConsumer = config
@@ -202,8 +195,8 @@ mod config {
         #[env(from = "KAFKA_TOPICS", with = split)]
         pub topics: Vec<String>,
         /// Consumer group ID.
-        #[env(from = "KAFKA_CONSUMER_GROUP")]
-        pub group_id: Option<String>,
+        #[env(from = "KAFKA_CONSUMER_GROUP", default = "wrt-kafka-consumer")]
+        pub group_id: String,
     }
 
     /// Confluent Schema Registry configuration.

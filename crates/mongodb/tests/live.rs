@@ -18,6 +18,7 @@ async fn write_read_delete() -> Result<()> {
 
     let container = format!("omnia-live-{}", std::process::id());
     let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
+    assert!(client.container_exists(container.clone()).await?, "container exists after create");
 
     let object = "greeting".to_owned();
     store.write_data(object.clone(), b"payload".to_vec().into()).await?;
@@ -26,6 +27,7 @@ async fn write_read_delete() -> Result<()> {
     assert!(store.has_object(object.clone()).await?, "object exists after write");
 
     store.delete_object(object).await?;
-    client.delete_container(container).await?;
+    client.delete_container(container.clone()).await?;
+    assert!(!client.container_exists(container).await?, "container gone after delete");
     Ok(())
 }

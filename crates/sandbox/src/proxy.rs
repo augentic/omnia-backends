@@ -148,7 +148,7 @@ impl fmt::Display for DeniedAddress {
 }
 
 // The addresses the host's own interfaces hold right now.
-#[expect(unsafe_code, reason = "`getifaddrs` has no safe wrapper among the crate's dependencies")]
+#[expect(unsafe_code, reason = "`getifaddrs` has no safe wrapper")]
 fn own_addresses() -> Result<Vec<IpAddr>> {
     let mut head = MaybeUninit::<*mut libc::ifaddrs>::uninit();
     // SAFETY: `getifaddrs` writes `head` as it succeeds, a list `freeifaddrs`
@@ -157,9 +157,11 @@ fn own_addresses() -> Result<Vec<IpAddr>> {
         if libc::getifaddrs(head.as_mut_ptr()) != 0 {
             return Err(std::io::Error::last_os_error()).context("enumerating the interfaces");
         }
+
         let head = head.assume_init();
         let mut addresses = Vec::new();
         let mut entry = head;
+
         while !entry.is_null() {
             let current = &*entry;
             if !current.ifa_addr.is_null() {
@@ -178,6 +180,7 @@ fn own_addresses() -> Result<Vec<IpAddr>> {
             }
             entry = current.ifa_next;
         }
+
         libc::freeifaddrs(head);
         Ok(addresses)
     }
@@ -189,27 +192,18 @@ struct Allowlist(Vec<Entry>);
 impl Allowlist {
     fn admits(&self, host: &str) -> Option<Admission> {
         let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
-        let literal = host.parse::<IpAddr>().ok();
-        self.0.iter().find_map(|entry| match (entry, literal) {
-            (Entry::Literal(listed), Some(asked)) if *listed == asked => {
-                Some(Admission::Literal(asked))
-            }
-            (Entry::Exact(name), None) if *name == host => Some(Admission::Name),
-            (Entry::Suffix(suffix), None)
-                if host == *suffix
-                    || host
-                        .strip_suffix(suffix.as_str())
-                        .is_some_and(|rest| rest.ends_with('.')) =>
-            {
-                Some(Admission::Name)
-            }
-            _ => None,
-        })
+        if let Ok(address) = host.parse::<IpAddr>() {
+            return self
+                .0
+                .contains(&Entry::Literal(address))
+                .then_some(Admission::Literal(address));
+        }
+        self.0.iter().any(|entry| entry.admits(&host)).then_some(Admission::Name)
     }
 }
 
 // One allowlist entry as the grant spelled it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Entry {
     // A host name, matched whole and without regard to case.
     Exact(String),
@@ -226,6 +220,17 @@ impl Entry {
             (Ok(address), _) => Self::Literal(address),
             (Err(_), Some(suffix)) => Self::Suffix(suffix.to_owned()),
             (Err(_), None) => Self::Exact(text),
+        }
+    }
+
+    fn admits(&self, host: &str) -> bool {
+        match self {
+            Self::Exact(name) => host == name,
+            Self::Suffix(suffix) => {
+                host == suffix
+                    || host.strip_suffix(suffix.as_str()).is_some_and(|rest| rest.ends_with('.'))
+            }
+            Self::Literal(_) => false,
         }
     }
 }

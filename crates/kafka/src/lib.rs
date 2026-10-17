@@ -69,7 +69,7 @@ impl Backend for Client {
             options.username.is_some() == options.password.is_some(),
             "KAFKA_USERNAME and KAFKA_PASSWORD must be set together"
         );
-        
+
         let mut config = ClientConfig::from(&options);
 
         let shared = Shared::new();

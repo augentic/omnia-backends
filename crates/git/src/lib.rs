@@ -13,18 +13,14 @@ use omnia::Backend;
 use omnia_wasi_vcs::Place;
 use tracing::instrument;
 
-/// The oldest git the backend runs over: `config --show-scope`, which the
-/// host-policy pins are read through, arrived in 2.26.
-pub const MIN_VERSION: (u32, u32) = (2, 26);
+// First git with `config --show-scope`, which host-policy pins read.
+const MIN_VERSION: (u32, u32) = (2, 26);
 
 /// Git backend for `omnia:vcs`: one `git` process per operation.
 #[derive(Clone)]
 pub struct Client {
-    binary: PathBuf,
-    // The gitdir of every working copy this client laid, by the copy's
-    // absolute path: a guest lent the copy can rewrite the `.git` file at
-    // its root, so the copy is addressed through the gitdir `add` recorded
-    // and that file is never read.
+    binary: String,
+    // Working-copy path to the recorded gitdir `add`. Guests can rewrite `.git` files.
     worktrees: Arc<Mutex<BTreeMap<PathBuf, PathBuf>>>,
 }
 
@@ -33,31 +29,15 @@ impl Backend for Client {
 
     #[instrument(name = "Git::connect")]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        Self::connect(options.binary).await
-    }
-}
-
-impl Client {
-    /// Connects over the git at `binary`, a name on `PATH` or a path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the binary's path is not UTF-8, when the
-    /// binary does not run or does not report a version, or when it is
-    /// older than [`MIN_VERSION`].
-    pub async fn connect(binary: impl Into<PathBuf>) -> Result<Self> {
-        let binary = binary.into();
-        ensure!(
-            binary.to_str().is_some(),
-            "git binary {} is not UTF-8, and a local transport names it on the command line",
-            binary.display()
-        );
         let client = Self {
-            binary,
+            binary: options.binary,
             worktrees: Arc::default(),
         };
+
+        // check git version
         let output = client.git(None, ["--version"], &[]).await?;
         ensure!(output.status.success(), "`git --version` failed: {}", output.stderr.trim());
+
         let reported = output.text();
         let (major, minor, patch) = version(&reported)
             .with_context(|| format!("unrecognised `git --version`: {}", reported.trim()))?;
@@ -67,11 +47,14 @@ impl Client {
             MIN_VERSION.0,
             MIN_VERSION.1
         );
+
         Ok(client)
     }
+}
 
+impl Client {
     // Record the gitdir a working copy at `at` was laid with.
-    pub(crate) fn register(&self, at: &Place, gitdir: PathBuf) {
+    fn register(&self, at: &Place, gitdir: PathBuf) {
         if let Some(worktree) = worktree_key(at) {
             self.worktrees().insert(worktree, gitdir);
         }
@@ -79,7 +62,7 @@ impl Client {
 
     // Drop a working copy's gitdir once the copy is gone, or once the place
     // is laid afresh as a repository of its own.
-    pub(crate) fn forget(&self, at: &Place) {
+    fn forget(&self, at: &Place) {
         if let Some(worktree) = worktree_key(at) {
             self.worktrees().remove(&worktree);
         }
@@ -87,7 +70,7 @@ impl Client {
 
     // The gitdir a working copy at `at` is addressed through, none for a
     // place this client did not lay.
-    pub(crate) fn gitdir(&self, at: &Place) -> Option<PathBuf> {
+    fn gitdir(&self, at: &Place) -> Option<PathBuf> {
         worktree_key(at).and_then(|worktree| self.worktrees().get(&worktree).cloned())
     }
 

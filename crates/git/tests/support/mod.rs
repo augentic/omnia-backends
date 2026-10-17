@@ -15,8 +15,17 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use omnia_git::Client;
+use omnia::Backend as _;
+use omnia_git::{Client, ConnectOptions};
 use tempfile::TempDir;
+
+/// Connects a [`Client`] over `binary`.
+pub async fn connect(binary: impl AsRef<Path>) -> anyhow::Result<Client> {
+    Client::connect_with(ConnectOptions {
+        binary: binary.as_ref().to_str().expect("scratch path is UTF-8").to_owned(),
+    })
+    .await
+}
 
 pub struct Hermetic {
     root: TempDir,
@@ -55,7 +64,7 @@ impl Hermetic {
     }
 
     pub async fn client(&self) -> Client {
-        Client::connect(self.binary()).await.expect("connecting over the hermetic git")
+        connect(self.binary()).await.expect("connecting over the hermetic git")
     }
 
     /// A setting in the scratch global configuration: the host's, as an operator set it.

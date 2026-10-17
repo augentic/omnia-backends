@@ -188,10 +188,9 @@ impl Client {
     // `git -c … <operation>` as one `--upload-pack` or `--receive-pack`
     // argument: the near side's `-c` pins reach no process the far side
     // starts, so its own ride the command. git splits the value with shell
-    // quoting for a local transport, so the binary — UTF-8, as `connect`
-    // held it — is single-quoted.
+    // quoting for a local transport, so the binary is single-quoted.
     fn pack_arg(&self, operation: &str) -> String {
-        let binary = shell_quote(&self.binary.to_string_lossy());
+        let binary = shell_quote(&self.binary);
         let mut pins = String::new();
         for pin in LOCAL_PACK_PINS {
             pins.push_str(" -c ");

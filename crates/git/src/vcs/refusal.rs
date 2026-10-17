@@ -1,5 +1,5 @@
 //! Reading what a failed `git` said into the class of `omnia:vcs` error it
-//! is, and the version `git --version` prints.
+//! is.
 
 // The class a failed process falls in; the operation names the subject.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,26 +72,11 @@ pub fn classify(stderr: &str) -> Class {
     }
 }
 
-// `git version 2.50.1 (Apple Git-155)` and `git version 2.47.0.windows.1`
-// both read as their first three numbers; a missing patch is zero.
-pub fn version(stdout: &str) -> Option<(u32, u32, u32)> {
-    let rest = stdout.trim().strip_prefix("git version ")?;
-    let token = rest.split_whitespace().next()?;
-    let mut parts = token.split('.').map(leading_number);
-    let major = parts.next().flatten()?;
-    let minor = parts.next().flatten()?;
-    let patch = parts.next().flatten().unwrap_or(0);
-    Some((major, minor, patch))
-}
-
-fn leading_number(part: &str) -> Option<u32> {
-    let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
-}
-
+// Classification is pure over text; the refusals suite drives each class
+// from a guest, over real repositories and remotes.
 #[cfg(test)]
 mod tests {
-    use super::{Class, classify, version};
+    use super::{Class, classify};
 
     #[test]
     fn classes() {
@@ -156,17 +141,5 @@ mod tests {
         let stderr = "fatal: 'nope' does not appear to be a git repository\n\
                       fatal: Could not read from remote repository.";
         assert_eq!(classify(stderr), Class::NotFound);
-    }
-
-    #[test]
-    fn versions() {
-        assert_eq!(version("git version 2.50.1 (Apple Git-155)\n"), Some((2, 50, 1)));
-        assert_eq!(version("git version 2.47.0.windows.1"), Some((2, 47, 0)));
-        assert_eq!(version("git version 2.4.0"), Some((2, 4, 0)));
-        assert_eq!(version("git version 2.5"), Some((2, 5, 0)));
-        assert_eq!(version("git version 2.39.5-rc1"), Some((2, 39, 5)));
-        assert_eq!(version("not git"), None);
-        assert_eq!(version("git version"), None);
-        assert_eq!(version("git version x.y"), None);
     }
 }

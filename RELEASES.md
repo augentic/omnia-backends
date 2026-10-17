@@ -11,7 +11,8 @@ Unreleased
   older than 2.26 is refused at connect), run in the directory the runtime
   opened for the guest's lent location — the child enters the open handle
   before it executes, so no operation walks a path again — with `GIT_DIR`
-  and its siblings scrubbed from the environment. A lent repository's own
+  and its siblings scrubbed from the environment, each process a session
+  leader with no controlling terminal. A lent repository's own
   configuration is a guest's to write, so each operation is held to host
   policy on its command line: hooks, the file-system monitor, the
   alternate-refs command, commit and push signing, and submodule

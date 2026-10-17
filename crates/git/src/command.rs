@@ -7,9 +7,10 @@
 //! walks a path a guest could redirect meanwhile. A working copy this
 //! client laid is addressed through the gitdir `add` recorded, never
 //! through the `.git` file at its root, which a guest lent the copy can
-//! rewrite. The process leads a group of its own and is killed when its
-//! future is dropped, so a helper git forks — a credential helper, `ssh`, a
-//! merge driver — never outlives the operation that started it.
+//! rewrite. The process leads a session of its own, with no controlling
+//! terminal, and is killed when its future is dropped, so a helper git
+//! forks — a credential helper, `ssh`, a merge driver — opens no terminal
+//! and never outlives the operation that started it.
 
 mod pins;
 
@@ -22,7 +23,7 @@ use std::process::{ExitStatus, Stdio};
 
 use anyhow::{Context as _, Result};
 use omnia_wasi_vcs::Place;
-use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessGroup};
+use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessSession};
 use tokio::process::Command;
 
 pub use self::pins::Pins;
@@ -107,7 +108,7 @@ impl Client {
 
         let mut command = CommandWrap::from(command);
         command.wrap(KillOnDrop);
-        command.wrap(ProcessGroup::leader());
+        command.wrap(ProcessSession);
         let child = command
             .spawn()
             .with_context(|| format!("issue spawning `{}`", self.binary.display()))?;

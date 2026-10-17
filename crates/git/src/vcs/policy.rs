@@ -10,6 +10,7 @@
 //! still in conflict that no rule matched abandons the whole merge. Nothing
 //! of the resolution touches the working tree but the resolved path itself.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io::Write as _;
 
@@ -29,20 +30,148 @@ pub enum Resolution {
     Unresolved(Vec<String>),
 }
 
-pub async fn resolve(repo: &Repo<'_>, rules: &[Rule]) -> Result<Resolution> {
-    let base = repo.merge_base().await?;
-    for path in repo.touched(base.as_deref()).await? {
-        if let Some(strategy) = rule_for(&path, rules) {
-            apply(repo, &path, strategy, base.as_deref()).await?;
+impl Repo<'_> {
+    // Resolve what `rules` cover of the merge in progress, each matching path
+    // from the three commits, then read back what is still in conflict.
+    pub async fn resolve(&self, rules: &[Rule]) -> Result<Resolution> {
+        let base = self.merge_base().await?;
+        for path in self.touched(base.as_deref()).await? {
+            if let Some(strategy) = rule_for(&path, rules) {
+                self.apply(&path, strategy, base.as_deref()).await?;
+            }
+        }
+
+        // what a rule resolved is staged; a conflict still unmerged is a path
+        // no rule matched
+        let unresolved = self.conflicts().await?;
+        if unresolved.is_empty() {
+            Ok(Resolution::Complete)
+        } else {
+            Ok(Resolution::Unresolved(unresolved))
         }
     }
-    // what a rule resolved is staged; a conflict still unmerged is a path no
-    // rule matched
-    let unresolved = repo.conflicts().await?;
-    if unresolved.is_empty() {
-        Ok(Resolution::Complete)
-    } else {
-        Ok(Resolution::Unresolved(unresolved))
+
+    async fn apply(&self, path: &str, strategy: Strategy, base: Option<&str>) -> Result<()> {
+        match strategy {
+            Strategy::Ours => self.keep(path, OURS).await,
+            Strategy::Theirs => self.keep(path, THEIRS).await,
+            Strategy::Union => self.union(path, base).await,
+        }
+    }
+
+    // The kept side laid whole over the path, or the path removed where that
+    // side lacks it. The merge may have staged the other side's version
+    // cleanly, which `rm` drops only under `--force`.
+    async fn keep(&self, path: &str, side: &str) -> Result<()> {
+        if let Some(content) = self.show(side, path).await? {
+            self.write(path, &content)?;
+            self.run(["add", "--", path], path).await?;
+        } else {
+            let args = ["rm", "--quiet", "--force", "--ignore-unmatch", "--", path];
+            self.run(args, path).await?;
+        }
+        Ok(())
+    }
+
+    // Both sides' lines, each once: a 3-way union through `merge-file` over
+    // the three commits' versions, laid in the host's temporary directory so
+    // nothing of them touches the working tree however the merge ends. A
+    // side git cannot merge as lines — a binary — fails the merge rather
+    // than seal a guess.
+    async fn union(&self, path: &str, base: Option<&str>) -> Result<()> {
+        let ours = self.write_temp_blob(Some(OURS), path).await?;
+        let basis = self.write_temp_blob(base, path).await?;
+        let theirs = self.write_temp_blob(Some(THEIRS), path).await?;
+        let args = [
+            OsStr::new("merge-file"),
+            OsStr::new("-p"),
+            OsStr::new("--union"),
+            ours.path().as_os_str(),
+            basis.path().as_os_str(),
+            theirs.path().as_os_str(),
+        ];
+        let merged = self.exec(args, &[]).await?;
+        if !merged.status.success() {
+            bail!("{}: cannot union {path}: {}", self.display_path(), merged.stderr.trim());
+        }
+        self.write(path, &merged.stdout)?;
+        self.run(["add", "--", path], path).await?;
+        Ok(())
+    }
+
+    // One commit's version of the path in a temporary file, empty where the
+    // commit lacks it or the sides share no ancestor.
+    async fn write_temp_blob(&self, revision: Option<&str>, path: &str) -> Result<NamedTempFile> {
+        let content = match revision {
+            Some(revision) => self.show(revision, path).await?.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let mut file = NamedTempFile::new().context("creating a merge temporary")?;
+        file.write_all(&content).context("writing a merge temporary")?;
+        Ok(file)
+    }
+
+    // The common ancestor of the merge's two sides, none when they share no
+    // history.
+    async fn merge_base(&self) -> Result<Option<String>> {
+        let output = self.exec(["merge-base", OURS, THEIRS], &[]).await?;
+        Ok(output.status.success().then(|| output.text().trim().to_owned()))
+    }
+
+    // The paths both sides changed since their common ancestor, where a
+    // policy rule may apply; a path one side alone changed is git's clean
+    // merge and no rule's, whatever the rule would lay there. A rename is
+    // its two paths, each ruled on its own, and followed as the merge
+    // follows it: the other side's change to the old path is a change to the
+    // new one too. Without an ancestor, every path the two sides differ on.
+    async fn touched(&self, base: Option<&str>) -> Result<BTreeSet<String>> {
+        let Some(base) = base else {
+            return Ok(self.diff_tree(OURS, THEIRS).await?.paths);
+        };
+        let ours = self.diff_tree(base, OURS).await?;
+        let theirs = self.diff_tree(base, THEIRS).await?;
+        Ok(ours.shared(&theirs))
+    }
+
+    async fn diff_tree(&self, from: &str, to: &str) -> Result<TreeDiff> {
+        let args = [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--find-renames",
+            "--name-status",
+            "-z",
+            from,
+            to,
+        ];
+        let output = self.run(args, "HEAD").await?;
+        Ok(parse_tree_diff(&output.text()))
+    }
+
+    async fn conflicts(&self) -> Result<Vec<String>> {
+        let args =
+            ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=U", "-z"];
+        let output = self.run(args, "HEAD").await?;
+        Ok(output.text().split('\0').filter(|path| !path.is_empty()).map(str::to_owned).collect())
+    }
+
+    // One commit's version of a path, byte for byte, or none when that commit
+    // lacks it.
+    async fn show(&self, revision: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        let output = self.exec(["show", &format!("{revision}:{path}")], &[]).await?;
+        Ok(output.status.success().then_some(output.stdout))
+    }
+
+    // Lay a merged path in the working tree, its directory first where the
+    // merge removed one.
+    fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        if let Some((parent, _)) = path.rsplit_once('/') {
+            self.at
+                .dir()
+                .create_dir_all(parent)
+                .with_context(|| format!("creating {parent} for the merge of {path}"))?;
+        }
+        self.at.dir().write(path, bytes).with_context(|| format!("writing the merge of {path}"))
     }
 }
 
@@ -50,63 +179,47 @@ fn rule_for(path: &str, rules: &[Rule]) -> Option<Strategy> {
     rules.iter().find(|rule| matches(&rule.paths, path)).map(|rule| rule.strategy)
 }
 
-async fn apply(repo: &Repo<'_>, path: &str, strategy: Strategy, base: Option<&str>) -> Result<()> {
-    match strategy {
-        Strategy::Ours => keep(repo, path, OURS).await,
-        Strategy::Theirs => keep(repo, path, THEIRS).await,
-        Strategy::Union => union(repo, path, base).await,
+// One side's changes since the merge base: every path it changed, a rename
+// as both of its paths, and the renames themselves.
+#[derive(Default)]
+struct TreeDiff {
+    paths: BTreeSet<String>,
+    renames: Vec<(String, String)>,
+}
+
+impl TreeDiff {
+    // The paths both sides changed, the renames followed: where one side
+    // renamed a path the other changed, the new path is theirs both too,
+    // since the merge carries that change to it.
+    fn shared(&self, other: &Self) -> BTreeSet<String> {
+        let mut shared: BTreeSet<String> = self.paths.intersection(&other.paths).cloned().collect();
+        let followed = self
+            .renames
+            .iter()
+            .filter(|(old, _)| other.paths.contains(old))
+            .chain(other.renames.iter().filter(|(old, _)| self.paths.contains(old)))
+            .map(|(_, new)| new.clone());
+        shared.extend(followed);
+        shared
     }
 }
 
-// The kept side laid whole over the path, or the path removed where that side
-// lacks it. The merge may have staged the other side's version cleanly,
-// which `rm` drops only under `--force`.
-async fn keep(repo: &Repo<'_>, path: &str, side: &str) -> Result<()> {
-    if let Some(content) = repo.show(side, path).await? {
-        repo.write(path, &content)?;
-        repo.run(["add", "--", path], &repo.shown(), path).await?;
-    } else {
-        let args = ["rm", "--quiet", "--force", "--ignore-unmatch", "--", path];
-        repo.run(args, &repo.shown(), path).await?;
+// The `-z` records of `diff --name-status --find-renames`: a status and its
+// path, or for a rename the old path and the new.
+fn parse_tree_diff(output: &str) -> TreeDiff {
+    let mut diff = TreeDiff::default();
+    let mut fields = output.split('\0');
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        if status.starts_with('R') {
+            let Some(new) = fields.next() else {
+                break;
+            };
+            diff.paths.insert(new.to_owned());
+            diff.renames.push((path.to_owned(), new.to_owned()));
+        }
+        diff.paths.insert(path.to_owned());
     }
-    Ok(())
-}
-
-// Both sides' lines, each once: a 3-way union through `merge-file` over the
-// three commits' versions, laid in the host's temporary directory so nothing
-// of them touches the working tree however the merge ends. A side git cannot
-// merge as lines — a binary — fails the merge rather than seal a guess.
-async fn union(repo: &Repo<'_>, path: &str, base: Option<&str>) -> Result<()> {
-    let ours = side(repo, Some(OURS), path).await?;
-    let basis = side(repo, base, path).await?;
-    let theirs = side(repo, Some(THEIRS), path).await?;
-    let args = [
-        OsStr::new("merge-file"),
-        OsStr::new("-p"),
-        OsStr::new("--union"),
-        ours.path().as_os_str(),
-        basis.path().as_os_str(),
-        theirs.path().as_os_str(),
-    ];
-    let merged = repo.git(args, &[]).await?;
-    if !merged.status.success() {
-        bail!("{}: cannot union {path}: {}", repo.shown(), merged.stderr.trim());
-    }
-    repo.write(path, &merged.stdout)?;
-    repo.run(["add", "--", path], &repo.shown(), path).await?;
-    Ok(())
-}
-
-// One commit's version of the path in a temporary file, empty where the
-// commit lacks it or the sides share no ancestor.
-async fn side(repo: &Repo<'_>, revision: Option<&str>, path: &str) -> Result<NamedTempFile> {
-    let content = match revision {
-        Some(revision) => repo.show(revision, path).await?.unwrap_or_default(),
-        None => Vec::new(),
-    };
-    let mut file = NamedTempFile::new().context("creating a merge temporary")?;
-    file.write_all(&content).context("writing a merge temporary")?;
-    Ok(file)
+    diff
 }
 
 // A glob over root-relative paths, in gitignore's reading: a pattern with no
@@ -225,9 +338,28 @@ fn glob(pattern: &[u8], text: &[u8]) -> bool {
     row[text.len()]
 }
 
+// The glob matcher and the diff parser are pure over text; the matrix suite
+// drives the policy over real merges, with git as the oracle.
 #[cfg(test)]
 mod tests {
-    use super::matches;
+    use std::collections::BTreeSet;
+
+    use super::{matches, parse_tree_diff};
+
+    fn set(paths: &[&str]) -> BTreeSet<String> {
+        paths.iter().map(|path| (*path).to_owned()).collect()
+    }
+
+    #[test]
+    fn name_status_records() {
+        let ours = parse_tree_diff("M\0old.txt\0A\0ours.txt\0");
+        let theirs = parse_tree_diff("R100\0old.txt\0new.txt\0A\0theirs.txt\0");
+        assert_eq!(theirs.paths, set(&["old.txt", "new.txt", "theirs.txt"]));
+        assert_eq!(theirs.renames, [("old.txt".to_owned(), "new.txt".to_owned())]);
+        assert_eq!(ours.shared(&theirs), set(&["old.txt", "new.txt"]));
+        assert_eq!(theirs.shared(&ours), set(&["old.txt", "new.txt"]));
+        assert!(parse_tree_diff("").paths.is_empty());
+    }
 
     #[test]
     fn globs() {

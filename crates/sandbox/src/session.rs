@@ -68,6 +68,7 @@ impl Session {
             fs::create_dir(&cwd).await.with_context(|| format!("creating {}", cwd.display()))?;
             (cwd, Access::Private)
         };
+
         let dir = fs::File::open(&cwd)
             .await
             .with_context(|| format!("opening {}", cwd.display()))?
@@ -137,7 +138,15 @@ impl Session {
     /// - a bare `program` is not on the host's `PATH`
     /// - the kernel boundary cannot be laid over the working directory
     pub fn command(self, program: &str) -> Result<Command> {
-        let program = self.locate(program)?;
+        let program = if program.contains('/') {
+            PathBuf::from(program)
+        } else {
+            env::split_paths(&self.path)
+                .map(|dir| dir.join(program))
+                .find(|path| executable(path))
+                .with_context(|| format!("`{program}` is not on PATH"))?
+        };
+
         let mut inner = self.kernel.command(&Place {
             cwd: &self.cwd,
             scratch: &self.scratch,
@@ -145,22 +154,14 @@ impl Session {
             read: &self.read,
             dir: self.dir.as_raw_fd(),
         })?;
+
         inner.env_clear().envs(&self.env);
+
         Ok(Command {
             session: self,
             inner,
             ready: None,
         })
-    }
-
-    fn locate(&self, program: &str) -> Result<PathBuf> {
-        if program.contains('/') {
-            return Ok(PathBuf::from(program));
-        }
-        env::split_paths(&self.path)
-            .map(|dir| dir.join(program))
-            .find(|path| executable(path))
-            .with_context(|| format!("`{program}` is not on PATH"))
     }
 }
 

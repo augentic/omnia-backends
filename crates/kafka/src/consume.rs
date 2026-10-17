@@ -560,7 +560,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn keys_wait_only_on_themselves() {
+    async fn per_key_lanes() {
         let mut scripted = Scripted::start();
         scripted.pull(Some(b"a"), 0, 0);
         scripted.pull(Some(b"b"), 0, 1);
@@ -579,7 +579,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_record_without_a_key_never_waits() {
+    async fn keyless_records() {
         let mut scripted = Scripted::start();
         scripted.pull(None, 0, 0);
         scripted.pull(None, 0, 1);
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_record_past_the_bound_waits() {
+    async fn in_flight_bound() {
         let bound = i64::try_from(IN_FLIGHT).expect("bound");
         let mut scripted = Scripted::start();
         for offset in 0..=bound {
@@ -608,7 +608,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_waiting_record_holds_the_resolved_offset() {
+    async fn offset_watermark() {
         let mut scripted = Scripted::start();
         scripted.pull(Some(b"a"), 0, 3);
         scripted.pull(Some(b"a"), 0, 5);
@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_failed_outcome_ends_the_loop() {
+    async fn handler_failure() {
         let mut scripted = Scripted::start();
         scripted.pull(Some(b"a"), 0, 7);
 
@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_revoked_partition_is_skipped_but_not_the_rest() {
+    async fn revoked_partition() {
         let mut scripted = Scripted::start();
         scripted.pull(Some(b"a"), 0, 1);
         scripted.pull(Some(b"a"), 0, 2);
@@ -669,7 +669,7 @@ mod tests {
     // The partition comes back before the first pull's handler returns, and
     // the redelivery waits behind it in the lane.
     #[tokio::test(start_paused = true)]
-    async fn a_record_redelivered_while_its_first_pull_is_in_flight() {
+    async fn in_flight_redelivery() {
         let mut scripted = Scripted::start();
         scripted.pull(Some(b"a"), 0, 5);
         let first = scripted.delivered().await;
@@ -691,7 +691,7 @@ mod tests {
     // The dropped send reports its own number; the queued one leaves it to
     // the delivery report, which the test plays.
     #[test]
-    fn a_send_dropped_before_it_queued() {
+    fn dropped_send() {
         let shared = Shared::new();
         let dropped = shared.next_send_id();
         let queued = shared.next_send_id();
@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lane_is_forgotten_with_its_last_record() {
+    fn lane_release() {
         let mut lanes = Lanes::default();
         let first = lanes.enqueue(Arc::from(b"a".as_slice()));
         let second = lanes.enqueue(Arc::from(b"a".as_slice()));

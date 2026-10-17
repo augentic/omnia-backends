@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_hint_names_servers() {
+    fn mcp_hint() {
         assert_eq!(with_mcp_hint(&[], "Q".to_owned()), "Q", "no servers, no hint");
         let open = Mcp {
             name: "docs".to_owned(),
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn private_workspace_keeps() {
+    fn private_mcp() {
         let mut request = request();
         request.tools = vec![Tool::Mcp(Mcp {
             name: "docs".to_owned(),

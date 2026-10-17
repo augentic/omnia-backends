@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn own_addresses_denied() {
+    fn host_addresses() {
         let own = own_addresses().expect("the host's interfaces");
         assert!(own.contains(&ip("127.0.0.1")), "a loopback interface among {own:?}");
         let public = ip("93.184.215.14");

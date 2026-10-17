@@ -98,7 +98,7 @@ fn own_address() -> Option<IpAddr> {
 // --- The proxy ---
 
 #[tokio::test]
-async fn unlisted_host_refused() {
+async fn unlisted_host() {
     let (proxy, _child) = proxy(&["127.0.0.1", "registry.example.test"]).await;
     let (status, body, _) = connect_to(proxy, "example.com:443").await;
     assert_eq!(status, 403, "{body}");
@@ -110,7 +110,7 @@ async fn unlisted_host_refused() {
 }
 
 #[tokio::test]
-async fn suffix_matches_beneath() {
+async fn suffix_pattern() {
     let (proxy, _child) = proxy(&["*.example.test"]).await;
     for target in ["example.test:443", "a.example.test:443", "b.a.example.test:443"] {
         let (status, body, _) = connect_to(proxy, target).await;
@@ -123,7 +123,7 @@ async fn suffix_matches_beneath() {
 }
 
 #[tokio::test]
-async fn listed_name_resolving_to_loopback_refused() {
+async fn loopback_resolution() {
     let server = echo_server().await;
     let (proxy, _child) = proxy(&["localhost"]).await;
     let (status, body, _) = connect_to(proxy, &format!("localhost:{}", server.port())).await;
@@ -132,7 +132,7 @@ async fn listed_name_resolving_to_loopback_refused() {
 }
 
 #[tokio::test]
-async fn tunnel_to_loopback_literal() {
+async fn loopback_literal() {
     let server = echo_server().await;
     let (proxy, _child) = proxy(&["127.0.0.1"]).await;
     let (status, _, mut tunnel) = connect_to(proxy, &format!("127.0.0.1:{}", server.port())).await;
@@ -147,7 +147,7 @@ async fn tunnel_to_loopback_literal() {
 // The proxy is one session's. Once the session's process is gone, a tunnel
 // it carried is closed with it rather than left to drain on its own.
 #[tokio::test]
-async fn tunnel_closed_with_the_session() {
+async fn session_drop() {
     let server = silent_server().await;
     let (proxy, child) = proxy(&["127.0.0.1"]).await;
     let (status, _, mut tunnel) = connect_to(proxy, &format!("127.0.0.1:{}", server.port())).await;
@@ -163,7 +163,7 @@ async fn tunnel_closed_with_the_session() {
 }
 
 #[tokio::test]
-async fn listed_literal_vetted() {
+async fn denied_literals() {
     let mut rows = vec![
         ("169.254.169.254".to_owned(), "a cloud metadata address"),
         ("fd00:ec2::254".to_owned(), "a cloud metadata address"),
@@ -186,7 +186,7 @@ async fn listed_literal_vetted() {
 }
 
 #[tokio::test]
-async fn plain_get_refused() {
+async fn plain_http() {
     let (proxy, _child) = proxy(&["127.0.0.1", "example.com"]).await;
     let (status, body, _) =
         request(proxy, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n").await;
@@ -197,7 +197,7 @@ async fn plain_get_refused() {
 }
 
 #[tokio::test]
-async fn proxy_in_the_environment() {
+async fn proxy_env() {
     let sandbox = connect(Options::default()).await;
     let output = support::run(support::session(&sandbox, None).await, "env").await;
     let env = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -222,7 +222,7 @@ async fn proxy_in_the_environment() {
 // listed host carries bytes.
 #[cfg(target_os = "macos")]
 #[tokio::test]
-async fn egress_through_the_proxy_alone() {
+async fn confined_egress() {
     let workspace = tempfile::tempdir().expect("a workspace");
     let tree = workspace.path().join("tree");
     std::fs::create_dir_all(&tree).expect("the tree");

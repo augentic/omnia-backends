@@ -156,7 +156,7 @@ fn passed(output: &Output, what: &str) {
 }
 
 #[tokio::test]
-async fn node_serves_on_port_zero() {
+async fn node_loopback() {
     let (_workspace, tree) = tree(&[("serve.mjs", SERVE)]);
     let sandbox = connect().await;
 
@@ -166,7 +166,7 @@ async fn node_serves_on_port_zero() {
 }
 
 #[tokio::test]
-async fn node_test_runs() {
+async fn node_test() {
     let (_workspace, tree) = tree(&[("test/worker.test.mjs", WORKER_TEST)]);
     let sandbox = connect().await;
 
@@ -181,7 +181,7 @@ async fn node_test_runs() {
 }
 
 #[tokio::test]
-async fn npm_installs_a_local_dependency() {
+async fn npm_local_install() {
     let (_workspace, tree) = tree(&[
         (
             "package.json",
@@ -214,7 +214,7 @@ async fn npm_installs_a_local_dependency() {
 // denials on macOS.
 #[tokio::test]
 #[ignore = "reaches registry.npmjs.org through the proxy"]
-async fn live_toolchain_through_the_proxy() {
+async fn npm_registry_install() {
     let (_workspace, tree) = tree(&[
         (
             "package.json",

@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_without_repo_config() {
+    fn no_repo_config() {
         let listing = "global\0user.name\nT\0global\0core.sshcommand\nhostssh\0";
         assert_eq!(
             pins(listing),
@@ -368,25 +368,25 @@ mod tests {
     }
 
     #[test]
-    fn repo_ssh_takes_the_host_value() {
+    fn ssh_with_host() {
         let listing = "global\0core.sshcommand\nhostssh\0local\0core.sshcommand\nreposs\0";
         assert!(pins(listing).windows(2).any(|w| w == ["-c", "core.sshCommand=hostssh"]));
     }
 
     #[test]
-    fn repo_ssh_without_a_host_empties() {
+    fn ssh_without_host() {
         let listing = "local\0core.sshcommand\nreposs\0";
         assert!(pins(listing).windows(2).any(|w| w == ["-c", "core.sshCommand="]));
     }
 
     #[test]
-    fn repo_askpass_emptied() {
+    fn askpass() {
         let listing = "local\0core.askpass\n/tmp/evil\0";
         assert!(pins(listing).windows(2).any(|w| w == ["-c", "core.askPass="]));
     }
 
     #[test]
-    fn repo_signers_take_the_host_value_or_empty() {
+    fn signers() {
         let listing = "global\0gpg.program\nhostgpg\0local\0gpg.program\n/tmp/evil\0\
                        local\0gpg.ssh.program\n/tmp/evil\0";
         let pins = pins(listing);
@@ -395,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_drivers_emptied() {
+    fn drivers() {
         let listing = "local\0filter.lfs.smudge\ngit-lfs\0local\0merge.evil.driver\nx\0\
                        local\0filter.lfs.clean\ngit-lfs\0";
         let pins = pins(listing);
@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_credential_reset_then_host_readded() {
+    fn credential_helpers() {
         let listing = "global\0credential.helper\nhostcred\0local\0credential.helper\nrepocred\0";
         let pins = pins(listing);
         let reset = pins.windows(2).position(|w| w == ["-c", "credential.helper="]).expect("reset");
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn per_url_credential_reset() {
+    fn per_url_credential() {
         let listing = "local\0credential.https://evil.example.helper\n!sh\0";
         assert!(
             pins(listing)
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_rewrite_named() {
+    fn url_rewrite() {
         let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0\
                        local\0url./tmp/m.pushinsteadof\nhttps://github.com/\0";
         let pins = Pins::build(&settings(listing));
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_http_named() {
+    fn http_override() {
         for key in [
             "http.proxy",
             "http.sslverify",
@@ -460,34 +460,33 @@ mod tests {
     }
 
     #[test]
-    fn repo_http_tuning_left_alone() {
+    fn http_tuning() {
         let listing = "local\0http.postbuffer\n524288000\0local\0http.lowspeedlimit\n0\0\
                        local\0http.https://h/.postbuffer\n1\0";
         assert_eq!(Pins::build(&settings(listing)).blocked_transport_key(), None);
     }
 
     #[test]
-    fn host_transport_override_left_alone() {
+    fn host_transport() {
         let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0global\0http.proxy\nhost\0\
                        system\0http.sslverify\nfalse\0";
         assert_eq!(Pins::build(&settings(listing)).blocked_transport_key(), None);
     }
 
     #[test]
-    fn empty_value_setting() {
+    fn empty_value() {
         let listing = "local\0foo.bar\n\0global\0user.name\nT\0";
-        // the empty value parses without eating the next setting
         assert_eq!(settings(listing).len(), 2);
     }
 
     #[test]
-    fn repo_key_not_utf8() {
+    fn non_utf8_repo_key() {
         let listing = b"local\0filter.\xff.clean\ntouch pwned\0";
         assert_eq!(parse(listing).expect_err("unnameable"), "filter.\u{FFFD}.clean");
     }
 
     #[test]
-    fn host_key_and_values_read_lossily() {
+    fn non_utf8_host_key() {
         let listing = b"global\0filter.\xff.clean\nx\0local\0user.name\n\xff\0";
         let settings = parse(listing).expect("the host's key and a value are the operator's");
         assert_eq!(settings.len(), 2);
@@ -495,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn local_and_remote_addresses() {
+    fn addresses() {
         assert!(is_local("file:///srv/repo.git"));
         assert!(is_local("/srv/repo.git"));
         assert!(is_local("./repo"));

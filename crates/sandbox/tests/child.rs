@@ -38,7 +38,7 @@ fn terminate(pid: u32) {
 // --- Death ---
 
 #[tokio::test]
-async fn grandchild_swept_on_exit() {
+async fn grandchild_on_exit() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let mut child = spawn_sh(session, "sleep 600 & echo \"ready $!\" >&2; exit 3", Some(READY));
@@ -54,7 +54,7 @@ async fn grandchild_swept_on_exit() {
 }
 
 #[tokio::test]
-async fn grandchild_swept_on_drop() {
+async fn grandchild_on_drop() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let mut child = spawn_sh(session, "sleep 600 & echo \"ready $!\" >&2; wait", Some(READY));
@@ -114,7 +114,7 @@ async fn stop_unanswered() {
 // --- Under its life ---
 
 #[tokio::test]
-async fn fail_on_exit_sees_the_exit() {
+async fn fail_on_exit() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let child = spawn_sh(session, "exit 7", None);
@@ -128,7 +128,7 @@ async fn fail_on_exit_sees_the_exit() {
 
 // The future fails first. The exit lands within the grace and wins.
 #[tokio::test]
-async fn fail_on_exit_outruns_a_failure() {
+async fn fail_on_exit_grace() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let child = spawn_sh(session, "sleep 0.1; exit 7", None);
@@ -141,7 +141,7 @@ async fn fail_on_exit_outruns_a_failure() {
 }
 
 #[tokio::test]
-async fn fail_on_exit_keeps_a_failure() {
+async fn fail_on_exit_err() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let child = spawn_sh(session, "exec sleep 600", None);
@@ -155,7 +155,7 @@ async fn fail_on_exit_keeps_a_failure() {
 }
 
 #[tokio::test]
-async fn fail_on_exit_passes_a_value() {
+async fn fail_on_exit_ok() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let child = spawn_sh(session, "exec sleep 600", None);
@@ -170,7 +170,7 @@ async fn fail_on_exit_passes_a_value() {
 // and `ps` shows the child no controlling terminal. `ps` runs from the test
 // process, since it is setuid on macOS and the kernel boundary never runs it.
 #[tokio::test]
-async fn tty_opens_nothing() {
+async fn controlling_tty() {
     let sandbox = connect(Options::default()).await;
     let session = support::session(&sandbox, None).await;
     // in a subshell, since dash exits on a special builtin's redirection failing
@@ -203,7 +203,7 @@ async fn output_captured() {
 }
 
 #[tokio::test]
-async fn output_killed_past_the_bound() {
+async fn output_timeout() {
     let workspace = tempfile::tempdir().expect("a workspace");
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, Some(workspace.path())).await;
@@ -219,7 +219,7 @@ async fn output_killed_past_the_bound() {
 
 // A fork left holding the pipes neither delays the exit nor outlives it.
 #[tokio::test]
-async fn output_sweeps_a_fork() {
+async fn output_with_fork() {
     let workspace = tempfile::tempdir().expect("a workspace");
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, Some(workspace.path())).await;
@@ -256,7 +256,7 @@ async fn output_capped() {
 // UTF-8 ahead of the ready line neither hides it nor closes stdout under
 // the write behind it.
 #[tokio::test]
-async fn ready_behind_binary_output() {
+async fn binary_before_ready() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let script = "printf '\\377\\376 binary\\n' >&2; printf '\\377\\376 binary\\n'; \
@@ -273,7 +273,7 @@ async fn ready_behind_binary_output() {
 // An exit nobody asked for is a crash: warned with its status, its tail
 // behind it at DEBUG, and the ready line in neither.
 #[tokio::test]
-async fn crash_logged_with_tail() {
+async fn crash_log() {
     let captured = Captured::default();
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(captured.clone()))
         .expect("this test owns the process's subscriber");

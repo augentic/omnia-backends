@@ -137,7 +137,7 @@ mod tests {
 
     // the two fatals an unknown remote prints together
     #[test]
-    fn unknown_remote_before_access() {
+    fn unknown_remote() {
         let stderr = "fatal: 'nope' does not appear to be a git repository\n\
                       fatal: Could not read from remote repository.";
         assert_eq!(classify(stderr), Class::NotFound);

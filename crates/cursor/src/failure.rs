@@ -205,7 +205,7 @@ mod tests {
     // The cap is the time budget: the guest's typed error is the budget, the
     // completion event still reads `timeout`, and nothing else changes class.
     #[test]
-    fn timeout_is_budget() {
+    fn timeout_budget() {
         let timeout = Failure::Timeout { cap_secs: 600 }.into_error();
         assert!(matches!(
             timeout.downcast_ref::<omnia_wasi_model::Error>(),

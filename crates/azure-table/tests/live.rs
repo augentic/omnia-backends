@@ -124,7 +124,7 @@ async fn edm_type() -> Result<()> {
 // token that drains the partition without duplicates.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs Azure Table Storage (AZURE_STORAGE_ACCOUNT/KEY); run with --run-ignored"]
-async fn filtered_query_and_continuation() -> Result<()> {
+async fn filtered_query() -> Result<()> {
     let client = client().await?;
     let pk = unique_partition("query");
     let scoped = format!("{TABLE}/{pk}");

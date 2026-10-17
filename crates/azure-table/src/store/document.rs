@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn unflatten_missing_partition_key() {
+    fn unflatten_missing_pk() {
         let entity = json!({
             "RowKey": "r1",
             "Name": "Alice",

@@ -117,7 +117,7 @@ fn restarted_after(first: &Process, second: &Process) {
 // --- Configuration ---
 
 #[tokio::test]
-async fn connect_rejects_invalid_options() {
+async fn invalid_options() {
     fake_bridge::dummy_key();
     let fake = Spawnable::new(&Config::echo());
     let good = options(1);
@@ -164,7 +164,7 @@ async fn connect_rejects_invalid_options() {
 // the backend through `WasiModelCtx::limits`, so the option is what the
 // session counts against; the other bounds stay the host's.
 #[tokio::test]
-async fn limits_follow_options() {
+async fn option_limits() {
     fake_bridge::dummy_key();
     let client = Client::connect_with(ConnectOptions {
         max_tool_calls: 5,
@@ -229,7 +229,7 @@ async fn shell_on_shell_root() {
 // under no shell root is refused as the request's fault before anything is
 // spawned.
 #[tokio::test]
-async fn worker_grant_needs_a_shell() {
+async fn grant_without_shell() {
     let fake = Spawnable::new(&Config::echo());
     let client = spawning(&fake, 1).await;
     let grant = ["env:OMNIA_TEST_TOOLS=~/tools", "refused:not under a shell root"];
@@ -673,7 +673,7 @@ async fn custom_shell_stalls() {
 // Five frames 400ms apart outlast the 1s window several times over: the
 // model's frames stand it down, and the cap is nowhere near.
 #[tokio::test]
-async fn slow_stream_completes() {
+async fn slow_stream() {
     let fake = Spawnable::new(&Config::paced(400, 5, Then::Finish));
     let client = connect(with_window(WINDOW, 1)).await;
     let started = Instant::now();
@@ -690,7 +690,7 @@ async fn slow_stream_completes() {
 // Process 1 dies as the opening `Send` begins: no candidate has been offered,
 // so the prompt goes once more, on process 2, and the guest gets its answer.
 #[tokio::test]
-async fn worker_killed_on_send_restarts() {
+async fn killed_on_send() {
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::KillOnSend(1)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
@@ -708,7 +708,7 @@ async fn worker_killed_on_send_restarts() {
 }
 
 #[tokio::test]
-async fn worker_exited_on_create_restarts() {
+async fn exited_on_create() {
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::ExitOnCreate(1)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
@@ -730,7 +730,7 @@ async fn worker_exited_on_create_restarts() {
 // stands. The socket resets as each process dies; the typed exit wins over
 // the transport error, and what the processes wrote to stderr stays out.
 #[tokio::test]
-async fn worker_killed_twice_fails() {
+async fn killed_twice() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::KillOnSend(1)));
     let client = spawning(&fake, 1).await;
     expect_error(KILLED, &["without:fake-bridge marker"], &client).await;
@@ -751,7 +751,7 @@ async fn worker_killed_twice_fails() {
 // process dies on the correction's `Send`. The guest has seen this agent, so
 // the prompt is not offered again.
 #[tokio::test]
-async fn killed_after_candidate_fails() {
+async fn killed_after_candidate() {
     let fake =
         Spawnable::new(&Config::replies(["alpha", "beta"]).fault_on(1, Fault::KillOnSend(2)));
     let client = spawning(&fake, 1).await;
@@ -777,7 +777,7 @@ async fn killed_after_candidate_fails() {
 // guest, but the opening prompt has been answered — whatever tools it ran
 // have run — so the prompt is not offered again.
 #[tokio::test]
-async fn killed_on_nudge_fails() {
+async fn killed_on_nudge() {
     let fake = Spawnable::new(
         &Config::replies(["Analyzing the claims.", "{}"]).fault_on(1, Fault::KillOnSend(2)),
     );
@@ -803,7 +803,7 @@ async fn killed_on_nudge_fails() {
 // and the silence is the model's: the cap ends the run, which is cancelled,
 // and the failure stands.
 #[tokio::test]
-async fn silent_run_not_restarted() {
+async fn hang_on_stream() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::Stream)));
     let client = connect(ConnectOptions {
         timeout_secs: 1,
@@ -952,7 +952,7 @@ async fn close_500() {
 // carried is cancelled, the agent torn down and the process asked to go
 // before the restart takes the slot.
 #[tokio::test]
-async fn stream_reset_restarts() {
+async fn stream_reset() {
     let fake = Spawnable::new(&Config::echo().fault_on(1, Fault::ResetStream(1)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
@@ -973,7 +973,7 @@ async fn stream_reset_restarts() {
 // Every process resets its opening stream: the second transport failure is
 // the guest's, typed below Connect.
 #[tokio::test]
-async fn stream_reset_twice_fails() {
+async fn stream_reset_twice() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::ResetStream(1)));
     let client = spawning(&fake, 1).await;
     expect_error(
@@ -1038,7 +1038,7 @@ async fn callback_rejections() {
 // The process lingers after `Shutdown`, so there is a moment when its
 // completion is over but its token is still the live one.
 #[tokio::test]
-async fn callback_token_revoked_after_exit() {
+async fn callback_after_exit() {
     let fake = Spawnable::new(&Config::tool("lookup").fault(Fault::LingerOnShutdown(3000)));
     let client = spawning(&fake, 1).await;
     run_guest(test_programs::MODEL_TOOL_ROUNDTRIP, &[], &client).await;
@@ -1098,7 +1098,7 @@ impl tracing::field::Visit for Flatten<'_> {
 }
 
 #[tokio::test]
-async fn ready_line_never_logged() {
+async fn inline_ready_token() {
     let captured = Captured::default();
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(captured.clone()))
         .expect("this test owns the process's subscriber");
@@ -1137,7 +1137,7 @@ fn completion_event(captured: &Captured) -> String {
 // check first time: two sends, no correction. `corrected` is the check's
 // verdict, not the send count.
 #[tokio::test]
-async fn nudged_completion_is_ok() {
+async fn nudged_outcome() {
     let captured = Captured::default();
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(captured.clone()))
         .expect("this test owns the process's subscriber");
@@ -1157,7 +1157,7 @@ async fn nudged_completion_is_ok() {
 }
 
 #[tokio::test]
-async fn corrected_completion_is_corrected() {
+async fn corrected_outcome() {
     let captured = Captured::default();
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(captured.clone()))
         .expect("this test owns the process's subscriber");

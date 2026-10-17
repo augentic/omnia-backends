@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn unframed_payload_is_not_decoded() {
+    fn unframed_payload() {
         assert!(Payload::decode(br#"{"stationId":"1"}"#).is_none());
         assert!(Payload::decode(b"hello").is_none());
         assert!(Payload::decode(b"hi").is_none());
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_is_checked_against_the_named_schema() {
+    fn schema_check() {
         let schema = Schema::compile(9, r#"{"type":"object","required":["id"]}"#).expect("schema");
         schema.check(br#"{"id":1}"#).expect("a valid payload");
 
@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unusable_schema_is_invalid() {
+    fn invalid_schema() {
         assert!(matches!(Schema::compile(1, "nope"), Err(Failure::Invalid(_))));
         assert!(matches!(Schema::compile(2, r#"{"type":"record"}"#), Err(Failure::Invalid(_))));
     }
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_waiters_share_one_fetch() {
+    async fn concurrent_waiters() {
         let scripted = Scripted::new();
         let (first, waiting_first) = scripted.get("a");
         tokio::task::yield_now().await;
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_fetch_fails_every_waiter_and_is_not_cached() {
+    async fn failed_fetch() {
         let scripted = Scripted::new();
         let (first, waiting_first) = scripted.get("a");
         tokio::task::yield_now().await;
@@ -512,7 +512,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_caller_dropped_mid_fetch_leaves_the_fetch_to_the_next() {
+    async fn dropped_waiter() {
         let scripted = Scripted::new();
         let (first, waiting_first) = scripted.get("a");
         tokio::task::yield_now().await;

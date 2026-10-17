@@ -882,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn frames_decode_incrementally() {
+    fn incremental_frames() {
         let mut buffer = BytesMut::new();
         let mut body = envelope(b"one");
         let mut end = envelope(b"two");

@@ -37,7 +37,7 @@ async fn access(sandbox: &Sandbox, workspace: Option<&Path>) -> Access {
 // The variable is planted before any thread of the runtime exists.
 #[test]
 #[expect(unsafe_code, reason = "the planted variable is set on the one thread of the test")]
-fn environment_rebuilt() {
+fn inherited_env() {
     // SAFETY: nothing else runs yet; the runtime below is built after the write.
     unsafe { env::set_var(PLANTED, "leaked") };
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
@@ -68,7 +68,7 @@ fn environment_rebuilt() {
 // --- Working directory ---
 
 #[tokio::test]
-async fn cwd_is_the_workspace() {
+async fn workspace_cwd() {
     let workspace = tempfile::tempdir().expect("a workspace");
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, Some(&workspace.path().join("tree"))).await;
@@ -85,7 +85,7 @@ async fn cwd_is_the_workspace() {
 }
 
 #[tokio::test]
-async fn cwd_is_private_without_a_workspace() {
+async fn private_cwd() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
 
@@ -100,7 +100,7 @@ async fn cwd_is_private_without_a_workspace() {
 // --- Shell by location ---
 
 #[tokio::test]
-async fn shell_under_a_root() {
+async fn shell_roots() {
     let roots = tempfile::tempdir().expect("roots");
     let a = roots.path().join("a");
     let link = roots.path().join("link");
@@ -128,7 +128,7 @@ async fn shell_under_a_root() {
 // --- Programs ---
 
 #[tokio::test]
-async fn program_resolved_on_path() {
+async fn program_lookup() {
     let sandbox = connect(Options::default()).await;
 
     let error = session(&sandbox, None)
@@ -147,7 +147,7 @@ async fn program_resolved_on_path() {
 // program the backend names is resolved against the host's `PATH`, so the
 // `sh` planted first on the grant's is never the one spawned.
 #[tokio::test]
-async fn path_in_the_grant() {
+async fn grant_path() {
     let workspace = tempfile::tempdir().expect("a workspace");
     let tree = workspace.path().join("tree");
     let bin = tree.join("bin");
@@ -171,7 +171,7 @@ async fn path_in_the_grant() {
 
 // A variable set on the command reaches the process beside the grant's.
 #[tokio::test]
-async fn env_on_the_command() {
+async fn command_env() {
     let sandbox = connect(Options::default()).await;
     let mut command = sh(session(&sandbox, None).await, "printf '%s' \"$ANSWER\"");
     command.env("ANSWER", "42");
@@ -216,7 +216,7 @@ async fn inherit_refused() {
 // adapter names and this machine does not have is no reason to refuse the
 // turn. The roots that exist are granted beside it, canonical.
 #[test]
-fn read_root_absent_skipped() {
+fn absent_read_root() {
     let captured = Captured::default();
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(captured.clone()))
         .expect("this test owns the process's subscriber");
@@ -249,7 +249,7 @@ fn read_root_absent_skipped() {
 // A root that steps through `.` or `..` is refused as spelled, before it
 // resolves, so no spelling reaches around the credential-store check.
 #[test]
-fn read_root_held_to_the_home() {
+fn read_root_bounds() {
     support::under_home(async |home| {
         std::fs::create_dir(home.join("tools")).expect("a directory");
         std::fs::write(home.join("note.txt"), "a file\n").expect("a file");
@@ -279,7 +279,7 @@ fn read_root_held_to_the_home() {
 // nothing set. A store is refused as spelled, through a link, from above,
 // and on a machine that lacks it.
 #[test]
-fn read_root_credential_store_refused() {
+fn credential_roots() {
     support::under_home(async |home| {
         std::fs::create_dir_all(home.join("tools/node")).expect("a toolchain");
         std::fs::create_dir_all(home.join(".config/nvim")).expect("a tool's settings");
@@ -319,7 +319,7 @@ fn read_root_credential_store_refused() {
 // A name the sandbox sets, one the backend inherits, or no name at all is
 // refused as an `inherit` is.
 #[test]
-fn env_set_and_home_expanded() {
+fn grant_env() {
     support::under_home(async |home| {
         let sandbox = connect(Options {
             inherit: &["SSL_CERT_FILE"],
@@ -370,7 +370,7 @@ fn env_set_and_home_expanded() {
 // Without a home, nothing `~/` spells can be granted or expanded.
 #[test]
 #[expect(unsafe_code, reason = "the home is unset on the one thread of the test")]
-fn home_required_for_tilde() {
+fn missing_home() {
     // SAFETY: nothing else runs yet; the runtime below is built after the write.
     unsafe { env::remove_var("HOME") };
     let runtime = tokio::runtime::Runtime::new().expect("a runtime");
@@ -439,7 +439,7 @@ mod seatbelt {
     }
 
     #[tokio::test]
-    async fn write_outside_the_tree_refused() {
+    async fn outside_write() {
         let (_workspace, tree) = tree();
         let outside = tempfile::tempdir().expect("outside");
         let escape = outside.path().join("escape");
@@ -464,7 +464,7 @@ mod seatbelt {
     }
 
     #[tokio::test]
-    async fn host_home_unreadable() {
+    async fn host_home() {
         let (_workspace, tree) = tree();
         let home = std::env::var("HOME").expect("the host has a home");
         let sandbox = support::connect(Options::default()).await;
@@ -482,7 +482,7 @@ mod seatbelt {
     }
 
     #[tokio::test]
-    async fn engine_directories_closed() {
+    async fn engine_dirs() {
         let (_workspace, tree) = tree();
         let sandbox = support::connect(Options::default()).await;
 
@@ -518,7 +518,7 @@ mod seatbelt {
     }
 
     #[tokio::test]
-    async fn linked_copy_finds_no_repository() {
+    async fn linked_worktree() {
         let workspace = tempfile::tempdir().expect("a workspace");
         let repository = workspace.path().join("repository");
         let copy = workspace.path().join("copy");
@@ -557,7 +557,7 @@ mod seatbelt {
     // the sysctl it reads them through answers for a process outside. `ps` is
     // setuid, so it never runs inside at all.
     #[tokio::test]
-    async fn outside_process_invisible() {
+    async fn host_process() {
         let (_workspace, tree) = tree();
         support::probe(&tree);
         let sandbox = support::connect(Options::default()).await;
@@ -580,7 +580,7 @@ mod seatbelt {
     }
 
     #[tokio::test]
-    async fn loopback_server_answers() {
+    async fn loopback_bind() {
         let (_workspace, tree) = tree();
         support::probe(&tree);
         let sandbox = support::connect(Options::default()).await;
@@ -592,7 +592,7 @@ mod seatbelt {
     // A root is one session's: the one granted it reads it, one granted
     // nothing does not.
     #[test]
-    fn read_root_readable() {
+    fn read_root() {
         support::under_home(async |home| {
             let (_workspace, tree) = tree();
             let shared = home.join("shared");
@@ -700,7 +700,7 @@ mod landlock {
     // glibc issues `clone3` for every thread and falls back to `clone` on
     // `ENOSYS` alone, so the filter's answer is what keeps threads running.
     #[tokio::test]
-    async fn clone3_unsupported_and_threads_run() {
+    async fn clone3_and_threads() {
         let (_workspace, tree) = tree();
         let sandbox = support::connect(Options::default()).await;
 
@@ -718,7 +718,7 @@ mod landlock {
     }
 
     #[tokio::test]
-    async fn write_outside_the_tree_refused() {
+    async fn outside_write() {
         let (_workspace, tree) = tree();
         let outside = tempfile::tempdir().expect("outside");
         let escape = outside.path().join("escape");
@@ -739,7 +739,7 @@ mod landlock {
     }
 
     #[tokio::test]
-    async fn host_home_unreadable() {
+    async fn host_home() {
         let (_workspace, tree) = tree();
         let home = std::env::var("HOME").expect("the host has a home");
         let sandbox = support::connect(Options::default()).await;
@@ -755,7 +755,7 @@ mod landlock {
     // A root is one session's: the one granted it reads it, one granted
     // nothing does not.
     #[test]
-    fn read_root_readable_and_kept() {
+    fn read_root() {
         support::under_home(async |home| {
             let (_workspace, tree) = tree();
             let shared = home.join("shared");
@@ -792,7 +792,7 @@ mod landlock {
     // The host sets itself non-dumpable at connect, so its `/proc/<pid>`
     // is root's from then on, inside the session and out.
     #[tokio::test]
-    async fn host_process_closed() {
+    async fn host_process() {
         let (_workspace, tree) = tree();
         let host = std::process::id().to_string();
         let before = support::probe_outside(&tree, &["environ", &host]);
@@ -808,7 +808,7 @@ mod landlock {
     }
 
     #[tokio::test]
-    async fn loopback_server_answers() {
+    async fn loopback_bind() {
         let (_workspace, tree) = tree();
         let sandbox = support::connect(Options::default()).await;
         let output = run(support::session(&sandbox, Some(&tree)).await, "./probe loopback").await;

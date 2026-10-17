@@ -46,7 +46,7 @@ async fn truncated_body() {
 }
 
 #[tokio::test]
-async fn endpoint_without_trailing_slash() {
+async fn endpoint_no_slash() {
     fake_openai::dummy_key();
     let fake = FakeOpenAi::serve(Config::echo()).await;
     let client = Client::connect_with(ConnectOptions {
@@ -64,7 +64,7 @@ async fn endpoint_without_trailing_slash() {
 }
 
 #[tokio::test]
-async fn connect_rejects_bad_endpoint() {
+async fn invalid_endpoint() {
     for endpoint in ["", "api.openai.com/v1/", "ftp://gateway/v1/"] {
         let error = Client::connect_with(ConnectOptions {
             model: "gpt-4o-mini".to_owned(),

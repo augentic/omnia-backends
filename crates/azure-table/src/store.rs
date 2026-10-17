@@ -449,46 +449,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_collection_full() {
+    fn collection_full() {
         let (table, pk) = parse_collection("users/tenant-a").unwrap();
         assert_eq!(table, "users");
         assert_eq!(pk.as_deref(), Some("tenant-a"));
     }
 
     #[test]
-    fn parse_collection_table_only() {
+    fn collection_table_only() {
         let (table, pk) = parse_collection("users").unwrap();
         assert_eq!(table, "users");
         assert!(pk.is_none());
     }
 
     #[test]
-    fn parse_collection_empty() {
+    fn collection_empty() {
         parse_collection("").unwrap_err();
     }
 
     #[test]
-    fn parse_collection_empty_pk() {
+    fn collection_empty_pk() {
         parse_collection("users/").unwrap_err();
     }
 
     #[test]
-    fn parse_collection_short_table() {
+    fn collection_short_table() {
         parse_collection("ab/pk").unwrap_err();
     }
 
     #[test]
-    fn parse_collection_special_chars() {
+    fn collection_special_chars() {
         parse_collection("my-table/pk").unwrap_err();
     }
 
     #[test]
-    fn parse_collection_reserved() {
+    fn collection_reserved() {
         parse_collection("Tables/pk").unwrap_err();
     }
 
     #[test]
-    fn sign_request_shared_key_lite() {
+    fn sign_shared_key_lite() {
         let key = Base64::encode_string(b"fake-key-for-unit-test-1234567!");
         let hmac_key = Base64::decode_vec(&key).unwrap();
         let auth = sign_request(
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_request_azurite() {
+    fn sign_azurite() {
         let key = Base64::encode_string(b"fake-key-for-unit-test-1234567!");
         let hmac_key = Base64::decode_vec(&key).unwrap();
         // the account in Azurite's path makes its signature differ from the

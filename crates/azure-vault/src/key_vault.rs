@@ -30,14 +30,14 @@ impl WasiVaultCtx for Client {
     }
 }
 
-pub struct AzLocker {
+struct AzLocker {
     identifier: String,
     vault: Arc<SecretClient>,
 }
 
 impl Debug for AzLocker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AzLocker").finish()
+        f.debug_struct("AzLocker").field("identifier", &self.identifier).finish_non_exhaustive()
     }
 }
 
@@ -48,8 +48,7 @@ impl Locker for AzLocker {
         let identifier = self.identifier.clone();
 
         async move {
-            let secret_name = format!("{identifier}-{secret_id}");
-            let secret_id = Base64UrlUnpadded::encode_string(secret_name.as_bytes());
+            let secret_id = encode_secret_name(&identifier, &secret_id);
 
             let result = vault.get_secret(&secret_id, None).await;
             let response = match result {
@@ -81,8 +80,7 @@ impl Locker for AzLocker {
         let identifier = self.identifier.clone();
 
         async move {
-            let secret_name = format!("{identifier}-{secret_id}");
-            let secret_id = Base64UrlUnpadded::encode_string(secret_name.as_bytes());
+            let secret_id = encode_secret_name(&identifier, &secret_id);
 
             let params = SetSecretParameters {
                 value: Some(Base64UrlUnpadded::encode_string(&value)),
@@ -102,8 +100,7 @@ impl Locker for AzLocker {
         let identifier = self.identifier.clone();
 
         async move {
-            let secret_name = format!("{identifier}-{secret_id}");
-            let secret_id = Base64UrlUnpadded::encode_string(secret_name.as_bytes());
+            let secret_id = encode_secret_name(&identifier, &secret_id);
             vault.delete_secret(&secret_id, None).await.context("issue deleting secret")?;
 
             Ok(())
@@ -131,7 +128,7 @@ impl Locker for AzLocker {
                     let Some(id) = props.id else {
                         return Ok(None);
                     };
-                    Ok(id.strip_prefix(&format!("{identifier}-")).map(ToString::to_string))
+                    Ok(decode_secret_id(&identifier, &id))
                 })
                 .try_collect()
                 .await
@@ -140,5 +137,51 @@ impl Locker for AzLocker {
             Ok(secret_ids)
         }
         .boxed()
+    }
+}
+
+fn encode_secret_name(identifier: &str, secret_id: &str) -> String {
+    let secret_name = format!("{}:{identifier}:{secret_id}", identifier.len());
+    Base64UrlUnpadded::encode_string(secret_name.as_bytes())
+}
+
+fn decode_secret_id(identifier: &str, secret_id_or_url: &str) -> Option<String> {
+    let encoded = secret_id_or_url
+        .rsplit_once("/secrets/")
+        .map_or(secret_id_or_url, |(_, tail)| tail.split('/').next().unwrap_or(tail));
+    let bytes = Base64UrlUnpadded::decode_vec(encoded).ok()?;
+    let decoded = String::from_utf8(bytes).ok()?;
+    let (len, rest) = decoded.split_once(':')?;
+    let len: usize = len.parse().ok()?;
+    let (locker, rest) = rest.split_at_checked(len)?;
+    let secret_id = rest.strip_prefix(':')?;
+    (locker == identifier).then(|| secret_id.to_owned())
+}
+
+// Secret name encoding and decoding for locker namespaces; Key Vault round-trips
+// are covered by `tests/live.rs`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_name_round_trips() {
+        let encoded = encode_secret_name("my-locker", "api/token:1");
+        assert_eq!(decode_secret_id("my-locker", &encoded).as_deref(), Some("api/token:1"));
+
+        let url = format!("https://myvault.vault.azure.net/secrets/{encoded}");
+        assert_eq!(decode_secret_id("my-locker", &url).as_deref(), Some("api/token:1"));
+
+        let versioned = format!("https://myvault.vault.azure.net/secrets/{encoded}/v1");
+        assert_eq!(decode_secret_id("my-locker", &versioned).as_deref(), Some("api/token:1"));
+
+        assert!(decode_secret_id("other-locker", &encoded).is_none());
+
+        // A prefix locker (`my`) must not decode or collide with `my-locker`.
+        assert!(decode_secret_id("my", &encoded).is_none());
+        assert_ne!(
+            encode_secret_name("my", "locker-api/token:1"),
+            encode_secret_name("my-locker", "api/token:1"),
+        );
     }
 }

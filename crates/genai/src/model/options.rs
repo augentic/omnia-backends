@@ -17,6 +17,8 @@ use serde_json::Value;
 
 use super::tools::{ListArgs, ReadArgs};
 
+// Everything one completion derives from the request: the provider chat
+// request, options, and telemetry counts.
 pub struct Turn {
     pub model: String,
     pub chat: ChatRequest,
@@ -159,6 +161,8 @@ const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
     }
 }
 
+// Request-to-provider translation; end-to-end round-trips run in
+// `tests/model.rs`.
 #[cfg(test)]
 mod tests {
     use std::path::Path;

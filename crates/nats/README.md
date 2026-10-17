@@ -50,9 +50,9 @@ let client = Client::connect_with(options).await?;
 
 ## Live tests
 
-[`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging` boundary against a
-real server. It is `#[ignore]`d so it never runs in CI; run it explicitly (the
-default `NATS_ADDR` is the public `demo.nats.io`):
+[`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging` and `wasi-keyvalue`
+boundaries against a real server. It is `#[ignore]`d so it never runs in CI; run it
+explicitly (the default `NATS_ADDR` is the public `demo.nats.io`):
 
 ```bash
 # or run a local server with JetStream instead of the public demo instance:

@@ -15,7 +15,7 @@ MSRV: Rust 1.99
 |----------|----------|---------|-------------|
 | `POSTGRES_URL` | yes | | Default pool connection URI |
 | `POSTGRES_POOL_SIZE` | no | `10` | Default pool size |
-| `POSTGRES_POOLS` | no | | Comma-separated extra pool names |
+| `POSTGRES_POOLS` | no | | Comma-separated extra pool names (matched case-insensitively; normalized to ASCII uppercase for environment variable suffixes) |
 | `POSTGRES_URL__<NAME>` | per pool | | URI for named pool |
 | `POSTGRES_POOL_SIZE__<NAME>` | no | inherited | Pool size for named pool |
 

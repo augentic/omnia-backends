@@ -2,8 +2,7 @@ use std::env;
 
 use dotenvy::dotenv;
 use omnia::Backend;
-use omnia_azure_table::store::document::{decode_id, encode_id};
-use omnia_azure_table::{Client, ConnectOptions};
+use omnia_azure_table::{Client, ConnectOptions, decode_id, encode_id};
 use omnia_wasi_docstore::{
     ComparisonOp, Document, FilterTree, QueryOpts, QueryResult, ScalarValue, WasiDocStoreCtx,
 };

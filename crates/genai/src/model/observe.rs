@@ -1,5 +1,6 @@
-//! [`Completion`] emits the start (DEBUG) and finish (INFO) events. [`Failure`]
-//! lets [`outcome_of`] classify backend errors by type instead of message text.
+//! [`Completion`] emits the start (DEBUG) and finish events — the finish at
+//! INFO for an answer, WARN for anything else. [`Failure`] lets
+//! [`outcome_of`] classify backend errors by type instead of message text.
 
 use std::time::Instant;
 
@@ -56,8 +57,9 @@ impl Completion {
         self.attempts
     }
 
-    // The one INFO line per completion. Consumes self so Drop does not emit
-    // a second time.
+    // The one line per completion: INFO for an answer, WARN for anything
+    // else, so a bare `info` run sees failed or aborted completions too.
+    // Consumes self so Drop does not emit a second time.
     pub fn finish(mut self, outcome: &'static str) {
         self.emit(outcome);
     }
@@ -68,15 +70,26 @@ impl Completion {
         }
         self.emitted = true;
         let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        tracing::info!(
-            outcome,
-            attempts = self.attempts,
-            duration_ms,
-            input_tokens = self.input_tokens,
-            output_tokens = self.output_tokens,
-            reasoning_tokens = self.reasoning_tokens,
-            "completion"
-        );
+
+        // an event's level is fixed at its callsite, so each level is its own event
+        macro_rules! completion {
+            ($level:ident) => {
+                tracing::$level!(
+                    outcome,
+                    attempts = self.attempts,
+                    duration_ms,
+                    input_tokens = self.input_tokens,
+                    output_tokens = self.output_tokens,
+                    reasoning_tokens = self.reasoning_tokens,
+                    "completion"
+                )
+            };
+        }
+        if matches!(outcome, "ok" | "corrected") {
+            completion!(info);
+        } else {
+            completion!(warn);
+        }
     }
 }
 
@@ -117,6 +130,8 @@ pub fn outcome_of(error: &anyhow::Error) -> &'static str {
     }
 }
 
+// Error classification and failure display; completion events are exercised
+// through the model e2e suite.
 #[cfg(test)]
 mod tests {
     use super::{Failure, outcome_of};

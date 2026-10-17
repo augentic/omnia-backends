@@ -45,11 +45,10 @@ The null byte (`\0`, U+0000) is used as the separator because it is
 (control characters U+0000–U+001F are disallowed), making the split
 unambiguous. The same separator is already used for continuation tokens.
 
-Construct and parse composite IDs with the helpers in
-`omnia_azure_table::store::document`:
+Construct and parse composite IDs with `omnia_azure_table::{encode_id, decode_id}`:
 
 ```rust,ignore
-use omnia_azure_table::store::document::{encode_id, decode_id};
+use omnia_azure_table::{encode_id, decode_id};
 
 let id = encode_id("tenant-a", "user-123");   // "tenant-a\0user-123"
 let (pk, rk) = decode_id(&id).unwrap();       // ("tenant-a", "user-123")

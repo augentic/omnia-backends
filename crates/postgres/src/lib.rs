@@ -4,8 +4,9 @@ mod sql;
 mod types;
 
 use std::collections::HashMap;
+use std::fmt;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result};
 use deadpool_postgres::{Pool, PoolConfig, Runtime};
 use omnia::Backend;
 use rustls::crypto::{CryptoProvider, ring};
@@ -15,9 +16,15 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::instrument;
 use webpki_roots::TLS_SERVER_ROOTS;
 
-/// Postgres client
-#[derive(Clone, Debug)]
+/// `PostgreSQL` backend client managing one or more named connection pools.
+#[derive(Clone)]
 pub struct Client(HashMap<String, Pool>);
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client").field("pools", &self.0.keys()).finish_non_exhaustive()
+    }
+}
 
 impl Backend for Client {
     type ConnectOptions = ConnectOptions;
@@ -68,18 +75,18 @@ impl Backend for Client {
 
                 pool_config
                     .create_pool(runtime, factory)
-                    .context(format!("failed to create postgres pool: '{}'", entry.name))?
+                    .with_context(|| format!("failed to create postgres pool '{}'", entry.name))?
             } else {
                 pool_config
                     .create_pool(runtime, tokio_postgres::NoTls)
-                    .context(format!("failed to create postgres pool: '{}'", entry.name))?
+                    .with_context(|| format!("failed to create postgres pool '{}'", entry.name))?
             };
 
             // check the pool is usable
-            let cnn = pool.get().await;
-            if cnn.is_err() {
-                return Err(anyhow!("failed to get connection from pool: {:?}", cnn.err()));
-            }
+            let _cnn = pool
+                .get()
+                .await
+                .with_context(|| format!("failed to get connection from pool '{}'", entry.name))?;
 
             tracing::info!(
                 "connected to Postgres database {:?}, with pool name '{}', tls '{}'",
@@ -95,7 +102,7 @@ impl Backend for Client {
 }
 
 /// A named connection pool entry.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PoolEntry {
     /// Pool name (e.g. `"EVENTSTORE"`). Used as lookup key and env var suffix.
     pub name: String,
@@ -105,22 +112,24 @@ pub struct PoolEntry {
     pub pool_size: usize,
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use fromenv::FromEnv;
-
-    use super::PoolEntry;
-
-    /// Connection options for the `PostgreSQL` backend.
-    #[derive(Debug, Clone, FromEnv)]
-    pub struct ConnectOptions {
-        /// Default connection pool (from `POSTGRES_URL`).
-        pub default_pool: PoolEntry,
-        /// Additional named pools discovered from `POSTGRES_POOLS`.
-        pub additional_pools: Vec<PoolEntry>,
+impl fmt::Debug for PoolEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PoolEntry")
+            .field("name", &self.name)
+            .field("uri", &"<redacted>")
+            .field("pool_size", &self.pool_size)
+            .finish()
     }
 }
-pub use config::ConnectOptions;
+
+/// Connection options for the `PostgreSQL` backend.
+#[derive(Debug, Clone)]
+pub struct ConnectOptions {
+    /// Default connection pool (from `POSTGRES_URL`).
+    pub default_pool: PoolEntry,
+    /// Additional named pools discovered from `POSTGRES_POOLS`.
+    pub additional_pools: Vec<PoolEntry>,
+}
 
 impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {

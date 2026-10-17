@@ -253,11 +253,11 @@ async fn assert_keyed_sends(scheme: PartitionerScheme, cases: Vec<Case>) -> Resu
 fn registry_client() -> (SchemaRegistryClient, RegistryOptions) {
     let url = std::env::var("KAFKA_REGISTRY_URL")
         .expect("KAFKA_REGISTRY_URL must be set for the registry live tests");
-    let api_key = std::env::var("KAFKA_REGISTRY_API_KEY").unwrap_or_default();
-    let api_secret = std::env::var("KAFKA_REGISTRY_API_SECRET").unwrap_or_default();
+    let api_key = std::env::var("KAFKA_REGISTRY_API_KEY").ok();
+    let api_secret = std::env::var("KAFKA_REGISTRY_API_SECRET").ok();
 
     let mut config = RegistryClientConfig::new(vec![url.clone()]);
-    config.basic_auth = Some((api_key.clone(), Some(api_secret.clone())));
+    config.basic_auth = api_key.clone().map(|key| (key, api_secret.clone()));
     (
         SchemaRegistryClient::new(config),
         RegistryOptions {
@@ -326,7 +326,7 @@ impl RegistrySubscriber {
             PartitionerScheme::KafkaJs,
             Some(ConsumerOptions {
                 topics: vec![topic.clone()],
-                group_id: Some(group.clone()),
+                group_id: group.clone(),
             }),
             Some(registry_options),
         );
@@ -469,7 +469,7 @@ async fn at_least_once() -> Result<()> {
         PartitionerScheme::KafkaJs,
         Some(ConsumerOptions {
             topics: vec![topic.clone()],
-            group_id: Some(group.clone()),
+            group_id: group.clone(),
         }),
         None,
     ))

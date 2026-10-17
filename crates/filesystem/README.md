@@ -39,9 +39,27 @@ backend.
 
 ## Configuration
 
-| Variable          | Description                                       |
-| ----------------- | ------------------------------------------------- |
-| `FILESYSTEM_ROOT` | Root directory of the store; created when absent. |
+| Variable          | Required | Default          | Description                                       |
+| ----------------- | -------- | ---------------- | ------------------------------------------------- |
+| `FILESYSTEM_ROOT` | no       | `.omnia/storage` | Root directory of the store; created when absent. |
+
+## Usage
+
+Bind the backend in your host's `runtime!` map — one `Client` can back both
+`WasiBlobstore` and `WasiKeyValue`:
+
+```rust,ignore
+use omnia_filesystem::Client as Filesystem;
+use omnia_wasi_blobstore::WasiBlobstore;
+use omnia_wasi_keyvalue::WasiKeyValue;
+
+omnia::runtime!({
+    hosts: {
+        WasiBlobstore: Filesystem,
+        WasiKeyValue: Filesystem,
+    }
+});
+```
 
 Deployments that anchor the root themselves (rather than through the
 environment) construct the backend with `Client::open(root)`.

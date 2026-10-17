@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::Client;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Blob {
+struct Blob {
     name: String,
     data: Document,
     size: u64,
@@ -28,6 +28,7 @@ impl WasiBlobstoreCtx for Client {
 
         async move {
             let db = client.default_database().ok_or_else(|| anyhow!("No default database"))?;
+            db.create_collection(&name).await.context("creating container")?;
             let collection = db.collection::<Blob>(&name);
             Ok(Arc::new(MongoDbContainer { name, collection }) as Arc<dyn Container>)
         }
@@ -59,12 +60,23 @@ impl WasiBlobstoreCtx for Client {
 
     fn container_exists(&self, name: String) -> FutureResult<bool> {
         tracing::trace!("checking existence of container: {name}");
-        async move { Ok(true) }.boxed()
+        let client = self.0.clone();
+
+        async move {
+            let db = client.default_database().ok_or_else(|| anyhow!("No default database"))?;
+            let names = db
+                .list_collection_names()
+                .filter(bson::doc! { "name": name })
+                .await
+                .context("checking container existence")?;
+            Ok(!names.is_empty())
+        }
+        .boxed()
     }
 }
 
 #[derive(Debug)]
-pub struct MongoDbContainer {
+struct MongoDbContainer {
     name: String,
     collection: Collection<Blob>,
 }
@@ -83,13 +95,13 @@ impl Container for MongoDbContainer {
         })
     }
 
-    fn get_data(&self, name: String, _start: u64, _end: u64) -> FutureResult<Option<Bytes>> {
+    fn get_data(&self, name: String, start: u64, end: u64) -> FutureResult<Option<Bytes>> {
         tracing::trace!("getting object data: {name}");
         let collection = self.collection.clone();
 
         async move {
             let Some(blob) = collection.find_one(bson::doc! { "name": name }).await? else {
-                return Err(anyhow!("Object not found"));
+                return Ok(None);
             };
 
             // HACK: blob data is a string not an object
@@ -99,7 +111,8 @@ impl Container for MongoDbContainer {
                 }
                 _ => serde_json::to_vec(&blob.data).context("deserializing Document")?,
             };
-            Ok(Some(data.into()))
+            let sliced = slice_range(Bytes::from(data), start, end)?;
+            Ok(Some(sliced))
         }
         .boxed()
     }
@@ -109,9 +122,6 @@ impl Container for MongoDbContainer {
         let collection = self.collection.clone();
 
         async move {
-            // `put` should update any previous value, so delete first
-            collection.delete_one(bson::doc! { "name": &name }).await?;
-
             let bytes = data;
 
             let data = match bytes.first() {
@@ -127,12 +137,16 @@ impl Container for MongoDbContainer {
             };
 
             let blob = Blob {
-                name,
+                name: name.clone(),
                 data,
                 size: bytes.len() as u64,
                 created_at: u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default(),
             };
-            collection.insert_one(blob).await?;
+            collection
+                .replace_one(bson::doc! { "name": name }, blob)
+                .upsert(true)
+                .await
+                .context("writing object")?;
 
             Ok(())
         }
@@ -193,5 +207,39 @@ impl Container for MongoDbContainer {
             })
         }
         .boxed()
+    }
+}
+
+fn slice_range(data: Bytes, start: u64, end: u64) -> anyhow::Result<Bytes> {
+    if start == 0 && (end == 0 || end == u64::MAX) {
+        return Ok(data);
+    }
+    let unbounded = end == 0 || end == u64::MAX;
+    if !unbounded && end < start {
+        anyhow::bail!("invalid byte range: end ({end}) < start ({start})");
+    }
+    let len = data.len();
+    let start_idx = usize::try_from(start).unwrap_or(len).min(len);
+    let end_idx = if unbounded {
+        len
+    } else {
+        usize::try_from(end).map_or(len, |e| e.saturating_add(1).min(len))
+    };
+    Ok(data.slice(start_idx..end_idx))
+}
+
+// Byte-range slicing for `get_data`; MongoDB document round-trips are covered
+// by `tests/live.rs`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slice_range_bounds() {
+        let bytes = Bytes::from_static(b"hello world");
+        assert_eq!(slice_range(bytes.clone(), 0, 0).unwrap(), Bytes::from_static(b"hello world"));
+        assert_eq!(slice_range(bytes.clone(), 0, 4).unwrap(), Bytes::from_static(b"hello"));
+        assert_eq!(slice_range(bytes.clone(), 6, 0).unwrap(), Bytes::from_static(b"world"));
+        slice_range(bytes, 8, 3).unwrap_err();
     }
 }

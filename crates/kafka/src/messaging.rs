@@ -11,7 +11,7 @@ use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::ToBytes;
 use rdkafka::producer::{BaseRecord, ThreadedProducer};
 
-use crate::{Tracer, consume};
+use crate::{DeliveryContext, consume};
 
 // One retry, long enough for a full queue to drain a slot.
 const QUEUE_RETRY: Duration = Duration::from_millis(20);
@@ -103,7 +103,7 @@ fn explicit_partition(metadata: &Metadata) -> Option<i32> {
 // A full queue hands the record back with the error, so the retry sends the
 // very same one.
 async fn enqueue<K, P>(
-    producer: &ThreadedProducer<Tracer>, record: BaseRecord<'_, K, P, usize>,
+    producer: &ThreadedProducer<DeliveryContext>, record: BaseRecord<'_, K, P, usize>,
 ) -> Result<(), KafkaError>
 where
     K: ToBytes + Sync + ?Sized,

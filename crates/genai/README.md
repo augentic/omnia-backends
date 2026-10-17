@@ -23,9 +23,10 @@ the guest through `ToolHost::check`: `Ok` ends the completion with that
 candidate, `Err(correction)` appends the candidate and the guest's correction
 to the conversation verbatim and the loop goes round. Workspace reads, tool
 calls, and check rounds share one bounded round budget (eight provider
-round-trips); a rejection on the last round fails the completion with the
-typed `budget-exhausted` carrying that correction. Without a `check` the
-guest sees the model's final text as-is.
+round-trips, independent of the host's per-completion tool-call limit in
+`WasiModelCtx::limits()`); a rejection on the last round fails the completion
+with the typed `budget-exhausted` carrying that correction. Without a `check`
+the guest sees the model's final text as-is.
 
 MSRV: Rust 1.99
 

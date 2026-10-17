@@ -58,7 +58,7 @@ impl WasiKeyValueCtx for Client {
 }
 
 // `ConnectionManager` has no `Debug`, and the bucket derives it.
-pub struct Conn(ConnectionManager);
+struct Conn(ConnectionManager);
 
 impl Debug for Conn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -67,9 +67,9 @@ impl Debug for Conn {
 }
 
 #[derive(Debug)]
-pub struct RedisBucket {
-    pub identifier: String,
-    pub conn: Conn,
+struct RedisBucket {
+    identifier: String,
+    conn: Conn,
 }
 
 impl Bucket for RedisBucket {
@@ -116,11 +116,30 @@ impl Bucket for RedisBucket {
 
     fn keys(&self) -> FutureResult<Vec<String>> {
         let mut conn = self.conn.0.clone();
-        let pattern = format!("{}:*", self.identifier);
+        let identifier = self.identifier.clone();
+        let pattern = format!("{identifier}:*");
         async move {
-            conn.keys(pattern.clone())
-                .await
-                .with_context(|| format!("failed to list keys for {pattern}"))
+            let mut cursor: u64 = 0;
+            let mut keys = Vec::new();
+            loop {
+                let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .cursor_arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .query_async(&mut conn)
+                    .await
+                    .with_context(|| format!("failed to list keys for {pattern}"))?;
+                for raw_key in batch {
+                    if let Some(key) = strip_bucket_prefix(&identifier, &raw_key) {
+                        keys.push(key);
+                    }
+                }
+                if next_cursor == 0 {
+                    break;
+                }
+                cursor = next_cursor;
+            }
+            Ok(keys)
         }
         .boxed()
     }
@@ -171,5 +190,25 @@ impl Bucket for RedisBucket {
             }
         }
         .boxed()
+    }
+}
+
+fn strip_bucket_prefix(identifier: &str, raw_key: &str) -> Option<String> {
+    raw_key.strip_prefix(identifier).and_then(|rest| rest.strip_prefix(':')).map(ToOwned::to_owned)
+}
+
+// Prefix stripping for bucket-scoped keys; Redis round-trips are covered by
+// `tests/live.rs`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_bucket_prefix_removes_namespace() {
+        assert_eq!(
+            strip_bucket_prefix("my-bucket", "my-bucket:user:42").as_deref(),
+            Some("user:42")
+        );
+        assert!(strip_bucket_prefix("my-bucket", "other-bucket:user:42").is_none());
     }
 }

@@ -32,7 +32,7 @@ impl WasiSqlCtx for Client {
 }
 
 #[derive(Debug)]
-pub struct PostgresConnection(Arc<Object>);
+struct PostgresConnection(Arc<Object>);
 
 impl Connection for PostgresConnection {
     fn query(&self, query: String, params: Vec<DataType>) -> FutureResult<Vec<Row>> {
@@ -40,17 +40,14 @@ impl Connection for PostgresConnection {
         let cnn = Arc::clone(&self.0);
 
         async move {
-            let mut pg_params: Vec<Param> = Vec::new();
-            for p in &params {
-                pg_params.push(into_param(p)?);
-            }
+            let pg_params = into_params(&params)?;
             let param_refs: Vec<ParamRef> =
                 pg_params.iter().map(|b| b.as_ref() as ParamRef).collect();
 
             let pg_rows = cnn.query(&query, &param_refs).await.context("query failed")?;
             tracing::debug!("query returned {} rows", pg_rows.len());
 
-            let mut wasi_rows = Vec::new();
+            let mut wasi_rows = Vec::with_capacity(pg_rows.len());
             for (idx, r) in pg_rows.iter().enumerate() {
                 let row = match into_wasi_row(r, idx) {
                     Ok(row) => row,
@@ -72,10 +69,7 @@ impl Connection for PostgresConnection {
         let cnn = Arc::clone(&self.0);
 
         async move {
-            let mut pg_params: Vec<Param> = Vec::new();
-            for p in &params {
-                pg_params.push(into_param(p)?);
-            }
+            let pg_params = into_params(&params)?;
             let param_refs: Vec<ParamRef> =
                 pg_params.iter().map(|b| b.as_ref() as ParamRef).collect();
 
@@ -86,10 +80,14 @@ impl Connection for PostgresConnection {
                     return Err(anyhow!("exec failed: {e}"));
                 }
             };
-            Ok(u32::try_from(affected).unwrap_or(u32::MAX))
+            u32::try_from(affected).context("affected row count exceeds u32::MAX")
         }
         .boxed()
     }
+}
+
+fn into_params(params: &[DataType]) -> anyhow::Result<Vec<Param>> {
+    params.iter().map(into_param).collect()
 }
 
 fn parse_date(source: Option<&str>) -> anyhow::Result<Option<NaiveDate>> {

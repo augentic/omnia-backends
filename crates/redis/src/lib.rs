@@ -23,7 +23,7 @@ impl Debug for Client {
 impl Backend for Client {
     type ConnectOptions = ConnectOptions;
 
-    #[instrument(name = "Redis::connect_with")]
+    #[instrument(name = "Redis::connect_with", skip(options))]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
         let client =
             redis::Client::open(options.url.clone()).context("failed to create redis client")?;
@@ -43,10 +43,12 @@ impl Backend for Client {
 
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
+    use std::fmt;
+
     use fromenv::FromEnv;
 
     /// Connection options for the Redis backend.
-    #[derive(Debug, Clone, FromEnv)]
+    #[derive(Clone, FromEnv)]
     pub struct ConnectOptions {
         /// Redis connection URL.
         #[env(from = "REDIS_URL", default = "redis://localhost:6379")]
@@ -57,6 +59,16 @@ mod config {
         /// Maximum backoff delay in milliseconds.
         #[env(from = "REDIS_MAX_DELAY", default = "1000")]
         pub max_delay: u64,
+    }
+
+    impl fmt::Debug for ConnectOptions {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("ConnectOptions")
+                .field("url", &"<redacted>")
+                .field("max_retries", &self.max_retries)
+                .field("max_delay", &self.max_delay)
+                .finish()
+        }
     }
 }
 pub use config::ConnectOptions;

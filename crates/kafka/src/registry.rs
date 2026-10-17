@@ -4,7 +4,7 @@ use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, ensure};
 use futures::FutureExt as _;
 use futures::future::{BoxFuture, Shared};
 use http::StatusCode;
@@ -28,7 +28,7 @@ const RETRY_WAIT_MS: u32 = 100;
 const RETRY_MAX_WAIT_MS: u32 = 1000;
 
 // The Confluent wire format's magic byte.
-const BIG_ENDIAN: u8 = 0;
+const MAGIC_BYTE: u8 = 0;
 
 // Decode looks a schema up by the id in the record's header, encode by the
 // topic's subject. Both are kept for the life of the process: an id always
@@ -77,8 +77,12 @@ impl Schema {
 
 impl Registry {
     pub fn new(options: RegistryOptions) -> Result<Self> {
+        ensure!(
+            options.api_key.is_some() || options.api_secret.is_none(),
+            "KAFKA_REGISTRY_API_SECRET requires KAFKA_REGISTRY_API_KEY"
+        );
         let mut config = RegistryConfig::new(vec![options.url]);
-        config.basic_auth = Some((options.api_key, Some(options.api_secret)));
+        config.basic_auth = options.api_key.map(|key| (key, options.api_secret));
         config.max_retries = RETRIES;
         config.retries_wait_ms = RETRY_WAIT_MS;
         config.retries_max_wait_ms = RETRY_MAX_WAIT_MS;
@@ -226,7 +230,7 @@ pub struct Rejection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Reason {
+enum Reason {
     RegistryUnavailable,
     UnknownSchema,
     InvalidSchema,
@@ -341,16 +345,16 @@ where
 // --- Wire format ---
 
 // The Confluent wire format: magic byte, big-endian schema id, data.
-pub struct Payload<'a> {
+struct Payload<'a> {
     registry_id: i32,
     data: &'a [u8],
 }
 
 impl Payload<'_> {
     #[must_use]
-    pub fn encode(registry_id: i32, payload: Vec<u8>) -> Vec<u8> {
+    fn encode(registry_id: i32, payload: Vec<u8>) -> Vec<u8> {
         let mut buf = Vec::with_capacity(1 + 4 + payload.len());
-        buf.push(BIG_ENDIAN);
+        buf.push(MAGIC_BYTE);
         buf.extend(&registry_id.to_be_bytes());
         buf.extend(payload);
         buf
@@ -359,9 +363,9 @@ impl Payload<'_> {
     // `None` for a buffer without the header: too short, or another magic byte.
     // `0x00` is the Confluent magic byte. No UTF-8 JSON starts with it, so a
     // miss here is an unframed payload, not a corrupt one.
-    pub fn decode(buffer: &[u8]) -> Option<Payload<'_>> {
+    fn decode(buffer: &[u8]) -> Option<Payload<'_>> {
         let ([magic_byte, id @ ..], data) = buffer.split_first_chunk::<5>()?;
-        if *magic_byte != BIG_ENDIAN {
+        if *magic_byte != MAGIC_BYTE {
             return None;
         }
         Some(Payload {
@@ -390,7 +394,7 @@ mod tests {
         let encoded = Payload::encode(registry_id, payload.clone());
 
         // layout: [magic byte][registry id, 4 bytes BE][payload]
-        assert_eq!(encoded[0], BIG_ENDIAN, "magic byte mismatch");
+        assert_eq!(encoded[0], MAGIC_BYTE, "magic byte mismatch");
         assert_eq!(&encoded[1..5], &[0xAA, 0xBB, 0xCC, 0xDD], "registry id mismatch");
         assert_eq!(&encoded[5..], &payload, "payload mismatch");
 

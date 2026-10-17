@@ -17,6 +17,9 @@ use super::options::Turn;
 use super::tools;
 use crate::Client;
 
+// Maximum provider round-trips per completion. A rejected `check` on the
+// final round surfaces as `Error::BudgetExhausted`; exhausting all rounds in
+// tool calls without a final text surfaces as `Failure::Exhausted`.
 const MAX_ROUNDS: usize = 8;
 
 pub struct Conversation {

@@ -304,12 +304,11 @@ pub struct Place<'a> {
 impl Place<'_> {
     // The child enters the working directory by its open descriptor. Hooks
     // run in the order registered, so the kernel calls this before its rules.
-    #[expect(
-        unsafe_code,
-        reason = "`pre_exec` runs in the forked child; `fchdir` is async-signal-safe"
-    )]
+    #[expect(unsafe_code, reason = "`pre_exec` runs in the forked child")]
     pub fn enter(&self, command: &mut tokio::process::Command) {
         let dir = self.dir;
+        // SAFETY: the descriptor is inherited across the fork and held open
+        // past `spawn`, and `fchdir` is async-signal-safe.
         unsafe {
             command.pre_exec(move || {
                 if libc::fchdir(dir) == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }

@@ -23,7 +23,7 @@ use crate::session::Place;
 // Named by absolute path, so no `PATH` of the operator's can stand in for it.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
-const BASE: &str = include_str!("seatbelt/base.sbpl");
+const BASE: &str = include_str!("seatbelt.sbpl");
 
 // `(deny default)` leaves `process-info` open on recent macOS, so it is
 // denied here, then allowed for the same sandbox, since the last match wins.
@@ -80,10 +80,10 @@ const SYSTEM: [&str; 11] = [
     "/opt/homebrew",
     "/usr/local",
 ];
+
 // The symlinks every resolution passes through. `realpath` fails without
 // their metadata.
 const NODES: [&str; 3] = ["/tmp", "/etc", "/var"];
-
 const PROBE: &str = "(version 1)(allow default)";
 const PROBE_BOUND: Duration = Duration::from_secs(10);
 

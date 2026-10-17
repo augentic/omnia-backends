@@ -54,6 +54,7 @@ impl Linux {
             .handle_access(AccessFs::from_all(REQUIRED))
             .and_then(|ruleset| ruleset.handle_access(AccessNet::ConnectTcp))
             .and_then(Ruleset::create);
+
         if let Err(error) = created {
             return Err(anyhow!(error).context(format!(
                 "Landlock ABI {} (kernel 6.7) is required and kernel {} cannot create its ruleset",
@@ -70,6 +71,7 @@ impl Linux {
             .trim()
             .parse()
             .with_context(|| format!("`kernel.yama.ptrace_scope` reads {scope:?}"))?;
+
         ensure!(scope >= 1, "`kernel.yama.ptrace_scope` is {scope}; 1 or more is required");
 
         let filters = Filters::compile()?;
@@ -87,14 +89,13 @@ impl Linux {
     // The ruleset over `place` and the filters, applied in the child once it
     // has entered its working directory. `restrict_self` sets
     // `no_new_privs`, and nothing short of full enforcement runs the program.
-    #[expect(
-        unsafe_code,
-        reason = "`pre_exec` runs in the forked child; it applies rules built here and allocates \
-                  only on its failure path"
-    )]
+    #[expect(unsafe_code, reason = "`pre_exec` runs in the forked child")]
     fn restrain(&self, command: &mut Command, place: &Place<'_>) -> Result<()> {
         let mut ruleset = Some(Self::ruleset(place)?);
         let mut filters = Some(self.filters.clone());
+
+        // SAFETY: the hook applies rules built here and allocates only on its
+        // failure path.
         unsafe {
             command.pre_exec(move || {
                 let ruleset = ruleset.take().ok_or_else(|| io::Error::other("rules spent"))?;
@@ -111,6 +112,7 @@ impl Linux {
                 filters.take().ok_or_else(|| io::Error::other("filters spent"))?.apply()
             });
         }
+
         Ok(())
     }
 

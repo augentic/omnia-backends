@@ -136,14 +136,11 @@ fn ceiling(place: &Place) -> Option<PathBuf> {
 }
 
 // The child's working directory is the open handle itself, entered between
-// `fork` and `exec`: the descriptor is inherited across the fork, the place
-// that owns it is held until `spawn` returns, and `fchdir` is
-// async-signal-safe, so the hook runs nothing a forked child may not.
-#[expect(
-    unsafe_code,
-    reason = "`pre_exec` runs in the forked child; `fchdir` is async-signal-safe"
-)]
+// `fork` and `exec`.
+#[expect(unsafe_code, reason = "`pre_exec` runs in the forked child")]
 fn enter(command: &mut Command, dir: RawFd) {
+    // SAFETY: the descriptor is inherited across the fork, the place that owns
+    // it is held until `spawn` returns, and `fchdir` is async-signal-safe.
     unsafe {
         command.pre_exec(move || {
             if libc::fchdir(dir) == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }

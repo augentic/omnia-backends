@@ -24,12 +24,8 @@ use crate::consume::{KafkaConsumer, KafkaContext, Shared};
 use crate::partitioner::Partitioner;
 use crate::registry::Registry;
 
-// Apache Kafka's own producer default (`delivery.timeout.ms`): long enough
-// to ride out a leader election or a rolling broker restart. librdkafka's is
-// 5 minutes. A record's offset is held until its sends resolve, so this also
-// bounds how long an unreachable broker stalls commits.
+// How long a produce retries before failing and releasing any offset waiting on it.
 const MESSAGE_TIMEOUT: &str = "120000";
-
 // How long shutdown waits for queued produces to reach the broker.
 const PRODUCER_FLUSH: Duration = Duration::from_secs(10);
 
@@ -73,6 +69,7 @@ impl Backend for Client {
             options.username.is_some() == options.password.is_some(),
             "KAFKA_USERNAME and KAFKA_PASSWORD must be set together"
         );
+        
         let mut config = ClientConfig::from(&options);
 
         let shared = Shared::new();

@@ -401,7 +401,7 @@ async fn registry_wire_format() -> Result<()> {
 // guest must see those bytes unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs Kafka + Schema Registry (KAFKA_BROKERS, KAFKA_REGISTRY_URL); run with --run-ignored"]
-async fn registry_unframed_payload() -> Result<()> {
+async fn registry_unframed() -> Result<()> {
     let mut subscriber = RegistrySubscriber::connect("omnia.live.unframed").await?;
 
     let payload = br#"{"stationId":"42"}"#;

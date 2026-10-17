@@ -1,6 +1,8 @@
-//! What a build's toolchain does inside the kernel boundary: `node` serving
-//! and fetching on loopback, `node --test` with a worker thread, and `npm`
-//! installing from the tree with its cache in the scratch.
+//! What a build's toolchain does inside the kernel boundary:
+//!
+//! - `node` serving and fetching on loopback
+//! - `node --test` with a worker thread
+//! - `npm` installing from the tree with its cache in the scratch
 //!
 //! The rows need `node` and `npm` on `PATH`, as omnia-git's need `git`. A
 //! toolchain under `$HOME` is asked for as a `~/` read root, as a target
@@ -14,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
-use omnia_confine::{Ask, Confine, Options};
+use omnia_sandbox::{Grant, Options, Sandbox};
 
 const BOUND: Duration = Duration::from_secs(120);
 const LIVE_BOUND: Duration = Duration::from_secs(300);
@@ -69,16 +71,16 @@ const TSCONFIG: &str = r#"{
 }
 "#;
 
-// A lent tree holding `files`, each at its path beneath the tree.
+// A workspace holding `files`, each at its path beneath the tree.
 fn tree(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
-    let lend = tempfile::tempdir().expect("a lend");
-    let tree = lend.path().join("tree");
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let tree = workspace.path().join("tree");
     for (path, text) in files {
         let path = tree.join(path);
         std::fs::create_dir_all(path.parent().expect("a parent")).expect("the directory");
         std::fs::write(path, text).expect("the file");
     }
-    (lend, tree)
+    (workspace, tree)
 }
 
 // Where `program` on the host's PATH lives.
@@ -98,13 +100,13 @@ fn home() -> PathBuf {
     std::fs::canonicalize(home).expect("the home resolves")
 }
 
-async fn connect() -> Confine {
+async fn connect() -> Sandbox {
     support::connect(Options::default()).await
 }
 
-// The install prefix of each tool under the host's `$HOME`, which the
-// scratch `HOME` hides, spelled `~/`-relative: `<prefix>/bin/<tool>` as
-// nvm, volta, and fnm lay it.
+// The install prefix of each tool under the host's `$HOME`, spelled
+// `~/`-relative. The scratch `HOME` hides it, and `<prefix>/bin/<tool>` is
+// how nvm, volta, and fnm lay a tool.
 fn toolchain_roots() -> Vec<String> {
     let home = home();
     let mut roots = Vec::new();
@@ -122,19 +124,20 @@ fn toolchain_roots() -> Vec<String> {
     roots
 }
 
-// The toolchain's ask: its prefixes under the home, and `egress`.
-fn toolchain(egress: Vec<String>) -> Ask {
-    Ask {
+// The toolchain's grant: its prefixes under the home, and `egress`.
+fn toolchain(egress: Vec<String>) -> Grant {
+    Grant {
         egress,
         read: toolchain_roots(),
-        ..Ask::default()
+        ..Grant::default()
     }
 }
 
-async fn run(confine: &Confine, ask: &Ask, tree: &Path, script: &str, bound: Duration) -> Output {
-    let boundary = support::asking(confine, Some(tree), ask).await;
-    let command = support::sh(&boundary, script);
-    boundary.output(command, bound).await.expect("the shell answers")
+async fn run(
+    sandbox: &Sandbox, grant: &Grant, tree: &Path, script: &str, bound: Duration,
+) -> Output {
+    let session = support::granted(sandbox, Some(tree), grant).await;
+    support::sh(session, script).output(bound).await.expect("the shell answers")
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -153,23 +156,23 @@ fn passed(output: &Output, what: &str) {
 }
 
 #[tokio::test]
-async fn node_serves_on_port_zero() {
-    let (_lend, tree) = tree(&[("serve.mjs", SERVE)]);
-    let confine = connect().await;
+async fn node_loopback() {
+    let (_workspace, tree) = tree(&[("serve.mjs", SERVE)]);
+    let sandbox = connect().await;
 
-    let output = run(&confine, &toolchain(vec![]), &tree, "node serve.mjs", BOUND).await;
+    let output = run(&sandbox, &toolchain(vec![]), &tree, "node serve.mjs", BOUND).await;
     passed(&output, "a server on port 0, fetched from inside");
     assert_eq!(text(&output.stdout), "200 served /ping");
 }
 
 #[tokio::test]
-async fn node_test_runs() {
-    let (_lend, tree) = tree(&[("test/worker.test.mjs", WORKER_TEST)]);
-    let confine = connect().await;
+async fn node_test() {
+    let (_workspace, tree) = tree(&[("test/worker.test.mjs", WORKER_TEST)]);
+    let sandbox = connect().await;
 
     let script = "node --test --test-force-exit --test-timeout=5000 --test-reporter=tap \
                   test/worker.test.mjs";
-    let output = run(&confine, &toolchain(vec![]), &tree, script, BOUND).await;
+    let output = run(&sandbox, &toolchain(vec![]), &tree, script, BOUND).await;
     passed(&output, "node --test with a worker thread");
     let report = text(&output.stdout);
     assert!(report.contains("ok 1 - a worker thread answers"), "{report}");
@@ -178,8 +181,8 @@ async fn node_test_runs() {
 }
 
 #[tokio::test]
-async fn npm_installs_a_local_dependency() {
-    let (_lend, tree) = tree(&[
+async fn npm_local_install() {
+    let (_workspace, tree) = tree(&[
         (
             "package.json",
             r#"{ "name": "app", "private": true, "version": "0.0.0", "dependencies": { "dep": "file:./dep" } }"#,
@@ -188,14 +191,13 @@ async fn npm_installs_a_local_dependency() {
         ("dep/index.js", "module.exports = \"dep answers\";\n"),
         ("index.js", "console.log(require(\"dep\"));\n"),
     ]);
-    let confine = connect().await;
-    let boundary = support::asking(&confine, Some(&tree), &toolchain(vec![])).await;
-    let cache = boundary.scratch().join(".npm");
+    let sandbox = connect().await;
+    let session = support::granted(&sandbox, Some(&tree), &toolchain(vec![])).await;
+    let cache = session.scratch().join(".npm");
 
     let script = "npm install --no-audit --no-fund >/dev/null && node index.js && npm config get \
                   cache && test -d \"$HOME/.npm\" && echo cached";
-    let command = support::sh(&boundary, script);
-    let output = boundary.output(command, BOUND).await.expect("the shell answers");
+    let output = support::sh(session, script).output(BOUND).await.expect("the shell answers");
     passed(&output, "npm install of a file: dependency");
     assert_eq!(
         text(&output.stdout),
@@ -206,14 +208,14 @@ async fn npm_installs_a_local_dependency() {
     assert!(tree.join("package-lock.json").exists(), "package-lock.json in the tree");
 }
 
-// The registry through the proxy: `npm install` of a pinned `typescript`
-// and `tsc --noEmit` over a source, the toolchain's own checks as a build
-// turn runs them. Needs the network; run by hand, reading `log stream`
-// for denials on macOS.
+// The registry through the proxy: `npm install` of a pinned `typescript` and
+// `tsc --noEmit` over a source, the toolchain's own checks as a build turn
+// runs them. Needs the network, so run by hand, reading `log stream` for
+// denials on macOS.
 #[tokio::test]
 #[ignore = "reaches registry.npmjs.org through the proxy"]
-async fn live_toolchain_through_the_proxy() {
-    let (_lend, tree) = tree(&[
+async fn npm_registry_install() {
+    let (_workspace, tree) = tree(&[
         (
             "package.json",
             r#"{ "name": "app", "private": true, "version": "0.0.0", "type": "module" }"#,
@@ -221,15 +223,15 @@ async fn live_toolchain_through_the_proxy() {
         ("tsconfig.json", TSCONFIG),
         ("src/index.ts", INDEX_TS),
     ]);
-    let confine = connect().await;
-    let ask = toolchain(vec!["registry.npmjs.org".to_owned()]);
+    let sandbox = connect().await;
+    let grant = toolchain(vec!["registry.npmjs.org".to_owned()]);
 
     let script = format!(
         "npm install --no-audit --no-fund typescript@{TYPESCRIPT} >/dev/null && node -p \
          'require(\"./node_modules/typescript/package.json\").version' && npx tsc --noEmit && echo \
          checked"
     );
-    let output = run(&confine, &ask, &tree, &script, LIVE_BOUND).await;
+    let output = run(&sandbox, &grant, &tree, &script, LIVE_BOUND).await;
     passed(&output, "npm install typescript and tsc through the proxy");
     assert_eq!(text(&output.stdout), format!("{TYPESCRIPT}\nchecked"));
 }

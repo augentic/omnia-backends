@@ -37,15 +37,13 @@ fn object(answer: &Answer) -> Value {
     value
 }
 
+// Cursor's own backend and model, four slots so the fan-outs never queue,
+// and a cap a real answer comes well inside.
 fn options() -> ConnectOptions {
     ConnectOptions {
         timeout_secs: 120,
-        inactivity_secs: 120,
-        model: "auto".to_owned(),
-        backend_url: "https://api2.cursor.sh".to_owned(),
         max_agents: 4,
-        max_tool_calls: 128,
-        shell_roots: Vec::new(),
+        ..ConnectOptions::default()
     }
 }
 
@@ -99,7 +97,7 @@ fn verdict_request() -> Request {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn live_cursor_completes() -> Result<()> {
+async fn single_completion() -> Result<()> {
     let client = connect().await?;
     let answer: Answer = client
         .complete(verdict_request(), local_path_tool_host(temp_workspace("ws")?))
@@ -250,18 +248,13 @@ impl tracing::field::Visit for Spawn {
 // first spawn, the restart the second.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn worker_killed_mid_run_recovers() -> Result<()> {
+async fn killed_mid_run() -> Result<()> {
     let pids = SpawnedPids::install();
 
     // one slot, so the restart also proves the dead lease is reaped first
     let client = Client::connect_with(ConnectOptions {
-        timeout_secs: 120,
-        inactivity_secs: 120,
-        model: "auto".to_owned(),
-        backend_url: "https://api2.cursor.sh".to_owned(),
         max_agents: 1,
-        max_tool_calls: 128,
-        shell_roots: Vec::new(),
+        ..options()
     })
     .await?;
     let completion = {
@@ -336,7 +329,7 @@ fn tool_request() -> Request {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn live_cursor_function_tool() -> Result<()> {
+async fn function_tool() -> Result<()> {
     let client = connect().await?;
     let answer: Answer = client
         .complete(tool_request(), local_path_tool_host(temp_workspace("tool")?))
@@ -497,7 +490,7 @@ async fn check_exhausts() -> Result<()> {
     Ok(())
 }
 
-// --- Confined ---
+// --- Sandboxed ---
 
 // The bridge inside the kernel boundary: with the network closed to
 // loopback on macOS and no Cursor host on the egress list, its backend is
@@ -505,7 +498,7 @@ async fn check_exhausts() -> Result<()> {
 // relay carrying every call the bridge makes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn confined_turn_through_the_proxy() -> Result<()> {
+async fn confined_turn() -> Result<()> {
     let workspace = temp_workspace("confined")?;
     let client = Client::connect_with(ConnectOptions {
         shell_roots: vec![workspace.clone()],
@@ -570,7 +563,7 @@ fn install_request() -> Request {
 // crosses.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge, CURSOR_API_KEY, node and npm; run with --run-ignored"]
-async fn npm_install_through_the_proxy() -> Result<()> {
+async fn confined_npm_install() -> Result<()> {
     let workspace = temp_workspace("npm")?;
     std::fs::write(
         workspace.join("package.json"),

@@ -43,9 +43,6 @@ audit-as-crates-io = false
 [policy.omnia-cli]
 audit-as-crates-io = false
 
-[policy.omnia-confine]
-audit-as-crates-io = false
-
 [policy.omnia-core]
 audit-as-crates-io = false
 
@@ -89,6 +86,9 @@ audit-as-crates-io = false
 audit-as-crates-io = false
 
 [policy.omnia-redis]
+audit-as-crates-io = false
+
+[policy.omnia-sandbox]
 audit-as-crates-io = false
 
 [policy.omnia-sdk]

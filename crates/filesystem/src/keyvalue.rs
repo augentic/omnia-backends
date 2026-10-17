@@ -99,11 +99,7 @@ impl Bucket for FsBucket {
         tracing::trace!("listing keys in bucket: {}", self.name);
         let dir = self.dir.clone();
 
-        blocking(move || {
-            let mut names = Vec::new();
-            collect(&dir, "", &mut names)?;
-            Ok(names)
-        })
+        blocking(move || collect(&dir, ""))
     }
 
     fn increment(&self, key: String, delta: i64) -> FutureResult<i64> {

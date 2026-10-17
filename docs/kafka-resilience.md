@@ -713,7 +713,7 @@ topic rather than infer from these numbers.
   scripted records and a scripted handler; the partitioner; the wire
   format; the single-flight schema cache.
 - **`omnia-kafka` live tests** (`#[ignore]`d, recipe in the crate README):
-  `keyed_sends`, `registry_wire_format`, `registry_unframed_payload`,
+  `keyed_sends`, `registry_wire_format`, `registry_unframed`,
   `registry_id_mismatch` and `at_least_once`, with the test playing the
   host's `Handler`.
 - **End to end.** The `runtime` example running `trip-update` over a

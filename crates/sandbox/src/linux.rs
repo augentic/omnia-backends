@@ -1,17 +1,19 @@
-//! The Linux substrate: a Landlock ruleset over the filesystem and two
+//! The Linux kernel boundary: a Landlock ruleset over the filesystem and two
 //! seccomp filters over the syscalls, built in the parent and applied in
 //! the child before it runs the program.
 
 // Lifted from heel 0.3.0, `src/platform/linux/{mod,landlock_rules,
 // seccomp_filter}.rs`, Copyright (c) 2025 Lexo Liu, MIT OR Apache-2.0:
-// support probed by creating a ruleset rather than forking, the ruleset a
-// hard requirement with anything short of full enforcement a failure, a
-// system path skipped when absent and a granted one refused, and
-// `clone3` refused with `ENOSYS` in a filter of its own.
+//
+// - support probed by creating a ruleset rather than forking
+// - the ruleset a hard requirement, anything short of full enforcement a
+//   failure
+// - a system path skipped when absent, a granted one refused
+// - `clone3` refused with `ENOSYS` in a filter of its own
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use landlock::{
@@ -24,36 +26,23 @@ use seccompiler::{
 };
 use tokio::process::Command;
 
-// The first ABI that fences TCP, which the follow-ups build on; its kernel
-// (6.7) carries every filesystem right the ruleset handles.
+use crate::session::Place;
+
+// The first ABI that fences TCP, which the follow-ups build on. Its kernel,
+// 6.7, carries every filesystem right the ruleset handles.
 const REQUIRED: ABI = ABI::V4;
 const OSRELEASE: &str = "/proc/sys/kernel/osrelease";
 const PTRACE_SCOPE: &str = "/proc/sys/kernel/yama/ptrace_scope";
 
-// Where programs and their libraries live, read and executed, and the
-// state they read; each skipped when the distribution lacks it.
+// Where programs and their libraries live, read and executed, and the state
+// they read. Each is skipped when the distribution lacks it.
 const EXECUTABLE: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32"];
 const READABLE: [&str; 4] = ["/etc", "/proc", "/sys", "/run"];
 const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
 
-// Where one process is put, every path canonical, and the directories its
-// ask was granted to read.
-pub struct Place<'a> {
-    pub tree: &'a Path,
-    pub scratch: &'a Path,
-    pub program: &'a Path,
-    pub read: &'a [PathBuf],
-}
-
-// The substrate as probed: the filters every process gets, compiled once.
+// The boundary as probed: the filters every process gets, compiled once.
 pub struct Linux {
     filters: Filters,
-}
-
-impl std::fmt::Debug for Linux {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Linux").finish_non_exhaustive()
-    }
 }
 
 impl Linux {
@@ -65,6 +54,7 @@ impl Linux {
             .handle_access(AccessFs::from_all(REQUIRED))
             .and_then(|ruleset| ruleset.handle_access(AccessNet::ConnectTcp))
             .and_then(Ruleset::create);
+
         if let Err(error) = created {
             return Err(anyhow!(error).context(format!(
                 "Landlock ABI {} (kernel 6.7) is required and kernel {} cannot create its ruleset",
@@ -81,6 +71,7 @@ impl Linux {
             .trim()
             .parse()
             .with_context(|| format!("`kernel.yama.ptrace_scope` reads {scope:?}"))?;
+
         ensure!(scope >= 1, "`kernel.yama.ptrace_scope` is {scope}; 1 or more is required");
 
         let filters = Filters::compile()?;
@@ -88,17 +79,23 @@ impl Linux {
         Ok(Self { filters })
     }
 
-    // The ruleset over `place` and the filters, applied in the child once
-    // it has entered the tree: `restrict_self` sets `no_new_privs` and
-    // nothing short of full enforcement runs the program.
-    #[expect(
-        unsafe_code,
-        reason = "`pre_exec` runs in the forked child; it applies rules built here and allocates \
-                  only on its failure path"
-    )]
-    pub fn restrain(&self, command: &mut Command, place: &Place<'_>) -> Result<()> {
+    pub fn command(&self, place: &Place<'_>) -> Result<Command> {
+        let mut command = Command::new(place.program);
+        place.enter(&mut command);
+        self.restrain(&mut command, place)?;
+        Ok(command)
+    }
+
+    // The ruleset over `place` and the filters, applied in the child once it
+    // has entered its working directory. `restrict_self` sets
+    // `no_new_privs`, and nothing short of full enforcement runs the program.
+    #[expect(unsafe_code, reason = "`pre_exec` runs in the forked child")]
+    fn restrain(&self, command: &mut Command, place: &Place<'_>) -> Result<()> {
         let mut ruleset = Some(Self::ruleset(place)?);
         let mut filters = Some(self.filters.clone());
+
+        // SAFETY: the hook applies rules built here and allocates only on its
+        // failure path.
         unsafe {
             command.pre_exec(move || {
                 let ruleset = ruleset.take().ok_or_else(|| io::Error::other("rules spent"))?;
@@ -115,6 +112,7 @@ impl Linux {
                 filters.take().ok_or_else(|| io::Error::other("filters spent"))?.apply()
             });
         }
+
         Ok(())
     }
 
@@ -138,16 +136,59 @@ impl Linux {
             optional(&mut ruleset, Path::new(device), AccessFs::from_file(abi))?;
         }
 
-        // the process's own: its tree, its scratch, its program, and the
-        // roots its ask was granted, which run as they read since a
-        // toolchain lives there
-        required(&mut ruleset, place.tree, AccessFs::from_all(abi))?;
+        // the process's own, a granted root executable too since a toolchain
+        // lives there
+        required(&mut ruleset, place.cwd, AccessFs::from_all(abi))?;
         required(&mut ruleset, place.scratch, AccessFs::from_all(abi))?;
         required(&mut ruleset, place.program, AccessFs::ReadFile | AccessFs::Execute)?;
         for root in place.read {
             required(&mut ruleset, root, AccessFs::from_read(abi) | AccessFs::Execute)?;
         }
         Ok(ruleset)
+    }
+}
+
+impl std::fmt::Debug for Linux {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Linux").finish_non_exhaustive()
+    }
+}
+
+const ARCH: Option<TargetArch> = cfg_select! {
+    target_arch = "x86_64" => Some(TargetArch::x86_64),
+    target_arch = "aarch64" => Some(TargetArch::aarch64),
+    _ => None,
+};
+
+// The seccomp programs every process gets: a deny list answering `EPERM`, and
+// `clone3` answering `ENOSYS` apart from it. glibc issues `clone3` for every
+// thread and falls back to `clone` on `ENOSYS` alone.
+#[derive(Clone)]
+struct Filters {
+    denied: BpfProgram,
+    unsupported: BpfProgram,
+}
+
+impl Filters {
+    fn compile() -> Result<Self> {
+        let arch = ARCH.context("seccomp filters are compiled for x86-64 and aarch64 alone")?;
+        let denied = compile(denied()?, SeccompAction::Errno(errno(libc::EPERM)), arch)?;
+        let unsupported = compile(
+            BTreeMap::from([(libc::SYS_clone3, Vec::new())]),
+            SeccompAction::Errno(errno(libc::ENOSYS)),
+            arch,
+        )?;
+        Ok(Self { denied, unsupported })
+    }
+
+    fn apply(self) -> io::Result<()> {
+        for program in [&self.denied, &self.unsupported] {
+            seccompiler::apply_filter(program).map_err(|error| match error {
+                seccompiler::Error::Prctl(source) | seccompiler::Error::Seccomp(source) => source,
+                other => io::Error::other(format!("seccomp: {other}")),
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -179,38 +220,6 @@ fn grant(
         .with_context(|| format!("Landlock refused the rule over {}", path.display()))
 }
 
-// The seccomp programs every process gets: a deny list answering `EPERM`,
-// and `clone3` answering `ENOSYS` apart from it, since glibc issues
-// `clone3` for every thread and falls back to `clone` on `ENOSYS` alone.
-#[derive(Clone)]
-struct Filters {
-    denied: BpfProgram,
-    unsupported: BpfProgram,
-}
-
-impl Filters {
-    fn compile() -> Result<Self> {
-        let arch = ARCH.context("seccomp filters are compiled for x86-64 and aarch64 alone")?;
-        let denied = compile(denied()?, SeccompAction::Errno(errno(libc::EPERM)), arch)?;
-        let unsupported = compile(
-            BTreeMap::from([(libc::SYS_clone3, Vec::new())]),
-            SeccompAction::Errno(errno(libc::ENOSYS)),
-            arch,
-        )?;
-        Ok(Self { denied, unsupported })
-    }
-
-    fn apply(self) -> io::Result<()> {
-        for program in [&self.denied, &self.unsupported] {
-            seccompiler::apply_filter(program).map_err(|error| match error {
-                seccompiler::Error::Prctl(source) | seccompiler::Error::Seccomp(source) => source,
-                other => io::Error::other(format!("seccomp: {other}")),
-            })?;
-        }
-        Ok(())
-    }
-}
-
 const fn errno(code: i32) -> u32 {
     code.unsigned_abs()
 }
@@ -220,12 +229,6 @@ async fn kernel() -> String {
         .await
         .map_or_else(|_| "[unknown]".to_owned(), |release| release.trim().to_owned())
 }
-
-const ARCH: Option<TargetArch> = cfg_select! {
-    target_arch = "x86_64" => Some(TargetArch::x86_64),
-    target_arch = "aarch64" => Some(TargetArch::aarch64),
-    _ => None,
-};
 
 fn compile(
     rules: BTreeMap<i64, Vec<SeccompRule>>, matched: SeccompAction, arch: TargetArch,
@@ -241,8 +244,8 @@ fn compile(
 const TIOCSTI: u64 = 0x5412;
 const TIOCLINUX: u64 = 0x541C;
 
-// What a confined process has no use for: an empty rule list matches the
-// syscall whole, a condition narrows it to the arguments named.
+// What a confined process has no use for. An empty rule list matches the
+// syscall whole, and a condition narrows it to the arguments named.
 fn denied() -> Result<BTreeMap<i64, Vec<SeccompRule>>> {
     const OUTRIGHT: &[i64] = &[
         libc::SYS_ptrace,
@@ -313,9 +316,13 @@ fn request(value: u64) -> Result<SeccompCondition> {
         .context("a seccomp condition")
 }
 
-// Landlock sees TCP alone: a raw or datagram socket, a packet socket, and
-// netlink past the route family `getifaddrs` reads are refused here. The
-// type is compared under its mask, so `SOCK_NONBLOCK` and `SOCK_CLOEXEC`
+// Landlock sees TCP alone, so the rest is refused here:
+//
+// - a raw or datagram socket
+// - a packet socket
+// - netlink past the route family `getifaddrs` reads
+//
+// The type is compared under its mask, so `SOCK_NONBLOCK` and `SOCK_CLOEXEC`
 // do not slip a rule.
 fn sockets() -> Result<Vec<SeccompRule>> {
     // The obsolete type the kernel still turns into a packet socket when

@@ -96,7 +96,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn read_succeeds() {
+    async fn text_read() {
         let result =
             dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "refs.md"})), CAP)
                 .await

@@ -274,7 +274,7 @@ fn object(answer: &Answer) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a provider key (e.g. OPENAI_API_KEY); run with --run-ignored"]
-async fn live_genai_function_tool_loop() -> Result<()> {
+async fn function_tool() -> Result<()> {
     let client = Client::connect().await?;
     let answer: Answer =
         client.complete(lookup_request(), Arc::new(LiveTools)).await.map_err(|e| {
@@ -304,7 +304,7 @@ async fn live_genai_function_tool_loop() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a provider key (e.g. OPENAI_API_KEY); run with --run-ignored"]
-async fn live_genai_workspace_tools() -> Result<()> {
+async fn workspace_tools() -> Result<()> {
     let client = Client::connect().await?;
     let answer: Answer =
         client.complete(workspace_request(), Arc::new(LiveWorkspace)).await.map_err(|e| {
@@ -338,7 +338,7 @@ async fn live_genai_workspace_tools() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a provider key (e.g. OPENAI_API_KEY); run with --run-ignored"]
-async fn live_genai_check_corrects() -> Result<()> {
+async fn check_corrects() -> Result<()> {
     let client = Client::connect().await?;
     let (check, candidates) = LiveCheck::rejecting(1);
     let answer: Answer = client.complete(check_request(), check).await.map_err(|e| {
@@ -360,7 +360,7 @@ async fn live_genai_check_corrects() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a provider key (e.g. OPENAI_API_KEY); run with --run-ignored"]
-async fn live_genai_check_exhausts() -> Result<()> {
+async fn check_exhausts() -> Result<()> {
     let client = Client::connect().await?;
     let (check, candidates) = LiveCheck::rejecting(usize::MAX);
     let error = client

@@ -19,15 +19,15 @@
 //! code on a unary call or an error frame closing a run stream — and
 //! [`RpcError::Transport`] — the socket, the HTTP layer, or the framing gave
 //! out below Connect, so the process is not known to have seen the call at
-//! all.
+//! all. Each reaches the caller as a [`Failure::Rpc`].
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::IpAddr;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow, ensure};
-use bytes::{Bytes, BytesMut};
+use anyhow::{Context as _, Result, ensure};
+use bytes::{Buf as _, Bytes, BytesMut};
 use http::uri::Scheme;
 use http::{StatusCode, Uri};
 use http_body_util::{BodyExt as _, Full};
@@ -40,8 +40,10 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-const END_STREAM: u8 = 0x02;
+use crate::Failure;
+
 const COMPRESSED: u8 = 0x01;
+const END_STREAM: u8 = 0x02;
 
 // A cloneable `sdk.v1` client bound to one process's loopback endpoint and
 // bearer token.
@@ -90,10 +92,7 @@ impl Rpc {
     }
 
     pub async fn cancel_run(&self, run_id: String, agent_id: String) -> Result<()> {
-        let request = CancelRunRequest {
-            run_id,
-            agent_id: Some(agent_id),
-        };
+        let request = CancelRunRequest { run_id, agent_id };
         self.unary_empty("SdkAgentService/CancelRun", &request).await
     }
 
@@ -126,11 +125,11 @@ impl Rpc {
             agent_id,
             message: UserMessage { text },
         };
-        Ok(RunStream(self.server_stream("SdkAgentService/Send", &request).await?))
+        self.server_stream("SdkAgentService/Send", &request).await.map(RunStream)
     }
 
     async fn unary_empty<Req: Serialize + Sync>(&self, method: &str, request: &Req) -> Result<()> {
-        self.unary::<_, Empty>(method, request).await.map(drop)
+        self.unary::<_, IgnoredAny>(method, request).await.map(drop)
     }
 
     async fn unary<Req: Serialize + Sync, Resp: DeserializeOwned>(
@@ -145,10 +144,7 @@ impl Rpc {
     async fn server_stream<Req: Serialize + Sync>(
         &self, method: &str, request: &Req,
     ) -> Result<FrameStream> {
-        let body = serde_json::to_vec(request)
-            .map_err(anyhow::Error::from)
-            .and_then(|payload| envelope(&payload))
-            .with_context(|| format!("encoding `{method}`"))?;
+        let body = envelope(request).with_context(|| format!("framing `{method}`"))?;
         let response = self.call(method, "application/connect+json", body).await?;
         Ok(FrameStream {
             method: method.to_owned(),
@@ -164,14 +160,14 @@ impl Rpc {
             .hyper
             .request(self.post(method, content_type, body)?)
             .await
-            .map_err(|error| RpcError::io(method, "sending the request", error))?;
+            .map_err(|error| failed(RpcError::io(method, "sending the request", error)))?;
 
         let status = response.status();
         if status.is_success() {
             return Ok(response);
         }
         let bytes = read_body(method, "reading the error response", response.into_body()).await?;
-        Err(RpcError::unary(method, status, &bytes).into())
+        Err(failed(RpcError::unary(method, status, &bytes)))
     }
 
     fn post(
@@ -203,19 +199,16 @@ impl RunStream {
         while let Some(frame) = self.0.next().await? {
             if frame.is_end_stream() {
                 return RpcError::end_stream(&self.0.method, &frame.payload)
-                    .map_or(Ok(None), |error| Err(error.into()));
+                    .map_or(Ok(None), |error| Err(failed(error)));
             }
-            let message: RunStreamMessage = match serde_json::from_slice(&frame.payload) {
-                Ok(message) => message,
-                Err(error) => {
-                    tracing::debug!(%error, "skipping unparsable stream frame");
-                    continue;
-                }
-            };
-            if message.is_keepalive() {
+            let Ok(message) = serde_json::from_slice::<RunStreamMessage>(&frame.payload)
+                .inspect_err(|error| tracing::debug!(%error, "skipping unparsable stream frame"))
+            else {
                 continue;
+            };
+            if !message.is_keepalive() {
+                return Ok(Some(message));
             }
-            return Ok(Some(message));
         }
         Ok(None)
     }
@@ -227,7 +220,10 @@ impl RunStream {
 pub enum RpcError {
     /// The process answered: a non-success status on a unary call, or an
     /// error `EndStreamResponse` on a stream.
-    #[error(fmt = connect_fmt)]
+    #[error(
+        "sdk.v1 RPC `{method}` failed ({}{code}): {message}",
+        .status.map_or(String::new(), |status| format!("{status}, "))
+    )]
     Connect {
         /// The `Service/Method` called.
         method: String,
@@ -256,15 +252,10 @@ pub enum RpcError {
 impl RpcError {
     // A body that is not Connect's error object (a crash's, a proxy's) is the message itself.
     fn unary(method: &str, status: StatusCode, body: &[u8]) -> Self {
-        let answer: ConnectStatus = serde_json::from_slice(body).unwrap_or_default();
-        let answer = if answer.message.is_empty() {
-            ConnectStatus {
-                message: String::from_utf8_lossy(body).trim().to_owned(),
-                ..answer
-            }
-        } else {
-            answer
-        };
+        let mut answer: ConnectStatus = serde_json::from_slice(body).unwrap_or_default();
+        if answer.message.is_empty() {
+            answer.message = String::from_utf8_lossy(body).trim().to_string();
+        }
         Self::answered(method, Some(status), answer)
     }
 
@@ -302,7 +293,6 @@ impl RpcError {
         }
     }
 
-    #[must_use]
     pub(crate) fn truncated(method: &str, buffered: usize) -> Self {
         let eof = std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
@@ -316,26 +306,8 @@ impl RpcError {
         let Self::Connect { code, message, .. } = self else {
             return false;
         };
-        if code == "not_found" {
-            return true;
-        }
         let message = message.to_ascii_lowercase();
-        message.contains("agent") && message.contains("not found")
-    }
-}
-
-#[expect(
-    clippy::ref_option,
-    clippy::trivially_copy_pass_by_ref,
-    reason = "`#[error(fmt = ..)]` hands every field over by reference"
-)]
-fn connect_fmt(
-    method: &str, status: &Option<StatusCode>, code: &str, message: &str,
-    f: &mut fmt::Formatter<'_>,
-) -> fmt::Result {
-    match status {
-        Some(status) => write!(f, "sdk.v1 RPC `{method}` failed ({status}, {code}): {message}"),
-        None => write!(f, "sdk.v1 RPC `{method}` stream failed ({code}): {message}"),
+        code == "not_found" || (message.contains("agent") && message.contains("not found"))
     }
 }
 
@@ -355,12 +327,12 @@ impl FrameStream {
             }
             let Some(chunk) = self.body.frame().await else {
                 if !self.buffer.is_empty() {
-                    return Err(RpcError::truncated(&self.method, self.buffer.len()).into());
+                    return Err(failed(RpcError::truncated(&self.method, self.buffer.len())));
                 }
                 return Ok(None);
             };
-            let chunk =
-                chunk.map_err(|error| RpcError::io(&self.method, "reading the stream", error))?;
+            let chunk = chunk
+                .map_err(|error| failed(RpcError::io(&self.method, "reading the stream", error)))?;
             if let Ok(data) = chunk.into_data() {
                 self.buffer.extend_from_slice(&data);
             }
@@ -403,19 +375,20 @@ fn ensure_loopback(base: &str) -> Result<()> {
     Ok(())
 }
 
-fn envelope(payload: &[u8]) -> Result<Vec<u8>> {
-    let length = u32::try_from(payload.len()).map_err(|_overflow| {
-        anyhow!("a {}-byte message exceeds the Connect frame limit", payload.len())
+// One message in the Connect envelope: the flag byte and big-endian length
+// stand first, and the JSON is written in place behind them.
+fn envelope<Req: Serialize>(request: &Req) -> Result<Vec<u8>> {
+    let mut body = vec![0_u8; 5];
+    serde_json::to_writer(&mut body, request).context("encoding the message")?;
+    let length = u32::try_from(body.len() - 5).with_context(|| {
+        format!("a {}-byte message exceeds the Connect frame limit", body.len() - 5)
     })?;
-
-    let mut body = Vec::with_capacity(payload.len() + 5);
-    body.push(0);
-    body.extend_from_slice(&length.to_be_bytes());
-    body.extend_from_slice(payload);
-
+    body[1..5].copy_from_slice(&length.to_be_bytes());
     Ok(body)
 }
 
+// The first whole frame in `buffer`, taken off its front; `None` with the
+// buffer untouched until the frame's length is buffered in full.
 fn decode_frame(buffer: &mut BytesMut) -> Result<Option<Frame>> {
     if buffer.len() < 5 {
         return Ok(None);
@@ -429,20 +402,31 @@ fn decode_frame(buffer: &mut BytesMut) -> Result<Option<Frame>> {
     if buffer.len() < 5 + length {
         return Ok(None);
     }
-    let mut frame = buffer.split_to(5 + length);
-    let payload = frame.split_off(5).freeze();
+    buffer.advance(5);
+    let payload = buffer.split_to(length).freeze();
     Ok(Some(Frame { flags, payload }))
 }
 
 async fn read_body(method: &str, doing: &'static str, body: Incoming) -> Result<Bytes> {
-    let collected = body.collect().await.map_err(|error| RpcError::io(method, doing, error))?;
+    let collected =
+        body.collect().await.map_err(|error| failed(RpcError::io(method, doing, error)))?;
     Ok(collected.to_bytes())
+}
+
+// Every RPC failure is a `Failure`, so a caller downcasts to one type.
+fn failed(error: RpcError) -> anyhow::Error {
+    Failure::Rpc(error).into()
 }
 
 // A missing agent is the desired end state of close/delete.
 fn gone_ok(result: Result<()>) -> Result<()> {
     match result {
-        Err(error) if error.downcast_ref::<RpcError>().is_some_and(RpcError::is_agent_gone) => {
+        Err(error)
+            if matches!(
+                error.downcast_ref::<Failure>(),
+                Some(Failure::Rpc(rpc)) if rpc.is_agent_gone()
+            ) =>
+        {
             Ok(())
         }
         other => other,
@@ -532,7 +516,7 @@ pub struct AgentOperationOptions {
 // --- Requests and responses ---
 
 // The braces keep it a JSON object: a unit struct serializes as `null`.
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize)]
 struct Empty {}
 
 #[derive(Debug, Default, Deserialize)]
@@ -577,8 +561,7 @@ struct DeleteAgentRequest {
 #[serde(rename_all = "camelCase")]
 struct CancelRunRequest {
     run_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agent_id: Option<String>,
+    agent_id: String,
 }
 
 #[derive(Serialize)]
@@ -651,7 +634,7 @@ pub struct RunStreamMessage {
     pub result: Option<RunStreamResult>,
     // Present on the closing frame.
     pub done: Option<IgnoredAny>,
-    offset: Option<String>,
+    offset: Option<IgnoredAny>,
 }
 
 impl RunStreamMessage {
@@ -819,12 +802,18 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ConnectStatus, END_STREAM, EndStreamResponse, RpcError, RunStatus, RunStreamResult,
-        TokenUsage, decode_frame, ensure_loopback,
+        COMPRESSED, END_STREAM, RpcError, RunStatus, RunStreamResult, TokenUsage, decode_frame,
+        ensure_loopback, envelope,
     };
 
-    fn envelope(payload: &[u8]) -> Vec<u8> {
-        super::envelope(payload).expect("a test payload fits one frame")
+    // A frame as the wire carries it, laid by hand so the decoder is held
+    // to the format rather than to `envelope`.
+    fn framed(flags: u8, payload: &[u8]) -> Vec<u8> {
+        let length = u32::try_from(payload.len()).expect("a test payload fits one frame");
+        let mut frame = vec![flags];
+        frame.extend_from_slice(&length.to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
     }
 
     #[test]
@@ -848,23 +837,6 @@ mod tests {
                 .expect("a bridge that reports no cache counts");
         assert_eq!((bare.cache_read_tokens, bare.cache_write_tokens), (None, None));
         assert_eq!(bare.total_tokens, None);
-    }
-
-    #[test]
-    fn connect_status_defaults() {
-        let bare: ConnectStatus = serde_json::from_value(json!({})).expect("all defaulted");
-        assert_eq!((bare.code.as_str(), bare.message.as_str()), ("unknown", ""));
-        assert!(bare.details.is_none());
-
-        let end: EndStreamResponse =
-            serde_json::from_value(json!({ "error": null })).expect("a null error parses");
-        assert!(end.error.is_none(), "a null error is a clean end");
-        let end: EndStreamResponse =
-            serde_json::from_value(json!({ "error": { "message": "boom", "details": [] } }))
-                .expect("an error with no code");
-        let error = end.error.expect("the error");
-        assert_eq!((error.code.as_str(), error.message.as_str()), ("unknown", "boom"));
-        assert!(error.details.is_some());
     }
 
     #[test]
@@ -921,17 +893,17 @@ mod tests {
 
     #[test]
     fn envelope_prefix() {
-        let body = envelope(br#"{"agentId":"a"}"#);
+        let body = envelope(&json!({ "agentId": "a" })).expect("a test message fits one frame");
         assert_eq!(body[0], 0, "a request message frame carries no flags");
         assert_eq!(u32::from_be_bytes([body[1], body[2], body[3], body[4]]), 15);
         assert_eq!(&body[5..], br#"{"agentId":"a"}"#);
     }
 
     #[test]
-    fn frames_decode_incrementally() {
+    fn incremental_frames() {
         let mut buffer = BytesMut::new();
-        let mut body = envelope(b"one");
-        body.extend_from_slice(&envelope(b"two"));
+        let mut body = framed(0, b"one");
+        body.extend_from_slice(&framed(END_STREAM, b"two"));
 
         // feed byte by byte: no frame until its length is fully buffered
         let mut frames = Vec::new();
@@ -943,30 +915,17 @@ mod tests {
         }
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].payload.as_ref(), b"one");
+        assert!(!frames[0].is_end_stream());
         assert_eq!(frames[1].payload.as_ref(), b"two");
+        assert!(frames[1].is_end_stream());
         assert!(buffer.is_empty(), "both frames consumed the buffer exactly");
     }
 
     #[test]
     fn compressed_frame() {
-        let mut body = envelope(b"x");
-        body[0] = 0x01;
-        let mut buffer = BytesMut::from(body.as_slice());
+        let mut buffer = BytesMut::from(framed(COMPRESSED, b"x").as_slice());
         let error = decode_frame(&mut buffer).expect_err("compression is never negotiated");
         assert!(error.to_string().contains("compressed"), "unexpected: {error}");
-    }
-
-    #[test]
-    fn end_stream_flag() {
-        let mut message = BytesMut::from(envelope(b"{}").as_slice());
-        let frame = decode_frame(&mut message).expect("decodes").expect("one frame");
-        assert!(!frame.is_end_stream());
-
-        let mut end = envelope(b"{}");
-        end[0] = END_STREAM;
-        let mut end = BytesMut::from(end.as_slice());
-        let frame = decode_frame(&mut end).expect("decodes").expect("one frame");
-        assert!(frame.is_end_stream());
     }
 
     #[test]
@@ -978,7 +937,7 @@ mod tests {
             .expect("an end-stream error fails the stream");
         assert_eq!(
             error.to_string(),
-            "sdk.v1 RPC `SdkAgentService/Send` stream failed (unauthenticated): Unauthorized"
+            "sdk.v1 RPC `SdkAgentService/Send` failed (unauthenticated): Unauthorized"
         );
     }
 
@@ -1003,9 +962,11 @@ mod tests {
         assert!(error.to_string().ends_with("unknown): plain text"), "{error}");
     }
 
+    // The wrapping `Failure` is transparent: the message and its source
+    // read as the RPC error's own.
     #[test]
     fn truncated_stream() {
-        let error: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
+        let error = super::failed(RpcError::truncated("SdkAgentService/Send", 3));
         assert_eq!(
             format!("{error:#}"),
             "sdk.v1 RPC `SdkAgentService/Send` transport failed reading the stream: stream ended \

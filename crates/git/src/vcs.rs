@@ -4,7 +4,7 @@
 //! into the typed error.
 
 mod policy;
-pub mod refusal;
+mod refusal;
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -35,15 +35,7 @@ impl WasiVcsCtx for Client {
             let repo = Repo::open(&client, &repo).await?;
             let ancestor = repo.rev_parse(&ancestor).await?;
             let descendant = repo.rev_parse(&descendant).await?;
-            // `--is-ancestor` answers by exit status alone, 1 writing
-            // nothing, so the status is read rather than the stderr
-            let args = ["merge-base", "--is-ancestor", &ancestor, &descendant];
-            let output = repo.git(args, &[]).await?;
-            match output.status.code() {
-                Some(0) => Ok(true),
-                Some(1) => Ok(false),
-                _ => Err(refuse(&output, &repo.shown(), &descendant, None).into()),
-            }
+            repo.is_ancestor(&ancestor, &descendant).await
         }
         .boxed()
     }
@@ -62,8 +54,8 @@ impl WasiVcsCtx for Client {
             if repo.status().await?.is_empty() {
                 return Ok(None);
             }
-            repo.run(["add", "-A"], &repo.shown(), "HEAD").await?;
-            repo.run(["commit", "--quiet", "-m", &message], &repo.shown(), "HEAD").await?;
+            repo.run(["add", "-A"], "HEAD").await?;
+            repo.run(["commit", "--quiet", "-m", &message], "HEAD").await?;
             Ok(Some(repo.rev_parse("HEAD").await?))
         }
         .boxed()
@@ -75,54 +67,16 @@ impl WasiVcsCtx for Client {
         tracing::trace!("merging {revision} into {}", at.path().display());
         let client = self.clone();
         async move {
-            vetted(&revision)?;
+            validate_arg(&revision)?;
             let repo = Repo::open(&client, &at).await?;
             let head = repo.rev_parse(&revision).await?;
-            // held before the commit, so the index is the backend's to settle
-            // by policy rather than git's attributes
-            let args = ["merge", "--no-ff", "--no-commit", "--", &head];
-            let output = repo.git(args, &[]).await?;
-            if !repo.merging().await? {
-                // nothing to merge — an ancestor — or a merge that never
-                // started; a failure here is the refusal git gave
-                if output.status.success() {
-                    return Ok(Merged {
-                        commit: Some(repo.rev_parse("HEAD").await?),
-                        conflicts: Vec::new(),
-                    });
-                }
-                return Err(refuse(&output, &repo.shown(), &revision, None).into());
+            if !repo.begin_merge(&head, &revision).await? {
+                return Ok(Merged {
+                    commit: Some(repo.rev_parse("HEAD").await?),
+                    conflicts: Vec::new(),
+                });
             }
-
-            // resolve what the policy covers; an unresolved conflict, or a step
-            // that fails, abandons the merge and leaves the tree on its head
-            match repo.resolve(&policy).await {
-                Ok(Resolution::Complete) => {}
-                Ok(Resolution::Unresolved(conflicts)) => {
-                    repo.abort().await;
-                    return Ok(Merged {
-                        commit: None,
-                        conflicts,
-                    });
-                }
-                Err(error) => {
-                    repo.abort().await;
-                    return Err(error);
-                }
-            }
-            // the message on the command line, never read from `MERGE_MSG`:
-            // that carries the `# Conflicts:` hint git appends to a merge it
-            // left in conflict, and stripping it would strip the message's
-            // own `#` lines too, to nothing where it has no others
-            let args = ["commit", "--quiet", "-m", &message];
-            if let Err(error) = repo.run(args, &repo.shown(), "HEAD").await {
-                repo.abort().await;
-                return Err(error);
-            }
-            Ok(Merged {
-                commit: Some(repo.rev_parse("HEAD").await?),
-                conflicts: Vec::new(),
-            })
+            repo.seal_merge(&policy, &message).await
         }
         .boxed()
     }
@@ -143,7 +97,7 @@ impl WasiVcsCtx for Client {
                 "--end-of-options",
                 &range,
             ];
-            let output = repo.run(args, &repo.shown(), &revision).await?;
+            let output = repo.run(args, &revision).await?;
             Ok(entries(&output.text()))
         }
         .boxed()
@@ -153,16 +107,11 @@ impl WasiVcsCtx for Client {
         tracing::trace!("initialising {}", at.path().display());
         let client = self.clone();
         async move {
-            // git reinitialises an existing repository and exits clean
+            // a repository already there is `exists`: git would reinitialise it clean
             if at.dir().exists(".git") {
-                return Err(Error::Exists(shown(&at)).into());
+                return Err(Error::Exists(display_path(&at)).into());
             }
-            let repo = Repo::open(&client, &at).await?;
-            let output = repo.create(["init", "--quiet"], &[]).await?;
-            if !output.status.success() {
-                return Err(refuse(&output, &repo.shown(), "HEAD", None).into());
-            }
-            Ok(())
+            client.create(&at, ["init", "--quiet"], &[], "HEAD").await
         }
         .boxed()
     }
@@ -175,31 +124,11 @@ impl WasiVcsCtx for Client {
         );
         let client = self.clone();
         async move {
-            vetted(&revision)?;
-            // the one path handed to git: a working copy is laid at a path
-            // git records in the repository, which no handle can stand for;
-            // the runtime laid it empty and holds it open meanwhile
-            let destination = path::absolute(at.path())
-                .with_context(|| format!("resolving {}", at.path().display()))?;
+            validate_arg(&revision)?;
             let repo = Repo::open(&client, &repo).await?;
-            let args = [
-                OsStr::new("worktree"),
-                OsStr::new("add"),
-                OsStr::new("--detach"),
-                OsStr::new("--"),
-                destination.as_os_str(),
-                OsStr::new(&revision),
-            ];
-            repo.run(args, &shown(&at), &revision).await?;
-            // the gitdir git laid the copy with, read while the copy holds
-            // nothing but what `worktree add` wrote; every operation at the
-            // copy is addressed through it from here on
-            let args = ["rev-parse", "--absolute-git-dir"];
-            let output = client.git(Some(&at), args, &[]).await?;
-            if !output.status.success() {
-                return Err(refuse(&output, &shown(&at), &revision, None).into());
-            }
-            client.register(&at, PathBuf::from(output.text().trim()));
+            repo.add_worktree(&at, &revision).await?;
+            let gitdir = client.read_gitdir(&at, &revision).await?;
+            client.register(&at, gitdir);
             Ok(())
         }
         .boxed()
@@ -209,12 +138,7 @@ impl WasiVcsCtx for Client {
         tracing::trace!("removing the working copy at {}", at.path().display());
         let client = self.clone();
         async move {
-            // a copy another process laid is addressed through its `.git`
-            // file: a rewritten one leads `worktree remove` to a repository
-            // the copy is no working copy of, which refuses rather than
-            // removes, and the copy stays for the operator
-            let repo = Repo::open(&client, &at).await?;
-            repo.run(["worktree", "remove", "--force", "."], &repo.shown(), &repo.shown()).await?;
+            Repo::open(&client, &at).await?.remove_worktree().await?;
             client.forget(&at);
             Ok(())
         }
@@ -231,23 +155,17 @@ impl WasiVcsCtx for Client {
         tracing::trace!("cloning {url} to {}", at.path().display());
         let client = self.clone();
         async move {
-            vetted(&url)?;
-            let repo = Repo::open(&client, &at).await?;
-            repo.transportable()?;
-            let address = expand(&repo, &url, false).await;
-            let (protocol, pack) = transport(&client, &address, false);
+            validate_arg(&url)?;
+            let address = client.expand_url(&at, &url).await;
+            let (protocol, pack) = client.transport_args(&address, false);
             let depth = options.depth.map(|depth| depth.to_string());
-            let mut args = vec!["clone".to_owned(), "--quiet".to_owned(), pack];
+            let mut args = vec!["clone", "--quiet", pack.as_str()];
             // depth cuts history, never the labels: git's implied --single-branch would
-            if let Some(depth) = &depth {
-                args.extend(["--depth".to_owned(), depth.clone(), "--no-single-branch".to_owned()]);
+            if let Some(depth) = depth.as_deref() {
+                args.extend(["--depth", depth, "--no-single-branch"]);
             }
-            args.extend(["--".to_owned(), url.clone(), ".".to_owned()]);
-            let output = repo.create(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
-            if !output.status.success() {
-                return Err(refuse(&output, &shown(&at), &url, None).into());
-            }
-            Ok(())
+            args.extend(["--", url.as_str(), "."]);
+            client.create(&at, args, &[("GIT_ALLOW_PROTOCOL", protocol)], &url).await
         }
         .boxed()
     }
@@ -256,16 +174,15 @@ impl WasiVcsCtx for Client {
         tracing::trace!("fetching {remote} into {}", repo.path().display());
         let client = self.clone();
         async move {
-            vetted(&remote)?;
+            validate_arg(&remote)?;
             let repo = Repo::open(&client, &repo).await?;
-            repo.transportable()?;
-            let address = expand(&repo, &remote, false).await;
-            let (protocol, pack) = transport(&client, &address, false);
-            let args =
-                ["fetch".to_owned(), "--quiet".to_owned(), pack, "--".to_owned(), remote.clone()];
-            let output = repo.git(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
+            repo.check_transport_config()?;
+            let address = repo.expand(&remote, false).await;
+            let (protocol, pack) = client.transport_args(&address, false);
+            let args = ["fetch", "--quiet", &pack, "--", &remote];
+            let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
             if !output.status.success() {
-                return Err(refuse(&output, &repo.shown(), &remote, None).into());
+                return Err(repo.refuse(&output, &remote).into());
             }
             Ok(())
         }
@@ -276,15 +193,12 @@ impl WasiVcsCtx for Client {
         tracing::trace!("labelling {revision} as {name} in {}", repo.path().display());
         let client = self.clone();
         async move {
-            vetted(&name)?;
-            vetted(&revision)?;
+            validate_arg(&name)?;
+            validate_arg(&revision)?;
             let repo = Repo::open(&client, &repo).await?;
             let head = repo.rev_parse(&revision).await?;
-            // a label is a branch; git refuses to force the branch the
-            // repository is on, so the working copy is detached onto its
-            // sealed commit first — where the model says it already sits
             repo.detach_from(&name).await?;
-            repo.run(["branch", "-f", "--", &name, &head], &repo.shown(), &revision).await?;
+            repo.run(["branch", "-f", "--", &name, &head], &revision).await?;
             Ok(())
         }
         .boxed()
@@ -294,23 +208,9 @@ impl WasiVcsCtx for Client {
         tracing::trace!("reading the label {name} in {}", repo.path().display());
         let client = self.clone();
         async move {
-            vetted(&name)?;
-            // the exact ref path, which `--verify` reads as a name and never
-            // as revision syntax: a tag or a remote's branch of the same
-            // spelling, which a bare name resolves to first, is never it, and
-            // nor is the commit a `~`, `^`, or `@{}` in the name would walk
-            // to; a branch holds a commit, so there is nothing to peel
+            validate_arg(&name)?;
             let full = format!("refs/heads/{name}");
-            let args = ["show-ref", "--verify", "--hash", "--", &full];
-            let output = client.git(Some(&repo), args, &[]).await?;
-            if output.status.success() {
-                return Ok(output.text().trim().to_owned());
-            }
-            Err(match refusal::classify(&output.stderr) {
-                Class::NotARepository => Error::NotARepository,
-                _ => Error::NotFound(name),
-            }
-            .into())
+            Ok(client.read_ref(&repo, &full).await?.ok_or(Error::NotFound(name))?)
         }
         .boxed()
     }
@@ -319,22 +219,14 @@ impl WasiVcsCtx for Client {
         tracing::trace!("reading {remote}'s label {name} in {}", repo.path().display());
         let client = self.clone();
         async move {
-            vetted(&remote)?;
-            vetted(&name)?;
-            // the exact remote-tracking ref, read as `labelled` reads the
-            // branch; what is missing is the remote when the repository has
-            // none of that name, else the label
+            validate_arg(&remote)?;
+            validate_arg(&name)?;
             let full = format!("refs/remotes/{remote}/{name}");
-            let args = ["show-ref", "--verify", "--hash", "--", &full];
-            let output = client.git(Some(&repo), args, &[]).await?;
-            if output.status.success() {
-                return Ok(output.text().trim().to_owned());
+            if let Some(commit) = client.read_ref(&repo, &full).await? {
+                return Ok(commit);
             }
-            if refusal::classify(&output.stderr) == Class::NotARepository {
-                return Err(Error::NotARepository.into());
-            }
-            let known = client.git(Some(&repo), ["remote", "get-url", "--", &remote], &[]).await?;
-            Err(Error::NotFound(if known.status.success() { name } else { remote }).into())
+            let missing = if client.has_remote(&repo, &remote).await? { name } else { remote };
+            Err(Error::NotFound(missing).into())
         }
         .boxed()
     }
@@ -343,26 +235,17 @@ impl WasiVcsCtx for Client {
         tracing::trace!("pushing {label} to {remote} from {}", repo.path().display());
         let client = self.clone();
         async move {
-            vetted(&remote)?;
-            vetted(&label)?;
+            validate_arg(&remote)?;
+            validate_arg(&label)?;
             let repo = Repo::open(&client, &repo).await?;
-            repo.transportable()?;
-            let address = expand(&repo, &remote, true).await;
-            let (protocol, pack) = transport(&client, &address, true);
+            repo.check_transport_config()?;
+            let address = repo.expand(&remote, true).await;
+            let (protocol, pack) = client.transport_args(&address, true);
             let refspec = format!("refs/heads/{label}:refs/heads/{label}");
-            let args = [
-                "push".to_owned(),
-                "--quiet".to_owned(),
-                pack,
-                "--".to_owned(),
-                remote.clone(),
-                refspec,
-            ];
-            let output = repo.git(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
+            let args = ["push", "--quiet", &pack, "--", &remote, &refspec];
+            let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
             if !output.status.success() {
-                // the label is what a refspec names; anything else missing is the remote
-                let missing = if output.stderr.contains("src refspec") { &label } else { &remote };
-                return Err(refuse(&output, &repo.shown(), missing, Some(&label)).into());
+                return Err(repo.refuse_push(&output, &remote, &label).into());
             }
             Ok(())
         }
@@ -375,7 +258,7 @@ impl Client {
     // `not-found` unless git names a missing repository. `rev-parse` runs no
     // program the repository chooses, so it needs no pins.
     async fn rev_parse(&self, at: &Place, revision: &str) -> Result<String> {
-        vetted(revision)?;
+        validate_arg(revision)?;
         let spec = format!("{revision}^{{commit}}");
         let args = ["rev-parse", "--verify", "--quiet", "--end-of-options", &spec];
         let output = self.git(Some(at), args, &[]).await?;
@@ -387,6 +270,76 @@ impl Client {
             _ => Error::NotFound(revision.to_owned()),
         }
         .into())
+    }
+
+    // The commit the ref at `full` holds, read by its exact path, which
+    // `--verify` takes as a name and never as revision syntax: a tag or a
+    // remote's branch of the same spelling, which a bare name resolves to
+    // first, is never it, and nor is the commit a `~`, `^`, or `@{}` in the
+    // name would walk to; a branch holds a commit, so there is nothing to
+    // peel. None for a ref the repository lacks. Reading a ref runs no
+    // program, so it needs no pins.
+    async fn read_ref(&self, at: &Place, full: &str) -> Result<Option<String>> {
+        let args = ["show-ref", "--verify", "--hash", "--", full];
+        let output = self.git(Some(at), args, &[]).await?;
+        if output.status.success() {
+            return Ok(Some(output.text().trim().to_owned()));
+        }
+        if refusal::classify(&output.stderr) == Class::NotARepository {
+            return Err(Error::NotARepository.into());
+        }
+        Ok(None)
+    }
+
+    async fn has_remote(&self, at: &Place, remote: &str) -> Result<bool> {
+        let output = self.git(Some(at), ["remote", "get-url", "--", remote], &[]).await?;
+        Ok(output.status.success())
+    }
+
+    // The URL an address reaches as the host's configuration rewrites it
+    // (`url.<base>.insteadOf`), for the transport rule; the address as given
+    // where git rewrites nothing.
+    async fn expand_url(&self, at: &Place, address: &str) -> String {
+        match self.git(Some(at), ["ls-remote", "--get-url", "--", address], &[]).await {
+            Ok(output) if output.status.success() => output.text().trim().to_owned(),
+            _ => address.to_owned(),
+        }
+    }
+
+    // The gitdir git laid the working copy at `at` with, read while the copy
+    // holds nothing but what `worktree add` wrote; every operation at the
+    // copy is addressed through it from here on.
+    async fn read_gitdir(&self, at: &Place, revision: &str) -> Result<PathBuf> {
+        let output = self.git(Some(at), ["rev-parse", "--absolute-git-dir"], &[]).await?;
+        if !output.status.success() {
+            return Err(refuse(&output, at, revision, None).into());
+        }
+        Ok(PathBuf::from(output.text().trim()))
+    }
+
+    // Run git to make a repository at `at`, held to success, else the typed
+    // refusal with `missing` naming what the repository lacks. The place
+    // holds no repository yet, so the forced pins alone apply and the work
+    // tree is git's to lay; a working copy this client laid there before is
+    // forgotten first, so the place is addressed as itself rather than
+    // through a gitdir no longer its own.
+    async fn create<I, S>(
+        &self, at: &Place, args: I, env: &[(&str, &str)], missing: &str,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.forget(at);
+        let pins = Pins::forced();
+        let mut full: Vec<OsString> = pins.args().map(OsString::from).collect();
+        full.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
+        let output = self.git(Some(at), full, env).await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(refuse(&output, at, missing, None).into())
+        }
     }
 }
 
@@ -405,10 +358,11 @@ impl<'a> Repo<'a> {
         Ok(Self { client, at, pins })
     }
 
-    // Run git for the repository: the work tree is the place itself, since a
-    // `core.worktree` the repository set would point git at any directory on
-    // the host, and the pins lead the arguments.
-    async fn git<I, S>(&self, args: I, env: &[(&str, &str)]) -> Result<Output>
+    // Run git for the repository and read what it said, whatever its exit:
+    // the work tree is the place itself, since a `core.worktree` the
+    // repository set would point git at any directory on the host, and the
+    // pins lead the arguments.
+    async fn exec<I, S>(&self, args: I, env: &[(&str, &str)]) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -419,32 +373,27 @@ impl<'a> Repo<'a> {
         self.client.git(Some(self.at), full, env).await
     }
 
-    // Run git to make the repository at the place: the pins lead, and the
-    // work tree is left to `clone`, which lays it and refuses to be given one.
-    async fn create<I, S>(&self, args: I, env: &[(&str, &str)]) -> Result<Output>
+    // Run git for the repository and hold it to success, else the typed
+    // refusal with `missing` naming what the repository lacks.
+    async fn run<I, S>(&self, args: I, missing: &str) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut full: Vec<OsString> = self.pins.args().map(OsString::from).collect();
-        full.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
-        self.client.git(Some(self.at), full, env).await
+        let output = self.exec(args, &[]).await?;
+        if output.status.success() { Ok(output) } else { Err(self.refuse(&output, missing).into()) }
     }
 
-    // Run git for this repository and hold it to success, else the typed
-    // refusal naming `exists` for a location taken and `missing` for what the
-    // repository lacks.
-    async fn run<I, S>(&self, args: I, exists: &str, missing: &str) -> Result<Output>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let output = self.git(args, &[]).await?;
-        if output.status.success() {
-            Ok(output)
-        } else {
-            Err(refuse(&output, exists, missing, None).into())
-        }
+    fn refuse(&self, output: &Output, missing: &str) -> Error {
+        refuse(output, self.at, missing, None)
+    }
+
+    // The typed refusal for a failed push: `diverged` over `label` where the
+    // remote's branch has moved past it; `not-found` naming the label where
+    // no refspec names it, the one thing a push can lack, else the remote.
+    fn refuse_push(&self, output: &Output, remote: &str, label: &str) -> Error {
+        let missing = if output.stderr.contains("src refspec") { label } else { remote };
+        refuse(output, self.at, missing, Some(label))
     }
 
     async fn rev_parse(&self, revision: &str) -> Result<String> {
@@ -456,9 +405,9 @@ impl<'a> Repo<'a> {
     // repository made is config no pin can put back, so a transport operation
     // refuses the repository whole rather than carry the operator's
     // credentials anywhere or over anything.
-    fn transportable(&self) -> Result<()> {
-        if let Some(key) = self.pins.shaping() {
-            let shown = self.shown();
+    fn check_transport_config(&self) -> Result<()> {
+        if let Some(key) = self.pins.blocked_transport_key() {
+            let shown = self.display_path();
             let message = format!(
                 "{shown}: the repository sets {key}, and how a transport runs is the host's to set"
             );
@@ -467,208 +416,176 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
+    // The URL a remote name or address reaches as the host's configuration
+    // expands it, for the transport rule: a remote's own URL, else the
+    // address as `url.<base>.insteadOf` rewrites it. A repository with
+    // transport settings of its own was refused before this, so the
+    // expansion is the host's alone.
+    async fn expand(&self, remote: &str, push: bool) -> String {
+        let mut args = vec!["remote", "get-url"];
+        if push {
+            args.push("--push");
+        }
+        args.extend(["--", remote]);
+        if let Ok(output) = self.exec(args, &[]).await
+            && output.status.success()
+        {
+            return output.text().trim().to_owned();
+        }
+        self.client.expand_url(self.at, remote).await
+    }
+
     async fn status(&self) -> Result<Vec<Change>> {
         let args = ["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"];
-        let output = self.run(args, &self.shown(), "HEAD").await?;
+        let output = self.run(args, "HEAD").await?;
         Ok(pending(&output.text()))
     }
 
-    async fn conflicts(&self) -> Result<Vec<String>> {
-        let args =
-            ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=U", "-z"];
-        let output = self.run(args, &self.shown(), "HEAD").await?;
-        Ok(nul_separated(&output.text()))
+    // `--is-ancestor` answers by exit status alone, 1 writing nothing, so
+    // the status is read rather than the stderr.
+    async fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        let args = ["merge-base", "--is-ancestor", ancestor, descendant];
+        let output = self.exec(args, &[]).await?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(self.refuse(&output, descendant).into()),
+        }
     }
 
-    async fn resolve(&self, rules: &[Rule]) -> Result<Resolution> {
-        policy::resolve(self, rules).await
+    // Start merging `head`, held before its commit so the index is the
+    // backend's to settle by policy rather than git's attributes. False
+    // where there was nothing to merge: an ancestor, which git reports clean
+    // without starting one. A merge that never started is the refusal git
+    // gave, naming `revision`.
+    async fn begin_merge(&self, head: &str, revision: &str) -> Result<bool> {
+        let args = ["merge", "--no-ff", "--no-commit", "--", head];
+        let output = self.exec(args, &[]).await?;
+        if self.merging().await? {
+            return Ok(true);
+        }
+        if output.status.success() {
+            return Ok(false);
+        }
+        Err(self.refuse(&output, revision).into())
+    }
+
+    // Settle the merge in progress by `policy` and commit it as `message`,
+    // or unwind it: the paths no rule resolved come back as data and a step
+    // that fails as its error, the working copy on its head either way, so
+    // nothing of a failed merge stays for a later commit to finish.
+    async fn seal_merge(&self, policy: &[Rule], message: &str) -> Result<Merged> {
+        let merged = self.commit_merge(policy, message).await;
+        if !matches!(merged, Ok(Merged { commit: Some(_), .. })) {
+            self.abort().await;
+        }
+        merged
+    }
+
+    // The merge in progress resolved by `policy` and committed as `message`,
+    // or the paths no rule resolved and no commit. The message goes on the
+    // command line, never read from `MERGE_MSG`: that carries the
+    // `# Conflicts:` hint git appends to a merge it left in conflict, and
+    // stripping it would strip the message's own `#` lines too, to nothing
+    // where it has no others.
+    async fn commit_merge(&self, policy: &[Rule], message: &str) -> Result<Merged> {
+        if let Resolution::Unresolved(conflicts) = self.resolve(policy).await? {
+            return Ok(Merged {
+                commit: None,
+                conflicts,
+            });
+        }
+        self.run(["commit", "--quiet", "-m", message], "HEAD").await?;
+        Ok(Merged {
+            commit: Some(self.rev_parse("HEAD").await?),
+            conflicts: Vec::new(),
+        })
     }
 
     // Whether a merge is in progress: a clean `--no-commit` merge and a
     // conflicted one both leave `MERGE_HEAD`, an ancestor leaves none.
     async fn merging(&self) -> Result<bool> {
         let args = ["rev-parse", "--verify", "--quiet", "--end-of-options", "MERGE_HEAD"];
-        Ok(self.git(args, &[]).await?.status.success())
-    }
-
-    // The common ancestor of the merge's two sides, none when they share no
-    // history.
-    async fn merge_base(&self) -> Result<Option<String>> {
-        let output = self.git(["merge-base", "HEAD", "MERGE_HEAD"], &[]).await?;
-        Ok(output.status.success().then(|| output.text().trim().to_owned()))
-    }
-
-    // The paths both sides changed since their common ancestor, where a
-    // policy rule may apply; a path one side alone changed is git's clean
-    // merge and no rule's, whatever the rule would lay there. A rename is
-    // its two paths, each ruled on its own, and followed as the merge
-    // follows it: the other side's change to the old path is a change to the
-    // new one too. Without an ancestor, every path the two sides differ on.
-    async fn touched(&self, base: Option<&str>) -> Result<Vec<String>> {
-        let Some(base) = base else {
-            return Ok(self.changed("HEAD", "MERGE_HEAD").await?.paths);
-        };
-        let ours = self.changed(base, "HEAD").await?;
-        let theirs = self.changed(base, "MERGE_HEAD").await?;
-        Ok(ours.shared(&theirs))
-    }
-
-    async fn changed(&self, from: &str, to: &str) -> Result<Changes> {
-        let args = [
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--find-renames",
-            "--name-status",
-            "-z",
-            from,
-            to,
-        ];
-        let output = self.run(args, &self.shown(), "HEAD").await?;
-        Ok(changes(&output.text()))
-    }
-
-    // One commit's version of a path, byte for byte, or none when that commit
-    // lacks it.
-    async fn show(&self, revision: &str, path: &str) -> Result<Option<Vec<u8>>> {
-        let output = self.git(["show", &format!("{revision}:{path}")], &[]).await?;
-        Ok(output.status.success().then_some(output.stdout))
+        Ok(self.exec(args, &[]).await?.status.success())
     }
 
     // Best-effort unwind of a merge git left in progress; a repository with
     // none to abort is already on its head.
     async fn abort(&self) {
-        let _ = self.git(["merge", "--abort"], &[]).await;
+        let _ = self.exec(["merge", "--abort"], &[]).await;
     }
 
     // Detach HEAD when the repository is on the branch `name`, so `branch -f`
-    // can move it. An unborn branch cannot be detached and is refused.
+    // can move it: a label is a branch, which git refuses to force while it
+    // is checked out, and the working copy sits on its sealed commit either
+    // way. An unborn branch cannot be detached and is refused.
     async fn detach_from(&self, name: &str) -> Result<()> {
-        let head = self.git(["symbolic-ref", "--quiet", "HEAD"], &[]).await?;
+        let head = self.exec(["symbolic-ref", "--quiet", "HEAD"], &[]).await?;
         if head.text().trim() != format!("refs/heads/{name}") {
             return Ok(());
         }
-        if self.git(["checkout", "--quiet", "--detach"], &[]).await?.status.success() {
+        if self.exec(["checkout", "--quiet", "--detach"], &[]).await?.status.success() {
             return Ok(());
         }
         Err(Error::Other(format!("cannot label the branch {name} the repository is on")).into())
     }
 
-    fn shown(&self) -> String {
-        shown(self.at)
+    // Lay a detached working copy of `revision` at `at`, whose absolute path
+    // is the one path handed to git: a working copy is laid at a path git
+    // records in the repository, which no handle can stand for; the runtime
+    // laid it empty and holds it open meanwhile.
+    async fn add_worktree(&self, at: &Place, revision: &str) -> Result<()> {
+        let destination = path::absolute(at.path())
+            .with_context(|| format!("resolving {}", at.path().display()))?;
+        let args = [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("--detach"),
+            OsStr::new("--"),
+            destination.as_os_str(),
+            OsStr::new(revision),
+        ];
+        let output = self.exec(args, &[]).await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(refuse(&output, at, revision, None).into())
+        }
     }
 
-    // Lay a merged path in the working tree, its directory first where the
-    // merge removed one.
-    fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
-        if let Some((parent, _)) = path.rsplit_once('/') {
-            self.at
-                .dir()
-                .create_dir_all(parent)
-                .with_context(|| format!("creating {parent} for the merge of {path}"))?;
-        }
-        self.at.dir().write(path, bytes).with_context(|| format!("writing the merge of {path}"))
+    // Remove the working copy, pending changes with it. A copy another
+    // process laid is addressed through its `.git` file: a rewritten one
+    // leads `worktree remove` to a repository the copy is no working copy of,
+    // which refuses rather than removes, and the copy stays for the operator.
+    async fn remove_worktree(&self) -> Result<()> {
+        let shown = self.display_path();
+        self.run(["worktree", "remove", "--force", "."], &shown).await?;
+        Ok(())
+    }
+
+    fn display_path(&self) -> String {
+        display_path(self.at)
     }
 }
 
 // A guest string git would read as an option, or the empty string it reads as
 // a default, is nothing the repository knows.
-fn vetted(value: &str) -> Result<()> {
+fn validate_arg(value: &str) -> Result<()> {
     if value.is_empty() || value.starts_with('-') {
         return Err(Error::NotFound(value.to_owned()).into());
     }
     Ok(())
 }
 
-// The protocol allow-list and the pack command the far side runs, named on
-// the command line so the repository's own `remote.<name>.uploadPack` or
-// `receivePack` — which no `-c` outranks — is never the program the
-// operator's ssh carries to a host: for a local transport, the wrapped
-// command that holds the far side to `FAR_SIDE`; for a remote one, git's
-// own default.
-fn transport(client: &Client, address: &str, push: bool) -> (&'static str, String) {
-    let operation = if push { "receive-pack" } else { "upload-pack" };
-    if is_local(address) {
-        ("file", wrap(client, operation))
-    } else {
-        ("http:https:ssh", format!("--{operation}=git-{operation}"))
-    }
-}
-
-// git's own rule: a `file://` URL, or an address with no scheme and no
-// scp-like `host:path`, is a local path; everything else crosses a network.
-fn is_local(address: &str) -> bool {
-    if let Some(scheme) = address.split_once("://") {
-        return scheme.0.eq_ignore_ascii_case("file");
-    }
-    match (address.find(':'), address.find('/')) {
-        (Some(colon), Some(slash)) => colon > slash,
-        (Some(_), None) => false,
-        (None, _) => true,
-    }
-}
-
-// What the far side of a local transport is held to, since a repository
-// beneath the mount is as much the guest's as the place: no hooks, no
-// alternate-refs command, no file-system monitor, and no update of a branch
-// a working copy has checked out, which `receive.denyCurrentBranch=
-// updateInstead` would write through the copy's own filters.
-const FAR_SIDE: [&str; 4] = [
-    "core.hooksPath=/dev/null",
-    "core.alternateRefsCommand=",
-    "core.fsmonitor=false",
-    "receive.denyCurrentBranch=refuse",
-];
-
-// `git -c … <operation>` as one `--upload-pack` or `--receive-pack`
-// argument: the near side's `-c` pins reach no process the far side starts,
-// so its own ride the command. git splits the value with shell quoting for a
-// local transport, so the binary is single-quoted.
-fn wrap(client: &Client, operation: &str) -> String {
-    let binary = sq(&client.binary.display().to_string());
-    let mut pins = String::new();
-    for pin in FAR_SIDE {
-        pins.push_str(" -c ");
-        pins.push_str(pin);
-    }
-    format!("--{operation}={binary}{pins} {operation}")
-}
-
-fn sq(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-// The URL a remote name or address reaches as the host's configuration
-// expands it, for the transport rule: a remote's own URL, else the address
-// rewritten under `url.<base>.insteadOf`, else the address as given. A
-// repository with transport settings of its own was refused before this, so
-// the expansion is the host's alone.
-async fn expand(repo: &Repo<'_>, remote: &str, push: bool) -> String {
-    let mut named = vec!["remote", "get-url"];
-    if push {
-        named.push("--push");
-    }
-    named.extend(["--", remote]);
-    if let Ok(output) = repo.git(named, &[]).await
-        && output.status.success()
-    {
-        return output.text().trim().to_owned();
-    }
-    match repo.git(["ls-remote", "--get-url", "--", remote], &[]).await {
-        Ok(output) if output.status.success() => output.text().trim().to_owned(),
-        _ => remote.to_owned(),
-    }
-}
-
-// The typed refusal for a failed process: `exists` names a location taken,
-// `missing` what the repository lacks, and `label` the one a push sent,
-// which is what a rejected push is `diverged` over; an operation that
-// pushes nothing passes `None` and is never typed so, whatever git said.
-fn refuse(output: &Output, exists: &str, missing: &str, label: Option<&str>) -> Error {
+// The typed refusal for a failed process at `at`, which is what `exists`
+// names: `missing` names what the repository lacks, and `label` the one a
+// push sent, which is what a rejected push is `diverged` over; an operation
+// that pushes nothing passes `None` and is never typed so, whatever git said.
+fn refuse(output: &Output, at: &Place, missing: &str, label: Option<&str>) -> Error {
     let detail = output.stderr.trim().to_owned();
     match (refusal::classify(&output.stderr), label) {
         (Class::NotARepository, _) => Error::NotARepository,
-        (Class::Exists, _) => Error::Exists(exists.to_owned()),
+        (Class::Exists, _) => Error::Exists(display_path(at)),
         (Class::NotFound, _) => Error::NotFound(missing.to_owned()),
         (Class::Access, _) => Error::Access(detail),
         (Class::Diverged, Some(label)) => Error::Diverged(label.to_owned()),
@@ -676,20 +593,15 @@ fn refuse(output: &Output, exists: &str, missing: &str, label: Option<&str>) -> 
     }
 }
 
-fn shown(place: &Place) -> String {
+fn display_path(place: &Place) -> String {
     place.path().display().to_string()
-}
-
-// Non-empty entries of a `-z` list, each `\0`-terminated.
-fn nul_separated(output: &str) -> Vec<String> {
-    output.split('\0').filter(|entry| !entry.is_empty()).map(str::to_owned).collect()
 }
 
 // One entry per `-z` record of `log --format=%H%x1f%B`: the id, then the
 // message as sealed, without the newline git ends a message with.
 fn entries(output: &str) -> Vec<Entry> {
-    nul_separated(output)
-        .iter()
+    output
+        .split('\0')
         .filter_map(|record| record.split_once('\x1f'))
         .map(|(id, message)| Entry {
             id: id.to_owned(),
@@ -730,63 +642,13 @@ const fn kind(index: char, tree: char) -> Option<ChangeKind> {
     }
 }
 
-// One side's changes since the merge base: every path it changed, a rename
-// as both of its paths, and the renames themselves.
-struct Changes {
-    paths: Vec<String>,
-    renames: Vec<(String, String)>,
-}
-
-impl Changes {
-    // The paths both sides changed, the renames followed: where one side
-    // renamed a path the other changed, the new path is theirs both too,
-    // since the merge carries that change to it.
-    fn shared(&self, other: &Self) -> Vec<String> {
-        let mut shared: Vec<String> =
-            self.paths.iter().filter(|path| other.paths.contains(path)).cloned().collect();
-        let followed = self
-            .renames
-            .iter()
-            .filter(|(old, _)| other.paths.contains(old))
-            .chain(other.renames.iter().filter(|(old, _)| self.paths.contains(old)))
-            .map(|(_, new)| new);
-        for new in followed {
-            if !shared.contains(new) {
-                shared.push(new.clone());
-            }
-        }
-        shared
-    }
-}
-
-// The `-z` records of `diff --name-status --find-renames`: a status and its
-// path, or for a rename the old path and the new.
-fn changes(output: &str) -> Changes {
-    let mut changes = Changes {
-        paths: Vec::new(),
-        renames: Vec::new(),
-    };
-    let mut fields = output.split('\0');
-    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
-        if status.starts_with('R') {
-            let Some(new) = fields.next() else {
-                break;
-            };
-            changes.paths.push(path.to_owned());
-            changes.paths.push(new.to_owned());
-            changes.renames.push((path.to_owned(), new.to_owned()));
-        } else {
-            changes.paths.push(path.to_owned());
-        }
-    }
-    changes
-}
-
+// The porcelain parsers are pure over text; the e2e suites drive every
+// operation through a guest over real repositories, with git as the oracle.
 #[cfg(test)]
 mod tests {
     use omnia_wasi_vcs::ChangeKind;
 
-    use super::{changes, entries, is_local, pending};
+    use super::{entries, pending};
 
     fn kinds(porcelain: &str) -> Vec<(String, ChangeKind)> {
         pending(porcelain).into_iter().map(|change| (change.path, change.kind)).collect()
@@ -831,28 +693,5 @@ mod tests {
             ]
         );
         assert_eq!(logged(""), []);
-    }
-
-    #[test]
-    fn name_status_records() {
-        let ours = changes("M\0old.txt\0A\0ours.txt\0");
-        let theirs = changes("R100\0old.txt\0new.txt\0A\0theirs.txt\0");
-        assert_eq!(theirs.paths, ["old.txt", "new.txt", "theirs.txt"]);
-        assert_eq!(theirs.renames, [("old.txt".to_owned(), "new.txt".to_owned())]);
-        assert_eq!(ours.shared(&theirs), ["old.txt", "new.txt"]);
-        assert_eq!(theirs.shared(&ours), ["old.txt", "new.txt"]);
-        assert_eq!(changes("").paths, Vec::<String>::new());
-    }
-
-    #[test]
-    fn local_and_remote_addresses() {
-        assert!(is_local("file:///srv/repo.git"));
-        assert!(is_local("/srv/repo.git"));
-        assert!(is_local("./repo"));
-        assert!(is_local("../origin.git"));
-        assert!(!is_local("https://host/repo.git"));
-        assert!(!is_local("ssh://host/repo.git"));
-        assert!(!is_local("git@host:owner/repo.git"));
-        assert!(!is_local("ext::sh -c payload"));
     }
 }

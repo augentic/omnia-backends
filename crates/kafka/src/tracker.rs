@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_order_completions_store_the_resolved_offset() {
+    fn out_of_order() {
         let mut tracker = Tracker::default();
         let first = tracker.insert("t", 3, 100);
         let second = tracker.insert("t", 3, 101);
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn record_done_before_its_sends_are_delivered() {
+    fn pending_sends() {
         let mut tracker = Tracker::default();
         let ticket = tracker.insert("t", 0, 7);
         assert_eq!(tracker.done("t", 0, 7, ticket, 2), None);
@@ -210,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn one_delivery_awaited_by_two_partitions() {
+    fn shared_delivery() {
         let mut tracker = Tracker::default();
         let t = tracker.insert("t", 0, 1);
         let u = tracker.insert("u", 2, 9);
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn revoked_partition_drops_its_records() {
+    fn revoke_partition() {
         let mut tracker = Tracker::default();
         let held = tracker.insert("t", 1, 5);
         assert!(tracker.holds("t", 1, 5, held));
@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn offset_pulled_again_after_a_reassignment() {
+    fn reassign_partition() {
         let mut tracker = Tracker::default();
         let stale = tracker.insert("t", 1, 5);
         tracker.revoke("t", 1);
@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_failure_does_not_stall_delivered() {
+    fn enqueue_failure() {
         let mut tracker = Tracker::default();
         assert_eq!(tracker.note_delivered(1), []);
         assert_eq!(tracker.delivered, 0);

@@ -390,7 +390,7 @@ mod tests {
     use super::{Event, History as _, Kind, Log, Rpc, proc_state};
 
     #[test]
-    fn command_name_holding_the_separator() {
+    fn comm_with_parens() {
         assert_eq!(proc_state("42 (sleep) S 1 42 42 0 -1"), Some('S'));
         assert_eq!(proc_state("42 (a) b) Z 1 42 42 0 -1"), Some('Z'));
         assert_eq!(proc_state("42 (no state"), None);

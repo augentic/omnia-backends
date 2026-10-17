@@ -21,7 +21,7 @@ async fn operator_locale() {
 }
 
 #[tokio::test]
-async fn version_refused() {
+async fn git_version() {
     let git = Hermetic::new();
     let error = Client::connect(git.reporting("2.25.0")).await.expect_err("too old");
     assert!(error.to_string().contains("older than 2.26"), "{error:#}");

@@ -1,5 +1,6 @@
 //! The command-line config that holds one operation to host policy, so the
-//! repository's own configuration cannot choose a program git runs.
+//! repository's own configuration cannot choose a program git runs, on
+//! either side of a transport.
 //!
 //! A guest with a writable mount owns everything beneath `.git`. Left to the
 //! repository, a planted hook, an `fsmonitor`, a signing program, a clean or
@@ -11,6 +12,12 @@
 //! signing program — are kept from the host's own configuration (system,
 //! global, or this command line) and dropped from the repository's. A key
 //! the repository spells in bytes a pin cannot name refuses the operation.
+//!
+//! The far side of a transport starts no process the near side's `-c` pins
+//! reach, so the pack command is named on the command line too: a local
+//! one wrapped to carry pins of its own, a remote one git's default rather
+//! than whatever `remote.<name>.uploadPack` or `receivePack` the repository
+//! set.
 
 use anyhow::Result;
 use omnia_wasi_vcs::{Error, Place};
@@ -39,7 +46,7 @@ const FORCED: [&str; 8] = [
 // them in a listing and as they are pinned: the repository's value gives way
 // to the host's, or to none. Nothing here signs, so a signing program is
 // pinned for whatever path to one a later git may add.
-const HOST_KEPT: [(&str, &str); 6] = [
+const HOST_PINNED_KEYS: [(&str, &str); 6] = [
     ("core.sshcommand", "core.sshCommand"),
     ("core.askpass", "core.askPass"),
     ("gpg.program", "gpg.program"),
@@ -48,25 +55,47 @@ const HOST_KEPT: [(&str, &str); 6] = [
     ("gpg.ssh.program", "gpg.ssh.program"),
 ];
 
-/// The `-c` overrides that hold one repository's operations to host policy,
-/// and the first setting the repository made of how a transport runs, if
-/// any, which no pin can undo.
-#[derive(Debug, Default)]
+// The `http.*` keys that size or pace a transfer and shape nothing of where
+// it goes or whom it trusts.
+const ALLOWED_HTTP_KEYS: [&str; 7] = [
+    "postbuffer",
+    "lowspeedlimit",
+    "lowspeedtime",
+    "maxrequests",
+    "minsessions",
+    "useragent",
+    "version",
+];
+
+// What the far side of a local transport is held to, since a repository
+// beneath the mount is as much the guest's as the place: no hooks, no
+// alternate-refs command, no file-system monitor, and no update of a branch
+// a working copy has checked out, which `receive.denyCurrentBranch=
+// updateInstead` would write through the copy's own filters.
+const LOCAL_PACK_PINS: [&str; 4] = [
+    "core.hooksPath=/dev/null",
+    "core.alternateRefsCommand=",
+    "core.fsmonitor=false",
+    "receive.denyCurrentBranch=refuse",
+];
+
+// The `-c` overrides that hold one repository's operations to host policy,
+// and the first setting the repository made of how a transport runs, if
+// any, which no pin can undo.
+#[derive(Debug)]
 pub struct Pins {
     pins: Vec<String>,
-    shaping: Option<String>,
+    blocked_transport_key: Option<String>,
 }
 
 impl Pins {
     // Read the repository's configuration with its scopes and build the
-    // overrides. A place that holds no repository yet — a clone's empty
-    // destination — has only host scope to read, so an unreadable listing
-    // leaves the forced set alone to apply.
+    // overrides. An unreadable listing leaves the forced set alone to apply.
     pub async fn read(client: &Client, at: &Place) -> Result<Self> {
         let args = ["config", "--show-scope", "--list", "-z"];
         let output = client.git(Some(at), args, &[]).await?;
         if !output.status.success() {
-            return Ok(Self::build(&[]));
+            return Ok(Self::forced());
         }
         let settings = parse(&output.stdout).map_err(|key| {
             let shown = at.path().display();
@@ -78,21 +107,28 @@ impl Pins {
         Ok(Self::build(&settings))
     }
 
+    // The forced set alone: what a place holding no repository yet — an
+    // `init` or a `clone` destination — is held to, having no configuration
+    // of its own to read.
+    pub fn forced() -> Self {
+        Self::build(&[])
+    }
+
     fn build(settings: &[Setting]) -> Self {
         // a URL rewrite, an HTTP setting, or a proxy the repository set would
         // carry the operator's credentials anywhere or over anything, and is
         // config no `-c` can put back to unset; the first is named for the
         // transport operations to refuse the repository on
-        let shaping = settings
+        let blocked_transport_key = settings
             .iter()
-            .find(|s| s.scope == Scope::Repo && is_shaping(&s.key))
+            .find(|s| s.is_repo() && s.is_transport_override())
             .map(|s| s.key.clone());
 
         let mut pins: Vec<String> = FORCED.iter().map(|pin| (*pin).to_owned()).collect();
 
         // an SSH command or a credential prompt the repository set is replaced
         // by the host's own, or emptied so git falls back to its environment
-        for (key, pin) in HOST_KEPT {
+        for (key, pin) in HOST_PINNED_KEYS {
             if repo_set(settings, key) {
                 let host = host_value(settings, key).unwrap_or_default();
                 pins.push(format!("{pin}={host}"));
@@ -101,7 +137,7 @@ impl Pins {
 
         // a clean, smudge, or merge driver the repository defined is emptied,
         // so git runs no program and falls back to its built-in merge
-        for setting in settings.iter().filter(|s| s.scope == Scope::Repo && is_driver(&s.key)) {
+        for setting in settings.iter().filter(|s| s.is_repo() && s.is_driver()) {
             pins.push(format!("{}=", setting.key));
         }
 
@@ -110,12 +146,15 @@ impl Pins {
         // survives and a planted helper does not
         for key in repo_credential_keys(settings) {
             pins.push(format!("{key}="));
-            for value in host_values(settings, &key) {
+            for value in host_values(settings, key) {
                 pins.push(format!("{key}={value}"));
             }
         }
 
-        Self { pins, shaping }
+        Self {
+            pins,
+            blocked_transport_key,
+        }
     }
 
     // `-c <pin>` for each override, to lead a subcommand's arguments.
@@ -125,9 +164,58 @@ impl Pins {
 
     // The first key the repository itself set of how a transport runs — a
     // URL rewrite, an HTTP setting, a proxy — as git lists it.
-    pub fn shaping(&self) -> Option<&str> {
-        self.shaping.as_deref()
+    pub fn blocked_transport_key(&self) -> Option<&str> {
+        self.blocked_transport_key.as_deref()
     }
+}
+
+impl Client {
+    // The protocol allow-list and the pack command for a transport over
+    // `address`, the command named so the repository's own
+    // `remote.<name>.uploadPack` or `receivePack` — which no `-c` outranks —
+    // is never the program the operator's ssh carries to a host: for a
+    // local transport, this git wrapped to hold the far side to
+    // `LOCAL_PACK_PINS`; for a remote one, git's own default.
+    pub(crate) fn transport_args(&self, address: &str, push: bool) -> (&'static str, String) {
+        let operation = if push { "receive-pack" } else { "upload-pack" };
+        if is_local(address) {
+            ("file", self.pack_arg(operation))
+        } else {
+            ("http:https:ssh", format!("--{operation}=git-{operation}"))
+        }
+    }
+
+    // `git -c … <operation>` as one `--upload-pack` or `--receive-pack`
+    // argument: the near side's `-c` pins reach no process the far side
+    // starts, so its own ride the command. git splits the value with shell
+    // quoting for a local transport, so the binary — UTF-8, as `connect`
+    // held it — is single-quoted.
+    fn pack_arg(&self, operation: &str) -> String {
+        let binary = shell_quote(&self.binary.to_string_lossy());
+        let mut pins = String::new();
+        for pin in LOCAL_PACK_PINS {
+            pins.push_str(" -c ");
+            pins.push_str(pin);
+        }
+        format!("--{operation}={binary}{pins} {operation}")
+    }
+}
+
+// git's own rule: a `file://` URL, or an address with no scheme and no
+// scp-like `host:path`, is a local path; everything else crosses a network.
+fn is_local(address: &str) -> bool {
+    if let Some(scheme) = address.split_once("://") {
+        return scheme.0.eq_ignore_ascii_case("file");
+    }
+    match (address.find(':'), address.find('/')) {
+        (Some(colon), Some(slash)) => colon > slash,
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 // Where a setting came from, cut to the one distinction that matters: the
@@ -144,6 +232,40 @@ struct Setting {
     scope: Scope,
     key: String,
     value: String,
+}
+
+impl Setting {
+    const fn is_repo(&self) -> bool {
+        matches!(self.scope, Scope::Repo)
+    }
+
+    const fn is_host(&self) -> bool {
+        matches!(self.scope, Scope::Host)
+    }
+
+    // `filter.<name>.clean` / `smudge` / `process` or `merge.<name>.driver`.
+    fn is_driver(&self) -> bool {
+        let Some((named, last)) = self.key.rsplit_once('.') else { return false };
+        (named.starts_with("filter.") && matches!(last, "clean" | "smudge" | "process"))
+            || (named.starts_with("merge.") && last == "driver")
+    }
+
+    // `credential.helper` or `credential.<url>.helper`.
+    fn is_helper(&self) -> bool {
+        self.key.starts_with("credential.")
+            && self.key.rsplit_once('.').is_some_and(|(_, last)| last == "helper")
+    }
+
+    // `url.<base>.insteadOf` / `pushInsteadOf`; `http.*` and `http.<url>.*`
+    // beyond the tuning keys; `remote.<name>.proxy` / `proxyAuthMethod`.
+    fn is_transport_override(&self) -> bool {
+        let Some((named, last)) = self.key.rsplit_once('.') else { return false };
+        let rewrite = named.starts_with("url.") && matches!(last, "insteadof" | "pushinsteadof");
+        let http =
+            (named == "http" || named.starts_with("http.")) && !ALLOWED_HTTP_KEYS.contains(&last);
+        let proxy = named.starts_with("remote.") && matches!(last, "proxy" | "proxyauthmethod");
+        rewrite || http || proxy
+    }
 }
 
 // `config --show-scope --list -z` is `<scope>\0<key>\n<value>\0` per setting;
@@ -178,71 +300,36 @@ fn parse(listing: &[u8]) -> Result<Vec<Setting>, String> {
 }
 
 fn repo_set(settings: &[Setting], key: &str) -> bool {
-    settings.iter().any(|s| s.scope == Scope::Repo && s.key == key)
+    settings.iter().any(|s| s.is_repo() && s.key == key)
 }
 
 // The last host-scope value, as git's own precedence would read it.
-fn host_value(settings: &[Setting], key: &str) -> Option<String> {
-    host_values(settings, key).pop()
+fn host_value<'a>(settings: &'a [Setting], key: &str) -> Option<&'a str> {
+    settings.iter().rfind(|s| s.is_host() && s.key == key).map(|s| s.value.as_str())
 }
 
-fn host_values(settings: &[Setting], key: &str) -> Vec<String> {
-    settings
-        .iter()
-        .filter(|s| s.scope == Scope::Host && s.key == key)
-        .map(|s| s.value.clone())
-        .collect()
-}
-
-// `filter.<name>.clean` / `smudge` / `process` or `merge.<name>.driver`.
-fn is_driver(key: &str) -> bool {
-    let Some((named, last)) = key.rsplit_once('.') else { return false };
-    (named.starts_with("filter.") && matches!(last, "clean" | "smudge" | "process"))
-        || (named.starts_with("merge.") && last == "driver")
+fn host_values<'a>(settings: &'a [Setting], key: &'a str) -> impl Iterator<Item = &'a str> {
+    settings.iter().filter(move |s| s.is_host() && s.key == key).map(|s| s.value.as_str())
 }
 
 // The credential-helper keys the repository set, each once and in order: the
 // top-level list and any per-URL list (`credential.<url>.helper`).
-fn repo_credential_keys(settings: &[Setting]) -> Vec<String> {
-    let mut keys: Vec<String> = Vec::new();
-    for setting in settings.iter().filter(|s| s.scope == Scope::Repo && is_helper(&s.key)) {
-        if !keys.contains(&setting.key) {
-            keys.push(setting.key.clone());
+fn repo_credential_keys(settings: &[Setting]) -> Vec<&str> {
+    let mut keys: Vec<&str> = Vec::new();
+    for setting in settings.iter().filter(|s| s.is_repo() && s.is_helper()) {
+        if !keys.contains(&setting.key.as_str()) {
+            keys.push(&setting.key);
         }
     }
     keys
 }
 
-// `credential.helper` or `credential.<url>.helper`.
-fn is_helper(key: &str) -> bool {
-    key.starts_with("credential.") && key.rsplit_once('.').is_some_and(|(_, last)| last == "helper")
-}
-
-// The `http.*` keys that size or pace a transfer and shape nothing of where
-// it goes or whom it trusts.
-const TUNING: [&str; 7] = [
-    "postbuffer",
-    "lowspeedlimit",
-    "lowspeedtime",
-    "maxrequests",
-    "minsessions",
-    "useragent",
-    "version",
-];
-
-// `url.<base>.insteadOf` / `pushInsteadOf`; `http.*` and `http.<url>.*`
-// beyond the tuning keys; `remote.<name>.proxy` / `proxyAuthMethod`.
-fn is_shaping(key: &str) -> bool {
-    let Some((named, last)) = key.rsplit_once('.') else { return false };
-    let rewrite = named.starts_with("url.") && matches!(last, "insteadof" | "pushinsteadof");
-    let http = (named == "http" || named.starts_with("http.")) && !TUNING.contains(&last);
-    let proxy = named.starts_with("remote.") && matches!(last, "proxy" | "proxyauthmethod");
-    rewrite || http || proxy
-}
-
+// The listing parser, the pin rules, and the address rule are pure over
+// text; the hardening suite proves the pins hold against a salted repository
+// and its far side.
 #[cfg(test)]
 mod tests {
-    use super::{Pins, Setting, parse};
+    use super::{Pins, Setting, is_local, parse};
 
     fn settings(listing: &str) -> Vec<Setting> {
         parse(listing.as_bytes()).expect("a listing in UTF-8")
@@ -254,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_without_repo_config() {
+    fn no_repo_config() {
         let listing = "global\0user.name\nT\0global\0core.sshcommand\nhostssh\0";
         assert_eq!(
             pins(listing),
@@ -281,25 +368,25 @@ mod tests {
     }
 
     #[test]
-    fn repo_ssh_takes_the_host_value() {
+    fn ssh_with_host() {
         let listing = "global\0core.sshcommand\nhostssh\0local\0core.sshcommand\nreposs\0";
         assert!(pins(listing).windows(2).any(|w| w == ["-c", "core.sshCommand=hostssh"]));
     }
 
     #[test]
-    fn repo_ssh_without_a_host_empties() {
+    fn ssh_without_host() {
         let listing = "local\0core.sshcommand\nreposs\0";
         assert!(pins(listing).windows(2).any(|w| w == ["-c", "core.sshCommand="]));
     }
 
     #[test]
-    fn repo_askpass_emptied() {
+    fn askpass() {
         let listing = "local\0core.askpass\n/tmp/evil\0";
         assert!(pins(listing).windows(2).any(|w| w == ["-c", "core.askPass="]));
     }
 
     #[test]
-    fn repo_signers_take_the_host_value_or_empty() {
+    fn signers() {
         let listing = "global\0gpg.program\nhostgpg\0local\0gpg.program\n/tmp/evil\0\
                        local\0gpg.ssh.program\n/tmp/evil\0";
         let pins = pins(listing);
@@ -308,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_drivers_emptied() {
+    fn drivers() {
         let listing = "local\0filter.lfs.smudge\ngit-lfs\0local\0merge.evil.driver\nx\0\
                        local\0filter.lfs.clean\ngit-lfs\0";
         let pins = pins(listing);
@@ -318,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_credential_reset_then_host_readded() {
+    fn credential_helpers() {
         let listing = "global\0credential.helper\nhostcred\0local\0credential.helper\nrepocred\0";
         let pins = pins(listing);
         let reset = pins.windows(2).position(|w| w == ["-c", "credential.helper="]).expect("reset");
@@ -332,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn per_url_credential_reset() {
+    fn per_url_credential() {
         let listing = "local\0credential.https://evil.example.helper\n!sh\0";
         assert!(
             pins(listing)
@@ -343,11 +430,11 @@ mod tests {
     }
 
     #[test]
-    fn repo_rewrite_named() {
+    fn url_rewrite() {
         let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0\
                        local\0url./tmp/m.pushinsteadof\nhttps://github.com/\0";
         let pins = Pins::build(&settings(listing));
-        assert_eq!(pins.shaping(), Some("url./tmp/m.pushinsteadof"));
+        assert_eq!(pins.blocked_transport_key(), Some("url./tmp/m.pushinsteadof"));
         assert!(
             !pins.args().any(|arg| arg.contains("insteadof")),
             "a rewrite is refused on, never pinned"
@@ -355,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_http_named() {
+    fn http_override() {
         for key in [
             "http.proxy",
             "http.sslverify",
@@ -367,42 +454,54 @@ mod tests {
             "remote.origin.proxy",
         ] {
             let listing = format!("local\0{key}\nx\0");
-            assert_eq!(Pins::build(&settings(&listing)).shaping(), Some(key), "{key}");
+            let pins = Pins::build(&settings(&listing));
+            assert_eq!(pins.blocked_transport_key(), Some(key), "{key}");
         }
     }
 
     #[test]
-    fn repo_http_tuning_left_alone() {
+    fn http_tuning() {
         let listing = "local\0http.postbuffer\n524288000\0local\0http.lowspeedlimit\n0\0\
                        local\0http.https://h/.postbuffer\n1\0";
-        assert_eq!(Pins::build(&settings(listing)).shaping(), None);
+        assert_eq!(Pins::build(&settings(listing)).blocked_transport_key(), None);
     }
 
     #[test]
-    fn host_shaping_left_alone() {
+    fn host_transport() {
         let listing = "global\0url.ssh://h/.insteadof\nhttps://h/\0global\0http.proxy\nhost\0\
                        system\0http.sslverify\nfalse\0";
-        assert_eq!(Pins::build(&settings(listing)).shaping(), None);
+        assert_eq!(Pins::build(&settings(listing)).blocked_transport_key(), None);
     }
 
     #[test]
-    fn empty_value_setting() {
+    fn empty_value() {
         let listing = "local\0foo.bar\n\0global\0user.name\nT\0";
-        // the empty value parses without eating the next setting
         assert_eq!(settings(listing).len(), 2);
     }
 
     #[test]
-    fn repo_key_not_utf8() {
+    fn non_utf8_repo_key() {
         let listing = b"local\0filter.\xff.clean\ntouch pwned\0";
         assert_eq!(parse(listing).expect_err("unnameable"), "filter.\u{FFFD}.clean");
     }
 
     #[test]
-    fn host_key_and_values_read_lossily() {
+    fn non_utf8_host_key() {
         let listing = b"global\0filter.\xff.clean\nx\0local\0user.name\n\xff\0";
         let settings = parse(listing).expect("the host's key and a value are the operator's");
         assert_eq!(settings.len(), 2);
         assert_eq!(settings[1].value, "\u{FFFD}");
+    }
+
+    #[test]
+    fn addresses() {
+        assert!(is_local("file:///srv/repo.git"));
+        assert!(is_local("/srv/repo.git"));
+        assert!(is_local("./repo"));
+        assert!(is_local("../origin.git"));
+        assert!(!is_local("https://host/repo.git"));
+        assert!(!is_local("ssh://host/repo.git"));
+        assert!(!is_local("git@host:owner/repo.git"));
+        assert!(!is_local("ext::sh -c payload"));
     }
 }

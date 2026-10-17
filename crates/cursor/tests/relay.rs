@@ -1,7 +1,8 @@
 //! The relay the bridge's API goes through: a worker is pointed at it in
 //! place of the host's `CURSOR_BACKEND_URL`, and what it is sent reaches the
-//! backend the client was configured with — path and query kept, hop-by-hop
-//! headers dropped, bodies streamed both ways, an unreachable backend `502`.
+//! backend the client was configured with — path and query kept,
+//! connection-specific headers dropped, bodies streamed both ways, an
+//! unreachable backend `502`.
 //! The relay's address is read back from the fake bridge's `CreateAgent`
 //! record, as the only place the client tells it.
 
@@ -41,7 +42,7 @@ const ARRIVAL: Duration = Duration::from_secs(5);
 // says, since the relay is where the client forwards from.
 #[tokio::test]
 #[expect(unsafe_code, reason = "the host's value is planted in the process environment")]
-async fn bridge_pointed_at_the_relay() {
+async fn bridge_backend_url() {
     // SAFETY: nextest runs one test per process, and the variable is set
     // before the test spawns any thread of its own.
     unsafe { std::env::set_var("CURSOR_BACKEND_URL", "http://backend.invalid") };
@@ -56,7 +57,7 @@ async fn bridge_pointed_at_the_relay() {
 // `CURSOR_BACKEND_URL` is the client's to set, so a worker grant naming it
 // is refused as the request's fault, before anything is spawned.
 #[tokio::test]
-async fn backend_url_refused_as_a_grant() {
+async fn grant_backend_url() {
     let fake = Spawnable::new(&Config::echo());
     let client = connect(ConnectOptions {
         shell_roots: vec![fake.home().to_path_buf()],
@@ -71,7 +72,7 @@ async fn backend_url_refused_as_a_grant() {
 
 // A backend that is not an http(s) URL is refused at connect.
 #[tokio::test]
-async fn backend_url_must_be_http() {
+async fn invalid_backend_url() {
     let fake = Spawnable::new(&Config::echo());
     fake_bridge::dummy_key();
     for bad in ["api2.cursor.sh", "ftp://api2.cursor.sh", "https://"] {
@@ -89,7 +90,7 @@ async fn backend_url_must_be_http() {
 // --- The backend's side ---
 
 // Method, path, query and the end-to-end headers reach the backend; the
-// hop-by-hop set, what `Connection` names, and the relay's own `Host` do
+// connection-specific set, what `Connection` names, and the relay's own `Host` do
 // not, and the backend's `Connection` is not handed back.
 #[tokio::test]
 async fn path_query_and_headers() {

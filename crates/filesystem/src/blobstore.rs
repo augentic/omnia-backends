@@ -121,11 +121,7 @@ impl Container for FsContainer {
         tracing::trace!("listing objects in container: {}", self.name);
         let dir = self.dir.clone();
 
-        blocking(move || {
-            let mut names = Vec::new();
-            collect(&dir, "", &mut names)?;
-            Ok(names)
-        })
+        blocking(move || collect(&dir, ""))
     }
 
     fn delete_object(&self, name: String) -> FutureResult<()> {

@@ -77,7 +77,8 @@ fn segment_ok(segment: &str) -> bool {
     !segment.is_empty() && segment != "." && segment != ".." && !segment.contains(['/', '\\', ':'])
 }
 
-fn collect(dir: &Path, prefix: &str, names: &mut Vec<String>) -> Result<()> {
+fn collect(dir: &Path, prefix: &str) -> Result<Vec<String>> {
+    let mut names = Vec::new();
     for entry in fs::read_dir(dir).context("issue reading directory")? {
         let entry = entry?;
         let name = entry.file_name();
@@ -92,10 +93,10 @@ fn collect(dir: &Path, prefix: &str, names: &mut Vec<String>) -> Result<()> {
         let rel = if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") };
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            collect(&entry.path(), &rel, names)?;
+            names.extend(collect(&entry.path(), &rel)?);
         } else if kind.is_file() {
             names.push(rel);
         }
     }
-    Ok(())
+    Ok(names)
 }

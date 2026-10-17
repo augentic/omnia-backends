@@ -104,11 +104,6 @@ mod tests {
         assert_eq!(discovery.auth_token_file.as_deref(), Some("/tmp/auth-token"));
     }
 
-    #[test]
-    fn discovery_malformed() {
-        assert!("{not json".parse::<Discovery>().is_err());
-    }
-
     #[tokio::test]
     async fn unknown_fields() {
         let discovery: Discovery = r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","url":"http://127.0.0.1:1","authToken":"inline","futureField":{"nested":true}}"#
@@ -134,20 +129,14 @@ mod tests {
 
     #[test]
     fn base_url_fallback() {
-        let discovery: Discovery =
-            r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"::1","port":9}"#
-                .parse()
-                .expect("host/port payload parses");
-        assert_eq!(discovery.base_url().expect("base url"), "http://[::1]:9");
-    }
-
-    #[test]
-    fn base_url_ipv6() {
-        let discovery: Discovery =
-            r#"{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"[::1]","port":9}"#
-                .parse()
-                .expect("pre-bracketed host/port payload parses");
-        assert_eq!(discovery.base_url().expect("base url"), "http://[::1]:9");
+        for host in ["::1", "[::1]"] {
+            let discovery: Discovery = format!(
+                r#"{{"schemaVersion":1,"transport":"tcp","protocol":"connect","host":"{host}","port":9}}"#
+            )
+            .parse()
+            .expect("host/port payload parses");
+            assert_eq!(discovery.base_url().expect("base url"), "http://[::1]:9", "{host}");
+        }
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 //! Loopback `CallCustomTool` server: the worker calls back here to execute a
-//! guest-declared function tool, and the call routes into the completion's
-//! session through [`ToolHost::call_tool`].
+//! guest-declared function tool, and the call routes into the completion
+//! through [`ToolHost::call_tool`].
 //!
 //! The server binds `127.0.0.1:0` and accepts both Connect unary codecs (the
 //! worker picks the content type). Each worker is registered under
@@ -33,6 +33,7 @@ use proto::{CallCustomToolRequest, CallCustomToolResponse, struct_to_value, valu
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 use tracing::instrument;
 
 use crate::lock;
@@ -41,15 +42,16 @@ const PATH: &str = "/sdk.v1.SdkCustomToolCallbackService/CallCustomTool";
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
-// The bound loopback endpoint; dropping it stops serving.
+// The bound loopback callback server; dropping it stops serving, in-flight
+// connections included.
 #[derive(Debug)]
-pub struct Endpoint {
+pub struct Callback {
     url: String,
     handler: Arc<Handler>,
     server: tokio::task::JoinHandle<()>,
 }
 
-impl Endpoint {
+impl Callback {
     pub async fn bind() -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -70,25 +72,28 @@ impl Endpoint {
     // dropping the registration revokes the token.
     pub fn register(&self) -> Result<Registration> {
         let token = gen_token()?;
-        let sessions = Arc::new(Sessions::default());
-        lock(&self.handler.workers).insert(token.clone(), Arc::clone(&sessions));
+        let routes = Arc::new(Routes::default());
+        lock(&self.handler.workers).insert(token.clone(), Arc::clone(&routes));
         Ok(Registration {
             handler: Arc::clone(&self.handler),
             url: self.url.clone(),
             token,
-            sessions,
+            routes,
         })
     }
 }
 
-impl Drop for Endpoint {
+impl Drop for Callback {
     fn drop(&mut self) {
         self.server.abort();
     }
 }
 
-// Accept until the `Endpoint` drops, one connection task per worker socket.
+// Accept until the `Callback` drops, one connection task per worker socket;
+// the connections go with the accept loop.
 async fn serve(listener: TcpListener, handler: Arc<Handler>) {
+    let mut connections = JoinSet::new();
+
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -101,8 +106,10 @@ async fn serve(listener: TcpListener, handler: Arc<Handler>) {
             }
         };
 
+        while connections.try_join_next().is_some() {}
+
         let handler = Arc::clone(&handler);
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let service = service_fn(move |request| {
                 let handler = Arc::clone(&handler);
                 async move { Ok::<_, Infallible>(handler.handle(request).await) }
@@ -124,7 +131,7 @@ pub struct Registration {
     handler: Arc<Handler>,
     url: String,
     token: String,
-    sessions: Arc<Sessions>,
+    routes: Arc<Routes>,
 }
 
 impl Registration {
@@ -139,17 +146,17 @@ impl Registration {
     // Route this worker's callbacks for `agent_id` into `tool_host` until
     // the returned guard drops; the guard also carries the abort the first
     // hard tool failure ends the completion with.
-    pub fn attach(&self, agent_id: String, tool_host: Arc<dyn ToolHost>) -> Attached {
+    pub fn attach(&self, agent_id: String, tool_host: Arc<dyn ToolHost>) -> Route {
         let (abort, aborted) = oneshot::channel();
-        self.sessions.insert(
+        self.routes.insert(
             agent_id.clone(),
-            Session {
+            Target {
                 tool_host,
                 abort: Some(abort),
             },
         );
-        Attached {
-            sessions: Arc::clone(&self.sessions),
+        Route {
+            routes: Arc::clone(&self.routes),
             agent_id,
             aborted,
         }
@@ -160,7 +167,7 @@ impl std::fmt::Debug for Registration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Registration")
             .field("url", &self.url)
-            .field("sessions", &self.sessions)
+            .field("routes", &self.routes)
             .finish_non_exhaustive()
     }
 }
@@ -173,33 +180,33 @@ impl Drop for Registration {
 
 // One agent's callback route, detached on drop.
 #[must_use]
-pub struct Attached {
-    sessions: Arc<Sessions>,
+pub struct Route {
+    routes: Arc<Routes>,
     agent_id: String,
     aborted: oneshot::Receiver<String>,
 }
 
-impl Attached {
+impl Route {
     // The reason the first hard tool failure aborted the completion with;
     // resolves once at most.
     pub async fn aborted(&mut self) -> String {
-        // the sender lives in the session until this guard drops: never closed unsent
+        // the sender lives in the route's target until this guard drops: never closed unsent
         (&mut self.aborted)
             .await
-            .unwrap_or_else(|_closed| unreachable!("session gone under its guard"))
+            .unwrap_or_else(|_closed| unreachable!("route gone under its guard"))
     }
 }
 
-impl Drop for Attached {
+impl Drop for Route {
     fn drop(&mut self) {
-        self.sessions.remove(&self.agent_id);
+        self.routes.remove(&self.agent_id);
     }
 }
 
 #[derive(Default)]
 struct Handler {
     // Registered workers' agent tables, by bearer token.
-    workers: Mutex<HashMap<String, Arc<Sessions>>>,
+    workers: Mutex<HashMap<String, Arc<Routes>>>,
 }
 
 impl Handler {
@@ -219,8 +226,8 @@ impl Handler {
 
         // HACK: drain a rejected request's body before answering; closing with
         // unread bytes turns the reply into a TCP reset
-        let sessions = match admitted {
-            Ok(sessions) => sessions,
+        let routes = match admitted {
+            Ok(routes) => routes,
             Err(reply) => {
                 let _ = tokio::time::timeout(DRAIN_TIMEOUT, drain(body, MAX_BODY_BYTES)).await;
                 return reply;
@@ -245,11 +252,11 @@ impl Handler {
             }
         };
 
-        sessions.call_tool(&parts.headers, body).await
+        routes.call_tool(&parts.headers, body).await
     }
 
     // The agent table of the worker whose bearer token the request carries.
-    fn authorize(&self, headers: &HeaderMap) -> Option<Arc<Sessions>> {
+    fn authorize(&self, headers: &HeaderMap) -> Option<Arc<Routes>> {
         let token = headers.get(AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ")?;
         lock(&self.workers).get(token).cloned()
     }
@@ -263,13 +270,13 @@ impl fmt::Debug for Handler {
 
 // One worker's live completions by `agent_id`.
 #[derive(Debug, Default)]
-struct Sessions {
-    entries: Mutex<HashMap<String, Session>>,
+struct Routes {
+    entries: Mutex<HashMap<String, Target>>,
 }
 
-impl Sessions {
-    fn insert(&self, agent_id: String, session: Session) {
-        lock(&self.entries).insert(agent_id, session);
+impl Routes {
+    fn insert(&self, agent_id: String, target: Target) {
+        lock(&self.entries).insert(agent_id, target);
     }
 
     fn remove(&self, agent_id: &str) {
@@ -323,13 +330,13 @@ impl Sessions {
     }
 
     fn tool_host(&self, agent_id: &str) -> Option<Arc<dyn ToolHost>> {
-        lock(&self.entries).get(agent_id).map(|session| Arc::clone(&session.tool_host))
+        lock(&self.entries).get(agent_id).map(|target| Arc::clone(&target.tool_host))
     }
 
     // End the completion live under `agent_id`, unless it is gone or an
     // earlier failure already has.
     fn abort(&self, agent_id: &str, reason: String) {
-        let abort = lock(&self.entries).get_mut(agent_id).and_then(|session| session.abort.take());
+        let abort = lock(&self.entries).get_mut(agent_id).and_then(|target| target.abort.take());
         if let Some(abort) = abort {
             // nobody listening: the completion ended on its own
             let _ = abort.send(reason);
@@ -337,11 +344,11 @@ impl Sessions {
     }
 }
 
-// One live completion's callback route: the session's tool host plus the
-// abort that ends the completion on a hard (non-repairable) tool failure,
-// taken by the first such failure.
+// Where one live completion's route leads: its tool host, plus the abort
+// that ends the completion on a hard (non-repairable) tool failure, taken
+// by the first such failure.
 #[derive(Debug)]
-struct Session {
+struct Target {
     tool_host: Arc<dyn ToolHost>,
     abort: Option<oneshot::Sender<String>>,
 }

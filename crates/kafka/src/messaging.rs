@@ -128,7 +128,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_consumed_record_forwarded_with_its_metadata() {
+    fn forwarded_metadata() {
         let record = OwnedMessage::new(
             None,
             Some(b"k".to_vec()),

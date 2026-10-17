@@ -30,7 +30,7 @@ async fn set_get_delete() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable Redis; run with --run-ignored"]
-async fn atomics_swap_and_increment() -> Result<()> {
+async fn keyvalue_atomics() -> Result<()> {
     let client = <Client as Backend>::connect().await?;
     let bucket: Arc<dyn Bucket> = client.open_bucket("omnia-live".to_owned()).await?;
 

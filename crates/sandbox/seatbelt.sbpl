@@ -1,6 +1,6 @@
 ; The base policy of OpenAI Codex, codex-rs/sandboxing/src/seatbelt_base_policy.sbpl,
 ; Copyright 2025 OpenAI, Apache-2.0, kept verbatim below this header. The rules
-; omnia-confine adds come after it in seatbelt.rs, since SBPL settles an
+; omnia-sandbox adds come after it in seatbelt.rs, since SBPL settles an
 ; operation by its last matching rule.
 
 (version 1)

@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-mod endpoint;
+mod callback;
 mod failure;
 mod model;
 mod pool;
@@ -15,16 +15,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 pub use failure::Failure;
 use omnia::Backend;
-pub use omnia_confine::Exit;
-use omnia_confine::{Confine, Options};
+pub use omnia_sandbox::Exit;
 pub use protocol::{RpcError, RunStatus};
 use tokio::time::Instant;
 use tracing::instrument;
 
 use crate::model::Deadlines;
 use crate::pool::Pool;
-use crate::relay::Relay;
-use crate::worker::Worker;
 
 /// Cursor model backend.
 #[derive(Clone)]
@@ -33,7 +30,6 @@ pub struct Client {
     model: String,
     api_key: Option<String>,
     pool: Arc<Pool>,
-    confine: Arc<Confine>,
     max_tool_calls: u32,
 }
 
@@ -42,9 +38,8 @@ impl std::fmt::Debug for Client {
         f.debug_struct("Client")
             .field("deadlines", &self.deadlines)
             .field("model", &self.model)
-            .field("max_agents", &self.pool.max_agents())
             .field("max_tool_calls", &self.max_tool_calls)
-            .field("confine", &self.confine.options())
+            .field("pool", &self.pool)
             .finish_non_exhaustive()
     }
 }
@@ -60,8 +55,9 @@ impl Backend for Client {
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
 
-        let confine = Confine::connect(options.confine()).await?;
-        let pool = Pool::connect(options.max_agents, &options.backend_url).await?;
+        let pool =
+            Pool::connect(options.max_agents, &options.backend_url, options.shell_roots).await?;
+
         Ok(Self {
             deadlines: Deadlines {
                 inactivity: Duration::from_secs(options.inactivity_secs),
@@ -70,23 +66,8 @@ impl Backend for Client {
             model: options.model,
             api_key,
             pool: Arc::new(pool),
-            confine: Arc::new(confine),
             max_tool_calls: options.max_tool_calls,
         })
-    }
-}
-
-impl ConnectOptions {
-    // What every worker reaches: the bridge's own settings as the
-    // environment it reads of the host, and never the client's own
-    // credential or the backend address, which would point the bridge past
-    // the relay. What one worker reaches beyond is its completion's ask.
-    fn confine(&self) -> Options {
-        Options {
-            shell_roots: self.shell_roots.clone(),
-            passthrough: Worker::PASSTHROUGH.iter().map(ToString::to_string).collect(),
-            refused: Worker::REFUSED.iter().map(ToString::to_string).collect(),
-        }
     }
 }
 
@@ -107,8 +88,8 @@ mod config {
     /// Connection options for the cursor backend.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
-        /// Default model id.
-        #[env(from = "CURSOR_MODEL", default = "composer-2.5")]
+        /// Default model id; `auto` is Cursor's server-side choice.
+        #[env(from = "CURSOR_MODEL", default = "auto")]
         pub model: String,
         /// The Cursor backend the client's relay forwards the bridge's API
         /// calls to, an `http` or `https` URL; the bridge itself is pointed
@@ -136,7 +117,7 @@ mod config {
         /// `:`-separated and relative to the invocation directory; a
         /// workspace lent elsewhere is read-only. What a worker reaches
         /// beyond its workspace — hosts, `~/` roots, variables — is the
-        /// completion's `grants.worker`, held to the boundary's own rules
+        /// completion's `grants.worker`, held to the sandbox's own rules
         /// and to nothing of the deployment's.
         #[env(from = "CURSOR_SHELL_ROOTS", default = "", with = paths)]
         pub shell_roots: Vec<PathBuf>,
@@ -149,10 +130,24 @@ mod config {
 }
 pub use config::ConnectOptions;
 
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            model: "auto".to_owned(),
+            backend_url: relay::BACKEND_URL.to_owned(),
+            timeout_secs: 600,
+            inactivity_secs: 120,
+            max_agents: 8,
+            max_tool_calls: 128,
+            shell_roots: Vec::new(),
+        }
+    }
+}
+
 impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env()
-            .backend_url(Relay::BACKEND.to_owned())
+            .backend_url(relay::BACKEND_URL.to_owned())
             .finalize()
             .context("issue loading connection options")
     }

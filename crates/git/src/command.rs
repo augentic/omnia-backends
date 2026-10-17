@@ -7,9 +7,10 @@
 //! walks a path a guest could redirect meanwhile. A working copy this
 //! client laid is addressed through the gitdir `add` recorded, never
 //! through the `.git` file at its root, which a guest lent the copy can
-//! rewrite. The process leads a group of its own and is killed when its
-//! future is dropped, so a helper git forks — a credential helper, `ssh`, a
-//! merge driver — never outlives the operation that started it.
+//! rewrite. The process leads a session of its own, with no controlling
+//! terminal, and is killed when its future is dropped, so a helper git
+//! forks — a credential helper, `ssh`, a merge driver — opens no terminal
+//! and never outlives the operation that started it.
 
 mod pins;
 
@@ -22,7 +23,7 @@ use std::process::{ExitStatus, Stdio};
 
 use anyhow::{Context as _, Result};
 use omnia_wasi_vcs::Place;
-use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessGroup};
+use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessSession};
 use tokio::process::Command;
 
 pub use self::pins::Pins;
@@ -107,7 +108,7 @@ impl Client {
 
         let mut command = CommandWrap::from(command);
         command.wrap(KillOnDrop);
-        command.wrap(ProcessGroup::leader());
+        command.wrap(ProcessSession);
         let child = command
             .spawn()
             .with_context(|| format!("issue spawning `{}`", self.binary.display()))?;
@@ -135,14 +136,11 @@ fn ceiling(place: &Place) -> Option<PathBuf> {
 }
 
 // The child's working directory is the open handle itself, entered between
-// `fork` and `exec`: the descriptor is inherited across the fork, the place
-// that owns it is held until `spawn` returns, and `fchdir` is
-// async-signal-safe, so the hook runs nothing a forked child may not.
-#[expect(
-    unsafe_code,
-    reason = "`pre_exec` runs in the forked child; `fchdir` is async-signal-safe"
-)]
+// `fork` and `exec`.
+#[expect(unsafe_code, reason = "`pre_exec` runs in the forked child")]
 fn enter(command: &mut Command, dir: RawFd) {
+    // SAFETY: the descriptor is inherited across the fork, the place that owns
+    // it is held until `spawn` returns, and `fchdir` is async-signal-safe.
     unsafe {
         command.pre_exec(move || {
             if libc::fchdir(dir) == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }

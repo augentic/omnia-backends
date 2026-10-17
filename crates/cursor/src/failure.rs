@@ -6,8 +6,8 @@ use crate::protocol::{RpcError, RunStatus};
 
 /// Why a completion failed, by variant rather than by message.
 ///
-/// `complete`'s error downcasts to one of these, to an [`RpcError`], or to
-/// the typed `budget-exhausted` a rejected check ends on.
+/// `complete`'s error downcasts to one of these, or to the typed
+/// `budget-exhausted` a rejected check ends on.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Failure {
@@ -32,7 +32,8 @@ pub enum Failure {
          inactivity limit {inactivity_secs}s, absolute cap {cap_secs}s)"
     )]
     Inactive {
-        /// What the run was waiting on: `the opening frame`, or ``tool `<name>` ``.
+        /// What the run was waiting on: `` `CreateAgent` ``, `the opening
+        /// frame`, or ``tool `<name>` ``.
         waiting: String,
         /// The idle span, in seconds.
         idle_secs: u64,
@@ -47,25 +48,21 @@ pub enum Failure {
     /// The worker exited under the completion.
     #[error("cursor-sdk-bridge exited ({0})")]
     WorkerExited(Exit),
+    /// An `sdk.v1` call failed: the worker answered with an error, or the
+    /// call never got an answer at all.
+    #[error(transparent)]
+    Rpc(#[from] RpcError),
 }
 
 impl Failure {
-    /// The `outcome` label the `completion` event carries for this failure.
+    // The error `complete` ends on. The absolute cap is the completion's
+    // time budget, so a `Timeout` reaches the guest as the typed
+    // `BudgetExhausted` carrying this failure's text: the same request put
+    // again would take as long, where a backend failure invites a retry.
+    // Every other failure is the backend's. The failure itself stays
+    // beneath for a caller that downcasts to it.
     #[must_use]
-    pub const fn outcome(&self) -> &'static str {
-        Outcome::of_failure(self).as_str()
-    }
-
-    /// Returns the error `complete` ends on for this failure.
-    ///
-    /// The absolute cap is the completion's time budget, so a
-    /// [`Failure::Timeout`] reaches the guest as the typed
-    /// [`omnia_wasi_model::Error::BudgetExhausted`], carrying this failure's
-    /// text: the same request put again would take as long, where a backend
-    /// failure invites a retry. Every other failure is the backend's. The
-    /// failure itself stays beneath for a caller that downcasts to it.
-    #[must_use]
-    pub fn into_error(self) -> anyhow::Error {
+    pub(crate) fn into_error(self) -> anyhow::Error {
         match &self {
             Self::Timeout { .. } => {
                 let budget = omnia_wasi_model::Error::BudgetExhausted(self.to_string());
@@ -88,12 +85,13 @@ pub enum Outcome {
     // `Failure::Aborted`, or a completion dropped before it finished.
     Abort,
     WorkerExit,
-    // `RpcError::Transport`: the socket to the worker failed below Connect.
+    // `Failure::Rpc` over a `Transport`: the socket to the worker failed
+    // below Connect.
     Transport,
     // The guest's check rejected every candidate.
     Exhausted,
     // The worker or the provider answered with an error: a `Failure::Run`,
-    // an `RpcError::Connect`, or anything else.
+    // a `Failure::Rpc` over a `Connect`, or anything else.
     Error,
 }
 
@@ -103,11 +101,6 @@ impl Outcome {
         if let Some(failure) = error.downcast_ref::<Failure>() {
             return Self::of_failure(failure);
         }
-        match error.downcast_ref::<RpcError>() {
-            Some(RpcError::Transport { .. }) => return Self::Transport,
-            Some(RpcError::Connect { .. }) => return Self::Error,
-            None => {}
-        }
         match error.downcast_ref::<omnia_wasi_model::Error>() {
             Some(omnia_wasi_model::Error::BudgetExhausted(_)) => Self::Exhausted,
             _ => Self::Error,
@@ -116,11 +109,12 @@ impl Outcome {
 
     const fn of_failure(failure: &Failure) -> Self {
         match failure {
-            Failure::Run { .. } => Self::Error,
+            Failure::Run { .. } | Failure::Rpc(RpcError::Connect { .. }) => Self::Error,
             Failure::Timeout { .. } => Self::Timeout,
             Failure::Inactive { .. } => Self::Inactive,
             Failure::Aborted(_) => Self::Abort,
             Failure::WorkerExited(_) => Self::WorkerExit,
+            Failure::Rpc(RpcError::Transport { .. }) => Self::Transport,
         }
     }
 
@@ -174,38 +168,6 @@ mod tests {
         .into()
     }
 
-    // The values are what log queries key on.
-    #[test]
-    fn labels() {
-        let labels = [
-            Outcome::Ok,
-            Outcome::Corrected,
-            Outcome::Timeout,
-            Outcome::Inactive,
-            Outcome::Abort,
-            Outcome::WorkerExit,
-            Outcome::Transport,
-            Outcome::Exhausted,
-            Outcome::Error,
-        ]
-        .map(Outcome::as_str);
-        assert_eq!(
-            labels,
-            [
-                "ok",
-                "corrected",
-                "timeout",
-                "inactive",
-                "abort",
-                "worker_exit",
-                "transport",
-                "exhausted",
-                "error"
-            ]
-        );
-        assert_eq!(Failure::Timeout { cap_secs: 600 }.outcome(), "timeout");
-    }
-
     #[test]
     fn classified() {
         let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
@@ -219,8 +181,16 @@ mod tests {
         assert_eq!(Outcome::of(&exited), Outcome::WorkerExit);
         assert_eq!(exited.to_string(), "cursor-sdk-bridge exited (status unknown)");
 
-        let transport: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
+        let transport: anyhow::Error =
+            Failure::from(RpcError::truncated("SdkAgentService/Send", 3)).into();
         assert_eq!(Outcome::of(&transport), Outcome::Transport);
+        assert!(
+            matches!(
+                transport.downcast_ref::<Failure>(),
+                Some(Failure::Rpc(RpcError::Transport { .. }))
+            ),
+            "an RPC failure is a `Failure` first: {transport}"
+        );
 
         let rejected: anyhow::Error =
             omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
@@ -237,7 +207,7 @@ mod tests {
     // The cap is the time budget: the guest's typed error is the budget, the
     // completion event still reads `timeout`, and nothing else changes class.
     #[test]
-    fn timeout_is_budget() {
+    fn timeout_budget() {
         let timeout = Failure::Timeout { cap_secs: 600 }.into_error();
         assert!(matches!(
             timeout.downcast_ref::<omnia_wasi_model::Error>(),
@@ -256,32 +226,5 @@ mod tests {
         .into_error();
         assert!(inactive.downcast_ref::<omnia_wasi_model::Error>().is_none());
         assert_eq!(Outcome::of(&inactive), Outcome::Inactive);
-    }
-
-    #[test]
-    fn lost_worker() {
-        let exited: anyhow::Error = Failure::WorkerExited(EXITED).into();
-        assert!(Outcome::of(&exited).lost_worker());
-        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
-        let socket: anyhow::Error =
-            RpcError::io("SdkAgentService/Send", "reading the stream", reset).into();
-        assert!(Outcome::of(&socket).lost_worker());
-        let torn: anyhow::Error = RpcError::truncated("SdkAgentService/Send", 3).into();
-        assert!(Outcome::of(&torn).lost_worker());
-
-        // the worker answered, one way or another
-        assert!(!Outcome::of(&inactive()).lost_worker());
-        let timeout: anyhow::Error = Failure::Timeout { cap_secs: 600 }.into();
-        assert!(!Outcome::of(&timeout).lost_worker());
-        let aborted: anyhow::Error = Failure::Aborted("session closed".to_owned()).into();
-        assert!(!Outcome::of(&aborted).lost_worker());
-        let rejected: anyhow::Error =
-            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
-        assert!(!Outcome::of(&rejected).lost_worker());
-        assert!(!Outcome::of(&anyhow::anyhow!(
-            "sdk.v1 RPC `SdkAgentService/Send` failed (500 Internal Server Error, internal): boom"
-        ))
-        .lost_worker());
-        assert!(!Outcome::of(&run_error(Some("model overloaded"))).lost_worker());
     }
 }

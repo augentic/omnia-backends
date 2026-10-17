@@ -84,8 +84,8 @@ impl Sandbox {
     /// Connects to the host: validates `options` and reads what a process
     /// inherits.
     ///
-    /// - `shell_roots` are made absolute against the current directory, so a
-    ///   workspace is compared with them however they were spelled.
+    /// - Each of `shell_roots` is resolved: canonical where the directory
+    ///   exists, absolute otherwise.
     /// - The kernel boundary is probed.
     /// - The operator's `HOME` is read, canonical, as what a [`Grant`]'s
     ///   `~/` spells.
@@ -107,8 +107,9 @@ impl Sandbox {
             }
         }
         for root in &mut options.shell_roots {
-            *root = path::absolute(&*root)
+            let absolute = path::absolute(&*root)
                 .with_context(|| format!("resolving shell root {}", root.display()))?;
+            *root = tokio::fs::canonicalize(&absolute).await.unwrap_or(absolute);
         }
 
         let inherited =
@@ -123,7 +124,7 @@ impl Sandbox {
         })
     }
 
-    /// The options as connected: absolute `shell_roots`.
+    /// The options as connected: resolved `shell_roots`.
     #[must_use]
     pub const fn options(&self) -> &Options {
         &self.options
@@ -305,6 +306,9 @@ impl fmt::Debug for Sandbox {
 pub struct Options {
     /// Directories a workspace at or beneath which runs with
     /// [`Access::Shell`].
+    ///
+    /// Resolved at connect: canonical where the directory exists, absolute
+    /// otherwise.
     pub shell_roots: Vec<PathBuf>,
     /// Host environment variables a sandboxed process inherits, by name.
     pub inherit: &'static [&'static str],

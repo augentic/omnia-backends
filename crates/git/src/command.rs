@@ -109,12 +109,10 @@ impl Client {
         let mut command = CommandWrap::from(command);
         command.wrap(KillOnDrop);
         command.wrap(ProcessSession);
-        let child = command
-            .spawn()
-            .with_context(|| format!("issue spawning `{}`", self.binary.display()))?;
+        let child = command.spawn().with_context(|| format!("issue spawning `{}`", self.binary))?;
         let output = Box::into_pin(child.wait_with_output())
             .await
-            .with_context(|| format!("issue waiting for `{}`", self.binary.display()))?;
+            .with_context(|| format!("issue waiting for `{}`", self.binary))?;
 
         Ok(Output {
             status: output.status,

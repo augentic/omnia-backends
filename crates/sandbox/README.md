@@ -67,7 +67,7 @@ let ready = child.ready().await;
 
 ## Provenance
 
-The kernel boundary files start from [heel](https://github.com/lexoliu/heel) 0.3.0, `src/platform/linux/{mod,landlock_rules,seccomp_filter}.rs` and `src/platform/macos/{mod,profile}.rs`, Copyright (c) 2025 Lexo Liu, MIT OR Apache-2.0, lifted with the notice kept in each file's header: the launcher by absolute path, support probed by creating a ruleset rather than forking, the ruleset a hard requirement, and `clone3` refused with `ENOSYS` apart from the deny list. The Seatbelt base policy is Codex's ([openai/codex](https://github.com/openai/codex), `codex-rs/sandboxing/src/seatbelt_base_policy.sbpl`, Copyright 2025 its authors, Apache-2.0), kept verbatim in [`src/seatbelt.sbpl`](src/seatbelt.sbpl). The vetting classes and the Linux row list follow [ai-jail](https://github.com/akitaonrails/ai-jail), read as an oracle and not linked.
+The kernel boundary files start from [heel](https://github.com/lexoliu/heel) 0.3.0, `src/platform/linux/{mod,landlock_rules,seccomp_filter}.rs` and `src/platform/macos/{mod,profile}.rs`, Copyright (c) 2025 Lexo Liu, MIT OR Apache-2.0, lifted with the notice kept in each file's header: the launcher by absolute path, support probed by creating a ruleset rather than forking, the ruleset a hard requirement, and `clone3` refused with `ENOSYS` apart from the deny list. The Seatbelt base policy is Codex's ([openai/codex](https://github.com/openai/codex), `codex-rs/sandboxing/src/seatbelt_base_policy.sbpl`, Copyright 2025 its authors, Apache-2.0), kept verbatim in [`seatbelt.sbpl`](seatbelt.sbpl). The vetting classes and the Linux row list follow [ai-jail](https://github.com/akitaonrails/ai-jail), read as an oracle and not linked.
 
 ## License
 

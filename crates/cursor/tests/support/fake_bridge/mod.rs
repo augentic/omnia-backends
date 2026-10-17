@@ -21,7 +21,7 @@
 mod log;
 // The crate's own callback codec, by path: one codec on both sides of the
 // callback keeps the fake honest.
-#[path = "../../../src/endpoint/proto.rs"]
+#[path = "../../../src/callback/proto.rs"]
 mod proto;
 mod server;
 
@@ -462,7 +462,7 @@ pub async fn run_spawned(args: Vec<String>) {
     ready_event["token"] = Value::String(server.token().to_owned());
 
     // a child in our group holding the stderr pipe, as a real agent would, that nothing reaps
-    #[allow(clippy::zombie_processes, reason = "the fault is a child nobody waits for")]
+    #[expect(clippy::zombie_processes, reason = "the fault is a child nobody waits for")]
     if server.has(&Fault::Grandchild) {
         let child = std::process::Command::new("sleep")
             .arg("600")

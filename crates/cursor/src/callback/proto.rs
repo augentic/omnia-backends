@@ -56,7 +56,7 @@ fn kind_to_value(value: &prost_types::Value) -> Value {
 // `42.0`, whichever codec the worker picked.
 fn number_to_value(number: f64) -> Value {
     match number {
-        #[allow(clippy::cast_possible_truncation, reason = "integral and within 2^53: exact")]
+        #[expect(clippy::cast_possible_truncation, reason = "integral and within 2^53: exact")]
         integral if integral.fract() == 0.0 && integral.abs() <= EXACT_INTEGER => {
             Value::from(integral as i64)
         }

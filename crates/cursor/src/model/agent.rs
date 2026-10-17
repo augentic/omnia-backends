@@ -28,9 +28,11 @@ use tokio::time::{Instant, interval_at, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, Span, instrument};
 
-use super::observe::{Completion, EventLog, Phase};
+use super::Deadlines;
+use super::observe::Completion;
 use super::options::{AgentSpec, Prompt, Turn};
-use crate::endpoint::Attached;
+use super::stream::{EventLog, Phase};
+use crate::callback::Route;
 use crate::failure::Outcome;
 use crate::pool::Lease;
 use crate::protocol::{AgentOperationOptions, RunStatus, RunStream, RunStreamResult, TokenUsage};
@@ -41,23 +43,29 @@ const MAX_ROUNDS: u32 = 2;
 const TEARDOWN: Duration = Duration::from_secs(5);
 const PROGRESS: Duration = Duration::from_secs(15);
 
-// One completion attempt: its turn on a leased worker, callbacks into the tool host
-pub struct Attempt {
-    pub lease: Lease,
-    pub turn: Turn,
-    pub tool_host: Arc<dyn ToolHost>,
-    pub deadlines: Deadlines,
+// One completion's agent on a leased worker, `CreateAgent` to `DeleteAgent`
+pub struct Agent {
+    handle: Handle,
+    prompt: Prompt,
+    tool_host: Arc<dyn ToolHost>,
+    deadlines: Deadlines,
+    cancel: CancellationToken,
+    completion: Completion,
+    route: Route,
 }
 
-impl Attempt {
+impl Agent {
     // `CreateAgent`, prompt to answer on its own task, then `DeleteAgent` on another
-    // Drop ends the run, never the delete; opening failures are `before_candidate`
-    pub async fn complete(self) -> Result<Answer, Unanswered> {
+    // Drop ends the run, never the delete; opening failures are `opening`
+    pub async fn complete(
+        lease: Lease, turn: Turn, tool_host: Arc<dyn ToolHost>, deadlines: Deadlines,
+    ) -> Result<Answer, Unanswered> {
         // drop cancels the run
         let cancel = CancellationToken::new();
         let _cancel_on_drop = cancel.clone().drop_guard();
 
-        let task = tokio::spawn(self.run(cancel).instrument(Span::current()));
+        let run = Self::run(lease, turn, tool_host, deadlines, cancel);
+        let task = tokio::spawn(run.instrument(Span::current()));
         task.await.unwrap_or_else(|panicked| {
             let error =
                 anyhow::Error::new(panicked).context("the agent's task ended with no answer");
@@ -68,37 +76,24 @@ impl Attempt {
     // Whole life in order, but the answer does not wait on the delete: the
     // teardown runs on a task of its own, holding the lease, so the slot
     // reopens only once the process is gone
-    async fn run(self, cancel: CancellationToken) -> Result<Answer, Unanswered> {
-        let mut agent = Agent::create(self, cancel).await.map_err(Unanswered::before_candidate)?;
+    async fn run(
+        lease: Lease, turn: Turn, tool_host: Arc<dyn ToolHost>, deadlines: Deadlines,
+        cancel: CancellationToken,
+    ) -> Result<Answer, Unanswered> {
+        let created = Self::create(lease, turn, tool_host, deadlines, cancel).await;
+        let mut agent = created.map_err(Unanswered::opening)?;
         let result = agent.rounds().await;
         agent.settle().await;
         agent.finish(&result);
         tokio::spawn(agent.delete().instrument(Span::current()));
         result
     }
-}
 
-// One completion's agent on a leased worker, `CreateAgent` to `DeleteAgent`
-struct Agent {
-    handle: Handle,
-    prompt: Prompt,
-    tool_host: Arc<dyn ToolHost>,
-    deadlines: Deadlines,
-    cancel: CancellationToken,
-    completion: Completion,
-    session: Attached,
-}
-
-impl Agent {
     // `CreateAgent`, bounded by inactivity window and worker exit
-    async fn create(attempt: Attempt, cancel: CancellationToken) -> Result<Self> {
-        let Attempt {
-            lease,
-            turn,
-            tool_host,
-            deadlines,
-        } = attempt;
-
+    async fn create(
+        lease: Lease, turn: Turn, tool_host: Arc<dyn ToolHost>, deadlines: Deadlines,
+        cancel: CancellationToken,
+    ) -> Result<Self> {
         let mut completion = Completion::from(&turn);
         let Turn { agent, prompt } = turn;
         let AgentSpec { options, operation } = agent;
@@ -118,13 +113,17 @@ impl Agent {
             }
             Ok(Ok(created)) => Ok(created.agent_id),
             Ok(Err(error)) => Err(error),
-            Err(_elapsed) => {
-                Err(anyhow!("sdk.v1 RPC `CreateAgent` unanswered after {}s", window.as_secs()))
+            Err(_elapsed) => Err(Failure::Inactive {
+                waiting: "`CreateAgent`".to_owned(),
+                idle_secs: window.as_secs(),
+                inactivity_secs: window.as_secs(),
+                cap_secs: deadlines.cap.as_secs(),
             }
+            .into()),
         }
         .inspect_err(|error| completion.finish(Outcome::of(error)))?;
 
-        let session = lease.attach(id.clone(), Arc::clone(&tool_host));
+        let route = lease.attach(id.clone(), Arc::clone(&tool_host));
 
         Ok(Self {
             handle: Handle {
@@ -138,7 +137,7 @@ impl Agent {
             deadlines,
             cancel,
             completion,
-            session,
+            route,
         })
     }
 
@@ -152,7 +151,7 @@ impl Agent {
         loop {
             let response = match self.send(round, &prompt).await {
                 Ok(response) => response,
-                Err(error) if opening => return Err(Unanswered::before_candidate(error)),
+                Err(error) if opening => return Err(Unanswered::opening(error)),
                 Err(error) => return Err(Unanswered::settled(error)),
             };
             opening = false;
@@ -293,7 +292,7 @@ impl Agent {
                     );
                 }
                 failure = &mut deadline => return Err(failure.into_error()),
-                reason = self.session.aborted() => return Err(Failure::Aborted(reason).into()),
+                reason = self.route.aborted() => return Err(Failure::Aborted(reason).into()),
                 // abandoned run cancels by id, so follow to the opening frame
                 () = self.cancel.cancelled(), if self.handle.run_id.is_some() => {
                     return Err(abandoned());
@@ -360,7 +359,7 @@ impl Agent {
         self.completion.finish(outcome);
     }
 
-    // The callback route (`session`) goes with `self`
+    // The callback route goes with `self`
     async fn delete(self) {
         self.handle.delete().await;
     }
@@ -405,15 +404,6 @@ impl Handle {
         }
         drop(lease);
     }
-}
-
-// Inactivity and absolute bounds on one run, from connect options
-#[derive(Clone, Copy, Debug)]
-pub struct Deadlines {
-    // Kill run after this long with no stream events while it waits on the bridge
-    pub inactivity: Duration,
-    // Kill run after this long, streaming or not
-    pub cap: Duration,
 }
 
 impl Deadlines {
@@ -487,26 +477,23 @@ impl Response {
     }
 }
 
-// No answer: the failure, and whether it struck before the opening prompt
-// was answered — in `CreateAgent` or the opening `Send` — when nothing the
-// guest asked for has run yet
+// No answer: the failure, and whether it struck while the completion was
+// opening — in `CreateAgent` or the opening `Send` — before anything the
+// guest asked for has run
 pub struct Unanswered {
     error: anyhow::Error,
-    before_candidate: bool,
+    opening: bool,
 }
 
 impl Unanswered {
-    const fn before_candidate(error: anyhow::Error) -> Self {
-        Self {
-            error,
-            before_candidate: true,
-        }
+    const fn opening(error: anyhow::Error) -> Self {
+        Self { error, opening: true }
     }
 
     pub const fn settled(error: anyhow::Error) -> Self {
         Self {
             error,
-            before_candidate: false,
+            opening: false,
         }
     }
 
@@ -520,7 +507,7 @@ impl Unanswered {
 
     // Retryable if worker lost before the opening prompt was answered: nothing said twice
     pub fn restartable(&self) -> bool {
-        self.before_candidate && Outcome::of(&self.error).lost_worker()
+        self.opening && Outcome::of(&self.error).lost_worker()
     }
 
     pub fn pid(&self) -> Option<u32> {

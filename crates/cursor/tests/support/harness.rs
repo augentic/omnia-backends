@@ -30,15 +30,16 @@ pub const AT_ONCE: Duration = Duration::from_secs(4);
 /// The `lend=` argument every guest lends the fake's home by.
 const LEND_HOME: &str = "lend=/fake";
 
+// The bounds are short, so a row that waits one out finishes in seconds;
+// the backend is a dead port, since the fake never calls it.
 pub fn options(max_agents: usize) -> ConnectOptions {
     ConnectOptions {
-        model: "auto".to_owned(),
         backend_url: "http://127.0.0.1:9".to_owned(),
         timeout_secs: 30,
         inactivity_secs: 10,
         max_agents,
         max_tool_calls: 32,
-        shell_roots: Vec::new(),
+        ..ConnectOptions::default()
     }
 }
 

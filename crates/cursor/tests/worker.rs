@@ -558,14 +558,14 @@ async fn lease_waits() {
 }
 
 // `CreateAgent` never answered, one slot: the completion gives up after one
-// window and its worker goes with nothing to tear down; the next completion
-// gets a worker of its own.
+// window, as the inactivity failure it is, and its worker goes with nothing
+// to tear down; the next completion gets a worker of its own.
 #[tokio::test]
 async fn hang_on_create() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::Hang(Point::CreateAgent)));
     let client = connect(with_window(WINDOW, 1)).await;
-    expect_error("unanswered after 1s", &[], &client).await;
-    expect_error("unanswered after 1s", &[], &client).await;
+    expect_error("inactive for 1s waiting on `CreateAgent`", &[], &client).await;
+    expect_error("inactive for 1s waiting on `CreateAgent`", &[], &client).await;
     await_gone(&fake).await;
 
     let log = fake.log();

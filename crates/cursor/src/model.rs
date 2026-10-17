@@ -9,13 +9,14 @@
 mod agent;
 mod observe;
 mod options;
+mod stream;
 
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-pub use agent::Deadlines;
-use agent::{Attempt, Unanswered};
+use agent::{Agent, Unanswered};
 use anyhow::anyhow;
 use omnia_sandbox::{Access, Denied, Grant, Session};
 use omnia_wasi_model::{
@@ -26,8 +27,18 @@ use tracing::field::Empty;
 use tracing::{Instrument, info_span};
 
 use crate::Client;
+use crate::pool::Lease;
 
 static COMPLETION_ID: AtomicU64 = AtomicU64::new(0);
+
+// The two bounds on one run, from the connect options: the inactivity
+// window, which stream progress rearms while the run waits on the bridge,
+// and the absolute cap, which nothing rearms.
+#[derive(Clone, Copy, Debug)]
+pub struct Deadlines {
+    pub inactivity: Duration,
+    pub cap: Duration,
+}
 
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
@@ -73,26 +84,21 @@ impl Client {
     async fn attempt(
         &self, request: &Request, tool_host: &Arc<dyn ToolHost>,
     ) -> Result<Answer, Unanswered> {
-        self.stage(request, tool_host).await.map_err(Unanswered::settled)?.complete().await
+        let (lease, turn) = self.stage(request, tool_host).await.map_err(Unanswered::settled)?;
+        Agent::complete(lease, turn, Arc::clone(tool_host), self.deadlines).await
     }
 
+    // The session and the turn come before the slot, so a bad workspace or
+    // grant costs no wait.
     async fn stage(
         &self, request: &Request, tool_host: &Arc<dyn ToolHost>,
-    ) -> anyhow::Result<Attempt> {
+    ) -> anyhow::Result<(Lease, Turn)> {
         let api_key =
             self.api_key.as_deref().ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))?;
-
-        // prepared before the slot is taken, so a bad workspace or grant costs no wait
         let session = self.prepare(request, tool_host.local_path()).await?;
         let turn = Turn::prepare(request, &session, &self.model, api_key)?;
-        let lease = self.pool.lease(session).await?;
-
-        Ok(Attempt {
-            lease,
-            turn,
-            tool_host: Arc::clone(tool_host),
-            deadlines: self.deadlines,
-        })
+        let lease = self.pool.acquire(session).await?;
+        Ok((lease, turn))
     }
 
     // A worker grant needs a shell: a worker reaches beyond its workspace
@@ -107,7 +113,7 @@ impl Client {
             read: worker.read.clone(),
             env: worker.env.clone(),
         });
-        let session = self.sandbox.prepare(workspace, &grant).await.map_err(refusal)?;
+        let session = self.pool.prepare(workspace, &grant).await.map_err(refusal)?;
 
         if worker.is_some() && session.access() != Access::Shell {
             let detail = if session.access().is_lent() {

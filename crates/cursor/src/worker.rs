@@ -14,7 +14,7 @@ use discovery::Discovery;
 use omnia_sandbox::{Child, Exit, Session};
 use tokio::time::{Instant, timeout};
 
-use crate::endpoint::Registration;
+use crate::callback::Registration;
 use crate::protocol::Rpc;
 use crate::{Failure, elapsed_ms};
 

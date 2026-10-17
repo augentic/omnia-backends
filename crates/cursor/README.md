@@ -40,15 +40,14 @@ use omnia_cursor::{Client, ConnectOptions};
 // Reads CURSOR_* from the environment, with the defaults below.
 let client = Client::connect().await?;
 
-// Or set the bounds, default model, pool shape, and shell roots explicitly.
+// Or set what differs from the defaults below: here the cap, the default
+// model, the pool shape, and the shell roots.
 let client = Client::connect_with(ConnectOptions {
     timeout_secs: 1800,
-    inactivity_secs: 120,
     model: "composer-2".into(),
-    backend_url: "https://api2.cursor.sh".into(),
     max_agents: 2,
-    max_tool_calls: 128,
     shell_roots: vec!["/srv/checkouts".into()],
+    ..ConnectOptions::default()
 }).await?;
 ```
 
@@ -92,14 +91,14 @@ The request's `generation` controls (temperature, max tokens, …) are ignored: 
 
 Each `Send` (the opening prompt, and a correction if any) is bounded twice:
 
-- **Inactivity window** — the stream went silent while waiting on the bridge (opening frame, or a tool call in flight). A `backend` failure a caller may retry. Stands down once the model is composing its answer.
+- **Inactivity window** — the stream went silent while waiting on the bridge (`CreateAgent`, the opening frame, or a tool call in flight). A `backend` failure a caller may retry. Stands down once the model is composing its answer.
 - **Absolute cap** — the completion's time budget. Reaches the guest as the typed `budget-exhausted`.
 
 Workers are session leaders and are shut down after their completion: a graceful `Shutdown` with 5s grace, then a kill of the whole session. A worker that crashes fails its completion with the typed `cursor-sdk-bridge exited (…)` rather than stalling the next one.
 
-A worker lost while a completion is *opening* (`CreateAgent` or the first `Send` fails with `WorkerExited` or `RpcError::Transport`, and no candidate has reached the guest) restarts the completion once on a fresh worker. Nothing else restarts.
+A worker lost while a completion is *opening* (`CreateAgent` or the first `Send` fails with `WorkerExited` or `Rpc(RpcError::Transport)`, and no candidate has reached the guest) restarts the completion once on a fresh worker. Nothing else restarts.
 
-Match failures on types, not messages: `Failure::{Run, Timeout, Inactive, Aborted, WorkerExited}`, `RpcError::{Connect, Transport}`, and `omnia_wasi_model::Error::BudgetExhausted`.
+Match failures on types, not messages: every error `complete` returns downcasts to one `Failure` — `Run`, `Timeout`, `Inactive`, `Aborted`, `WorkerExited`, or `Rpc` carrying the `RpcError::{Connect, Transport}` it wraps — or to `omnia_wasi_model::Error::BudgetExhausted`.
 
 ## Observability
 

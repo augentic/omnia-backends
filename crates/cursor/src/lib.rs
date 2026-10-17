@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-mod endpoint;
+mod callback;
 mod failure;
 mod model;
 mod pool;
@@ -16,7 +16,6 @@ use anyhow::{Context, Result, ensure};
 pub use failure::Failure;
 use omnia::Backend;
 pub use omnia_sandbox::Exit;
-use omnia_sandbox::{Options, Sandbox};
 pub use protocol::{RpcError, RunStatus};
 use tokio::time::Instant;
 use tracing::instrument;
@@ -31,7 +30,6 @@ pub struct Client {
     model: String,
     api_key: Option<String>,
     pool: Arc<Pool>,
-    sandbox: Arc<Sandbox>,
     max_tool_calls: u32,
 }
 
@@ -40,9 +38,8 @@ impl std::fmt::Debug for Client {
         f.debug_struct("Client")
             .field("deadlines", &self.deadlines)
             .field("model", &self.model)
-            .field("max_agents", &self.pool.max_agents())
             .field("max_tool_calls", &self.max_tool_calls)
-            .field("sandbox", &self.sandbox.options())
+            .field("pool", &self.pool)
             .finish_non_exhaustive()
     }
 }
@@ -58,13 +55,8 @@ impl Backend for Client {
         ensure!(options.max_agents > 0, "max_agents must be greater than 0");
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
 
-        let sandbox = Sandbox::connect(Options {
-            shell_roots: options.shell_roots,
-            inherit: worker::INHERIT,
-            refused: worker::REFUSED,
-        })
-        .await?;
-        let pool = Pool::connect(options.max_agents, &options.backend_url).await?;
+        let pool =
+            Pool::connect(options.max_agents, &options.backend_url, options.shell_roots).await?;
 
         Ok(Self {
             deadlines: Deadlines {
@@ -74,7 +66,6 @@ impl Backend for Client {
             model: options.model,
             api_key,
             pool: Arc::new(pool),
-            sandbox: Arc::new(sandbox),
             max_tool_calls: options.max_tool_calls,
         })
     }
@@ -97,8 +88,8 @@ mod config {
     /// Connection options for the cursor backend.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
-        /// Default model id.
-        #[env(from = "CURSOR_MODEL", default = "composer-2.5")]
+        /// Default model id; `auto` is Cursor's server-side choice.
+        #[env(from = "CURSOR_MODEL", default = "auto")]
         pub model: String,
         /// The Cursor backend the client's relay forwards the bridge's API
         /// calls to, an `http` or `https` URL; the bridge itself is pointed
@@ -138,6 +129,20 @@ mod config {
     }
 }
 pub use config::ConnectOptions;
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            model: "auto".to_owned(),
+            backend_url: relay::BACKEND_URL.to_owned(),
+            timeout_secs: 600,
+            inactivity_secs: 120,
+            max_agents: 8,
+            max_tool_calls: 128,
+            shell_roots: Vec::new(),
+        }
+    }
+}
 
 impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {

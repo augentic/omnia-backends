@@ -37,15 +37,13 @@ fn object(answer: &Answer) -> Value {
     value
 }
 
+// Cursor's own backend and model, four slots so the fan-outs never queue,
+// and a cap a real answer comes well inside.
 fn options() -> ConnectOptions {
     ConnectOptions {
         timeout_secs: 120,
-        inactivity_secs: 120,
-        model: "auto".to_owned(),
-        backend_url: "https://api2.cursor.sh".to_owned(),
         max_agents: 4,
-        max_tool_calls: 128,
-        shell_roots: Vec::new(),
+        ..ConnectOptions::default()
     }
 }
 
@@ -255,13 +253,8 @@ async fn killed_mid_run() -> Result<()> {
 
     // one slot, so the restart also proves the dead lease is reaped first
     let client = Client::connect_with(ConnectOptions {
-        timeout_secs: 120,
-        inactivity_secs: 120,
-        model: "auto".to_owned(),
-        backend_url: "https://api2.cursor.sh".to_owned(),
         max_agents: 1,
-        max_tool_calls: 128,
-        shell_roots: Vec::new(),
+        ..options()
     })
     .await?;
     let completion = {

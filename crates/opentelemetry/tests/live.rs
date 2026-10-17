@@ -11,6 +11,7 @@ use omnia::Backend;
 use omnia_opentelemetry::Client;
 use omnia_wasi_otel::WasiOtelCtx;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an OTLP/gRPC collector (OTEL_EXPORTER_OTLP_ENDPOINT); run with --run-ignored"]
@@ -19,6 +20,7 @@ async fn exports_metrics() -> Result<()> {
 
     // An empty batch is a valid no-op export: it proves the request crosses the
     // boundary and the gRPC channel is accepted.
+    client.export_traces(ExportTraceServiceRequest::default()).await?;
     client.export_metrics(ExportMetricsServiceRequest::default()).await?;
     Ok(())
 }

@@ -5,14 +5,16 @@ use anyhow::{Context, anyhow};
 use futures::future::FutureExt;
 use futures::stream::{self, StreamExt};
 use omnia_wasi_messaging::{
-    Client, FutureResult, Handler, Message, Metadata, Reply, RequestOptions, WasiMessagingCtx,
-    dispatch,
+    Client as MessagingClient, FutureResult, Handler, Message, Metadata, Reply, RequestOptions,
+    WasiMessagingCtx, dispatch,
 };
 
-impl WasiMessagingCtx for crate::Client {
-    fn connect(&self) -> FutureResult<Arc<dyn Client>> {
+use crate::Client;
+
+impl WasiMessagingCtx for Client {
+    fn connect(&self) -> FutureResult<Arc<dyn MessagingClient>> {
         let client = self.clone();
-        async move { Ok(Arc::new(client) as Arc<dyn Client>) }.boxed()
+        async move { Ok(Arc::new(client) as Arc<dyn MessagingClient>) }.boxed()
     }
 }
 
@@ -41,7 +43,7 @@ fn nats_headers(metadata: &Metadata) -> async_nats::HeaderMap {
     headers
 }
 
-impl Client for crate::Client {
+impl MessagingClient for Client {
     // NATS core has no acknowledgement: a message is finished with once the
     // handler returns, whatever it returned
     fn consume(&self, handler: Arc<dyn Handler>) -> FutureResult<()> {
@@ -102,5 +104,38 @@ impl Client for crate::Client {
             Ok(from_nats(nats_msg))
         }
         .boxed()
+    }
+}
+
+// Header and message translation between `omnia_wasi_messaging` and `async_nats`;
+// live publish/subscribe is covered by `tests/live.rs`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_and_message_translation() {
+        let mut md = Metadata::new();
+        md.insert("x-trace".to_owned(), "abc-123".to_owned());
+        let headers = nats_headers(&md);
+
+        let nats_msg = async_nats::Message {
+            subject: "orders.created".into(),
+            reply: Some("inbox.1".into()),
+            payload: b"hello".as_slice().into(),
+            headers: Some(headers),
+            status: None,
+            description: None,
+            length: 5,
+        };
+
+        let converted = from_nats(nats_msg);
+        assert_eq!(converted.topic, "orders.created");
+        assert_eq!(converted.payload, b"hello");
+        assert_eq!(converted.reply.as_ref().map(|r| r.topic.as_str()), Some("inbox.1"));
+        assert_eq!(
+            converted.metadata.as_ref().and_then(|m| m.get("x-trace")).map(String::as_str),
+            Some("abc-123")
+        );
     }
 }

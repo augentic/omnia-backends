@@ -5,8 +5,6 @@ pub mod document;
 pub mod filter;
 pub mod query;
 
-use std::sync::Arc;
-
 use anyhow::{Context, anyhow, bail};
 use base64ct::{Base64, Encoding};
 use futures::future::FutureExt;
@@ -14,6 +12,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use omnia_wasi_docstore::{
     Document, FilterTree, FutureResult, QueryOpts, QueryResult, WasiDocStoreCtx,
 };
+use reqwest::Method;
 use serde_json::Value;
 use sha2::Sha256;
 
@@ -24,25 +23,14 @@ const ACCEPT_HEADER: &str = "application/json;odata=fullmetadata";
 
 impl WasiDocStoreCtx for Client {
     fn get(&self, collection: String, id: String) -> FutureResult<Option<Document>> {
-        let opts = Arc::clone(&self.options);
-        let http = self.http.clone();
-        let base = Arc::clone(&self.base_url);
-        let hmac_key = Arc::clone(&self.hmac_key);
+        let client = self.clone();
         async move {
             let (table, _scope_pk) = parse_collection(&collection)?;
             let (pk, rk) = document::decode_id(&id)?;
-            let uri = format!(
-                "{base}/{table}(PartitionKey='{pk}',RowKey='{rk}')",
-                pk = escape_entity_key(pk),
-                rk = escape_entity_key(rk),
-            );
+            let uri = client.entity_uri(&table, pk, rk);
 
-            let now = now_rfc1123();
-            let auth = sign_request(&opts.name, &hmac_key, &now, &uri)?;
-
-            let response = http
-                .get(&uri)
-                .headers(azure_headers(&now, &auth)?)
+            let response = client
+                .signed_request(Method::GET, &uri)?
                 .send()
                 .await
                 .map_err(|e| anyhow!("HTTP request error: {e}"))?;
@@ -67,21 +55,14 @@ impl WasiDocStoreCtx for Client {
     }
 
     fn insert(&self, collection: String, doc: Document) -> FutureResult<()> {
-        let opts = Arc::clone(&self.options);
-        let http = self.http.clone();
-        let base = Arc::clone(&self.base_url);
-        let hmac_key = Arc::clone(&self.hmac_key);
+        let client = self.clone();
         async move {
             let (table, _scope_pk) = parse_collection(&collection)?;
-            let uri = format!("{base}/{table}");
+            let uri = format!("{}/{table}", client.base_url);
             let body = document::flatten(&doc)?;
 
-            let now = now_rfc1123();
-            let auth = sign_request(&opts.name, &hmac_key, &now, &uri)?;
-
-            let response = http
-                .post(&uri)
-                .headers(azure_headers(&now, &auth)?)
+            let response = client
+                .signed_request(Method::POST, &uri)?
                 .json(&body)
                 .send()
                 .await
@@ -103,26 +84,15 @@ impl WasiDocStoreCtx for Client {
     }
 
     fn put(&self, collection: String, doc: Document) -> FutureResult<()> {
-        let opts = Arc::clone(&self.options);
-        let http = self.http.clone();
-        let base = Arc::clone(&self.base_url);
-        let hmac_key = Arc::clone(&self.hmac_key);
+        let client = self.clone();
         async move {
             let (table, _scope_pk) = parse_collection(&collection)?;
             let (pk, rk) = document::decode_id(&doc.id)?;
-            let uri = format!(
-                "{base}/{table}(PartitionKey='{epk}',RowKey='{erk}')",
-                epk = escape_entity_key(pk),
-                erk = escape_entity_key(rk),
-            );
+            let uri = client.entity_uri(&table, pk, rk);
             let body = document::flatten(&doc)?;
 
-            let now = now_rfc1123();
-            let auth = sign_request(&opts.name, &hmac_key, &now, &uri)?;
-
-            let response = http
-                .put(&uri)
-                .headers(azure_headers(&now, &auth)?)
+            let response = client
+                .signed_request(Method::PUT, &uri)?
                 .json(&body)
                 .send()
                 .await
@@ -141,28 +111,15 @@ impl WasiDocStoreCtx for Client {
     }
 
     fn delete(&self, collection: String, id: String) -> FutureResult<bool> {
-        let opts = Arc::clone(&self.options);
-        let http = self.http.clone();
-        let base = Arc::clone(&self.base_url);
-        let hmac_key = Arc::clone(&self.hmac_key);
+        let client = self.clone();
         async move {
             let (table, _scope_pk) = parse_collection(&collection)?;
             let (pk, rk) = document::decode_id(&id)?;
-            let uri = format!(
-                "{base}/{table}(PartitionKey='{epk}',RowKey='{erk}')",
-                epk = escape_entity_key(pk),
-                erk = escape_entity_key(rk),
-            );
+            let uri = client.entity_uri(&table, pk, rk);
 
-            let now = now_rfc1123();
-            let auth = sign_request(&opts.name, &hmac_key, &now, &uri)?;
-
-            let mut headers = azure_headers(&now, &auth)?;
-            headers.insert("If-Match", reqwest::header::HeaderValue::from_static("*"));
-
-            let response = http
-                .delete(&uri)
-                .headers(headers)
+            let response = client
+                .signed_request(Method::DELETE, &uri)?
+                .header("If-Match", "*")
                 .send()
                 .await
                 .map_err(|e| anyhow!("HTTP request error: {e}"))?;
@@ -194,6 +151,9 @@ impl WasiDocStoreCtx for Client {
                     "offset is not supported by Azure Table — \
                      use continuation tokens for pagination instead"
                 );
+            }
+            if !options.order_by.is_empty() {
+                tracing::warn!("order_by is not supported by Azure Table and will be ignored");
             }
 
             let fetch_limit = options.limit.map(|l| l as usize);
@@ -257,13 +217,9 @@ impl Client {
     /// an unexpected status.
     pub async fn ensure_table(&self, table: &str) -> anyhow::Result<bool> {
         let uri = format!("{}/Tables", self.base_url);
-        let now = now_rfc1123();
-        let auth = sign_request(&self.options.name, &self.hmac_key, &now, &uri)?;
 
         let response = self
-            .http
-            .post(&uri)
-            .headers(azure_headers(&now, &auth)?)
+            .signed_request(Method::POST, &uri)?
             .json(&serde_json::json!({"TableName": table}))
             .send()
             .await
@@ -280,6 +236,22 @@ impl Client {
                 );
             }
         }
+    }
+
+    fn entity_uri(&self, table: &str, pk: &str, rk: &str) -> String {
+        format!(
+            "{}/{table}(PartitionKey='{epk}',RowKey='{erk}')",
+            self.base_url,
+            epk = escape_entity_key(pk),
+            erk = escape_entity_key(rk),
+        )
+    }
+
+    fn signed_request(&self, method: Method, uri: &str) -> anyhow::Result<reqwest::RequestBuilder> {
+        let now = now_rfc1123();
+        let auth = sign_request(&self.options.name, &self.hmac_key, &now, uri)?;
+        let headers = azure_headers(&now, &auth)?;
+        Ok(self.http.request(method, uri).headers(headers))
     }
 
     // One page of a query: the response body and the continuation token
@@ -311,13 +283,8 @@ impl Client {
             format!("{base_uri}?{}", query_params.join("&"))
         };
 
-        let now = now_rfc1123();
-        let auth = sign_request(&self.options.name, &self.hmac_key, &now, &uri)?;
-
         let response = self
-            .http
-            .get(&uri)
-            .headers(azure_headers(&now, &auth)?)
+            .signed_request(Method::GET, &uri)?
             .send()
             .await
             .map_err(|e| anyhow!("HTTP request error: {e}"))?;

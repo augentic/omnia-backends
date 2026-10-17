@@ -23,7 +23,7 @@ pub struct Client {
 
 impl Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AzTableClient").finish()
+        f.debug_struct("Client").field("base_url", &self.base_url).finish_non_exhaustive()
     }
 }
 
@@ -77,7 +77,7 @@ mod config {
             f.debug_struct("ConnectOptions")
                 .field("name", &self.name)
                 .field("endpoint", &self.endpoint)
-                .field("key", &"[REDACTED]")
+                .field("key", &"<redacted>")
                 .finish()
         }
     }
@@ -95,6 +95,7 @@ mod config {
     }
 }
 pub use config::ConnectOptions;
+pub use store::document::{decode_id, encode_id};
 
 impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> anyhow::Result<Self> {

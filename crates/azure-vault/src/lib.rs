@@ -20,7 +20,7 @@ pub struct Client {
 
 impl Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AzSecretClient").finish()
+        f.debug_struct("Client").finish_non_exhaustive()
     }
 }
 
@@ -58,6 +58,8 @@ impl Backend for Client {
 
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
+    use std::fmt;
+
     use fromenv::FromEnv;
 
     /// Connection options for the Azure Key Vault backend.
@@ -72,7 +74,7 @@ mod config {
     }
 
     /// Azure service principal credential fields.
-    #[derive(Debug, Clone, FromEnv)]
+    #[derive(Clone, FromEnv)]
     pub struct CredentialOptions {
         /// Azure AD tenant identifier.
         #[env(from = "AZURE_TENANT_ID")]
@@ -83,6 +85,16 @@ mod config {
         /// Azure AD application secret.
         #[env(from = "AZURE_CLIENT_SECRET")]
         pub client_secret: String,
+    }
+
+    impl fmt::Debug for CredentialOptions {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("CredentialOptions")
+                .field("tenant_id", &self.tenant_id)
+                .field("client_id", &self.client_id)
+                .field("client_secret", &"<redacted>")
+                .finish()
+        }
     }
 }
 pub use config::{ConnectOptions, CredentialOptions};

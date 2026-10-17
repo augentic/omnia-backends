@@ -1,26 +1,26 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
-use async_nats::jetstream::kv::Config;
-use async_nats::jetstream::{self, kv};
+use anyhow::{Context, Result, anyhow, bail};
+use async_nats::jetstream::context::KeyValueErrorKind;
+use async_nats::jetstream::kv::{self, Config};
 use futures::TryStreamExt;
 use futures::future::FutureExt;
 use omnia_wasi_keyvalue::{Bucket, Cas, FutureResult, WasiKeyValueCtx};
 
 use crate::Client;
 
+const MAX_INCREMENT_RETRIES: usize = 64;
+
 impl WasiKeyValueCtx for Client {
     fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
         tracing::trace!("opening bucket: {identifier}");
-        let client = self.inner.clone();
+        let jetstream = self.jetstream.clone();
 
         async move {
-            let jetstream = jetstream::new(client);
-            let store = if let Ok(store) = jetstream.get_key_value(&identifier).await {
-                store
-            } else {
-                let result = jetstream
+            let store = match jetstream.get_key_value(&identifier).await {
+                Ok(store) => store,
+                Err(err) if err.kind() == KeyValueErrorKind::GetBucket => jetstream
                     .create_key_value(Config {
                         bucket: identifier,
                         history: 1,
@@ -28,9 +28,9 @@ impl WasiKeyValueCtx for Client {
                         max_bytes: 100 * 1024 * 1024,
                         ..Config::default()
                     })
-                    .await;
-
-                result.context("failed to create bucket")?
+                    .await
+                    .context("failed to create bucket")?,
+                Err(err) => return Err(err).context("failed to open bucket"),
             };
 
             Ok(Arc::new(KvBucket(store)) as Arc<dyn Bucket>)
@@ -40,7 +40,7 @@ impl WasiKeyValueCtx for Client {
 }
 
 #[derive(Debug)]
-pub struct KvBucket(pub kv::Store);
+struct KvBucket(kv::Store);
 
 impl Bucket for KvBucket {
     fn get(&self, key: String) -> FutureResult<Option<Vec<u8>>> {
@@ -109,7 +109,7 @@ impl Bucket for KvBucket {
         async move {
             // JetStream KV has no native increment; loop a revision-conditioned
             // read-modify-write, retrying only on lost races.
-            loop {
+            for _ in 0..MAX_INCREMENT_RETRIES {
                 let live = live_entry(&store, &key).await?;
                 let base = match &live {
                     None => 0,
@@ -133,6 +133,7 @@ impl Bucket for KvBucket {
                     },
                 }
             }
+            bail!("incrementing `{key}` exceeded {MAX_INCREMENT_RETRIES} CAS retries")
         }
         .boxed()
     }
@@ -200,4 +201,22 @@ fn decode_counter(key: &str, value: &[u8]) -> Result<i64> {
         anyhow!("value at `{key}` is {} bytes, not an 8-byte big-endian integer", value.len())
     })?;
     Ok(i64::from_be_bytes(bytes))
+}
+
+// Counter wire-format decoding; JetStream KV operations are covered by
+// `tests/live.rs::keyvalue_atomics`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_counter_values() {
+        assert_eq!(decode_counter("k", &42_i64.to_be_bytes()).unwrap(), 42);
+        assert_eq!(decode_counter("k", &(-7_i64).to_be_bytes()).unwrap(), -7);
+        assert_eq!(decode_counter("k", &i64::MAX.to_be_bytes()).unwrap(), i64::MAX);
+        assert_eq!(decode_counter("k", &i64::MIN.to_be_bytes()).unwrap(), i64::MIN);
+
+        let err = decode_counter("bad", &[1, 2, 3]).unwrap_err();
+        assert!(err.to_string().contains("`bad` is 3 bytes"));
+    }
 }

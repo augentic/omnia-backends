@@ -149,6 +149,8 @@ fn odata_value(v: &ScalarValue) -> anyhow::Result<String> {
     })
 }
 
+// OData `$filter` translation and unsupported-node rejection; the service
+// evaluating the generated filter is `tests/live.rs::query_and_pagination`.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -31,7 +31,8 @@ impl Backend for Client {
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
         tracing::debug!("connecting to OpenTelemetry gRPC endpoint at: {}", options.grpc_url);
 
-        let channel = Channel::from_shared(options.grpc_url)?
+        let channel = Channel::from_shared(options.grpc_url)
+            .context("invalid OTEL_EXPORTER_OTLP_ENDPOINT")?
             .connect()
             .await
             .context("failed to connect to OpenTelemetry gRPC endpoint")?;

@@ -4,18 +4,26 @@ mod blobstore;
 mod keyvalue;
 mod messaging;
 
+use std::fmt;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use async_nats::AuthError;
+use anyhow::{Context, Result, ensure};
+use async_nats::{AuthError, jetstream};
 use omnia::Backend;
 use tracing::instrument;
 
 /// NATS backend client for messaging, key-value, and blobstore.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Client {
     inner: async_nats::Client,
+    jetstream: jetstream::Context,
     topics: Option<Vec<String>>,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client").field("topics", &self.topics).finish_non_exhaustive()
+    }
 }
 
 impl Backend for Client {
@@ -23,6 +31,10 @@ impl Backend for Client {
 
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
+        ensure!(
+            options.jwt.is_some() == options.seed.is_some(),
+            "NATS_JWT and NATS_SEED must be set together"
+        );
         let mut nats_opts = async_nats::ConnectOptions::new();
 
         if let Some(jwt) = &options.jwt
@@ -37,9 +49,11 @@ impl Backend for Client {
         }
 
         let client = nats_opts.connect(&options.address).await.context("connecting to NATS")?;
+        let jetstream = jetstream::new(client.clone());
 
         Ok(Self {
             inner: client,
+            jetstream,
             topics: options.topics,
         })
     }
@@ -47,10 +61,12 @@ impl Backend for Client {
 
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
+    use std::fmt;
+
     use fromenv::{FromEnv, ParseResult};
 
     /// Connection options for the NATS backend.
-    #[derive(Debug, Clone, FromEnv)]
+    #[derive(Clone, FromEnv)]
     pub struct ConnectOptions {
         /// NATS server address.
         #[env(from = "NATS_ADDR", default = "demo.nats.io")]
@@ -66,9 +82,24 @@ mod config {
         pub seed: Option<String>,
     }
 
+    impl fmt::Debug for ConnectOptions {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("ConnectOptions")
+                .field("address", &self.address)
+                .field("topics", &self.topics)
+                .field("jwt", &self.jwt)
+                .field("seed", &self.seed.as_ref().map(|_| "<redacted>"))
+                .finish()
+        }
+    }
+
     #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
     fn split(s: &str) -> ParseResult<Vec<String>> {
-        Ok(s.split(',').map(ToOwned::to_owned).collect())
+        Ok(s.split(',')
+            .map(str::trim)
+            .filter(|topic| !topic.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
     }
 }
 pub use config::ConnectOptions;

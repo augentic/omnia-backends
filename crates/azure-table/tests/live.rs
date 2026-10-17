@@ -13,8 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, ensure};
 use omnia::Backend;
-use omnia_azure_table::Client;
-use omnia_azure_table::store::document::encode_id;
+use omnia_azure_table::{Client, encode_id};
 use omnia_wasi_docstore::{
     ComparisonOp, Document, FilterTree, QueryOpts, ScalarValue, WasiDocStoreCtx,
 };

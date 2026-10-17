@@ -20,7 +20,7 @@ MSRV: Rust 1.99
 | `KAFKA_PARTITION_COUNT` | no | `12` | Partition count for custom partitioner |
 | `KAFKA_PARTITIONER` | no | `kafkajs` | Key-to-partition scheme for sends without `metadata["partition"]`: `kafkajs` matches the Node and .NET producers, `java` matches Kafka's Java client |
 | `KAFKA_TOPICS` | no | | Comma-separated topics for consumer |
-| `KAFKA_CONSUMER_GROUP` | no | `wrt-kafka-consumer` | Consumer group ID |
+| `KAFKA_CONSUMER_GROUP` | no | `omnia-kafka-consumer` | Consumer group ID |
 | `KAFKA_COMMIT_INTERVAL_MS` | no | `200` | How often processed offsets are committed; bounds how much a restart replays |
 | `KAFKA_REGISTRY_URL` | no | | Schema Registry URL |
 | `KAFKA_REGISTRY_API_KEY` | no | | Schema Registry API key |

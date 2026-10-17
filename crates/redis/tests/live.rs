@@ -22,6 +22,7 @@ async fn set_get_delete() -> Result<()> {
     bucket.set(key.clone(), b"payload".to_vec()).await?;
     assert_eq!(bucket.get(key.clone()).await?.as_deref(), Some(b"payload".as_slice()));
     assert!(bucket.exists(key.clone()).await?, "key exists after set");
+    assert!(bucket.keys().await?.contains(&key), "keys() returns unprefixed key");
 
     bucket.delete(key.clone()).await?;
     assert!(!bucket.exists(key).await?, "key gone after delete");

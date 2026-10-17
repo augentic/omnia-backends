@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+mod lanes;
+
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -10,9 +11,10 @@ use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext, Rebalance, Stre
 use rdkafka::error::KafkaError;
 use rdkafka::message::{Headers, OwnedMessage};
 use rdkafka::{ClientContext, Message as _};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
+use self::lanes::{Lane, Lanes};
 use crate::registry::Registry;
 use crate::tracker::{Stored, Ticket, Tracker};
 
@@ -361,60 +363,6 @@ impl Delivery {
     }
 }
 
-// Per-key FIFO. A record waits on the record for its key pulled before it,
-// and on nothing else; the order is fixed at the pull, under one lock, so
-// two records for a key can never swap. A lane is forgotten once its last
-// record is done.
-#[derive(Default)]
-struct Lanes {
-    tails: HashMap<Arc<[u8]>, (u64, oneshot::Receiver<()>)>,
-    next: u64,
-}
-
-struct Lane {
-    key: Arc<[u8]>,
-    seq: u64,
-    // the predecessor's completion; `None` at the head of the lane
-    behind: Option<oneshot::Receiver<()>>,
-    // dropped when this record is done, waking the record behind
-    _done: oneshot::Sender<()>,
-}
-
-impl Lanes {
-    fn enqueue(&mut self, key: Arc<[u8]>) -> Lane {
-        let seq = self.next;
-        self.next += 1;
-        let (done, wakes_next) = oneshot::channel();
-        let behind =
-            self.tails.insert(Arc::clone(&key), (seq, wakes_next)).map(|(_, behind)| behind);
-        Lane {
-            key,
-            seq,
-            behind,
-            _done: done,
-        }
-    }
-
-    fn release(&mut self, lane: &Lane) {
-        if self.tails.get(&lane.key).is_some_and(|(tail, _)| *tail == lane.seq) {
-            self.tails.remove(&lane.key);
-        }
-    }
-}
-
-impl Lane {
-    const fn is_head(&self) -> bool {
-        self.behind.is_none()
-    }
-
-    // Resolves once the record ahead is done, however it finished.
-    async fn turn(&mut self) {
-        if let Some(behind) = self.behind.take() {
-            let _ = behind.await;
-        }
-    }
-}
-
 // The partition the record was read from travels as `source-partition`:
 // `partition` is a send's destination, and a guest forwarding a record's
 // metadata must not pin its output to where the record came from.
@@ -450,7 +398,7 @@ mod tests {
     use futures::FutureExt as _;
     use futures::future::BoxFuture;
     use rdkafka::Timestamp;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
     use tokio::task::JoinHandle;
 
     use super::*;
@@ -702,19 +650,5 @@ mod tests {
         let ticket = tracker.insert("t", 0, 3);
         assert_eq!(tracker.done("t", 0, 3, ticket, 2), None);
         assert_eq!(tracker.note_delivered(1), [("t".to_owned(), 0, 3)]);
-    }
-
-    #[test]
-    fn lane_release() {
-        let mut lanes = Lanes::default();
-        let first = lanes.enqueue(Arc::from(b"a".as_slice()));
-        let second = lanes.enqueue(Arc::from(b"a".as_slice()));
-        assert!(first.is_head());
-        assert!(!second.is_head());
-
-        lanes.release(&first);
-        assert_eq!(lanes.tails.len(), 1, "the lane still has a record behind");
-        lanes.release(&second);
-        assert!(lanes.tails.is_empty());
     }
 }

@@ -22,7 +22,6 @@ all-features = true
 anyhow.workspace = true
 chrono.workspace = true
 deadpool-postgres = { version = "0.14.2", default-features = false, features = ["rt_tokio_1"] }
-fromenv.workspace = true
 futures.workspace = true
 omnia.workspace = true
 omnia-wasi-sql.workspace = true

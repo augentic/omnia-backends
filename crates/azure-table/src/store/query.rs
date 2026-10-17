@@ -26,6 +26,8 @@ pub fn decode_continuation(token: &str) -> (String, Option<String>) {
     }
 }
 
+// Continuation token packing and unpacking; real paged queries are covered by
+// `tests/live.rs::query_and_pagination`.
 #[cfg(test)]
 mod tests {
     use super::*;

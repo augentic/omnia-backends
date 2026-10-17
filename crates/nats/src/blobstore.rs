@@ -1,9 +1,8 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use anyhow::Context;
-use async_nats::jetstream;
-use async_nats::jetstream::object_store::{Config, ObjectStore};
+use anyhow::{Context, anyhow};
+use async_nats::jetstream::object_store::{Config, GetErrorKind, InfoErrorKind, ObjectStore};
 use chrono::Utc;
 use futures::{FutureExt, StreamExt};
 use omnia_wasi_blobstore::{
@@ -16,17 +15,17 @@ use crate::Client;
 impl WasiBlobstoreCtx for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("creating container: {name}");
-        let client = self.inner.clone();
+        let jetstream = self.jetstream.clone();
 
         async move {
-            let store = jetstream::new(client)
+            let store = jetstream
                 .create_object_store(Config {
                     bucket: name.clone(),
                     ..Default::default()
                 })
                 .await
                 .context("creating object store")?;
-            let metadata = metadata(name);
+            let metadata = container_metadata(name);
 
             Ok(Arc::new(NatsContainer { metadata, store }) as Arc<dyn Container>)
         }
@@ -35,14 +34,11 @@ impl WasiBlobstoreCtx for Client {
 
     fn get_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("getting container: {name}");
-        let client = self.inner.clone();
+        let jetstream = self.jetstream.clone();
 
         async move {
-            let store = jetstream::new(client)
-                .get_object_store(&name)
-                .await
-                .context("getting object store")?;
-            let metadata = metadata(name);
+            let store = jetstream.get_object_store(&name).await.context("getting object store")?;
+            let metadata = container_metadata(name);
 
             Ok(Arc::new(NatsContainer { metadata, store }) as Arc<dyn Container>)
         }
@@ -51,13 +47,10 @@ impl WasiBlobstoreCtx for Client {
 
     fn delete_container(&self, name: String) -> FutureResult<()> {
         tracing::trace!("deleting container: {name}");
-        let client = self.inner.clone();
+        let jetstream = self.jetstream.clone();
 
         async move {
-            jetstream::new(client)
-                .delete_object_store(&name)
-                .await
-                .context("issue deleting object store")?;
+            jetstream.delete_object_store(&name).await.context("issue deleting object store")?;
             Ok(())
         }
         .boxed()
@@ -65,31 +58,31 @@ impl WasiBlobstoreCtx for Client {
 
     fn container_exists(&self, name: String) -> FutureResult<bool> {
         tracing::trace!("checking existence of container: {name}");
-        let client = self.inner.clone();
+        let jetstream = self.jetstream.clone();
 
         async move {
-            let exists = jetstream::new(client).get_object_store(&name).await.is_ok();
+            let exists = jetstream.get_object_store(&name).await.is_ok();
             Ok(exists)
         }
         .boxed()
     }
 }
 
-fn metadata(name: String) -> ContainerMetadata {
+fn container_metadata(name: String) -> ContainerMetadata {
     ContainerMetadata {
         name,
         created_at: u64::try_from(Utc::now().timestamp()).unwrap_or_default(),
     }
 }
 
-pub struct NatsContainer {
+struct NatsContainer {
     metadata: ContainerMetadata,
     store: ObjectStore,
 }
 
 impl Debug for NatsContainer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NatsContainer").finish()
+        f.debug_struct("NatsContainer").field("name", &self.metadata.name).finish_non_exhaustive()
     }
 }
 
@@ -103,15 +96,19 @@ impl Container for NatsContainer {
         Ok(self.metadata.clone())
     }
 
-    fn get_data(&self, name: String, _start: u64, _end: u64) -> FutureResult<Option<Bytes>> {
+    fn get_data(&self, name: String, start: u64, end: u64) -> FutureResult<Option<Bytes>> {
         tracing::trace!("getting object data: {name}");
         let store = self.store.clone();
 
         async move {
-            let mut object = store.get(name).await.context("getting object")?;
-            let mut bytes = vec![];
+            let mut object = match store.get(&name).await {
+                Ok(object) => object,
+                Err(err) if err.kind() == GetErrorKind::NotFound => return Ok(None),
+                Err(err) => return Err(err).context("getting object"),
+            };
+            let mut bytes = Vec::new();
             object.read_to_end(&mut bytes).await?;
-            Ok(Some(bytes.into()))
+            slice_range(&Bytes::from(bytes), start, end).map(Some)
         }
         .boxed()
     }
@@ -158,8 +155,11 @@ impl Container for NatsContainer {
         let store = self.store.clone();
 
         async move {
-            let _ = store.get(name).await.context("checking object")?;
-            Ok(true)
+            match store.info(&name).await {
+                Ok(info) => Ok(!info.deleted),
+                Err(err) if err.kind() == InfoErrorKind::NotFound => Ok(false),
+                Err(err) => Err(err).context("checking object"),
+            }
         }
         .boxed()
     }
@@ -171,14 +171,49 @@ impl Container for NatsContainer {
 
         async move {
             let info = store.info(&name).await.context("getting object info")?;
+            let created_at = info
+                .modified
+                .and_then(|t| u64::try_from(t.unix_timestamp()).ok())
+                .unwrap_or(metadata.created_at);
 
             Ok(ObjectMetadata {
                 container: metadata.name.clone(),
                 name: info.name,
                 size: info.size as u64,
-                created_at: metadata.created_at,
+                created_at,
             })
         }
         .boxed()
+    }
+}
+
+fn slice_range(data: &Bytes, start: u64, end: u64) -> anyhow::Result<Bytes> {
+    let unbounded = end == 0 || end == u64::MAX;
+    if !unbounded && end < start {
+        return Err(anyhow!("invalid byte range: end ({end}) < start ({start})"));
+    }
+    let len = data.len();
+    let clamp = |bound: u64| usize::try_from(bound).map_or(len, |bound| bound.min(len));
+    let from = clamp(start);
+    let to = if unbounded { len } else { clamp(end.saturating_add(1)) };
+    Ok(data.slice(from..to))
+}
+
+// Byte-range slicing for `get_data`; JetStream object store calls are covered
+// by `tests/live.rs`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slice_range_bounds() {
+        let data = Bytes::from_static(b"hello world");
+        assert_eq!(slice_range(&data, 0, 0).unwrap(), Bytes::from_static(b"hello world"));
+        assert_eq!(slice_range(&data, 0, u64::MAX).unwrap(), Bytes::from_static(b"hello world"));
+        assert_eq!(slice_range(&data, 6, 0).unwrap(), Bytes::from_static(b"world"));
+        assert_eq!(slice_range(&data, 0, 4).unwrap(), Bytes::from_static(b"hello"));
+        assert_eq!(slice_range(&data, 3, 3).unwrap(), Bytes::from_static(b"l"));
+        assert_eq!(slice_range(&data, 6, 100).unwrap(), Bytes::from_static(b"world"));
+        slice_range(&data, 5, 2).unwrap_err();
     }
 }

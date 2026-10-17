@@ -134,7 +134,7 @@ impl Tracker {
     }
 
     #[cfg(test)]
-    pub(crate) fn stored_offset(&self, topic: &str, partition: i32) -> Option<i64> {
+    pub fn stored_offset(&self, topic: &str, partition: i32) -> Option<i64> {
         self.partition(topic, partition).and_then(|state| state.stored)
     }
 

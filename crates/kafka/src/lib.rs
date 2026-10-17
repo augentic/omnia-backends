@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use omnia::Backend;
 use rand::random_range;
 use rdkafka::consumer::Consumer;
@@ -24,7 +24,7 @@ use crate::consume::{KafkaConsumer, KafkaContext, Shared};
 use crate::partitioner::Partitioner;
 use crate::registry::Registry;
 
-const DEFAULT_GROUP: &str = "wrt-kafka-consumer";
+const DEFAULT_GROUP: &str = "omnia-kafka-consumer";
 
 // Apache Kafka's own producer default (`delivery.timeout.ms`): long enough
 // to ride out a leader election or a rolling broker restart. librdkafka's is
@@ -44,7 +44,7 @@ pub struct Client {
 // Fields drop in order: the producer flushes first, so a delivery report can
 // still store an offset before the consumer's close commits what is stored.
 struct Inner {
-    producer: ThreadedProducer<Tracer>,
+    producer: ThreadedProducer<DeliveryContext>,
     partitioner: Partitioner,
     registry: Option<Registry>,
     shared: Arc<Shared>,
@@ -54,7 +54,7 @@ struct Inner {
 
 impl Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KafkaClient").finish()
+        f.debug_struct("Client").finish_non_exhaustive()
     }
 }
 
@@ -71,13 +71,17 @@ impl Backend for Client {
 
     #[instrument]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
+        ensure!(
+            options.username.is_some() == options.password.is_some(),
+            "KAFKA_USERNAME and KAFKA_PASSWORD must be set together"
+        );
         let mut config = ClientConfig::from(&options);
 
         let shared = Shared::new();
         let producer = config
             .clone()
             .set("message.timeout.ms", MESSAGE_TIMEOUT)
-            .create_with_context(Tracer {
+            .create_with_context(DeliveryContext {
                 shared: Arc::clone(&shared),
             })
             .context("issue creating producer")?;
@@ -86,6 +90,11 @@ impl Backend for Client {
         let registry = options.registry.map(Registry::new).transpose()?;
 
         let consumer = if let Some(consumer_options) = options.consumer {
+            ensure!(
+                !consumer_options.topics.is_empty()
+                    && consumer_options.topics.iter().all(|topic| !topic.trim().is_empty()),
+                "KAFKA_TOPICS must contain at least one non-empty topic"
+            );
             let group_id = consumer_options.group_id.as_deref().unwrap_or(DEFAULT_GROUP);
             config.set("group.id", group_id);
             // the tracker decides when a record is done; librdkafka commits
@@ -130,12 +139,14 @@ impl Backend for Client {
 
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
+    use std::fmt;
+
     use fromenv::{FromEnv, ParseResult};
 
     use crate::partitioner::PartitionerScheme;
 
     /// Connection options for the Kafka backend.
-    #[derive(Debug, Clone, FromEnv)]
+    #[derive(Clone, FromEnv)]
     pub struct ConnectOptions {
         /// Client identifier prefix (suffixed with a random number). The
         /// runtime no longer writes `COMPONENT` into the process environment,
@@ -168,6 +179,22 @@ mod config {
         pub registry: Option<RegistryOptions>,
     }
 
+    impl fmt::Debug for ConnectOptions {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("ConnectOptions")
+                .field("client_id", &self.client_id)
+                .field("brokers", &self.brokers)
+                .field("username", &self.username)
+                .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+                .field("partition_count", &self.partition_count)
+                .field("partitioner", &self.partitioner)
+                .field("commit_interval_ms", &self.commit_interval_ms)
+                .field("consumer", &self.consumer)
+                .field("registry", &self.registry)
+                .finish()
+        }
+    }
+
     /// Kafka consumer configuration.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConsumerOptions {
@@ -180,22 +207,36 @@ mod config {
     }
 
     /// Confluent Schema Registry configuration.
-    #[derive(Debug, Clone, FromEnv)]
+    #[derive(Clone, FromEnv)]
     pub struct RegistryOptions {
         /// Schema Registry URL.
         #[env(from = "KAFKA_REGISTRY_URL")]
         pub url: String,
-        /// Schema Registry API key.
+        /// Optional Schema Registry API key.
         #[env(from = "KAFKA_REGISTRY_API_KEY")]
-        pub api_key: String,
-        /// Schema Registry API secret.
+        pub api_key: Option<String>,
+        /// Optional Schema Registry API secret.
         #[env(from = "KAFKA_REGISTRY_API_SECRET")]
-        pub api_secret: String,
+        pub api_secret: Option<String>,
+    }
+
+    impl fmt::Debug for RegistryOptions {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("RegistryOptions")
+                .field("url", &self.url)
+                .field("api_key", &self.api_key)
+                .field("api_secret", &self.api_secret.as_ref().map(|_| "<redacted>"))
+                .finish()
+        }
     }
 
     #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
     fn split(s: &str) -> ParseResult<Vec<String>> {
-        Ok(s.split(',').map(ToOwned::to_owned).collect())
+        Ok(s.split(',')
+            .map(str::trim)
+            .filter(|topic| !topic.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
     }
 
     fn partitioner(value: &str) -> ParseResult<PartitionerScheme> {
@@ -247,14 +288,13 @@ impl omnia::FromEnv for ConnectOptions {
     }
 }
 
-/// Kafka producer delivery callback that logs send results.
-pub struct Tracer {
+struct DeliveryContext {
     shared: Arc<Shared>,
 }
 
-impl ClientContext for Tracer {}
+impl ClientContext for DeliveryContext {}
 
-impl ProducerContext for Tracer {
+impl ProducerContext for DeliveryContext {
     type DeliveryOpaque = usize;
 
     fn delivery(

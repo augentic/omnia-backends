@@ -58,8 +58,20 @@ impl ToSql for PgType {
         }
     }
 
-    fn accepts(_: &Type) -> bool {
-        true
+    fn accepts(ty: &Type) -> bool {
+        <i32 as ToSql>::accepts(ty)
+            || <i64 as ToSql>::accepts(ty)
+            || <u32 as ToSql>::accepts(ty)
+            || <f32 as ToSql>::accepts(ty)
+            || <f64 as ToSql>::accepts(ty)
+            || <String as ToSql>::accepts(ty)
+            || <tokio_postgres::types::Json<serde_json::Value> as ToSql>::accepts(ty)
+            || <bool as ToSql>::accepts(ty)
+            || <NaiveDate as ToSql>::accepts(ty)
+            || <NaiveTime as ToSql>::accepts(ty)
+            || <NaiveDateTime as ToSql>::accepts(ty)
+            || <DateTime<Utc> as ToSql>::accepts(ty)
+            || <Vec<u8> as ToSql>::accepts(ty)
     }
 
     fn encode_format(&self, _ty: &Type) -> tokio_postgres::types::Format {
@@ -179,5 +191,25 @@ mod tests {
     fn pgtype_binary_format() {
         let value = PgType::Int32(Some(42));
         assert!(matches!(value.encode_format(&Type::INT4), tokio_postgres::types::Format::Binary));
+    }
+
+    #[test]
+    fn accepts_supported_and_rejects_unsupported() {
+        assert!(PgType::accepts(&Type::INT4));
+        assert!(PgType::accepts(&Type::INT8));
+        assert!(PgType::accepts(&Type::OID));
+        assert!(PgType::accepts(&Type::FLOAT4));
+        assert!(PgType::accepts(&Type::FLOAT8));
+        assert!(PgType::accepts(&Type::TEXT));
+        assert!(PgType::accepts(&Type::JSON));
+        assert!(PgType::accepts(&Type::JSONB));
+        assert!(PgType::accepts(&Type::BOOL));
+        assert!(PgType::accepts(&Type::DATE));
+        assert!(PgType::accepts(&Type::TIME));
+        assert!(PgType::accepts(&Type::TIMESTAMP));
+        assert!(PgType::accepts(&Type::TIMESTAMPTZ));
+        assert!(PgType::accepts(&Type::BYTEA));
+        assert!(!PgType::accepts(&Type::UUID));
+        assert!(!PgType::accepts(&Type::INET));
     }
 }

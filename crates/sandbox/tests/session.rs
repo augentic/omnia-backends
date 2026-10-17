@@ -104,11 +104,18 @@ async fn shell_roots() {
     let roots = tempfile::tempdir().expect("roots");
     let a = roots.path().join("a");
     let link = roots.path().join("link");
+    let missing = roots.path().join("missing");
+    let late_link = roots.path().join("late-link");
     std::fs::create_dir(&a).expect("root a");
     std::os::unix::fs::symlink(&a, &link).expect("a symlink to root a");
 
     let sandbox = connect(Options {
-        shell_roots: vec![a.clone(), Path::new("relative/root").to_path_buf()],
+        shell_roots: vec![
+            a.clone(),
+            missing.clone(),
+            late_link.clone(),
+            Path::new("relative/root").to_path_buf(),
+        ],
         ..Options::default()
     })
     .await;
@@ -118,9 +125,28 @@ async fn shell_roots() {
         sandbox.options().shell_roots
     );
 
+    let target = roots.path().join("target");
+    std::fs::create_dir(&target).expect("late target");
+    std::os::unix::fs::symlink(&target, &late_link).expect("a symlink created after connect");
+
     assert_eq!(access(&sandbox, Some(&a.join("x"))).await, Access::Shell, "beneath the root");
     assert_eq!(access(&sandbox, Some(&a)).await, Access::Shell, "at the root");
     assert_eq!(access(&sandbox, Some(&link.join("y"))).await, Access::Shell, "through a symlink");
+    assert_eq!(
+        access(&sandbox, Some(&missing.join("x"))).await,
+        Access::Shell,
+        "beneath a root created on prepare"
+    );
+    assert_eq!(
+        access(&sandbox, Some(&late_link.join("x"))).await,
+        Access::Shell,
+        "beneath a symlink root created after connect"
+    );
+    assert_eq!(
+        access(&sandbox, Some(&target.join("y"))).await,
+        Access::Shell,
+        "beneath the target of a symlink root created after connect"
+    );
     assert_eq!(access(&sandbox, Some(&roots.path().join("b"))).await, Access::Read, "beside it");
     assert_eq!(access(&sandbox, None).await, Access::Private, "private");
 }

@@ -61,7 +61,17 @@ impl Session {
             let cwd = fs::canonicalize(path)
                 .await
                 .with_context(|| format!("canonicalizing {}", path.display()))?;
-            let shell = sandbox.options().shell_roots.iter().any(|root| cwd.starts_with(root));
+
+            // is cwd beneath any of the shell roots?
+            let mut shell = false;
+            for root in &sandbox.options().shell_roots {
+                let root = fs::canonicalize(root).await.unwrap_or_else(|_| root.clone());
+                if cwd.starts_with(root) {
+                    shell = true;
+                    break;
+                }
+            }
+
             (cwd, if shell { Access::Shell } else { Access::Read })
         } else {
             let cwd = scratch.join("cwd");

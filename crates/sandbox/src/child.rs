@@ -223,6 +223,29 @@ impl fmt::Display for Exit {
 
 impl std::error::Error for Exit {}
 
+/// A one-shot that outlived its bound and was killed with everything it
+/// forked.
+///
+/// [`Command::output`](crate::Command::output) fails with one of these,
+/// downcastable from its error, where the process had not exited within
+/// the bound. A process that could not be spawned or waited on fails with a
+/// plain error.
+#[derive(Clone, Debug)]
+pub struct TimedOut {
+    /// The program, as the command named it.
+    pub program: String,
+    /// The bound the process outlived.
+    pub bound: Duration,
+}
+
+impl fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "`{}` did not exit within {:?}", self.program, self.bound)
+    }
+}
+
+impl std::error::Error for TimedOut {}
+
 // Past `bound` the process is killed with everything it forked. Once it has
 // exited on its own, what it forked is killed too, so a pipe left to a fork
 // closes with it.
@@ -251,7 +274,7 @@ pub async fn output(command: Command, bound: Duration) -> Result<Output> {
         Err(_elapsed) => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            bail!("`{program}` did not exit within {bound:?}");
+            bail!(TimedOut { program, bound });
         }
     };
 

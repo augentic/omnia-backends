@@ -1,21 +1,25 @@
 //! Provider request translation.
 //!
 //! [`Turn`] maps a validated request into provider messages, tools, and chat
-//! options. A lent workspace adds the host-provided `read` and `list` tools.
-//! The request's `format` becomes the provider `response_format` — steering
+//! options. A lent workspace adds the host-provided `read` and `list` tools,
+//! and one lent under a shell root the `shell` tool beside them. The
+//! request's `format` becomes the provider `response_format` — steering
 //! only; acceptance is the guest's `check` when the request asks for one.
-
-use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, JsonSpec, ReasoningEffort, Tool,
 };
-use omnia_wasi_model::{Effort, Format, Function, Request, Role, Tool as ModelTool};
+use omnia_sandbox::Access;
+use omnia_wasi_model::{Effort, Error, Format, Function, Request, Role, Tool as ModelTool};
 use schemars::schema_for;
 use serde_json::Value;
 
-use super::tools::{ListArgs, ReadArgs};
+use super::tools::{ListArgs, ReadArgs, ShellArgs};
+
+// The one tool name this backend reserves beyond the host's: a guest tool
+// of the name would be shadowed where a shell is advertised.
+pub const SHELL_TOOL: &str = "shell";
 
 // Everything one completion derives from the request: the provider chat
 // request, options, and telemetry counts.
@@ -30,9 +34,9 @@ pub struct Turn {
 }
 
 impl Turn {
-    pub fn prepare(request: &Request, lent: Option<&Path>, default_model: &str) -> Result<Self> {
+    pub fn prepare(request: &Request, access: Access, default_model: &str) -> Result<Self> {
         let model = request.model.as_deref().unwrap_or(default_model).to_owned();
-        let chat = build_request(request, lent.is_some())?;
+        let chat = build_request(request, access)?;
         let options = build_options(request)?;
 
         Ok(Self {
@@ -53,7 +57,7 @@ fn prompt_bytes(request: &Request) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
-fn build_request(request: &Request, workspace: bool) -> Result<ChatRequest> {
+fn build_request(request: &Request, access: Access) -> Result<ChatRequest> {
     let messages = request
         .messages
         .iter()
@@ -72,13 +76,16 @@ fn build_request(request: &Request, workspace: bool) -> Result<ChatRequest> {
     let mut tools: Vec<Tool> = Vec::new();
     for tool in &request.tools {
         match tool {
+            ModelTool::Function(function) if function.name == SHELL_TOOL => {
+                bail!(Error::InvalidRequest(format!(
+                    "tool `{SHELL_TOOL}` is reserved by the backend"
+                )));
+            }
             ModelTool::Function(function) => tools.push(function_tool(function)?),
             ModelTool::Mcp(_) => bail!("genai does not support MCP servers"),
         }
     }
-    if workspace {
-        tools.extend(workspace_tools());
-    }
+    tools.extend(workspace_tools(access));
     if !tools.is_empty() {
         chat = chat.with_tools(tools);
     }
@@ -86,20 +93,39 @@ fn build_request(request: &Request, workspace: bool) -> Result<ChatRequest> {
     Ok(chat)
 }
 
-// The host reserves these names (`read`, `list`, plus the unadvertised
-// `write` and the guest's `check`), so no guest tool can shadow them.
-fn workspace_tools() -> [Tool; 2] {
-    [
-        Tool::new("read")
-            .with_description("Read a text file from the workspace for this task.")
-            .with_schema(schema_for!(ReadArgs).to_value()),
-        Tool::new("list")
-            .with_description(
-                "List a directory of the workspace for this task. Omit `path` to list \
-                 the workspace root.",
-            )
-            .with_schema(schema_for!(ListArgs).to_value()),
-    ]
+// The host reserves `read` and `list` (plus the unadvertised `write` and
+// the guest's `check`), so no guest tool can shadow them; `shell` is this
+// backend's, refused above.
+fn workspace_tools(access: Access) -> Vec<Tool> {
+    let mut tools = Vec::new();
+    if access.is_lent() {
+        tools.push(
+            Tool::new("read")
+                .with_description("Read a text file from the workspace for this task.")
+                .with_schema(schema_for!(ReadArgs).to_value()),
+        );
+        tools.push(
+            Tool::new("list")
+                .with_description(
+                    "List a directory of the workspace for this task. Omit `path` to list \
+                     the workspace root.",
+                )
+                .with_schema(schema_for!(ListArgs).to_value()),
+        );
+    }
+    if access == Access::Shell {
+        tools.push(
+            Tool::new(SHELL_TOOL)
+                .with_description(
+                    "Run a shell command in the workspace for this task, as `sh -c`, with the \
+                     workspace as the working directory and as `$WORKSPACE`. The result is what \
+                     it wrote, its stderr after `--- stderr ---` when any, and its exit after \
+                     `--- exit ---` when it failed. A command that runs too long is killed.",
+                )
+                .with_schema(schema_for!(ShellArgs).to_value()),
+        );
+    }
+    tools
 }
 
 // The host already guarantees `parameters` parses as JSON.
@@ -165,8 +191,6 @@ const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
 // `tests/model.rs`.
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use omnia_wasi_model::{Grants, Mcp, Message};
     use serde_json::json;
 
@@ -201,18 +225,19 @@ mod tests {
 
     #[test]
     fn model_selection() {
-        let turn = Turn::prepare(&request(vec![]), None, "gpt-5.5").expect("a bare request maps");
+        let turn = Turn::prepare(&request(vec![]), Access::Private, "gpt-5.5")
+            .expect("a bare request maps");
         assert_eq!(turn.model, "gpt-5.5", "an unset model falls back to the backend default");
 
         let mut named = request(vec![]);
         named.model = Some("claude-fable-5".to_owned());
-        let turn = Turn::prepare(&named, None, "gpt-5.5").expect("a named model maps");
+        let turn = Turn::prepare(&named, Access::Private, "gpt-5.5").expect("a named model maps");
         assert_eq!(turn.model, "claude-fable-5", "the request's model wins");
     }
 
     #[test]
     fn function_tool() {
-        let chat = build_request(&request(vec![lookup_tool()]), false)
+        let chat = build_request(&request(vec![lookup_tool()]), Access::Private)
             .expect("a declared function tool translates");
         let tools = chat.tools.expect("the chat request advertises the tool");
         assert_eq!(tools.len(), 1, "one declared tool, one advertised tool");
@@ -232,7 +257,7 @@ mod tests {
                 tools: vec![],
                 url: "http://localhost:8080/mcp".to_owned(),
             })]),
-            false,
+            Access::Private,
         )
         .expect_err("genai rejects MCP grants");
         assert!(err.to_string().contains("does not support MCP"), "unexpected error: {err}");
@@ -240,7 +265,7 @@ mod tests {
 
     #[test]
     fn workspace_tools() {
-        let turn = Turn::prepare(&request(vec![lookup_tool()]), Some(Path::new("/unused")), "auto")
+        let turn = Turn::prepare(&request(vec![lookup_tool()]), Access::Read, "auto")
             .expect("declared and injected tools translate");
         let tools = turn.chat.tools.expect("the chat request advertises the tools");
         let names: Vec<_> = tools.iter().map(|tool| tool.name.to_string()).collect();
@@ -255,9 +280,35 @@ mod tests {
     }
 
     #[test]
+    fn shell_tool() {
+        let turn = Turn::prepare(&request(vec![]), Access::Shell, "auto")
+            .expect("a shell lend translates");
+        let tools = turn.chat.tools.expect("the chat request advertises the tools");
+        let names: Vec<_> = tools.iter().map(|tool| tool.name.to_string()).collect();
+        assert_eq!(names, ["read", "list", "shell"], "the shell comes after read/list");
+        let schema = tools[2].schema.as_ref().expect("shell carries a schema");
+        assert_eq!(schema.get("required"), Some(&json!(["command"])), "shell requires a command");
+    }
+
+    #[test]
+    fn shell_reserved() {
+        let shell = ModelTool::Function(Function {
+            name: "shell".to_owned(),
+            description: "a guest's own shell".to_owned(),
+            parameters: "{}".to_owned(),
+        });
+        let err = build_request(&request(vec![shell]), Access::Private)
+            .expect_err("a guest tool named `shell` is refused whatever the access");
+        let Some(Error::InvalidRequest(detail)) = err.downcast_ref::<Error>() else {
+            panic!("the refusal is the request's: {err:#}");
+        };
+        assert_eq!(detail, "tool `shell` is reserved by the backend");
+    }
+
+    #[test]
     fn no_workspace() {
-        let turn =
-            Turn::prepare(&request(vec![]), None, "auto").expect("an empty tool list translates");
+        let turn = Turn::prepare(&request(vec![]), Access::Private, "auto")
+            .expect("an empty tool list translates");
         assert!(turn.chat.tools.is_none(), "without a workspace lend nothing is advertised");
     }
 }

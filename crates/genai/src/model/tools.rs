@@ -1,5 +1,6 @@
-//! The `read` and `list` tools access a lent workspace directly; all other
-//! calls are delegated through [`ToolHost::call_tool`]. Workspace failures
+//! The `read` and `list` tools access a lent workspace directly, the `shell`
+//! tool runs a command in the completion's session, and all other calls are
+//! delegated through [`ToolHost::call_tool`]. Workspace and shell failures
 //! are returned to the model as repairable tool output.
 
 use std::sync::Arc;
@@ -8,6 +9,9 @@ use anyhow::{Context as _, Result};
 use genai::chat::ToolCall;
 use omnia_wasi_model::ToolHost;
 use serde_json::Value;
+
+use super::options::SHELL_TOOL;
+use super::shell::Shell;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -21,9 +25,18 @@ pub struct ListArgs {
     path: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ShellArgs {
+    command: String,
+}
+
 pub async fn dispatch_tool(
-    tool_host: &Arc<dyn ToolHost>, call: &ToolCall, max_result_bytes: usize,
+    tool_host: &Arc<dyn ToolHost>, shell: Option<&Shell>, call: &ToolCall, max_result_bytes: usize,
 ) -> Result<String> {
+    if call.fn_name == SHELL_TOOL {
+        return handle_shell(shell, &call.fn_arguments).await;
+    }
     tracing::debug!(tool = %call.fn_name, "tool call");
 
     match call.fn_name.as_str() {
@@ -76,6 +89,19 @@ async fn handle_list(
     }
 }
 
+// A call where no shell was advertised is the model's slip, answered as
+// any bad call is.
+async fn handle_shell(shell: Option<&Shell>, arguments: &Value) -> Result<String> {
+    let Some(shell) = shell else {
+        return Ok("tool `shell` failed: no shell on this workspace".to_owned());
+    };
+    let ShellArgs { command } = match serde_json::from_value(arguments.clone()) {
+        Ok(arguments) => arguments,
+        Err(error) => return Ok(format!("tool `shell` failed: invalid arguments: {error}")),
+    };
+    shell.run(&command).await
+}
+
 fn max_result(tool: &str, text: String, max_result_bytes: usize) -> String {
     if text.len() > max_result_bytes {
         return format!(
@@ -97,44 +123,40 @@ mod tests {
 
     #[tokio::test]
     async fn text_read() {
-        let result =
-            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "refs.md"})), CAP)
-                .await
-                .expect("a workspace read is never a hard failure");
+        let result = dispatch("read", json!({"path": "refs.md"}), CAP)
+            .await
+            .expect("a workspace read is never a hard failure");
         assert_eq!(result, "reference text", "the file body is the tool result");
     }
 
     #[tokio::test]
     async fn binary_read() {
-        let result =
-            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "logo.bin"})), CAP)
-                .await
-                .expect("a binary read is model-visible, not a hard failure");
+        let result = dispatch("read", json!({"path": "logo.bin"}), CAP)
+            .await
+            .expect("a binary read is model-visible, not a hard failure");
         assert!(result.contains("is not UTF-8"), "unexpected result: {result}");
     }
 
     #[tokio::test]
     async fn oversize_read() {
-        let result =
-            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "refs.md"})), 8)
-                .await
-                .expect("an oversize read is model-visible, not a hard failure");
+        let result = dispatch("read", json!({"path": "refs.md"}), 8)
+            .await
+            .expect("an oversize read is model-visible, not a hard failure");
         assert!(result.contains("exceeds the 8-byte cap"), "unexpected result: {result}");
     }
 
     #[tokio::test]
     async fn read_missing_file() {
-        let result =
-            dispatch_tool(&workspace_stub(), &tool_call("read", json!({"path": "gone.md"})), CAP)
-                .await
-                .expect("a missing file is model-visible, not a hard failure");
+        let result = dispatch("read", json!({"path": "gone.md"}), CAP)
+            .await
+            .expect("a missing file is model-visible, not a hard failure");
         assert!(result.starts_with("tool `read` failed:"), "unexpected result: {result}");
         assert!(result.contains("gone.md"), "the failure names the path: {result}");
     }
 
     #[tokio::test]
     async fn read_missing_path() {
-        let result = dispatch_tool(&workspace_stub(), &tool_call("read", json!({})), CAP)
+        let result = dispatch("read", json!({}), CAP)
             .await
             .expect("malformed arguments are model-visible, not a hard failure");
         assert!(result.contains("missing field `path`"), "unexpected result: {result}");
@@ -142,9 +164,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_serialization() {
-        let result = dispatch_tool(&workspace_stub(), &tool_call("list", json!({})), CAP)
-            .await
-            .expect("a root listing is never a hard failure");
+        let result =
+            dispatch("list", json!({}), CAP).await.expect("a root listing is never a hard failure");
         assert_eq!(
             result,
             r#"[{"name":"refs","is_directory":true},{"name":"refs.md","is_directory":false}]"#,
@@ -154,14 +175,25 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tool() {
-        let result =
-            dispatch_tool(&workspace_stub(), &tool_call("lookup", json!({"name": "alpha"})), CAP)
-                .await
-                .expect("the session stub answers");
+        let result = dispatch("lookup", json!({"name": "alpha"}), CAP)
+            .await
+            .expect("the session stub answers");
         assert_eq!(
             result, r#"session:lookup:{"name":"alpha"}"#,
             "non-reserved names go through call_tool"
         );
+    }
+
+    #[tokio::test]
+    async fn shell_without_session() {
+        let result = dispatch("shell", json!({"command": "pwd"}), CAP)
+            .await
+            .expect("a shell call with no shell is model-visible, not a hard failure");
+        assert_eq!(result, "tool `shell` failed: no shell on this workspace");
+    }
+
+    async fn dispatch(name: &str, arguments: Value, cap: usize) -> Result<String> {
+        dispatch_tool(&workspace_stub(), None, &tool_call(name, arguments), cap).await
     }
 
     #[derive(Debug)]

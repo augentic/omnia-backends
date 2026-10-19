@@ -52,6 +52,7 @@ async fn endpoint_no_slash() {
     let client = Client::connect_with(ConnectOptions {
         model: "gpt-4o-mini".to_owned(),
         endpoint: Some(fake.url().trim_end_matches('/').to_owned()),
+        ..ConnectOptions::default()
     })
     .await
     .expect("the endpoint is accepted");
@@ -69,9 +70,40 @@ async fn invalid_endpoint() {
         let error = Client::connect_with(ConnectOptions {
             model: "gpt-4o-mini".to_owned(),
             endpoint: Some(endpoint.to_owned()),
+            ..ConnectOptions::default()
         })
         .await
         .expect_err(&format!("accepted `{endpoint}`"));
         assert!(format!("{error:#}").contains("http(s) URL"), "`{endpoint}`: {error:#}");
+    }
+}
+
+#[tokio::test]
+async fn zero_budget() {
+    for (what, options) in [
+        (
+            "max_rounds",
+            ConnectOptions {
+                max_rounds: 0,
+                ..ConnectOptions::default()
+            },
+        ),
+        (
+            "max_tool_calls",
+            ConnectOptions {
+                max_tool_calls: 0,
+                ..ConnectOptions::default()
+            },
+        ),
+        (
+            "shell_timeout_secs",
+            ConnectOptions {
+                shell_timeout_secs: 0,
+                ..ConnectOptions::default()
+            },
+        ),
+    ] {
+        let error = Client::connect_with(options).await.expect_err(&format!("accepted {what} 0"));
+        assert!(format!("{error:#}").contains(what), "{what}: {error:#}");
     }
 }

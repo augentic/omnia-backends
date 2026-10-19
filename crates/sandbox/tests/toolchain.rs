@@ -137,7 +137,7 @@ async fn run(
     sandbox: &Sandbox, grant: &Grant, tree: &Path, script: &str, bound: Duration,
 ) -> Output {
     let session = support::granted(sandbox, Some(tree), grant).await;
-    support::sh(session, script).output(bound).await.expect("the shell answers")
+    support::sh(&session, script).output(bound).await.expect("the shell answers")
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -197,7 +197,7 @@ async fn npm_local_install() {
 
     let script = "npm install --no-audit --no-fund >/dev/null && node index.js && npm config get \
                   cache && test -d \"$HOME/.npm\" && echo cached";
-    let output = support::sh(session, script).output(BOUND).await.expect("the shell answers");
+    let output = support::sh(&session, script).output(BOUND).await.expect("the shell answers");
     passed(&output, "npm install of a file: dependency");
     assert_eq!(
         text(&output.stdout),

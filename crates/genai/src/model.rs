@@ -1,24 +1,32 @@
 //! In-process `wasi-model` backend.
 //!
 //! Each completion translates a validated [`Request`] into a provider
-//! conversation and drives it within a shared round budget. Guest function
-//! calls are delegated through [`ToolHost::call_tool`], while the `read` and
-//! `list` tools operate directly on a lent workspace. When the request asks
-//! for a `check`, each final text is offered to the guest through
+//! conversation and drives it within the configured round budget. Guest
+//! function calls are delegated through [`ToolHost::call_tool`], the `read`
+//! and `list` tools operate directly on a lent workspace, and a workspace
+//! lent under a shell root adds a `shell` tool whose commands run inside the
+//! sandbox session prepared for the completion. When the request asks for a
+//! `check`, each final text is offered to the guest through
 //! [`ToolHost::check`]; a rejection stays in the conversation with the
 //! guest's correction as the next user turn, and the loop goes round.
 
 mod conversation;
 mod observe;
 mod options;
+mod shell;
 mod tools;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use conversation::Conversation;
-use omnia_wasi_model::{Answer, Format, FutureResult, Request, ToolHost, WasiModelCtx};
+use omnia_sandbox::{Access, Denied, Grant, Session};
+use omnia_wasi_model::{
+    Answer, Error, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx,
+};
 use options::Turn;
+use shell::Shell;
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
 
@@ -40,10 +48,74 @@ impl WasiModelCtx for Client {
 
         Box::pin(
             async move {
-                let turn = Turn::prepare(&request, tool_host.local_path(), &client.model)?;
-                Conversation::new(&client, turn, tool_host).complete().await
+                let (access, session) = client.prepare(&request, tool_host.local_path()).await?;
+                let turn = Turn::prepare(&request, access, &client.model)?;
+                let shell = session.map(|session| {
+                    Shell::new(session, client.shell_timeout, client.limits().max_result_bytes)
+                });
+                Conversation::new(&client, turn, tool_host, shell).complete().await
             }
             .instrument(span),
         )
+    }
+
+    fn limits(&self) -> Limits {
+        Limits {
+            max_tool_calls: self.max_tool_calls,
+            ..Limits::default()
+        }
+    }
+}
+
+impl Client {
+    // A worker grant needs a shell: a worker reaches beyond its workspace
+    // through the commands it runs there, so one over a read-only workspace,
+    // or under a deployment with no shell root, is the request's fault. The
+    // session is kept only where it opens a shell.
+    async fn prepare(
+        &self, request: &Request, workspace: Option<&Path>,
+    ) -> anyhow::Result<(Access, Option<Session>)> {
+        let worker = request.grants.worker.as_ref();
+
+        let Some(sandbox) = &self.sandbox else {
+            let access = if workspace.is_some() { Access::Read } else { Access::Private };
+            if worker.is_some() {
+                let detail = if access.is_lent() {
+                    "worker grant needs a shell: no shell root is configured"
+                } else {
+                    "worker grant needs a workspace"
+                };
+                return Err(Error::InvalidRequest(detail.to_owned()).into());
+            }
+            return Ok((access, None));
+        };
+
+        let grant = worker.map_or_else(Grant::default, |worker| Grant {
+            egress: worker.egress.clone(),
+            read: worker.read.clone(),
+            env: worker.env.clone(),
+        });
+        let session = sandbox.prepare(workspace, &grant).await.map_err(refusal)?;
+        let access = session.access();
+
+        if worker.is_some() && access != Access::Shell {
+            let detail = if access.is_lent() {
+                "worker grant needs a shell: the workspace is not under a shell root"
+            } else {
+                "worker grant needs a workspace"
+            };
+            return Err(Error::InvalidRequest(detail.to_owned()).into());
+        }
+
+        Ok((access, (access == Access::Shell).then_some(session)))
+    }
+}
+
+// A session the sandbox denied for the grant's fault is the request's; a host
+// failure stays the backend's.
+fn refusal(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast::<Denied>() {
+        Ok(denied) => Error::InvalidRequest(format!("worker grant: {denied}")).into(),
+        Err(error) => error,
     }
 }

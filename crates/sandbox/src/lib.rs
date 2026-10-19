@@ -13,7 +13,7 @@ use std::{env, fmt, io};
 
 use anyhow::{Context as _, Result, bail};
 
-pub use crate::child::{Child, Exit};
+pub use crate::child::{Child, Exit, TimedOut};
 pub use crate::session::{Access, Command, Session};
 
 // The kernel boundary around a process: Landlock and seccomp on Linux,
@@ -72,7 +72,7 @@ const STORES: &[&str] = &[
 ///
 /// [`Sandbox::connect`] validates the [`Options`] against the host and reads
 /// what a process inherits. [`Sandbox::prepare`] then validates one
-/// process's [`Grant`] and prepares the [`Session`] it runs in.
+/// session's [`Grant`] and prepares the [`Session`] its processes run in.
 pub struct Sandbox {
     options: Options,
     inherited: BTreeMap<OsString, OsString>,
@@ -130,16 +130,16 @@ impl Sandbox {
         &self.options
     }
 
-    /// Prepares the [`Session`] one process runs in: its working directory,
-    /// its environment, and what `grant` opens to it.
+    /// Prepares the [`Session`] a completion's processes run in: their
+    /// working directory, their environment, and what `grant` opens to them.
     ///
-    /// The process works in `workspace`, created and canonicalised, or in a
+    /// The processes work in `workspace`, created and canonicalised, or in a
     /// private directory when none is given. A workspace at or beneath one
     /// of the connected `shell_roots` runs with [`Access::Shell`], any other
     /// workspace with [`Access::Read`], and a private directory with
     /// [`Access::Private`].
     ///
-    /// Its environment is built from nothing:
+    /// Their environment is built from nothing:
     ///
     /// - the host's variables, as read at connect
     /// - `HOME` and `TMPDIR`, a scratch directory of its own, removed once

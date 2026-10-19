@@ -1,5 +1,5 @@
-//! The session one process runs in: its working directory, its scratch, its
-//! environment, and the command that spawns it there.
+//! The session a completion's processes run in: their working directory,
+//! their scratch, their environment, and the commands that spawn them there.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -20,17 +20,21 @@ use crate::child::{self, Child};
 use crate::proxy::Proxy;
 use crate::{Grant, Kernel, Sandbox};
 
-/// The session one process runs in: where it works, what it inherits, and
-/// what its grant opened.
+/// The session a completion's processes run in: where they work, what they
+/// inherit, and what their grant opened.
 ///
-/// [`Session::command`] builds the [`Command`] that runs a program inside
-/// it. The scratch directory and the egress proxy live as long as the
-/// process the command runs.
-pub struct Session {
+/// [`Session::command`] builds a [`Command`] that runs a program inside the
+/// session, as many times as the caller asks. A `Session` is a handle: a
+/// clone names the same session, and the scratch directory and the egress
+/// proxy live as long as any handle or any process a command ran.
+#[derive(Clone)]
+pub struct Session(Arc<Inner>);
+
+struct Inner {
     cwd: PathBuf,
     access: Access,
     scratch: PathBuf,
-    // Removes the scratch as the session is dropped.
+    // Removes the scratch as the last handle is dropped.
     _scratch_dir: TempDir,
     dir: File,
     env: BTreeMap<OsString, OsString>,
@@ -90,7 +94,7 @@ impl Session {
         let proxy = Proxy::bind(&grant.egress).await?;
         let env = sandbox.environment(&scratch, proxy.address(), &grant.env)?;
 
-        Ok(Self {
+        Ok(Self(Arc::new(Inner {
             cwd,
             access,
             scratch,
@@ -101,34 +105,35 @@ impl Session {
             kernel: Arc::clone(sandbox.kernel()),
             read,
             proxy,
-        })
+        })))
     }
 
-    /// The directory the process works in, canonical.
+    /// The directory the processes work in, canonical.
     #[must_use]
     pub fn cwd(&self) -> &Path {
-        &self.cwd
+        &self.0.cwd
     }
 
-    /// What the process may do in its working directory.
+    /// What the processes may do in their working directory.
     #[must_use]
-    pub const fn access(&self) -> Access {
-        self.access
+    pub fn access(&self) -> Access {
+        self.0.access
     }
 
-    /// The process's own scratch directory: its `HOME` and `TMPDIR`.
+    /// The session's own scratch directory: the processes' `HOME` and
+    /// `TMPDIR`.
     #[must_use]
     pub fn scratch(&self) -> &Path {
-        &self.scratch
+        &self.0.scratch
     }
 
-    /// The directories the process reads beside the system's, its working
-    /// directory, and its scratch.
+    /// The directories the processes read beside the system's, their working
+    /// directory, and their scratch.
     ///
     /// These are the grant's `read` roots that exist, canonical.
     #[must_use]
     pub fn read_roots(&self) -> &[PathBuf] {
-        &self.read
+        &self.0.read
     }
 
     /// A command running `program` inside the session.
@@ -140,6 +145,8 @@ impl Session {
     /// - A bare `program` is resolved against the host's `PATH` as
     ///   connecting read it, never one the grant set. An absent one is
     ///   refused before any spawn, and no grant chooses the program.
+    /// - The command holds a handle on the session, so the session outlives
+    ///   the process however the caller's handle goes.
     ///
     /// # Errors
     ///
@@ -147,28 +154,28 @@ impl Session {
     ///
     /// - a bare `program` is not on the host's `PATH`
     /// - the kernel boundary cannot be laid over the working directory
-    pub fn command(self, program: &str) -> Result<Command> {
+    pub fn command(&self, program: &str) -> Result<Command> {
         let program = if program.contains('/') {
             PathBuf::from(program)
         } else {
-            env::split_paths(&self.path)
+            env::split_paths(&self.0.path)
                 .map(|dir| dir.join(program))
                 .find(|path| executable(path))
                 .with_context(|| format!("`{program}` is not on PATH"))?
         };
 
-        let mut inner = self.kernel.command(&Place {
-            cwd: &self.cwd,
-            scratch: &self.scratch,
+        let mut inner = self.0.kernel.command(&Place {
+            cwd: &self.0.cwd,
+            scratch: &self.0.scratch,
             program: &program,
-            read: &self.read,
-            dir: self.dir.as_raw_fd(),
+            read: &self.0.read,
+            dir: self.0.dir.as_raw_fd(),
         })?;
 
-        inner.env_clear().envs(&self.env);
+        inner.env_clear().envs(&self.0.env);
 
         Ok(Command {
-            session: self,
+            session: self.clone(),
             inner,
             ready: None,
         })
@@ -178,20 +185,20 @@ impl Session {
 impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Session")
-            .field("cwd", &self.cwd)
-            .field("access", &self.access)
-            .field("scratch", &self.scratch)
-            .field("read", &self.read)
-            .field("proxy", &self.proxy)
+            .field("cwd", &self.0.cwd)
+            .field("access", &self.0.access)
+            .field("scratch", &self.0.scratch)
+            .field("read", &self.0.read)
+            .field("proxy", &self.0.proxy)
             .finish_non_exhaustive()
     }
 }
 
-/// What a process may do in its working directory.
+/// What a session's processes may do in their working directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
-    /// No workspace was lent: the process works in a private directory
-    /// under its scratch.
+    /// No workspace was lent: the processes work in a private directory
+    /// under the scratch.
     Private,
     /// A workspace lent outside every shell root: for reading, with no
     /// shell.
@@ -214,7 +221,8 @@ impl Access {
 /// [`Command::env`], [`Command::arg`] and [`Command::args`] add to them.
 /// [`Command::spawn`] starts a supervised [`Child`], and
 /// [`Command::output`] runs the program once and captures what it wrote.
-/// Either takes the session with it, which lives as long as the process.
+/// Either takes the command's handle on the session with it, so the
+/// session lives at least as long as the process.
 pub struct Command {
     session: Session,
     inner: tokio::process::Command,
@@ -280,7 +288,7 @@ impl Command {
     ///
     /// - the process cannot be spawned
     /// - it has not exited within `bound`, in which case it is killed with
-    ///   everything it forked
+    ///   everything it forked and the error downcasts to [`TimedOut`](crate::TimedOut)
     pub async fn output(self, bound: Duration) -> Result<Output> {
         // the session outlives the run
         let Self {

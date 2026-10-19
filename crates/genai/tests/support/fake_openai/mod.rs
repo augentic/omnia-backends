@@ -30,11 +30,12 @@ pub enum Script {
     Echo,
     /// Request `n` gets `replies[n]`; the last reply repeats.
     Replies(Vec<String>),
-    /// A conversation's first request gets one call of `name` with `args`;
-    /// the request carrying the tool's result gets that result as the
-    /// answer — a repairable failure line rephrased as `tool failed:
-    /// reason`, the phrasing the shared guests expect.
-    ToolCalls { name: String, args: Value },
+    /// A conversation's requests get one call of `calls` each, in order,
+    /// the request carrying `n` tool results the call after them; the
+    /// request carrying every result gets `answer`, or without one the last
+    /// result as the answer — a repairable failure line rephrased as `tool
+    /// failed: reason`, the phrasing the shared guests expect.
+    ToolCalls { calls: Vec<(String, Value)>, answer: Option<String> },
 }
 
 /// How every request fails, when one does.
@@ -75,14 +76,28 @@ impl Config {
     }
 
     pub fn tool(name: &str, args: Value) -> Self {
+        Self::calls([(name, args)])
+    }
+
+    pub fn calls<'n>(calls: impl IntoIterator<Item = (&'n str, Value)>) -> Self {
         Self {
             script: Script::ToolCalls {
-                name: name.to_owned(),
-                args,
+                calls: calls.into_iter().map(|(name, args)| (name.to_owned(), args)).collect(),
+                answer: None,
             },
             fault: None,
             gate: None,
         }
+    }
+
+    /// The answer the request after the last tool result gets, in place of
+    /// the result itself.
+    #[must_use]
+    pub fn answering(mut self, answer: &str) -> Self {
+        if let Script::ToolCalls { answer: scripted, .. } = &mut self.script {
+            *scripted = Some(answer.to_owned());
+        }
+        self
     }
 
     #[must_use]
@@ -363,16 +378,23 @@ async fn handle(
             let reply = replies.get(round).or_else(|| replies.last());
             completion(Some(reply.map_or("", String::as_str)), None)
         }
-        Script::ToolCalls { name, args } => {
-            let call = json!([{
-                "id": format!("call_{}", round + 1),
-                "type": "function",
-                "function": { "name": name, "arguments": args.to_string() },
-            }]);
-            recorded.last("tool").map_or_else(
-                || completion(None, Some(call)),
-                |result| completion(Some(&answer_from(&result)), None),
-            )
+        Script::ToolCalls { calls, answer } => {
+            // the results the conversation carries count the calls answered
+            let answered = recorded.messages().iter().filter(|(role, _)| role == "tool").count();
+            if let Some((name, args)) = calls.get(answered) {
+                completion(
+                    None,
+                    Some(json!([{
+                        "id": format!("call_{}", answered + 1),
+                        "type": "function",
+                        "function": { "name": name, "arguments": args.to_string() },
+                    }])),
+                )
+            } else {
+                let result = recorded.last("tool").unwrap_or_default();
+                let text = answer.clone().unwrap_or_else(|| answer_from(&result));
+                completion(Some(&text), None)
+            }
         }
     };
     Ok(in_flight.answer(json_response(StatusCode::OK, Bytes::from(body.to_string()))))

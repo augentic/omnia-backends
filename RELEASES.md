@@ -156,21 +156,27 @@ Unreleased
   or a file; a variable the sandbox sets, one the dynamic loader or a
   runtime reads at startup, one inherited from the host, or no name at
   all) with the typed `Denied`, which a backend tells from a host
-  failure. The `Session`'s `access` says what its working directory
-  admits — `Private`, `Read`, or `Shell` for a workspace under a shell
-  root — and its `command` consumes it for a `Command` scoped to it: the
-  bare program resolved against the host's `PATH` rather than the
-  grant's, run in the workspace's open directory handle, as a session
-  leader, with an environment built from nothing (`PATH`, `LANG`,
-  `LC_*`, `TZ`, `TERM`, a private `HOME` and `TMPDIR`, the proxy
-  variables, the `inherit`, and the grant's `env`), with `arg`, `args`,
-  `env` and `ready_prefix` the only knobs. `Command::spawn` supervises
-  the process as a `Child` — the supervisor lifted from `omnia-cursor`'s
-  worker, which holds the session until the process is gone — and
-  `Command::output` runs it once under a bound, each stream capped at
-  sixteen mebibytes and the rest drained, killing what the process forked
-  once it has exited so a fork left holding the pipes neither delays the
-  exit nor outlives it. `Exit` is an `Error`. The kernel holds the
+  failure. The `Session` is a handle — a clone names the same session,
+  and its scratch and proxy live as long as any handle or any process a
+  command ran — whose `access` says what its working directory admits —
+  `Private`, `Read`, or `Shell` for a workspace under a shell root — and
+  whose `command` borrows it for a `Command` scoped to it, as many times
+  as a completion's commands ask, so a build's `cargo check` and its
+  `cargo test` run in one `HOME` with one cache: the bare program
+  resolved against the host's `PATH` rather than the grant's, run in the
+  workspace's open directory handle, as a session leader, with an
+  environment built from nothing (`PATH`, `LANG`, `LC_*`, `TZ`, `TERM`,
+  a private `HOME` and `TMPDIR`, the proxy variables, the `inherit`, and
+  the grant's `env`), with `arg`, `args`, `env` and `ready_prefix` the
+  only knobs. `Command::spawn` supervises the process as a `Child` — the
+  supervisor lifted from `omnia-cursor`'s worker, which holds the session
+  until the process is gone — and `Command::output` runs it once under a
+  bound, each stream capped at sixteen mebibytes and the rest drained,
+  killing what the process forked once it has exited so a fork left
+  holding the pipes neither delays the exit nor outlives it, and failing
+  with the typed `TimedOut` where the process outlived the bound, so a
+  caller tells a run cut short from one that never started. `Exit` is an
+  `Error`. The kernel holds the
   process to its workspace, its scratch, the system, and the grant's read
   roots, always, with no setting to turn it off: on macOS a Seatbelt
   profile rendered from Codex's base policy and applied through
@@ -234,6 +240,56 @@ Unreleased
   an `npm install` through the proxy under a request's egress grant. The
   fake bridge the suites spawn runs inside the sandbox as the real one
   does, its script and log in a home every guest lends.
+- `omnia-genai` runs a shell under `omnia-sandbox`, so a model served at
+  `GENAI_ENDPOINT` — a local Ollama under a bare model name, a vLLM or
+  any `OpenAI`-compatible server under `openai::<name>` — builds and
+  tests a tree as the Cursor backend's agent does: `ConnectOptions` gains
+  `shell_roots`
+  (`GENAI_SHELL_ROOTS`, `:`-separated, none by default), and a workspace
+  lent at or beneath one is advertised a `shell` tool beside `read` and
+  `list` — `sh -c <command>`, resolved on the host's `PATH`, in the lend
+  as its working directory and as `$WORKSPACE`, inside one sandbox
+  session per completion, so every command of a turn shares one scratch
+  `HOME` and one egress proxy — its result what the command wrote, its
+  stderr after `--- stderr ---` when any, its exit after `--- exit ---`
+  when not clean (`exit 3`, `killed by signal 9`; a silent clean command
+  reads `exit 0`), cut to the host's result cap keeping its head and
+  tail with the omitted count between them, and a command past
+  `shell_timeout_secs` (`GENAI_SHELL_TIMEOUT_SECS`, default `600`)
+  killed with everything it started and the model told so as a result
+  it can act on. What the shell reaches beyond the lend is the
+  completion's `grants.worker`, prepared as the session's `Grant` under
+  the sandbox's rules and refused as the Cursor backend refuses it — a
+  grant over a lend under no shell root, over no lend, or under a
+  deployment with no shell root at all is `invalid-request` before any
+  request, and a `Denied` grant is `invalid-request` in the sandbox's
+  words — with the provider keys the SDK reads (`OPENAI_API_KEY` and its
+  siblings) refused as a grant's `env`, and `USER`, `LOGNAME`,
+  `SSL_CERT_FILE`, and `SSL_CERT_DIR` the shell's inheritance beyond
+  `PATH`; with no shell root configured no kernel boundary is set up and
+  the backend runs as before. A guest tool named `shell` is
+  `invalid-request`, as one named `read` is the host's. The budgets are
+  two, as the Cursor backend's are: `max_rounds` (`GENAI_MAX_ROUNDS`,
+  default `128`) bounds the provider round-trips one completion makes,
+  a tool round, a candidate, or a correction each one, and a rejected
+  `check` candidate is corrected once, the second rejection the typed
+  `budget-exhausted` carrying the correction, so a correction counts the
+  same under either backend; `max_tool_calls` (`GENAI_MAX_TOOL_CALLS`,
+  default `128`) is answered to the host through `WasiModelCtx::limits`,
+  as the Cursor backend's is. The log carries each command as the Cursor
+  backend's stream does — `tool call tool=shell subject=…` before it and
+  `tool call completed tool=shell subject=… result_bytes=… exit=…
+  duration_ms=…` after — and the `completion` line gains `model_ms` and
+  `tool_ms`, the time waited on the provider and the time spent in tool
+  rounds, so a scorecard over the log tells a slow model from a slow
+  build. The `model` suite's fake provider scripts a list of tool calls
+  and a scripted final answer, and its shell rows run real commands
+  inside the sandbox: the grant's variable, the proxy, and `$WORKSPACE`
+  seen from inside, nothing of the host's environment, a failing exit
+  and a signal rendered, a command past the bound killed with its fork,
+  two commands in one session, and the refusals; `tests/live.rs` gains
+  an ignored row running `cargo --version` under the Rust toolchain's
+  grant.
 
 ### Changed
 

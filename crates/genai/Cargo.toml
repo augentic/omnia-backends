@@ -23,11 +23,13 @@ anyhow.workspace = true
 fromenv.workspace = true
 genai = "0.6.5"
 omnia.workspace = true
+omnia-sandbox.workspace = true
 omnia-wasi-model.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 
 # Integration tests are separate crates and do not inherit the library's normal
@@ -41,6 +43,7 @@ futures.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
+libc.workspace = true
 omnia-test = { workspace = true, features = ["host"] }
 test-programs.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

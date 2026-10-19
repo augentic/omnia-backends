@@ -1,9 +1,13 @@
 //! Provider conversation loop.
 //!
-//! Tool calls and rejected checks may add further provider rounds. All
-//! rounds share one budget, bounding cost and guaranteeing termination.
+//! Tool calls and rejected checks each add a provider round. Every round
+//! draws on the configured round budget, so a completion terminates; a
+//! rejected candidate draws on the candidate budget beside it, so a model
+//! that cannot satisfy the check is ended with the correction rather than
+//! asked again until the rounds run out.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ToolCall, ToolResponse};
@@ -14,13 +18,14 @@ use serde_json::Value;
 
 use super::observe::{self, Completion, Failure};
 use super::options::Turn;
+use super::shell::Shell;
 use super::tools;
 use crate::Client;
 
-// Maximum provider round-trips per completion. A rejected `check` on the
-// final round surfaces as `Error::BudgetExhausted`; exhausting all rounds in
-// tool calls without a final text surfaces as `Failure::Exhausted`.
-const MAX_ROUNDS: usize = 8;
+// Candidates one completion may offer the guest's check: a rejection of the
+// last is the typed `budget-exhausted` carrying the correction, the figure
+// the cursor backend's, so a correction counts the same under either.
+const MAX_CANDIDATES: u32 = 2;
 
 pub struct Conversation {
     client: genai::Client,
@@ -30,13 +35,17 @@ pub struct Conversation {
     format: Format,
     check: bool,
     tool_host: Arc<dyn ToolHost>,
+    shell: Option<Shell>,
+    max_rounds: usize,
     max_result_bytes: usize,
     transcript: Transcript,
     completion: Option<Completion>,
 }
 
 impl Conversation {
-    pub fn new(client: &Client, turn: Turn, tool_host: Arc<dyn ToolHost>) -> Self {
+    pub fn new(
+        client: &Client, turn: Turn, tool_host: Arc<dyn ToolHost>, shell: Option<Shell>,
+    ) -> Self {
         let completion = Completion::from(&turn);
 
         Self {
@@ -47,6 +56,8 @@ impl Conversation {
             format: turn.format,
             check: turn.check,
             tool_host,
+            shell,
+            max_rounds: client.max_rounds,
             max_result_bytes: client.limits().max_result_bytes,
             transcript: Transcript::default(),
             completion: Some(completion),
@@ -68,12 +79,17 @@ impl Conversation {
     }
 
     async fn run(&mut self) -> Result<Answer> {
-        for round in 1..=MAX_ROUNDS {
+        let mut candidates = 0;
+        for round in 1..=self.max_rounds {
+            let asked = Instant::now();
             let response = self
                 .client
                 .exec_chat(&self.model, self.chat.clone(), Some(&self.options))
                 .await
                 .with_context(|| format!("genai exec_chat failed for model `{}`", self.model))?;
+            if let Some(completion) = &mut self.completion {
+                completion.model_time(asked.elapsed());
+            }
 
             let text = response.first_text().map(ToOwned::to_owned);
             let usage = to_usage(&response.usage);
@@ -88,6 +104,7 @@ impl Conversation {
                 bail!("genai returned neither content nor tool calls (model `{}`)", self.model);
             };
 
+            candidates += 1;
             if let Some(completion) = &mut self.completion {
                 completion.attempt();
                 completion.record(text.len(), self.transcript.turns.len(), usage.as_ref());
@@ -101,8 +118,9 @@ impl Conversation {
             match self.tool_host.check(candidate.clone()).await? {
                 Ok(()) => return Ok(self.answer(candidate, usage)),
                 // The guest's correction is the model's next turn, verbatim;
-                // on the last round it is the typed failure the guest sees.
-                Err(correction) if round == MAX_ROUNDS => {
+                // with no candidate or round left it is the typed failure
+                // the guest sees.
+                Err(correction) if candidates >= MAX_CANDIDATES || round == self.max_rounds => {
                     bail!(Error::BudgetExhausted(correction));
                 }
                 Err(correction) => {
@@ -119,14 +137,23 @@ impl Conversation {
             }
         }
 
-        Err(Failure::Exhausted { rounds: MAX_ROUNDS }.into())
+        Err(Failure::Exhausted {
+            rounds: self.max_rounds,
+        }
+        .into())
     }
 
     async fn tool_round(&mut self, tool_calls: Vec<ToolCall>) -> Result<()> {
+        let started = Instant::now();
         let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
         for call in tool_calls {
-            let result =
-                tools::dispatch_tool(&self.tool_host, &call, self.max_result_bytes).await?;
+            let result = tools::dispatch_tool(
+                &self.tool_host,
+                self.shell.as_ref(),
+                &call,
+                self.max_result_bytes,
+            )
+            .await?;
             self.transcript.turns.push(ToolTurn {
                 tool: call.fn_name,
                 args: call.fn_arguments,
@@ -135,6 +162,9 @@ impl Conversation {
             chat = chat.append_message(ToolResponse::new(call.call_id, result));
         }
         self.chat = chat;
+        if let Some(completion) = &mut self.completion {
+            completion.tool_time(started.elapsed());
+        }
         Ok(())
     }
 

@@ -7,10 +7,13 @@
 
 mod support;
 
-use omnia_test::host::scratch;
+use std::path::PathBuf;
+
+use omnia_genai::ConnectOptions;
+use omnia_test::host::{Scratch, scratch};
 use serde_json::json;
 use support::fake_openai::{self, Config, FakeOpenAi, Fault};
-use support::harness::{client, expect_error, run_guest, run_guest_over};
+use support::harness::{client, client_with, expect_error, run_guest, run_guest_over};
 
 // Every guest program in `crates/test-programs` must have a matching test
 // here; a new program without one fails to compile.
@@ -21,8 +24,47 @@ test_programs::foreach_model!();
 // correction quotes them verbatim.
 const PASS: &str = r#"{"findings":[],"verdict":"pass"}"#;
 const FAIL: &str = r#"{"findings":["x"],"verdict":"fail"}"#;
-// The backend's bound on provider round-trips per completion.
-const MAX_ROUNDS: usize = 8;
+// The backend's bound on the candidates one completion offers a check.
+const MAX_CANDIDATES: usize = 2;
+
+// A scratch with `tree/` to lend, and the shell roots that put it under one.
+fn tree() -> (Scratch, Vec<PathBuf>) {
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    let roots = vec![scratch.path().join("tree")];
+    (scratch, roots)
+}
+
+// The working directory a shell in `tree/` sees: the lend, canonical.
+fn cwd_of(scratch: &Scratch) -> String {
+    std::fs::canonicalize(scratch.path().join("tree"))
+        .expect("the tree exists")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn shelled(roots: Vec<PathBuf>) -> ConnectOptions {
+    ConnectOptions {
+        shell_roots: roots,
+        ..ConnectOptions::default()
+    }
+}
+
+// The `worker` guest over `tree/`, with `grant` and the fake's script.
+async fn worker(
+    config: Config, scratch: &Scratch, options: ConnectOptions, grant: &[&str],
+) -> FakeOpenAi {
+    let fake = FakeOpenAi::serve(config).await;
+    let client = client_with(&fake, options).await;
+    let mut args = grant.to_vec();
+    args.push("lend=./tree");
+    run_guest_over(test_programs::MODEL_WORKER, &args, &client, [scratch.mount(false)]).await;
+    fake
+}
+
+fn shell(command: &str) -> Config {
+    Config::calls([("shell", json!({ "command": command }))]).answering("hi")
+}
 
 #[tokio::test]
 async fn model_echo_text() {
@@ -61,20 +103,231 @@ async fn model_lend() {
     assert_eq!(requests[0].tools(), ["read", "list"]);
 }
 
-// A worker grant is for the worker a backend runs, and this one runs none:
-// the grant is inert, and the completion runs as any over a lend does.
+// A lend under a shell root advertises the shell beside `read` and `list`,
+// with or without a worker grant.
 #[tokio::test]
-async fn model_worker() {
+async fn model_lend_shell() {
     let fake = FakeOpenAi::serve(Config::echo()).await;
-    let client = client(&fake).await;
-    let scratch = scratch();
-    scratch.write("tree/.keep", "");
-    let grant = ["env:OMNIA_TEST_TOOLS=rust", "egress:registry.npmjs.org", "lend=./tree"];
-    run_guest_over(test_programs::MODEL_WORKER, &grant, &client, [scratch.mount(false)]).await;
+    let (scratch, roots) = tree();
+    let client = client_with(&fake, shelled(roots)).await;
+    run_guest_over(test_programs::MODEL_LEND, &["./tree"], &client, [scratch.mount(false)]).await;
 
     let requests = fake.requests();
     assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].tools(), ["read", "list", "shell"]);
+}
+
+// A worker grant over a lend under a shell root opens the shell on it: the
+// command runs in the lend, behind the session's proxy, with the grant's
+// variable set and the lend as `$WORKSPACE`.
+#[tokio::test]
+async fn model_worker() {
+    let (scratch, roots) = tree();
+    let fake = worker(
+        shell(r#"printf '%s %s %s %s' "$OMNIA_TEST_TOOLS" "${HTTPS_PROXY%%://*}" "$WORKSPACE" "$(pwd)""#),
+        &scratch,
+        shelled(roots),
+        &["env:OMNIA_TEST_TOOLS=rust", "egress:registry.npmjs.org"],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].tools(), ["read", "list", "shell"]);
+    let cwd = cwd_of(&scratch);
+    assert_eq!(requests[1].last("tool"), Some(format!("rust http {cwd} {cwd}")));
+}
+
+// Nothing of the host's environment reaches the shell: not a planted
+// variable, not the provider key the SDK reads.
+#[tokio::test]
+async fn model_worker_shell_env() {
+    let (scratch, roots) = tree();
+    let fake = worker(
+        shell(r#"printf '%s|%s|%s' "$OPENAI_API_KEY" "$HOME" "$USER""#),
+        &scratch,
+        shelled(roots),
+        &["env:OMNIA_TEST_TOOLS=rust"],
+    )
+    .await;
+
+    let result = fake.requests()[1].last("tool").expect("the shell answered");
+    let (key, rest) = result.split_once('|').expect("three fields");
+    let (home, user) = rest.split_once('|').expect("three fields");
+    assert_eq!(key, "", "the provider key stays out: {result}");
+    assert_ne!(home, std::env::var("HOME").unwrap_or_default(), "HOME is the session's scratch");
+    assert!(!home.is_empty(), "HOME is set: {result}");
+    assert_eq!(user, std::env::var("USER").unwrap_or_default(), "USER is inherited");
+}
+
+// A worker grant over a lend outside every shell root is the request's fault.
+#[tokio::test]
+async fn model_worker_read_only() {
+    let (scratch, _) = tree();
+    let elsewhere = vec![scratch.path().join("elsewhere")];
+    let fake = worker(
+        Config::echo(),
+        &scratch,
+        shelled(elsewhere),
+        &["env:OMNIA_TEST_TOOLS=rust", "refused:not under a shell root"],
+    )
+    .await;
+    assert!(fake.requests().is_empty(), "refused before any request");
+}
+
+// With no shell root configured the sandbox is never set up, so a worker
+// grant has no shell to open; a lend without one still reads, as
+// `model_lend` has it.
+#[tokio::test]
+async fn model_worker_unrooted() {
+    let (scratch, _) = tree();
+    let fake = worker(
+        Config::echo(),
+        &scratch,
+        ConnectOptions::default(),
+        &["env:OMNIA_TEST_TOOLS=rust", "refused:no shell root is configured"],
+    )
+    .await;
+    assert!(fake.requests().is_empty(), "refused before any request");
+}
+
+// The sandbox's own rules hold the grant: a `~/` root over a credential
+// store is denied as `invalid-request`, in the sandbox's words.
+#[tokio::test]
+async fn model_worker_denied() {
+    let (scratch, roots) = tree();
+    let fake = worker(
+        Config::echo(),
+        &scratch,
+        shelled(roots),
+        &["read:~/.ssh", "refused:worker grant: "],
+    )
+    .await;
+    assert!(fake.requests().is_empty(), "refused before any request");
+}
+
+// What a failing command wrote comes back whole, its stderr and its exit
+// marked; a clean command that wrote nothing reads `exit 0`.
+#[tokio::test]
+async fn model_worker_shell_exit() {
+    let (scratch, roots) = tree();
+    let fake = worker(
+        Config::calls([
+            ("shell", json!({ "command": "echo out; echo err >&2; exit 3" })),
+            ("shell", json!({ "command": "true" })),
+            ("shell", json!({ "command": "kill -9 $$" })),
+        ])
+        .answering("hi"),
+        &scratch,
+        shelled(roots.clone()),
+        &[],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 4);
+    let results: Vec<_> =
+        requests[1..].iter().map(|request| request.last("tool").expect("a tool result")).collect();
+    assert_eq!(
+        results,
+        [
+            "out\n--- stderr ---\nerr\n--- exit ---\nexit 3",
+            "exit 0",
+            "--- exit ---\nkilled by signal 9",
+        ]
+    );
+}
+
+// A command past the bound is killed, with what it started, and the model
+// told so as the result rather than the completion failing.
+#[tokio::test]
+async fn model_worker_shell_bound() {
+    let (scratch, roots) = tree();
+    let fake = worker(
+        shell("sleep 30 & echo $! > pid; wait"),
+        &scratch,
+        ConnectOptions {
+            shell_timeout_secs: 1,
+            ..shelled(roots)
+        },
+        &[],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].last("tool").as_deref(),
+        Some("the command did not exit within 1s and was killed with everything it started")
+    );
+    let pid = scratch.read("tree/pid").expect("the sleep's pid was written");
+    let pid: u32 = String::from_utf8_lossy(&pid).trim().parse().expect("a pid");
+    fake_openai::poll(
+        || !alive(pid),
+        std::time::Duration::from_secs(8),
+        &format!("the sleep ({pid}) to be gone"),
+    )
+    .await;
+}
+
+// Every command of one completion runs in one session: the second finds
+// what the first left in `$HOME`.
+#[tokio::test]
+async fn model_worker_shell_shared() {
+    let (scratch, roots) = tree();
+    let fake = worker(
+        Config::calls([
+            ("shell", json!({ "command": "echo one > \"$HOME/mark\"" })),
+            ("shell", json!({ "command": "cat \"$HOME/mark\"" })),
+        ])
+        .answering("hi"),
+        &scratch,
+        shelled(roots),
+        &[],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[2].last("tool").as_deref(), Some("one\n"));
+}
+
+// A shell call where no shell was advertised is answered as the model's
+// slip, not the completion's failure.
+#[tokio::test]
+async fn model_lend_shell_unadvertised() {
+    let fake = FakeOpenAi::serve(shell("pwd")).await;
+    let client = client(&fake).await;
+    let (scratch, _) = tree();
+    run_guest_over(test_programs::MODEL_LEND, &["./tree"], &client, [scratch.mount(false)]).await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].tools(), ["read", "list"]);
+    assert_eq!(
+        requests[1].last("tool").as_deref(),
+        Some("tool `shell` failed: no shell on this workspace")
+    );
+}
+
+// A guest tool named `shell` would be shadowed where a shell is advertised,
+// so the name is the backend's whatever the lend.
+#[tokio::test]
+async fn model_shell_reserved() {
+    let fake = FakeOpenAi::serve(Config::echo()).await;
+    let client = client(&fake).await;
+    expect_error("tool `shell` is reserved", &["tool:shell", "invalid"], &client).await;
+    assert!(fake.requests().is_empty(), "refused before any request");
+}
+
+// Whether `pid` is still running, by a signal-0 probe.
+#[expect(unsafe_code, reason = "a signal-0 probe is the one portable liveness check for a pid")]
+fn alive(pid: u32) -> bool {
+    let Ok(signed) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 probes for existence and delivers nothing.
+    unsafe { libc::kill(signed, 0) == 0 }
 }
 
 #[tokio::test]
@@ -120,12 +373,31 @@ async fn model_check_exhausted() {
     run_guest(test_programs::MODEL_CHECK_EXHAUSTED, &[], &client).await;
 
     // Every round offered a candidate; each request carries every rejected
-    // candidate and correction before it.
+    // candidate and correction before it, and the last rejection ends the
+    // completion with rounds to spare.
     let requests = fake.requests();
-    assert_eq!(requests.len(), MAX_ROUNDS);
+    assert_eq!(requests.len(), MAX_CANDIDATES);
     for (index, request) in requests.iter().enumerate() {
         assert_eq!(request.messages().len(), 1 + 2 * index, "request {index}");
     }
+}
+
+// The round budget bounds a completion that never answers: a model calling
+// tools forever is ended as exhausted once the rounds are spent.
+#[tokio::test]
+async fn model_rounds_exhausted() {
+    let fake =
+        FakeOpenAi::serve(Config::calls(std::iter::repeat_n(("lookup", json!({})), 8))).await;
+    let client = client_with(
+        &fake,
+        ConnectOptions {
+            max_rounds: 3,
+            ..ConnectOptions::default()
+        },
+    )
+    .await;
+    expect_error("no answer after 3 model round-trips", &["tools"], &client).await;
+    assert_eq!(fake.requests().len(), 3);
 }
 
 #[tokio::test]

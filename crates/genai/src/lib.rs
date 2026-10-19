@@ -27,6 +27,7 @@ pub struct Client {
     sandbox: Option<Arc<Sandbox>>,
     max_rounds: usize,
     max_tool_calls: u32,
+    max_candidates: u32,
     cap: Duration,
     shell_timeout: Duration,
 }
@@ -38,6 +39,7 @@ impl std::fmt::Debug for Client {
             .field("sandbox", &self.sandbox)
             .field("max_rounds", &self.max_rounds)
             .field("max_tool_calls", &self.max_tool_calls)
+            .field("max_candidates", &self.max_candidates)
             .field("cap", &self.cap)
             .field("shell_timeout", &self.shell_timeout)
             .finish_non_exhaustive()
@@ -51,6 +53,7 @@ impl Backend for Client {
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
         ensure!(options.max_rounds > 0, "max_rounds must be greater than 0");
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
+        ensure!(options.max_candidates > 0, "max_candidates must be greater than 0");
         ensure!(options.timeout_secs > 0, "timeout_secs must be greater than 0");
         ensure!(options.shell_timeout_secs > 0, "shell_timeout_secs must be greater than 0");
         let inner = options.build_client()?;
@@ -73,6 +76,7 @@ impl Backend for Client {
             sandbox,
             max_rounds: options.max_rounds,
             max_tool_calls: options.max_tool_calls,
+            max_candidates: options.max_candidates,
             cap: Duration::from_secs(options.timeout_secs),
             shell_timeout: Duration::from_secs(options.shell_timeout_secs),
         })
@@ -91,9 +95,10 @@ mod config {
     /// from the ambient environment per request, routed by the model id's
     /// prefix. Each completion runs within the `max_rounds` provider budget
     /// alongside the `max_tool_calls` guest-tool budget, under the
-    /// `timeout_secs` cap on each reply of the model, and a rejected
-    /// `check` candidate is corrected once: a second rejection ends the
-    /// completion as `budget-exhausted` with the correction.
+    /// `timeout_secs` cap on each reply of the model, and offers the
+    /// guest's `check` at most `max_candidates` candidates: the rejection
+    /// of the last ends the completion as `budget-exhausted` with the
+    /// correction.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
         /// Default model id when a request leaves `model` unset.
@@ -123,6 +128,13 @@ mod config {
         /// `budget-exhausted`; the host's default is 32.
         #[env(from = "GENAI_MAX_TOOL_CALLS", default = "128")]
         pub max_tool_calls: u32,
+        /// Candidates one completion may offer the guest's `check`: a
+        /// rejection of the last is `budget-exhausted` carrying the
+        /// correction, so every candidate but the last is corrected once.
+        /// The default is the cursor backend's figure, so a correction
+        /// counts the same under either.
+        #[env(from = "GENAI_MAX_CANDIDATES", default = "2")]
+        pub max_candidates: u32,
         /// Absolute cap in seconds on one reply of the model: the provider
         /// rounds and tool calls up to its next text, a nudge or a
         /// correction starting a fresh cap. Past it the completion is ended
@@ -151,6 +163,7 @@ impl Default for ConnectOptions {
             shell_roots: Vec::new(),
             max_rounds: 128,
             max_tool_calls: 128,
+            max_candidates: 2,
             timeout_secs: 600,
             shell_timeout_secs: 600,
         }

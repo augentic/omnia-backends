@@ -320,6 +320,13 @@ Unreleased
   capture of their own for the outcome and the bill; `tests/live.rs`
   gains an ignored row running `cargo --version` under the Rust
   toolchain's grant.
+- `omnia-genai`'s candidate budget is a knob: `GENAI_MAX_CANDIDATES`
+  (`ConnectOptions::max_candidates`, default `2`, the figure the Cursor
+  backend keeps) is how many candidates one completion may offer the
+  guest's `check` before the rejection of the last is `budget-exhausted`
+  carrying the correction, so a deployment over a small local model can
+  let a build turn's report be corrected more than once; `0` is refused
+  at connect as the other budgets are.
 
 ### Changed
 

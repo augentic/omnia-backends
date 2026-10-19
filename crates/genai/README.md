@@ -29,9 +29,10 @@ well-formed JSON value is nudged once, with what the parser said of it,
 before any candidate reaches the guest. Three budgets bound a completion,
 and any spent is the typed `budget-exhausted`: every provider round-trip —
 a tool round, a candidate, a nudge, or a correction — draws on `max_rounds`
-(default 128), and a rejected `check` candidate is corrected once, the
-second rejection failing the completion with that correction as the
-detail, the same count the `omnia-cursor` backend keeps; each reply of the
+(default 128), and the guest's `check` is offered at most `max_candidates`
+candidates (default 2, the count the `omnia-cursor` backend keeps), every
+one but the last corrected once and the rejection of the last failing the
+completion with that correction as the detail; each reply of the
 model, the tool rounds before it included, runs under the `timeout_secs`
 cap (default 600), a nudge or a correction starting a fresh one, so a
 provider that never answers or a build that never ends holds no completion
@@ -52,6 +53,7 @@ MSRV: Rust 1.99
 | `GENAI_SHELL_ROOTS` | no | | Trees a lent workspace at or beneath which runs with the `shell` tool, `:`-separated, relative to the invocation directory; none configures no shell |
 | `GENAI_MAX_ROUNDS` | no | `128` | Provider round-trips one completion may make before it is ended as `budget-exhausted` |
 | `GENAI_MAX_TOOL_CALLS` | no | `128` | Guest tool calls one completion may make before `budget-exhausted` (the host's default is 32) |
+| `GENAI_MAX_CANDIDATES` | no | `2` | Candidates one completion may offer the guest's `check`; the rejection of the last is `budget-exhausted` carrying the correction |
 | `GENAI_TIMEOUT_SECS` | no | `600` | Absolute cap in seconds on one reply of the model, tool rounds included, before the completion is ended as `budget-exhausted` |
 | `GENAI_SHELL_TIMEOUT_SECS` | no | `600` | Seconds one `shell` command may run before it is killed |
 | `OPENAI_API_KEY` | per provider | | `OpenAI` API key, read by genai from the ambient environment |
@@ -79,8 +81,12 @@ the prompt alone steers the shape; an `OpenAI`-compatible server (vLLM,
 llama.cpp's) is named under the adapter's namespace
 (`GENAI_MODEL=openai::qwen3-coder GENAI_ENDPOINT=http://127.0.0.1:8000/v1/`)
 with `OPENAI_API_KEY` holding whatever the server expects, any value where
-it checks none, and receives the schema. The URL must be `http://` or
-`https://`; `connect` rejects anything else before a request is made.
+it checks none, and receives the schema. A local server's context length is
+its own setting, since no request carries one: Ollama's
+`OLLAMA_CONTEXT_LENGTH` or a Modelfile's `num_ctx`, vLLM's
+`--max-model-len`; a server left at its default silently truncates a long
+prompt. The URL must be `http://` or `https://`; `connect` rejects anything
+else before a request is made.
 
 `Client::connect()` / `FromEnv` reads the optional variables above; callers
 that need a different default model, endpoint, shell root, or budget pass

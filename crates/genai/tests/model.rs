@@ -484,6 +484,28 @@ async fn model_check_exhausted() {
     }
 }
 
+// The candidate budget is the deployment's: raised, the check is offered
+// that many candidates, each corrected, before the last rejection ends it.
+#[tokio::test]
+async fn model_check_candidates() {
+    let fake = FakeOpenAi::serve(Config::replies([FAIL])).await;
+    let client = client_with(
+        &fake,
+        ConnectOptions {
+            max_candidates: 4,
+            ..ConnectOptions::default()
+        },
+    )
+    .await;
+    run_guest(test_programs::MODEL_CHECK_EXHAUSTED, &[], &client).await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 4);
+    for (index, request) in requests.iter().enumerate() {
+        assert_eq!(request.messages().len(), 1 + 2 * index, "request {index}");
+    }
+}
+
 // The round budget bounds a completion that never answers: a model calling
 // tools forever is ended as exhausted once the rounds are spent.
 #[tokio::test]

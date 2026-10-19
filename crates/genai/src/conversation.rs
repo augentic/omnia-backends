@@ -2,9 +2,9 @@
 //!
 //! Tool calls and rejected checks each add a provider round. Every round
 //! draws on the configured round budget, so a completion terminates; a
-//! rejected candidate draws on the candidate budget beside it, so a model
-//! that cannot satisfy the check is ended with the correction rather than
-//! asked again until the rounds run out. Each reply of the model runs under
+//! rejected candidate draws on the configured candidate budget beside it,
+//! so a model that cannot satisfy the check is ended with the correction
+//! rather than asked again until the rounds run out. Each reply of the model runs under
 //! the configured cap, tool rounds included; a nudge or a correction starts
 //! a fresh one. Either budget spent, or the cap passed, is the typed
 //! `budget-exhausted`: the same request put again would spend it again.
@@ -26,11 +26,6 @@ use crate::observe::{Completion, Phase, Timeout, to_usage};
 use crate::request::{chat_options, chat_request, prompt_bytes};
 use crate::tools::Tools;
 
-// Candidates one completion may offer the guest's check: a rejection of the
-// last is the typed `budget-exhausted` carrying the correction, the figure
-// the cursor backend's, so a correction counts the same under either.
-const MAX_CANDIDATES: u32 = 2;
-
 pub struct Conversation {
     client: genai::Client,
     model: String,
@@ -41,6 +36,7 @@ pub struct Conversation {
     tool_host: Arc<dyn ToolHost>,
     tools: Tools,
     max_rounds: usize,
+    max_candidates: u32,
     cap: Duration,
     round: usize,
     candidates: u32,
@@ -78,6 +74,7 @@ impl Conversation {
             tools: Tools::new(Arc::clone(&tool_host), shell, client.limits().max_result_bytes),
             tool_host,
             max_rounds: client.max_rounds,
+            max_candidates: client.max_candidates,
             cap: client.cap,
             round: 0,
             candidates: 0,
@@ -161,7 +158,7 @@ impl Conversation {
                 // with no candidate or round left it is the typed failure
                 // the guest sees.
                 Err(correction)
-                    if self.candidates >= MAX_CANDIDATES || self.round == self.max_rounds =>
+                    if self.candidates >= self.max_candidates || self.round == self.max_rounds =>
                 {
                     bail!(Error::BudgetExhausted(correction));
                 }

@@ -8,12 +8,12 @@
 //! provider's token counts become the guest's [`Usage`] here too.
 
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use omnia_wasi_model::{Answer, Error, Usage};
 use tokio::sync::watch;
-use tokio::time::{Interval, MissedTickBehavior, interval_at};
+use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 
 use crate::tools::SHELL_TOOL;
 
@@ -118,11 +118,11 @@ impl Outcome {
     }
 }
 
-// The cap passed before the model's reply, while the completion waited on
-// `waiting`.
+// The timeout passed before the model's reply, while the completion waited
+// on `waiting`.
 #[derive(Debug)]
 pub struct Timeout {
-    pub cap_secs: u64,
+    pub after: Duration,
     pub waiting: Phase,
 }
 
@@ -131,7 +131,8 @@ impl fmt::Display for Timeout {
         write!(
             f,
             "completion timed out after {}s waiting on {} (absolute cap on one reply exceeded)",
-            self.cap_secs, self.waiting
+            self.after.as_secs(),
+            self.waiting
         )
     }
 }
@@ -139,10 +140,10 @@ impl fmt::Display for Timeout {
 impl std::error::Error for Timeout {}
 
 impl Timeout {
-    // The error `complete` ends on. The cap is the completion's time budget,
-    // so the guest sees the typed `budget-exhausted` carrying this text: the
-    // same request put again would take as long, where a backend failure
-    // invites a retry. The timeout stays beneath for `Outcome::of`.
+    // The error `complete` ends on. The timeout is the completion's time
+    // budget, so the guest sees the typed `budget-exhausted` carrying this
+    // text: the same request put again would take as long, where a backend
+    // failure invites a retry. The timeout stays beneath for `Outcome::of`.
     pub fn into_error(self) -> anyhow::Error {
         let budget = Error::BudgetExhausted(self.to_string());
         anyhow::Error::new(self).context(budget)
@@ -151,12 +152,12 @@ impl Timeout {
 
 // The wait a completion is in: on what, since when, and how many provider
 // rounds and tool calls it has made.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Activity {
     at: Instant,
     phase: Phase,
-    rounds: usize,
-    tool_calls: usize,
+    rounds: u32,
+    tool_calls: u32,
 }
 
 // One completion's start/finish events: the outcome, what it cost, and
@@ -209,17 +210,16 @@ impl Completion {
     // A wait on the model is a provider round, one on a tool or the shell a
     // tool call.
     pub fn enter(&mut self, phase: Phase) {
-        let mut activity = self.activity.borrow().clone();
-        self.book(&activity);
-
-        activity.at = Instant::now();
-        match &phase {
-            Phase::Model => activity.rounds += 1,
-            Phase::Tool(_) | Phase::Shell => activity.tool_calls += 1,
-            Phase::Check => {}
-        }
-        activity.phase = phase;
-        self.activity.send_replace(activity);
+        self.book();
+        self.activity.send_modify(|activity| {
+            activity.at = Instant::now();
+            match &phase {
+                Phase::Model => activity.rounds += 1,
+                Phase::Tool(_) | Phase::Shell => activity.tool_calls += 1,
+                Phase::Check => {}
+            }
+            activity.phase = phase;
+        });
     }
 
     // What the completion is waiting on right now.
@@ -227,7 +227,9 @@ impl Completion {
         self.activity.borrow().phase.clone()
     }
 
-    fn book(&mut self, activity: &Activity) {
+    // The wait so far on the current phase, into its bucket.
+    fn book(&mut self) {
+        let activity = self.activity.borrow();
         let bucket = match &activity.phase {
             Phase::Model => &mut self.model,
             Phase::Tool(_) | Phase::Shell => &mut self.tool,
@@ -266,7 +268,7 @@ impl Completion {
 
     // The `in progress` line, written every `PROGRESS` while awaited.
     pub fn heartbeat(&self) -> Heartbeat {
-        let mut ticks = interval_at(tokio::time::Instant::now() + PROGRESS, PROGRESS);
+        let mut ticks = interval_at(Instant::now() + PROGRESS, PROGRESS);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         Heartbeat {
             started: self.started,
@@ -292,8 +294,7 @@ impl Completion {
             return;
         }
         self.emitted = true;
-        let activity = self.activity.borrow().clone();
-        self.book(&activity);
+        self.book();
         let duration_ms = millis(self.started.elapsed());
 
         // an event's level is fixed at its callsite, so each level is its own event
@@ -338,7 +339,7 @@ impl Heartbeat {
     // The next beat, written once it is due.
     pub async fn tick(&mut self) {
         self.ticks.tick().await;
-        let current = self.activity.borrow_and_update().clone();
+        let current = self.activity.borrow();
         tracing::info!(
             elapsed_s = self.started.elapsed().as_secs(),
             round = current.rounds,
@@ -372,7 +373,7 @@ impl From<&genai::chat::Usage> for Bill {
             cache_write: count(prompt.and_then(|details| details.cache_creation_tokens)),
             output: count(usage.completion_tokens),
             reasoning: count(completion.and_then(|details| details.reasoning_tokens)),
-            total: usage.total_tokens.map(|total| count(Some(total))),
+            total: usage.total_tokens.and_then(|total| u64::try_from(total).ok()),
         }
     }
 }
@@ -394,7 +395,12 @@ impl Bill {
 
 // A wire count booked on the bill: absent or negative is 0.
 fn count(value: Option<i32>) -> u64 {
-    value.and_then(|value| u64::try_from(value).ok()).unwrap_or(0)
+    value.map_or(0, |value| u64::from(clamp(value)))
+}
+
+// A wire count as the guest reads it: negative is 0.
+fn clamp(value: i32) -> u32 {
+    u32::try_from(value).unwrap_or(0)
 }
 
 pub fn millis(duration: Duration) -> u64 {
@@ -407,13 +413,13 @@ pub fn to_usage(usage: &genai::chat::Usage) -> Option<Usage> {
         return None;
     }
     Some(Usage {
-        input_tokens: usage.prompt_tokens.and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
-        output_tokens: usage.completion_tokens.and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
+        input_tokens: usage.prompt_tokens.map_or(0, clamp),
+        output_tokens: usage.completion_tokens.map_or(0, clamp),
         reasoning_tokens: usage
             .completion_tokens_details
             .as_ref()
-            .and_then(|d| d.reasoning_tokens)
-            .and_then(|v| u32::try_from(v).ok()),
+            .and_then(|details| details.reasoning_tokens)
+            .map(clamp),
     })
 }
 
@@ -473,12 +479,12 @@ mod tests {
         assert_eq!(Outcome::of(&anyhow::anyhow!("provider unreachable")), Outcome::Error);
     }
 
-    // The cap is the time budget: the guest's typed error is the budget,
+    // The timeout is the time budget: the guest's typed error is the budget,
     // the completion event still reads `timeout`.
     #[test]
     fn timeout_budget() {
         let timeout = Timeout {
-            cap_secs: 600,
+            after: Duration::from_secs(600),
             waiting: Phase::Tool("read".to_owned()),
         }
         .into_error();
@@ -491,8 +497,8 @@ mod tests {
     }
 
     // Two rounds add up, cache and total included; an absent or negative
-    // wire count books nothing. The provider's total stays absent until a
-    // round reports one.
+    // wire count books nothing, a negative total included. The provider's
+    // total stays absent until a round reports one.
     #[test]
     fn bill() {
         let mut completion = Completion::new();
@@ -524,7 +530,14 @@ mod tests {
             Some(10),
             0,
         );
-        completion.answered(&ProviderUsage::default(), Some(10), 0);
+        completion.answered(
+            &ProviderUsage {
+                total_tokens: Some(-1),
+                ..ProviderUsage::default()
+            },
+            Some(10),
+            0,
+        );
         assert_eq!(
             completion.bill,
             Bill {
@@ -537,31 +550,36 @@ mod tests {
             }
         );
         assert_eq!(completion.attempts, 2, "the replies are the attempts, the tool round none");
+        completion.finish(&Ok(answer()));
     }
 
     // Every wait lands in its phase's bucket, tool calls and the shell
     // together, the guest's checks in their own, the open one at the
     // finish; the counts follow the waits, the opening wait on the model
     // being no round yet.
-    #[test]
-    fn phase_buckets() {
+    #[tokio::test(start_paused = true)]
+    async fn phase_buckets() {
         const TICK: Duration = Duration::from_millis(2);
         let mut completion = Completion::new();
         completion.enter(Phase::Tool("read".to_owned()));
-        std::thread::sleep(TICK);
+        tokio::time::advance(TICK).await;
         completion.enter(Phase::Shell);
-        std::thread::sleep(TICK);
+        tokio::time::advance(TICK).await;
         completion.enter(Phase::Model);
         completion.enter(Phase::Check);
-        std::thread::sleep(TICK);
+        tokio::time::advance(TICK).await;
 
-        let activity = completion.activity.borrow().clone();
-        assert_eq!((activity.rounds, activity.tool_calls), (1, 2));
+        let (rounds, tool_calls) = {
+            let activity = completion.activity.borrow();
+            (activity.rounds, activity.tool_calls)
+        };
+        assert_eq!((rounds, tool_calls), (1, 2));
         assert_eq!(completion.phase(), Phase::Check);
-        assert!(completion.tool >= 2 * TICK, "{:?}", completion.tool);
+        assert_eq!(completion.tool, 2 * TICK);
+        assert_eq!(completion.model, Duration::ZERO);
         assert_eq!(completion.check, Duration::ZERO, "the open wait is booked at the finish");
         completion.finish(&Ok(answer()));
-        assert!(completion.check >= TICK, "{:?}", completion.check);
+        assert_eq!(completion.check, TICK);
     }
 
     #[test]
@@ -581,14 +599,30 @@ mod tests {
             (3, 1, Some(2))
         );
 
-        // Reasoning is optional; a negative count is clamped, not an error.
+        // Reasoning is optional; a negative count is clamped, not an error,
+        // whichever count it is.
         let clamped = ProviderUsage {
             prompt_tokens: Some(-1),
             completion_tokens: Some(4),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(-1),
+                ..CompletionTokensDetails::default()
+            }),
             ..ProviderUsage::default()
         };
         let usage = to_usage(&clamped).expect("counts surfaced");
-        assert_eq!((usage.input_tokens, usage.output_tokens, usage.reasoning_tokens), (0, 4, None));
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens, usage.reasoning_tokens),
+            (0, 4, Some(0))
+        );
+
+        let unreported = ProviderUsage {
+            prompt_tokens: Some(3),
+            completion_tokens: Some(1),
+            ..ProviderUsage::default()
+        };
+        let usage = to_usage(&unreported).expect("counts surfaced");
+        assert_eq!(usage.reasoning_tokens, None, "no reasoning count, none reported");
 
         assert!(to_usage(&ProviderUsage::default()).is_none(), "no counts, no usage");
     }

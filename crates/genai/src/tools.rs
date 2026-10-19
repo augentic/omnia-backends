@@ -24,9 +24,6 @@ use crate::shell::{Run, Shell};
 // of the name would be shadowed where a shell is advertised.
 pub const SHELL_TOOL: &str = "shell";
 
-// The width a subject is cut to in a log line.
-const SUBJECT_WIDTH: usize = 80;
-
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadArgs {
@@ -102,7 +99,8 @@ impl Tools {
 
     // One call's result as the model reads it, logged as the cursor
     // backend's stream is: the call with its subject before, the result's
-    // size, a command's exit, and the time taken after.
+    // size, a command's exit, and the time taken after. A failure the model
+    // can repair is its result, named for the tool.
     pub async fn call(&self, call: &ToolCall) -> Result<String> {
         let subject = subject(&call.fn_arguments, self.shell.as_ref().map(Shell::cwd));
         tracing::debug!(tool = %call.fn_name, subject = subject.as_deref(), "tool call");
@@ -116,12 +114,17 @@ impl Tools {
         );
         let started = Instant::now();
 
-        let (result, exit) = match call.fn_name.as_str() {
-            SHELL_TOOL => self.shell(&call.fn_arguments).await?,
+        let (outcome, exit) = match call.fn_name.as_str() {
+            SHELL_TOOL => match self.shell(&call.fn_arguments).await? {
+                Ok(Run { result, exit }) => (Ok(result), Some(exit)),
+                Err(reason) => (Err(reason), None),
+            },
             "read" => (self.read(&call.fn_arguments).await, None),
             "list" => (self.list(&call.fn_arguments).await, None),
             _ => (self.guest(call).await?, None),
         };
+        let result =
+            outcome.unwrap_or_else(|reason| format!("tool `{}` failed: {reason}", call.fn_name));
 
         tracing::debug!(
             tool = %call.fn_name,
@@ -134,81 +137,67 @@ impl Tools {
         Ok(result)
     }
 
-    async fn read(&self, arguments: &Value) -> String {
-        let ReadArgs { path } = match ReadArgs::deserialize(arguments) {
-            Ok(arguments) => arguments,
-            Err(error) => return format!("tool `read` failed: invalid arguments: {error}"),
-        };
-        let bytes = match self.host.read(path.clone()).await {
-            Ok(bytes) => bytes,
-            Err(error) => return format!("tool `read` failed: {error:#}"),
-        };
-
-        String::from_utf8(bytes).map_or_else(
-            |_| format!("tool `read` failed: `{path}` is not UTF-8"),
-            |text| self.cap("read", text),
-        )
+    async fn read(&self, arguments: &Value) -> Result<String, String> {
+        let ReadArgs { path } = args(arguments)?;
+        let bytes = self.host.read(path.clone()).await.map_err(|error| format!("{error:#}"))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|error| format!("`{path}` is not UTF-8: {}", error.utf8_error()))?;
+        self.within_cap(text)
     }
 
-    async fn list(&self, arguments: &Value) -> String {
-        let ListArgs { path } = match ListArgs::deserialize(arguments) {
-            Ok(arguments) => arguments,
-            Err(error) => return format!("tool `list` failed: invalid arguments: {error}"),
-        };
-        let entries = match self.host.list(path.unwrap_or_default()).await {
-            Ok(entries) => entries,
-            Err(error) => return format!("tool `list` failed: {error:#}"),
-        };
-
-        match serde_json::to_string(&entries) {
-            Ok(json) => self.cap("list", json),
-            Err(error) => format!("tool `list` failed: {error}"),
-        }
+    async fn list(&self, arguments: &Value) -> Result<String, String> {
+        let ListArgs { path } = args(arguments)?;
+        let entries =
+            self.host.list(path.unwrap_or_default()).await.map_err(|error| format!("{error:#}"))?;
+        let json = serde_json::to_string(&entries).map_err(|error| error.to_string())?;
+        self.within_cap(json)
     }
 
     // A call where no shell was advertised is the model's slip, answered as
     // any bad call is; only a command that ran has an exit.
-    async fn shell(&self, arguments: &Value) -> Result<(String, Option<String>)> {
+    async fn shell(&self, arguments: &Value) -> Result<Result<Run, String>> {
         let Some(shell) = &self.shell else {
-            return Ok(("tool `shell` failed: no shell on this workspace".to_owned(), None));
+            return Ok(Err("no shell on this workspace".to_owned()));
         };
-        let ShellArgs { command } = match ShellArgs::deserialize(arguments) {
+        let ShellArgs { command } = match args(arguments) {
             Ok(arguments) => arguments,
-            Err(error) => {
-                return Ok((format!("tool `shell` failed: invalid arguments: {error}"), None));
-            }
+            Err(reason) => return Ok(Err(reason)),
         };
-        let Run { result, exit } = shell.run(&command).await?;
-        Ok((result, Some(exit)))
+        Ok(Ok(shell.run(&command).await?))
     }
 
-    async fn guest(&self, call: &ToolCall) -> Result<String> {
-        let outcome = self
-            .host
+    async fn guest(&self, call: &ToolCall) -> Result<Result<String, String>> {
+        self.host
             .call_tool(call.fn_name.clone(), call.fn_arguments.to_string())
             .await
-            .with_context(|| format!("calling tool `{}`", call.fn_name))?;
-        Ok(outcome.unwrap_or_else(|failure| format!("tool `{}` failed: {failure}", call.fn_name)))
+            .with_context(|| format!("calling tool `{}`", call.fn_name))
     }
 
     // A result past the cap is refused whole, the model told its size.
-    fn cap(&self, tool: &str, text: String) -> String {
+    fn within_cap(&self, text: String) -> Result<String, String> {
         if text.len() > self.max_result_bytes {
-            return format!(
-                "tool `{tool}` failed: result of {} bytes exceeds the {}-byte cap",
+            return Err(format!(
+                "result of {} bytes exceeds the {}-byte cap",
                 text.len(),
                 self.max_result_bytes
-            );
+            ));
         }
-        text
+        Ok(text)
     }
 }
 
-// The one argument worth a log line: a path, or the first line of a
-// command, every `<cwd>/` in it spelled `./`, cut to a readable width.
+// The call's arguments as the tool's own; a mismatch is the model's to repair.
+fn args<'de, T: Deserialize<'de>>(arguments: &'de Value) -> Result<T, String> {
+    T::deserialize(arguments).map_err(|error| format!("invalid arguments: {error}"))
+}
+
+// The one argument worth a log line: a path, a pattern, a query, a URL, or
+// the first line of a command, every `<cwd>/` in it spelled `./`, cut to a
+// readable width.
 fn subject(arguments: &Value, cwd: Option<&Path>) -> Option<String> {
-    let text =
-        ["path", "command"].iter().find_map(|key| arguments.get(key).and_then(Value::as_str))?;
+    const KEYS: &[&str] = &["path", "command", "pattern", "query", "url"];
+    const WIDTH: usize = 80;
+    let text = KEYS.iter().find_map(|key| arguments.get(key).and_then(Value::as_str))?;
     let line = text.lines().next().unwrap_or_default();
     let line = match cwd.map(|cwd| cwd.to_string_lossy()) {
         Some(root) if !root.trim_end_matches('/').is_empty() => {
@@ -216,7 +205,7 @@ fn subject(arguments: &Value, cwd: Option<&Path>) -> Option<String> {
         }
         _ => line.to_owned(),
     };
-    Some(match line.char_indices().nth(SUBJECT_WIDTH) {
+    Some(match line.char_indices().nth(WIDTH) {
         Some((cut, _)) => format!("{}…", &line[..cut]),
         None => line,
     })
@@ -313,6 +302,11 @@ mod tests {
         );
         assert_eq!(subject(&json!({ "command": "" }), cwd).as_deref(), Some(""));
         assert_eq!(subject(&json!({ "path": "src/a.ts" }), cwd).as_deref(), Some("src/a.ts"));
+        assert_eq!(
+            subject(&json!({ "query": "fn main", "limit": 3 }), cwd).as_deref(),
+            Some("fn main"),
+            "a guest tool's query is its subject"
+        );
         assert_eq!(subject(&json!({}), cwd), None, "a root listing names nothing");
     }
 

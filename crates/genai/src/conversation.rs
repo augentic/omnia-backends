@@ -1,30 +1,36 @@
 //! Provider conversation loop.
 //!
 //! Tool calls and rejected checks each add a provider round. Every round
-//! draws on the configured round budget, so a completion terminates; a
-//! rejected candidate draws on the configured candidate budget beside it,
-//! so a model that cannot satisfy the check is ended with the correction
-//! rather than asked again until the rounds run out. Each reply of the model runs under
-//! the configured cap, tool rounds included; a nudge or a correction starts
-//! a fresh one. Either budget spent, or the cap passed, is the typed
-//! `budget-exhausted`: the same request put again would spend it again.
+//! draws on the round budget, so a completion terminates; a rejected
+//! candidate draws on the candidate budget beside it, so a model that cannot
+//! satisfy the check is ended with the correction rather than asked again
+//! until the rounds run out. Each reply of the model runs under the timeout,
+//! tool rounds included; a nudge or a correction starts a fresh one. Either
+//! budget spent, or the timeout passed, is the typed `budget-exhausted`: the
+//! same request put again would spend it again.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ToolCall, ToolResponse};
-use omnia_sandbox::Access;
-use omnia_wasi_model::{
-    Answer, Error, Format, Request, ToolHost, ToolTurn, Transcript, Usage, WasiModelCtx as _,
-};
+use omnia_wasi_model::{Answer, Error, Format, ToolHost, ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::timeout;
 
-use crate::Client;
 use crate::observe::{Completion, Phase, Timeout, to_usage};
-use crate::request::{chat_options, chat_request, prompt_bytes};
+use crate::request::Turn;
 use crate::tools::Tools;
+
+// The budgets one completion runs within, from the connect options: the
+// provider rounds it may make, the candidates it may offer the guest's
+// check, and the time one reply of the model may take.
+#[derive(Clone, Copy, Debug)]
+pub struct Budgets {
+    pub max_rounds: u32,
+    pub max_candidates: u32,
+    pub timeout: Duration,
+}
 
 pub struct Conversation {
     client: genai::Client,
@@ -35,10 +41,8 @@ pub struct Conversation {
     check: bool,
     tool_host: Arc<dyn ToolHost>,
     tools: Tools,
-    max_rounds: usize,
-    max_candidates: u32,
-    cap: Duration,
-    round: usize,
+    budgets: Budgets,
+    round: u32,
     candidates: u32,
     nudged: bool,
     transcript: Transcript,
@@ -52,36 +56,39 @@ struct Reply {
 }
 
 impl Conversation {
-    // The request is translated before a session is prepared, and the
-    // completion started once nothing is left to refuse: the start event
-    // means a completion that will be billed.
-    pub async fn prepare(
-        client: &Client, request: &Request, model: String, access: Access,
-        tool_host: Arc<dyn ToolHost>,
-    ) -> Result<Self> {
-        let chat = chat_request(request, access)?;
-        let options = chat_options(request)?;
-        let shell = client.shell(request, access, tool_host.local_path()).await?;
-        let completion = Completion::start(prompt_bytes(request), request.tools.len());
-
-        Ok(Self {
-            client: client.inner.clone(),
+    // The completion starts here, once nothing is left to refuse: the start
+    // event means a completion that will be billed.
+    pub fn new(
+        client: genai::Client, turn: Turn, tools: Tools, tool_host: Arc<dyn ToolHost>,
+        budgets: Budgets,
+    ) -> Self {
+        let advertised = turn.chat.tools.as_ref().map_or(0, Vec::len);
+        let completion = Completion::start(turn.prompt_bytes, advertised);
+        let Turn {
             model,
             chat,
             options,
-            format: request.format.clone(),
-            check: request.check,
-            tools: Tools::new(Arc::clone(&tool_host), shell, client.limits().max_result_bytes),
+            format,
+            check,
+            ..
+        } = turn;
+
+        Self {
+            client,
+            model,
+            chat,
+            options,
+            format,
+            check,
             tool_host,
-            max_rounds: client.max_rounds,
-            max_candidates: client.max_candidates,
-            cap: client.cap,
+            tools,
+            budgets,
             round: 0,
             candidates: 0,
             nudged: false,
             transcript: Transcript::default(),
             completion,
-        })
+        }
     }
 
     pub async fn complete(mut self) -> Result<Answer> {
@@ -103,12 +110,12 @@ impl Conversation {
 
     async fn run(&mut self) -> Result<Answer> {
         loop {
-            // the model's next reply, under the cap
-            let reply = match timeout(self.cap, self.next_reply()).await {
+            // the model's next reply, under the timeout
+            let reply = match timeout(self.budgets.timeout, self.next_reply()).await {
                 Ok(reply) => reply?,
                 Err(_elapsed) => {
                     return Err(Timeout {
-                        cap_secs: self.cap.as_secs(),
+                        after: self.budgets.timeout,
                         waiting: self.completion.phase(),
                     }
                     .into_error());
@@ -117,7 +124,7 @@ impl Conversation {
             let Some(Reply { text, usage }) = reply else {
                 bail!(Error::BudgetExhausted(format!(
                     "no answer after {} model round-trips",
-                    self.max_rounds
+                    self.budgets.max_rounds
                 )));
             };
 
@@ -158,7 +165,8 @@ impl Conversation {
                 // with no candidate or round left it is the typed failure
                 // the guest sees.
                 Err(correction)
-                    if self.candidates >= self.max_candidates || self.round == self.max_rounds =>
+                    if self.candidates >= self.budgets.max_candidates
+                        || self.round == self.budgets.max_rounds =>
                 {
                     bail!(Error::BudgetExhausted(correction));
                 }
@@ -181,7 +189,7 @@ impl Conversation {
     // The model's next text, through the tool rounds before it; `None` once
     // the round budget is spent first.
     async fn next_reply(&mut self) -> Result<Option<Reply>> {
-        while self.round < self.max_rounds {
+        while self.round < self.budgets.max_rounds {
             self.round += 1;
             self.completion.enter(Phase::Model);
             let response = self

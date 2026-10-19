@@ -17,6 +17,8 @@ use omnia::Backend;
 use omnia_sandbox::{Options, Sandbox};
 use tracing::instrument;
 
+use crate::conversation::Budgets;
+
 /// Multi-provider generative-AI model backend.
 #[derive(Clone)]
 pub struct Client {
@@ -25,10 +27,8 @@ pub struct Client {
     // `None` where no shell root is configured: the kernel is never probed,
     // and a worker grant is refused.
     sandbox: Option<Arc<Sandbox>>,
-    max_rounds: usize,
+    budgets: Budgets,
     max_tool_calls: u32,
-    max_candidates: u32,
-    cap: Duration,
     shell_timeout: Duration,
 }
 
@@ -37,10 +37,8 @@ impl std::fmt::Debug for Client {
         f.debug_struct("Client")
             .field("model", &self.model)
             .field("sandbox", &self.sandbox)
-            .field("max_rounds", &self.max_rounds)
+            .field("budgets", &self.budgets)
             .field("max_tool_calls", &self.max_tool_calls)
-            .field("max_candidates", &self.max_candidates)
-            .field("cap", &self.cap)
             .field("shell_timeout", &self.shell_timeout)
             .finish_non_exhaustive()
     }
@@ -74,10 +72,12 @@ impl Backend for Client {
             model: options.model,
             inner,
             sandbox,
-            max_rounds: options.max_rounds,
+            budgets: Budgets {
+                max_rounds: options.max_rounds,
+                max_candidates: options.max_candidates,
+                timeout: Duration::from_secs(options.timeout_secs),
+            },
             max_tool_calls: options.max_tool_calls,
-            max_candidates: options.max_candidates,
-            cap: Duration::from_secs(options.timeout_secs),
             shell_timeout: Duration::from_secs(options.shell_timeout_secs),
         })
     }
@@ -123,7 +123,7 @@ mod config {
         /// candidate, or a correction each one — before it is ended as
         /// `budget-exhausted`.
         #[env(from = "GENAI_MAX_ROUNDS", default = "128")]
-        pub max_rounds: usize,
+        pub max_rounds: u32,
         /// Guest tool calls one completion may make before it is ended as
         /// `budget-exhausted`; the host's default is 32.
         #[env(from = "GENAI_MAX_TOOL_CALLS", default = "128")]

@@ -479,6 +479,8 @@ Unreleased
   file is never read, and what the copy seals is the repository's it was
   cut from, the planted repository one untracked directory. A copy another
   process laid is addressed as any place is.
+- `omnia-genai`'s `ConnectOptions::max_rounds` is a `u32`, as
+  `max_tool_calls` and `max_candidates` are.
 
 ### Fixed
 

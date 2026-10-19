@@ -66,7 +66,7 @@ impl Shell {
         process.args(["-c", command]).env("WORKSPACE", self.cwd());
         match process.output(self.timeout).await {
             Ok(output) => Ok(Run {
-                result: cut(render(&output), self.max_result_bytes),
+                result: truncate(render(&output), self.max_result_bytes),
                 exit: exit_of(output.status),
             }),
             Err(error) => match error.downcast::<TimedOut>() {
@@ -90,18 +90,12 @@ impl Shell {
 // A result past the cap keeps its head and its tail with the omitted count
 // between them, since a log's start names the step and its end holds the
 // verdict. The cuts fall on character boundaries.
-fn cut(text: String, cap: usize) -> String {
+fn truncate(text: String, cap: usize) -> String {
     if text.len() <= cap {
         return text;
     }
-    let mut head = cap / 2;
-    while !text.is_char_boundary(head) {
-        head -= 1;
-    }
-    let mut tail = text.len() - (cap - head);
-    while !text.is_char_boundary(tail) {
-        tail += 1;
-    }
+    let head = text.floor_char_boundary(cap / 2);
+    let tail = text.ceil_char_boundary(text.len() - (cap - head));
     format!("{}\n[… {} bytes omitted …]\n{}", &text[..head], tail - head, &text[tail..])
 }
 
@@ -145,29 +139,28 @@ fn exit_of(status: ExitStatus) -> String {
     }
 }
 
-// The cut of a result alone; a command run in a session, its rendering
-// included, is the `model` suite's.
+// The truncation of a result alone; a command run in a session, its
+// rendering included, is the `model` suite's.
 #[cfg(test)]
 mod tests {
-    use super::cut;
+    use super::truncate;
 
     #[test]
-    fn cut_within_cap() {
-        assert_eq!(cut("short".to_owned(), 5), "short");
-        assert_eq!(cut(String::new(), 0), "");
+    fn within_cap() {
+        assert_eq!(truncate("short".to_owned(), 5), "short");
+        assert_eq!(truncate(String::new(), 0), "");
     }
 
     #[test]
-    fn cut_head_and_tail() {
+    fn head_and_tail() {
         let text = "0123456789".to_owned();
-        assert_eq!(cut(text, 4), "01\n[… 6 bytes omitted …]\n89");
+        assert_eq!(truncate(text, 4), "01\n[… 6 bytes omitted …]\n89");
     }
 
     #[test]
-    fn cut_on_char_boundaries() {
+    fn char_boundaries() {
         // each `é` is two bytes, so the tail's byte cut at 5 would split one
         let text = "éééé".to_owned();
-        let cut = cut(text, 5);
-        assert_eq!(cut, "é\n[… 4 bytes omitted …]\né");
+        assert_eq!(truncate(text, 5), "é\n[… 4 bytes omitted …]\né");
     }
 }

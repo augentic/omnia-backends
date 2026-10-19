@@ -47,5 +47,5 @@ hyper-util = { workspace = true, features = ["tokio"] }
 libc.workspace = true
 omnia-test = { workspace = true, features = ["host"] }
 test-programs.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
 tracing-subscriber.workspace = true

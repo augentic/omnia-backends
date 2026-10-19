@@ -175,7 +175,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::Backend;
+use omnia::{Backend, FromEnv};
 use omnia_genai::{Client, ConnectOptions};
 
 // GENAI_MODEL and GENAI_ENDPOINT when set; else `gpt-5.5` at the

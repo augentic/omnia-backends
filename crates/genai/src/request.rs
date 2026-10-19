@@ -1,31 +1,65 @@
 //! Provider request translation.
 //!
-//! A validated request becomes the provider's chat request and options: the
-//! system text and messages as they are, the declared function tools beside
-//! the tools a lend advertises, and the request's `format` as the provider
-//! `response_format` — steering only; acceptance is the guest's `check`
-//! when the request asks for one.
+//! A validated request becomes a [`Turn`]: the system text and messages as
+//! they are, the declared function tools, and the request's `format` as the
+//! provider `response_format` — steering only; acceptance is the guest's
+//! `check` when the request asks for one. Whatever the request gets wrong is
+//! refused here, before any lend is resolved; the tools a lend advertises
+//! join the turn once its access is known.
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, JsonSpec, ReasoningEffort, Tool,
 };
-use omnia_sandbox::Access;
 use omnia_wasi_model::{Effort, Error, Format, Function, Request, Role, Tool as ModelTool};
 use serde_json::Value;
 
-use crate::tools::{SHELL_TOOL, workspace_tools};
+use crate::tools::SHELL_TOOL;
 
-// The system text and every message, in bytes.
-pub fn prompt_bytes(request: &Request) -> u64 {
+// Everything one completion derives from the request: the model to ask, the
+// provider's chat request and options, and what the guest asked of the
+// answer.
+#[derive(Debug)]
+pub struct Turn {
+    pub model: String,
+    pub chat: ChatRequest,
+    pub options: ChatOptions,
+    pub format: Format,
+    pub check: bool,
+    // the system text and every message, in bytes
+    pub prompt_bytes: u64,
+}
+
+impl Turn {
+    pub fn translate(request: &Request, default_model: &str) -> Result<Self> {
+        Ok(Self {
+            model: request.model.as_deref().unwrap_or(default_model).to_owned(),
+            chat: chat_request(request)?,
+            options: chat_options(request)?,
+            format: request.format.clone(),
+            check: request.check,
+            prompt_bytes: prompt_bytes(request),
+        })
+    }
+
+    // The tools a lend advertises, after the request's own.
+    pub fn advertise(&mut self, tools: Vec<Tool>) {
+        if !tools.is_empty() {
+            self.chat.tools.get_or_insert_default().extend(tools);
+        }
+    }
+}
+
+fn prompt_bytes(request: &Request) -> u64 {
     let bytes = request.system.as_deref().map_or(0, str::len)
         + request.messages.iter().map(|message| message.content.len()).sum::<usize>();
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
-// The messages, the system text, and the tools: the declared function
-// tools first, then the ones the lend advertises.
-pub fn chat_request(request: &Request, access: Access) -> Result<ChatRequest> {
+// The messages, the system text, and the declared function tools. A tool
+// named `shell` is the backend's, refused whatever the lend; an MCP server
+// is nothing genai can reach.
+fn chat_request(request: &Request) -> Result<ChatRequest> {
     let messages = request
         .messages
         .iter()
@@ -53,7 +87,6 @@ pub fn chat_request(request: &Request, access: Access) -> Result<ChatRequest> {
             ModelTool::Mcp(_) => bail!("genai does not support MCP servers"),
         }
     }
-    tools.extend(workspace_tools(access));
     if !tools.is_empty() {
         chat = chat.with_tools(tools);
     }
@@ -71,7 +104,7 @@ fn function_tool(function: &Function) -> Result<Tool> {
         .with_schema(schema))
 }
 
-pub fn chat_options(request: &Request) -> Result<ChatOptions> {
+fn chat_options(request: &Request) -> Result<ChatOptions> {
     let mut options = ChatOptions::default().with_capture_usage(true);
 
     options = match &request.format {
@@ -120,14 +153,18 @@ const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
     }
 }
 
-// Request-to-provider translation; end-to-end round-trips run in
+// Request-to-turn translation; end-to-end round-trips run in
 // `tests/model.rs`.
 #[cfg(test)]
 mod tests {
+    use omnia_sandbox::Access;
     use omnia_wasi_model::{Grants, Mcp, Message};
     use serde_json::json;
 
     use super::*;
+    use crate::tools::workspace_tools;
+
+    const DEFAULT_MODEL: &str = "gpt-4o-mini";
 
     fn request(tools: Vec<ModelTool>) -> Request {
         Request {
@@ -156,6 +193,14 @@ mod tests {
         })
     }
 
+    // The request translated, the tools a lend of `access` advertises after
+    // its own.
+    fn turn(tools: Vec<ModelTool>, access: Access) -> Result<Turn> {
+        let mut turn = Turn::translate(&request(tools), DEFAULT_MODEL)?;
+        turn.advertise(workspace_tools(access));
+        Ok(turn)
+    }
+
     fn tool_names(chat: &ChatRequest) -> Vec<String> {
         chat.tools
             .as_ref()
@@ -166,10 +211,21 @@ mod tests {
     }
 
     #[test]
+    fn request_model() {
+        let turn = turn(vec![], Access::Private).expect("a bare request translates");
+        assert_eq!(turn.model, DEFAULT_MODEL, "an unset model is the default");
+
+        let mut request = request(vec![]);
+        request.model = Some("claude-fable-5".to_owned());
+        let turn = Turn::translate(&request, DEFAULT_MODEL).expect("a named model translates");
+        assert_eq!(turn.model, "claude-fable-5", "a set model is the request's");
+    }
+
+    #[test]
     fn declared_tool() {
-        let chat = chat_request(&request(vec![lookup_tool()]), Access::Private)
+        let turn = turn(vec![lookup_tool()], Access::Private)
             .expect("a declared function tool translates");
-        let tools = chat.tools.expect("the chat request advertises the tool");
+        let tools = turn.chat.tools.expect("the chat request advertises the tool");
         assert_eq!(tools.len(), 1, "one declared tool, one advertised tool");
         assert_eq!(tools[0].name, "lookup".into());
         assert_eq!(
@@ -181,12 +237,12 @@ mod tests {
 
     #[test]
     fn mcp_grant() {
-        let err = chat_request(
-            &request(vec![ModelTool::Mcp(Mcp {
+        let err = turn(
+            vec![ModelTool::Mcp(Mcp {
                 name: "docs".to_owned(),
                 tools: vec![],
                 url: "http://localhost:8080/mcp".to_owned(),
-            })]),
+            })],
             Access::Private,
         )
         .expect_err("genai rejects MCP grants");
@@ -195,11 +251,11 @@ mod tests {
 
     #[test]
     fn lent_workspace() {
-        let chat = chat_request(&request(vec![lookup_tool()]), Access::Read)
-            .expect("declared and injected tools translate");
-        assert_eq!(tool_names(&chat), ["lookup", "read", "list"], "declared tools first");
+        let turn =
+            turn(vec![lookup_tool()], Access::Read).expect("declared and injected tools translate");
+        assert_eq!(tool_names(&turn.chat), ["lookup", "read", "list"], "declared tools first");
 
-        let tools = chat.tools.expect("the chat request advertises the tools");
+        let tools = turn.chat.tools.expect("the chat request advertises the tools");
         let schema = tools[1].schema.as_ref().expect("read carries a schema");
         assert_eq!(schema.get("required"), Some(&json!(["path"])), "read requires a path argument");
         let schema = tools[2].schema.as_ref().expect("list carries a schema");
@@ -208,10 +264,10 @@ mod tests {
 
     #[test]
     fn shell_lend() {
-        let chat = chat_request(&request(vec![]), Access::Shell).expect("a shell lend translates");
-        assert_eq!(tool_names(&chat), ["read", "list", "shell"], "the shell after read/list");
+        let turn = turn(vec![], Access::Shell).expect("a shell lend translates");
+        assert_eq!(tool_names(&turn.chat), ["read", "list", "shell"], "the shell after read/list");
 
-        let tools = chat.tools.expect("the chat request advertises the tools");
+        let tools = turn.chat.tools.expect("the chat request advertises the tools");
         let schema = tools[2].schema.as_ref().expect("shell carries a schema");
         assert_eq!(schema.get("required"), Some(&json!(["command"])), "shell requires a command");
     }
@@ -223,7 +279,7 @@ mod tests {
             description: "a guest's own shell".to_owned(),
             parameters: "{}".to_owned(),
         });
-        let err = chat_request(&request(vec![shell]), Access::Private)
+        let err = turn(vec![shell], Access::Private)
             .expect_err("a guest tool named `shell` is refused whatever the access");
         let Some(Error::InvalidRequest(detail)) = err.downcast_ref::<Error>() else {
             panic!("the refusal is the request's: {err:#}");
@@ -233,8 +289,7 @@ mod tests {
 
     #[test]
     fn no_workspace() {
-        let chat =
-            chat_request(&request(vec![]), Access::Private).expect("an empty tool list translates");
-        assert!(chat.tools.is_none(), "without a workspace lend nothing is advertised");
+        let turn = turn(vec![], Access::Private).expect("an empty tool list translates");
+        assert!(turn.chat.tools.is_none(), "without a workspace lend nothing is advertised");
     }
 }

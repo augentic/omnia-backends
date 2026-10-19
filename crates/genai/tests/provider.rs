@@ -135,6 +135,13 @@ async fn zero_budget() {
             },
         ),
         (
+            "max_candidates",
+            ConnectOptions {
+                max_candidates: 0,
+                ..ConnectOptions::default()
+            },
+        ),
+        (
             "timeout_secs",
             ConnectOptions {
                 timeout_secs: 0,

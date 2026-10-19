@@ -103,7 +103,7 @@ so the policy splits into three tiers:
   OData filter building (`azure-table/store/filter.rs`), Postgres type
   mapping, the Kafka partitioner, cursor's ready-line and Connect-frame
   parsing (`cursor/src/worker/discovery.rs`, `protocol.rs`), genai's
-  request translation (`genai/src/model/options.rs`). A behaviour a guest
+  request translation (`genai/src/request.rs`). A behaviour a guest
   boundary reaches is an e2e row, not a unit test: the scripted-server unit
   tests the model backends once carried inside `src/` were retired for
   exactly that reason, and a new in-crate loopback server is the signal to

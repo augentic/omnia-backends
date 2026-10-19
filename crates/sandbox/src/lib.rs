@@ -178,6 +178,43 @@ impl Sandbox {
         Session::prepare(self, workspace, grant).await
     }
 
+    /// The [`Access`] a session over `workspace` would run with, before any
+    /// is prepared.
+    ///
+    /// The workspace is created and canonicalised as [`Sandbox::prepare`]
+    /// does: at or beneath one of the connected `shell_roots` it is
+    /// [`Access::Shell`], elsewhere [`Access::Read`], and none is
+    /// [`Access::Private`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace cannot be created or
+    /// canonicalised.
+    pub async fn access(&self, workspace: Option<&Path>) -> Result<Access> {
+        match workspace {
+            Some(path) => Ok(self.workspace(path).await?.1),
+            None => Ok(Access::Private),
+        }
+    }
+
+    // The workspace created and canonical, with what runs in it. A shell
+    // root is resolved again here: one that did not exist at connect may now.
+    pub(crate) async fn workspace(&self, path: &Path) -> Result<(PathBuf, Access)> {
+        tokio::fs::create_dir_all(path)
+            .await
+            .with_context(|| format!("creating {}", path.display()))?;
+        let cwd = tokio::fs::canonicalize(path)
+            .await
+            .with_context(|| format!("canonicalizing {}", path.display()))?;
+        for root in &self.options.shell_roots {
+            let root = tokio::fs::canonicalize(root).await.unwrap_or_else(|_| root.clone());
+            if cwd.starts_with(root) {
+                return Ok((cwd, Access::Shell));
+            }
+        }
+        Ok((cwd, Access::Read))
+    }
+
     pub(crate) const fn kernel(&self) -> &Arc<Kernel> {
         &self.kernel
     }

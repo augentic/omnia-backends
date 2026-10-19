@@ -10,50 +10,41 @@
 //! [`ToolHost::check`]; a rejection stays in the conversation with the
 //! guest's correction as the next user turn, and the loop goes round.
 
-mod conversation;
-mod observe;
-mod options;
-mod shell;
-mod tools;
-
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use conversation::Conversation;
-use omnia_sandbox::{Access, Denied, Grant, Session};
+use omnia_sandbox::{Access, Denied, Grant};
 use omnia_wasi_model::{
     Answer, Error, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx,
 };
-use options::Turn;
-use shell::Shell;
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
 
 use crate::Client;
+use crate::conversation::Conversation;
+use crate::shell::Shell;
 
 static COMPLETION_ID: AtomicU64 = AtomicU64::new(0);
 
 impl WasiModelCtx for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let client = self.clone();
-        let model = request.model.as_deref().unwrap_or(&self.model);
+        let model = request.model.clone().unwrap_or_else(|| self.model.clone());
         let n = COMPLETION_ID.fetch_add(1, Ordering::Relaxed) + 1;
 
         // a schema's name is the guest's label for the question it asks
-        let span = info_span!("complete", n, model, format = %request.format, label = Empty);
+        let span = info_span!("complete", n, model = model.as_str(), format = %request.format, label = Empty);
         if let Format::Schema(schema) = &request.format {
             span.record("label", schema.name.as_str());
         }
 
         Box::pin(
             async move {
-                let (access, session) = client.prepare(&request, tool_host.local_path()).await?;
-                let turn = Turn::prepare(&request, access, &client.model)?;
-                let shell = session.map(|session| {
-                    Shell::new(session, client.shell_timeout, client.limits().max_result_bytes)
-                });
-                Conversation::new(&client, turn, tool_host, shell).complete().await
+                let (access, shell) = client.prepare(&request, tool_host.local_path()).await?;
+                Conversation::prepare(&client, &request, model, access, tool_host, shell)?
+                    .complete()
+                    .await
             }
             .instrument(span),
         )
@@ -70,44 +61,41 @@ impl WasiModelCtx for Client {
 impl Client {
     // A worker grant needs a shell: a worker reaches beyond its workspace
     // through the commands it runs there, so one over a read-only workspace,
-    // or under a deployment with no shell root, is the request's fault. The
-    // session is kept only where it opens a shell.
+    // or under a deployment with no shell root, is the request's fault. A
+    // session is prepared only where it opens a shell.
     async fn prepare(
         &self, request: &Request, workspace: Option<&Path>,
-    ) -> anyhow::Result<(Access, Option<Session>)> {
+    ) -> anyhow::Result<(Access, Option<Shell>)> {
         let worker = request.grants.worker.as_ref();
 
-        let Some(sandbox) = &self.sandbox else {
-            let access = if workspace.is_some() { Access::Read } else { Access::Private };
-            if worker.is_some() {
-                let detail = if access.is_lent() {
-                    "worker grant needs a shell: no shell root is configured"
-                } else {
-                    "worker grant needs a workspace"
-                };
-                return Err(Error::InvalidRequest(detail.to_owned()).into());
-            }
-            return Ok((access, None));
+        let access = match &self.sandbox {
+            Some(sandbox) => sandbox.access(workspace).await?,
+            None if workspace.is_some() => Access::Read,
+            None => Access::Private,
         };
 
+        if worker.is_some() && access != Access::Shell {
+            let detail = if !access.is_lent() {
+                "worker grant needs a workspace"
+            } else if self.sandbox.is_none() {
+                "worker grant needs a shell: no shell root is configured"
+            } else {
+                "worker grant needs a shell: the workspace is not under a shell root"
+            };
+            return Err(Error::InvalidRequest(detail.to_owned()).into());
+        }
+
+        let (Some(sandbox), Access::Shell) = (&self.sandbox, access) else {
+            return Ok((access, None));
+        };
         let grant = worker.map_or_else(Grant::default, |worker| Grant {
             egress: worker.egress.clone(),
             read: worker.read.clone(),
             env: worker.env.clone(),
         });
         let session = sandbox.prepare(workspace, &grant).await.map_err(refusal)?;
-        let access = session.access();
-
-        if worker.is_some() && access != Access::Shell {
-            let detail = if access.is_lent() {
-                "worker grant needs a shell: the workspace is not under a shell root"
-            } else {
-                "worker grant needs a workspace"
-            };
-            return Err(Error::InvalidRequest(detail.to_owned()).into());
-        }
-
-        Ok((access, (access == Access::Shell).then_some(session)))
+        let shell = Shell::new(session, self.shell_timeout, self.limits().max_result_bytes);
+        Ok((access, Some(shell)))
     }
 }
 

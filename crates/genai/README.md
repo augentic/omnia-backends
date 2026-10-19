@@ -24,14 +24,14 @@ here validates the answer. When the request sets `check`, each final text
 the model produces is offered to the guest through `ToolHost::check`: `Ok`
 ends the completion with that candidate, `Err(correction)` appends the
 candidate and the guest's correction to the conversation verbatim and the
-loop goes round. Two budgets bound a completion: every provider round-trip
-— a tool round, a candidate, or a correction — draws on `max_rounds`
-(default 128), and a rejected `check` candidate is corrected once, the
-second rejection failing the completion with the typed `budget-exhausted`
-carrying that correction, the same count the `omnia-cursor` backend keeps;
-the host's per-completion tool-call limit is answered through
-`WasiModelCtx::limits()` as `max_tool_calls`. Without a `check` the guest
-sees the model's final text as-is.
+loop goes round. Two budgets bound a completion, and either spent is the
+typed `budget-exhausted`: every provider round-trip — a tool round, a
+candidate, or a correction — draws on `max_rounds` (default 128), and a
+rejected `check` candidate is corrected once, the second rejection failing
+the completion with that correction as the detail, the same count the
+`omnia-cursor` backend keeps; the host's per-completion tool-call limit is
+answered through `WasiModelCtx::limits()` as `max_tool_calls`. Without a
+`check` the guest sees the model's final text as-is.
 
 MSRV: Rust 1.99
 
@@ -42,7 +42,7 @@ MSRV: Rust 1.99
 | `GENAI_MODEL` | no | `gpt-5.5` | Default model id when a request leaves `model` unset |
 | `GENAI_ENDPOINT` | no | | Base URL every request goes to in place of the provider's own (a self-hosted gateway or proxy) |
 | `GENAI_SHELL_ROOTS` | no | | Trees a lent workspace at or beneath which runs with the `shell` tool, `:`-separated, relative to the invocation directory; none configures no shell |
-| `GENAI_MAX_ROUNDS` | no | `128` | Provider round-trips one completion may make before it is ended as exhausted |
+| `GENAI_MAX_ROUNDS` | no | `128` | Provider round-trips one completion may make before it is ended as `budget-exhausted` |
 | `GENAI_MAX_TOOL_CALLS` | no | `128` | Guest tool calls one completion may make before `budget-exhausted` (the host's default is 32) |
 | `GENAI_SHELL_TIMEOUT_SECS` | no | `600` | Seconds one `shell` command may run before it is killed |
 | `OPENAI_API_KEY` | per provider | | `OpenAI` API key, read by genai from the ambient environment |
@@ -114,12 +114,13 @@ host's environment beyond what the sandbox sets. A guest tool named `shell`
 is `invalid-request`, as one named `read` is the host's. With no shell root
 configured no kernel boundary is set up and the backend runs as before.
 
-The log carries each command as the `omnia-cursor` backend's does — `tool
-call tool=shell subject=…` before it, `tool call completed tool=shell
-subject=… result_bytes=… exit=… duration_ms=…` after, the subject the
-command's first line with the lend spelled `./` — and the `completion` line
-carries `model_ms` and `tool_ms`, the time waited on the provider and the
-time spent in tool rounds, beside the token counts.
+The log carries every tool call as the `omnia-cursor` backend's does — `tool
+call tool=… subject=…` before it, `tool call completed tool=… subject=…
+result_bytes=… duration_ms=…` after, with `exit=…` on a `shell` command; the
+subject is a `read` or `list` path, or the command's first line with the
+lend spelled `./` — and the `completion` line carries `model_ms` and
+`tool_ms`, the time waited on the provider and the time spent in tool
+rounds, beside the token counts.
 
 ## Usage
 

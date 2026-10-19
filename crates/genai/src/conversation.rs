@@ -4,23 +4,25 @@
 //! draws on the configured round budget, so a completion terminates; a
 //! rejected candidate draws on the candidate budget beside it, so a model
 //! that cannot satisfy the check is ended with the correction rather than
-//! asked again until the rounds run out.
+//! asked again until the rounds run out. Either budget spent is the typed
+//! `budget-exhausted`: the same request put again would spend it again.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ToolCall, ToolResponse};
+use omnia_sandbox::Access;
 use omnia_wasi_model::{
-    Answer, Error, Format, ToolHost, ToolTurn, Transcript, Usage, WasiModelCtx as _,
+    Answer, Error, Format, Request, ToolHost, ToolTurn, Transcript, Usage, WasiModelCtx as _,
 };
 use serde_json::Value;
 
-use super::observe::{self, Completion, Failure};
-use super::options::Turn;
-use super::shell::Shell;
-use super::tools;
 use crate::Client;
+use crate::observe::Completion;
+use crate::request::{chat_options, chat_request, prompt_bytes};
+use crate::shell::Shell;
+use crate::tools::Tools;
 
 // Candidates one completion may offer the guest's check: a rejection of the
 // last is the typed `budget-exhausted` carrying the correction, the figure
@@ -35,51 +37,43 @@ pub struct Conversation {
     format: Format,
     check: bool,
     tool_host: Arc<dyn ToolHost>,
-    shell: Option<Shell>,
+    tools: Tools,
     max_rounds: usize,
-    max_result_bytes: usize,
     transcript: Transcript,
-    completion: Option<Completion>,
+    completion: Completion,
 }
 
 impl Conversation {
-    pub fn new(
-        client: &Client, turn: Turn, tool_host: Arc<dyn ToolHost>, shell: Option<Shell>,
-    ) -> Self {
-        let completion = Completion::from(&turn);
+    pub fn prepare(
+        client: &Client, request: &Request, model: String, access: Access,
+        tool_host: Arc<dyn ToolHost>, shell: Option<Shell>,
+    ) -> Result<Self> {
+        let chat = chat_request(request, access)?;
+        let options = chat_options(request)?;
+        let completion = Completion::start(prompt_bytes(request), request.tools.len());
 
-        Self {
+        Ok(Self {
             client: client.inner.clone(),
-            model: turn.model,
-            chat: turn.chat,
-            options: turn.options,
-            format: turn.format,
-            check: turn.check,
+            model,
+            chat,
+            options,
+            format: request.format.clone(),
+            check: request.check,
+            tools: Tools::new(Arc::clone(&tool_host), shell, client.limits().max_result_bytes),
             tool_host,
-            shell,
             max_rounds: client.max_rounds,
-            max_result_bytes: client.limits().max_result_bytes,
             transcript: Transcript::default(),
-            completion: Some(completion),
-        }
+            completion,
+        })
     }
 
     pub async fn complete(mut self) -> Result<Answer> {
         let result = self.run().await;
-        let attempts = self.completion.as_ref().map_or(0, Completion::attempts);
-        let outcome = match &result {
-            Ok(_) if attempts > 1 => "corrected",
-            Ok(_) => "ok",
-            Err(error) => observe::outcome_of(error),
-        };
-        if let Some(completion) = self.completion.take() {
-            completion.finish(outcome);
-        }
+        self.completion.finish(&result);
         result
     }
 
     async fn run(&mut self) -> Result<Answer> {
-        let mut candidates = 0;
         for round in 1..=self.max_rounds {
             let asked = Instant::now();
             let response = self
@@ -87,9 +81,7 @@ impl Conversation {
                 .exec_chat(&self.model, self.chat.clone(), Some(&self.options))
                 .await
                 .with_context(|| format!("genai exec_chat failed for model `{}`", self.model))?;
-            if let Some(completion) = &mut self.completion {
-                completion.model_time(asked.elapsed());
-            }
+            self.completion.model_time(asked.elapsed());
 
             let text = response.first_text().map(ToOwned::to_owned);
             let usage = to_usage(&response.usage);
@@ -103,12 +95,7 @@ impl Conversation {
             let Some(text) = text else {
                 bail!("genai returned neither content nor tool calls (model `{}`)", self.model);
             };
-
-            candidates += 1;
-            if let Some(completion) = &mut self.completion {
-                completion.attempt();
-                completion.record(text.len(), self.transcript.turns.len(), usage.as_ref());
-            }
+            self.completion.answered(text.len(), self.transcript.turns.len(), usage.as_ref());
 
             let candidate = self.format.candidate(&text);
             if !self.check {
@@ -120,7 +107,9 @@ impl Conversation {
                 // The guest's correction is the model's next turn, verbatim;
                 // with no candidate or round left it is the typed failure
                 // the guest sees.
-                Err(correction) if candidates >= MAX_CANDIDATES || round == self.max_rounds => {
+                Err(correction)
+                    if self.completion.attempts() >= MAX_CANDIDATES || round == self.max_rounds =>
+                {
                     bail!(Error::BudgetExhausted(correction));
                 }
                 Err(correction) => {
@@ -137,9 +126,10 @@ impl Conversation {
             }
         }
 
-        Err(Failure::Exhausted {
-            rounds: self.max_rounds,
-        }
+        Err(Error::BudgetExhausted(format!(
+            "no answer after {} model round-trips",
+            self.max_rounds
+        ))
         .into())
     }
 
@@ -147,13 +137,7 @@ impl Conversation {
         let started = Instant::now();
         let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
         for call in tool_calls {
-            let result = tools::dispatch_tool(
-                &self.tool_host,
-                self.shell.as_ref(),
-                &call,
-                self.max_result_bytes,
-            )
-            .await?;
+            let result = self.tools.call(&call).await?;
             self.transcript.turns.push(ToolTurn {
                 tool: call.fn_name,
                 args: call.fn_arguments,
@@ -162,9 +146,7 @@ impl Conversation {
             chat = chat.append_message(ToolResponse::new(call.call_id, result));
         }
         self.chat = chat;
-        if let Some(completion) = &mut self.completion {
-            completion.tool_time(started.elapsed());
-        }
+        self.completion.tool_time(started.elapsed());
         Ok(())
     }
 

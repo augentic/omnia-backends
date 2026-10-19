@@ -28,8 +28,12 @@ async fn pwd(session: &Session) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+// What `prepare` runs `workspace` with, which `access` says beforehand.
 async fn access(sandbox: &Sandbox, workspace: Option<&Path>) -> Access {
-    session(sandbox, workspace).await.access()
+    let queried = sandbox.access(workspace).await.expect("the workspace resolves");
+    let prepared = session(sandbox, workspace).await.access();
+    assert_eq!(queried, prepared, "`access` and `prepare` agree on {workspace:?}");
+    prepared
 }
 
 // --- Environment ---

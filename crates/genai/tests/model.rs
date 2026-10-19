@@ -396,7 +396,7 @@ async fn model_rounds_exhausted() {
         },
     )
     .await;
-    expect_error("no answer after 3 model round-trips", &["tools"], &client).await;
+    expect_error("no answer after 3 model round-trips", &["tools", "budget"], &client).await;
     assert_eq!(fake.requests().len(), 3);
 }
 

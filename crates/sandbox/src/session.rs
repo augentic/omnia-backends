@@ -59,24 +59,7 @@ impl Session {
 
         // the working directory, lent or private
         let (cwd, access) = if let Some(path) = workspace {
-            fs::create_dir_all(path)
-                .await
-                .with_context(|| format!("creating {}", path.display()))?;
-            let cwd = fs::canonicalize(path)
-                .await
-                .with_context(|| format!("canonicalizing {}", path.display()))?;
-
-            // is cwd beneath any of the shell roots?
-            let mut shell = false;
-            for root in &sandbox.options().shell_roots {
-                let root = fs::canonicalize(root).await.unwrap_or_else(|_| root.clone());
-                if cwd.starts_with(root) {
-                    shell = true;
-                    break;
-                }
-            }
-
-            (cwd, if shell { Access::Shell } else { Access::Read })
+            sandbox.workspace(path).await?
         } else {
             let cwd = scratch.join("cwd");
             fs::create_dir(&cwd).await.with_context(|| format!("creating {}", cwd.display()))?;

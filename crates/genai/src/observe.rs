@@ -1,12 +1,13 @@
-//! [`Completion`] emits the start (DEBUG) and finish events — the finish at
-//! INFO for an answer, WARN for anything else. [`Failure`] lets
-//! [`outcome_of`] classify backend errors by type instead of message text.
+//! Completion telemetry: the one line per completion, and its bill.
+//!
+//! [`Completion`] emits the start event at DEBUG and the finish event at
+//! INFO for an answer, WARN for anything else, carrying the outcome, the
+//! bill, and how the wait split between the provider and the tools.
 
 use std::time::{Duration, Instant};
 
-use omnia_wasi_model::Usage;
-
-use crate::model::options::Turn;
+use anyhow::Result;
+use omnia_wasi_model::{Answer, Error, Usage};
 
 // One completion's start/finish events: the outcome and what it cost, on
 // the `complete` span that names the model and format. Drop without
@@ -22,10 +23,10 @@ pub struct Completion {
     emitted: bool,
 }
 
-impl From<&Turn> for Completion {
+impl Completion {
     // The start event: the clock runs from here.
-    fn from(turn: &Turn) -> Self {
-        tracing::debug!(prompt_bytes = turn.prompt_bytes, tools = turn.tools, "completion started");
+    pub fn start(prompt_bytes: u64, tools: usize) -> Self {
+        tracing::debug!(prompt_bytes, tools, "completion started");
 
         Self {
             started: Instant::now(),
@@ -38,13 +39,6 @@ impl From<&Turn> for Completion {
             emitted: false,
         }
     }
-}
-
-impl Completion {
-    // Count a candidate answer as produced (tool rounds do not count).
-    pub const fn attempt(&mut self) {
-        self.attempts = self.attempts.saturating_add(1);
-    }
 
     // Time spent waiting on the provider, summed over the rounds.
     pub const fn model_time(&mut self, elapsed: Duration) {
@@ -56,8 +50,10 @@ impl Completion {
         self.tool_time = self.tool_time.saturating_add(elapsed);
     }
 
-    // Note one answer round and add its tokens to the completion's bill.
-    pub fn record(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
+    // One candidate answered, its tokens on the bill; a tool round is no
+    // candidate.
+    pub fn answered(&mut self, result_len: usize, tool_turns: usize, usage: Option<&Usage>) {
+        self.attempts = self.attempts.saturating_add(1);
         tracing::debug!(result_bytes = result_len, tool_turns, ?usage, "round answered");
 
         if let Some(usage) = usage {
@@ -67,14 +63,20 @@ impl Completion {
         }
     }
 
+    // Candidates answered so far.
     pub const fn attempts(&self) -> u32 {
         self.attempts
     }
 
     // The one line per completion: INFO for an answer, WARN for anything
     // else, so a bare `info` run sees failed or aborted completions too.
-    // Consumes self so Drop does not emit a second time.
-    pub fn finish(mut self, outcome: &'static str) {
+    // Emitted once, so a later `Drop` says nothing.
+    pub fn finish(&mut self, result: &Result<Answer>) {
+        let outcome = match result {
+            Ok(_) if self.attempts > 1 => "corrected",
+            Ok(_) => "ok",
+            Err(error) => outcome_of(error),
+        };
         self.emit(outcome);
     }
 
@@ -111,72 +113,37 @@ impl Completion {
 
 impl Drop for Completion {
     fn drop(&mut self) {
-        if !self.emitted {
-            self.emit("abort");
-        }
+        self.emit("abort");
     }
 }
 
-fn millis(duration: Duration) -> u64 {
+pub fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-// A completion failure this crate constructs. `outcome_of` downcasts this
-// so the `outcome` field does not depend on message wording.
-#[derive(Debug, thiserror::Error)]
-pub enum Failure {
-    // The configured round budget spent without the model producing a
-    // final text answer.
-    #[error("no answer after {rounds} model round-trips")]
-    Exhausted { rounds: usize },
-}
-
-impl Failure {
-    pub const fn outcome(&self) -> &'static str {
-        match self {
-            Self::Exhausted { .. } => "exhausted",
-        }
-    }
-}
-
-// Classify a failed `complete`: a `Failure` by variant, the typed
-// `budget-exhausted` a rejected check ends on, anything else `error`.
-pub fn outcome_of(error: &anyhow::Error) -> &'static str {
-    if let Some(failure) = error.downcast_ref::<Failure>() {
-        return failure.outcome();
-    }
-    match error.downcast_ref::<omnia_wasi_model::Error>() {
-        Some(omnia_wasi_model::Error::BudgetExhausted(_)) => "exhausted",
+// A failed `complete` by its class: the typed `budget-exhausted` — the
+// rounds or the candidates spent — is `exhausted`, anything else `error`.
+fn outcome_of(error: &anyhow::Error) -> &'static str {
+    match error.downcast_ref::<Error>() {
+        Some(Error::BudgetExhausted(_)) => "exhausted",
         _ => "error",
     }
 }
 
-// Error classification and failure display; completion events are exercised
-// through the model e2e suite.
+// The outcome a failure is classed under; the events themselves are the
+// `model` suite's, over the fake provider.
 #[cfg(test)]
 mod tests {
-    use super::{Failure, outcome_of};
+    use super::{Error, outcome_of};
 
     #[test]
     fn classify_errors() {
-        let exhausted: anyhow::Error = Failure::Exhausted { rounds: 128 }.into();
+        let exhausted: anyhow::Error = Error::BudgetExhausted("say more".to_owned()).into();
         assert_eq!(outcome_of(&exhausted), "exhausted");
 
-        let rejected: anyhow::Error =
-            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
-        assert_eq!(outcome_of(&rejected), "exhausted");
-
-        let other: anyhow::Error = omnia_wasi_model::Error::Backend("down".to_owned()).into();
-        assert_eq!(outcome_of(&other), "error");
+        let backend: anyhow::Error = Error::Backend("down".to_owned()).into();
+        assert_eq!(outcome_of(&backend), "error");
 
         assert_eq!(outcome_of(&anyhow::anyhow!("provider unreachable")), "error");
-    }
-
-    #[test]
-    fn failure_budget() {
-        assert_eq!(
-            Failure::Exhausted { rounds: 128 }.to_string(),
-            "no answer after 128 model round-trips"
-        );
     }
 }

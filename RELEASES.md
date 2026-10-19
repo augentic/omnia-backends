@@ -159,7 +159,10 @@ Unreleased
   failure. The `Session` is a handle — a clone names the same session,
   and its scratch and proxy live as long as any handle or any process a
   command ran — whose `access` says what its working directory admits —
-  `Private`, `Read`, or `Shell` for a workspace under a shell root — and
+  `Private`, `Read`, or `Shell` for a workspace under a shell root, the
+  same answer `Sandbox::access` gives for a workspace before any session
+  is prepared, so a backend with nothing to run outside a shell prepares
+  none elsewhere — and
   whose `command` borrows it for a `Command` scoped to it, as many times
   as a completion's commands ask, so a build's `cargo check` and its
   `cargo test` run in one `HOME` with one cache: the bare program
@@ -269,19 +272,21 @@ Unreleased
   `PATH`; with no shell root configured no kernel boundary is set up and
   the backend runs as before. A guest tool named `shell` is
   `invalid-request`, as one named `read` is the host's. The budgets are
-  two, as the Cursor backend's are: `max_rounds` (`GENAI_MAX_ROUNDS`,
-  default `128`) bounds the provider round-trips one completion makes,
-  a tool round, a candidate, or a correction each one, and a rejected
-  `check` candidate is corrected once, the second rejection the typed
-  `budget-exhausted` carrying the correction, so a correction counts the
-  same under either backend; `max_tool_calls` (`GENAI_MAX_TOOL_CALLS`,
-  default `128`) is answered to the host through `WasiModelCtx::limits`,
-  as the Cursor backend's is. The log carries each command as the Cursor
-  backend's stream does — `tool call tool=shell subject=…` before it and
-  `tool call completed tool=shell subject=… result_bytes=… exit=…
-  duration_ms=…` after — and the `completion` line gains `model_ms` and
-  `tool_ms`, the time waited on the provider and the time spent in tool
-  rounds, so a scorecard over the log tells a slow model from a slow
+  two, as the Cursor backend's are, and either spent is the typed
+  `budget-exhausted`: `max_rounds` (`GENAI_MAX_ROUNDS`, default `128`)
+  bounds the provider round-trips one completion makes, a tool round, a
+  candidate, or a correction each one, and a rejected `check` candidate
+  is corrected once, the second rejection carrying the correction, so a
+  correction counts the same under either backend; `max_tool_calls`
+  (`GENAI_MAX_TOOL_CALLS`, default `128`) is answered to the host through
+  `WasiModelCtx::limits`, as the Cursor backend's is. The log carries
+  every tool call as the Cursor backend's stream does — `tool call
+  tool=… subject=…` before it and `tool call completed tool=… subject=…
+  result_bytes=… duration_ms=…` after, with `exit=…` on a `shell`
+  command, the subject a `read` or `list` path or the command's first
+  line — and the `completion` line gains `model_ms` and `tool_ms`, the
+  time waited on the provider and the time spent in tool rounds, so a
+  scorecard over the log tells a slow model from a slow
   build. The `model` suite's fake provider scripts a list of tool calls
   and a scripted final answer, and its shell rows run real commands
   inside the sandbox: the grant's variable, the proxy, and `$WORKSPACE`
@@ -345,6 +350,14 @@ Unreleased
   put once more a request that takes as long the second time. The
   inactivity window stays a backend failure: a run that fell silent may
   answer when put again. The message and `Outcome::Timeout` are unchanged.
+- `omnia-genai` reports a spent round budget (`GENAI_MAX_ROUNDS`) as the
+  typed `omnia_wasi_model::Error::BudgetExhausted`, where it was a bare
+  backend failure (`no answer after N model round-trips`, the message
+  unchanged): the same request put again would spend the rounds again,
+  so a guest sees `bad_request` and a retry-on-`bad_gateway` policy
+  leaves it, as it leaves the rejected `check` candidate the same error
+  already carried. The `completion` line's `outcome=exhausted` is
+  unchanged.
 - `omnia-cursor` closes a tool call the stream never terminated when the
   model next reasons or speaks: the model resumes only once every call it
   issued has answered, so a call still pending then was answered off the

@@ -1,6 +1,11 @@
 #![doc = include_str!("../README.md")]
 
+mod conversation;
 mod model;
+mod observe;
+mod request;
+mod shell;
+mod tools;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,24 +16,6 @@ use genai::resolver::{Endpoint, ServiceTargetResolver};
 use omnia::Backend;
 use omnia_sandbox::{Options, Sandbox};
 use tracing::instrument;
-
-// What a shell inherits of the host's environment beyond `PATH`: who runs
-// it, and where the system's certificates are.
-const INHERIT: &[&str] = &["USER", "LOGNAME", "SSL_CERT_FILE", "SSL_CERT_DIR"];
-
-// The provider keys the SDK reads from the process environment, which no
-// grant may set for a shell.
-const REFUSED: &[&str] = &[
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "GEMINI_API_KEY",
-    "GROQ_API_KEY",
-    "XAI_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "COHERE_API_KEY",
-    "MISTRAL_API_KEY",
-    "OLLAMA_API_KEY",
-];
 
 /// Multi-provider generative-AI model backend.
 #[derive(Clone)]
@@ -70,8 +57,8 @@ impl Backend for Client {
         } else {
             let sandbox = Sandbox::connect(Options {
                 shell_roots: options.shell_roots,
-                inherit: INHERIT,
-                refused: REFUSED,
+                inherit: shell::INHERIT,
+                refused: shell::REFUSED,
             })
             .await?;
             Some(Arc::new(sandbox))
@@ -100,7 +87,8 @@ mod config {
     /// from the ambient environment per request, routed by the model id's
     /// prefix. Each completion runs within the `max_rounds` provider budget
     /// alongside the `max_tool_calls` guest-tool budget, and a rejected
-    /// `check` candidate is corrected at most twice.
+    /// `check` candidate is corrected once: a second rejection ends the
+    /// completion as `budget-exhausted` with the correction.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
         /// Default model id when a request leaves `model` unset.
@@ -123,7 +111,7 @@ mod config {
         pub shell_roots: Vec<PathBuf>,
         /// Provider round-trips one completion may make — a tool round, a
         /// candidate, or a correction each one — before it is ended as
-        /// exhausted.
+        /// `budget-exhausted`.
         #[env(from = "GENAI_MAX_ROUNDS", default = "128")]
         pub max_rounds: usize,
         /// Guest tool calls one completion may make before it is ended as

@@ -1,28 +1,30 @@
 //! Key-gated live integration tests for the genai backend — the function-tool
-//! session loop and the host-injected workspace tools against a real provider.
+//! session loop, the host-injected workspace tools, and the shell against a
+//! real provider.
 //!
 //! The cross-repo companions to omnia's deterministic ABI scenarios
 //! (`crates/abi-tests/tests/model.rs`): those prove the session
 //! machinery and the real workspace `ToolHost` with no network; these prove
 //! the genai backend itself — `Request`→`ChatRequest` mapping with declared
 //! and host-injected tools, the in-process tool loop forwarding through
-//! [`ToolHost`], and the guest `check` loop — against a real provider.
+//! [`ToolHost`], the shell a lend under a shell root opens, and the guest
+//! `check` loop — against a real provider.
 //!
 //! `#[ignore]`d so they never run or touch the network in CI; run them with
 //! `cargo nextest run -p omnia-genai --run-ignored all` alongside a provider
 //! key such as `OPENAI_API_KEY`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use futures::FutureExt as _;
-use omnia::Backend as _;
-use omnia_genai::Client;
+use omnia::{Backend as _, FromEnv as _};
+use omnia_genai::{Client, ConnectOptions};
 use omnia_wasi_model::{
     Answer, DirEntry, Error, Format, Function, FutureResult, Grants, Message, Request, Role, Tool,
-    ToolHost, WasiModelCtx,
+    ToolHost, WasiModelCtx, WorkerGrant,
 };
 use serde_json::Value;
 
@@ -150,6 +152,71 @@ impl ToolHost for LiveWorkspace {
 
     fn local_path(&self) -> Option<&Path> {
         Some(Path::new("/unused/live-workspace"))
+    }
+}
+
+// A lent tree the client was connected with as a shell root, so the backend
+// prepares a session over it and advertises `shell`; the workspace tools go
+// unused since the prompt asks for the toolchain alone.
+#[derive(Debug)]
+struct LiveShell(PathBuf);
+
+impl ToolHost for LiveShell {
+    fn call_tool(&self, name: String, _arguments: String) -> FutureResult<Result<String, String>> {
+        async move { Err(anyhow::anyhow!("no function tools are declared, model called `{name}`")) }
+            .boxed()
+    }
+
+    fn read(&self, _path: String) -> FutureResult<Vec<u8>> {
+        async { Err(anyhow::anyhow!("read is unused in this test")) }.boxed()
+    }
+
+    fn list(&self, _path: String) -> FutureResult<Vec<DirEntry>> {
+        async { Err(anyhow::anyhow!("list is unused in this test")) }.boxed()
+    }
+
+    fn write(&self, _path: String, _bytes: Vec<u8>) -> FutureResult<()> {
+        async { Err(anyhow::anyhow!("write is unused in this test")) }.boxed()
+    }
+
+    fn check(&self, _candidate: String) -> FutureResult<Result<(), String>> {
+        async { Err(anyhow::anyhow!("no check was requested")) }.boxed()
+    }
+
+    fn local_path(&self) -> Option<&Path> {
+        Some(&self.0)
+    }
+}
+
+// A prompt that forces the shell: the version is never stated, so the model
+// must run the command and answer with its first line. The grant is the
+// Rust toolchain's reach, as the omnia target adapter spells it.
+fn shell_request() -> Request {
+    Request {
+        model: None,
+        system: Some(
+            "A workspace is granted for this task, with a `shell` tool that runs a command in \
+             it. Run `cargo --version` through the shell, then reply with a JSON object \
+             {\"cargo\": <the exact first line the command printed>}. Use the command's output \
+             verbatim; do not invent it."
+                .to_owned(),
+        ),
+        messages: vec![Message {
+            role: Role::User,
+            content: "Report the cargo version installed.".to_owned(),
+        }],
+        generation: None,
+        format: Format::Json,
+        tools: vec![],
+        grants: Grants {
+            workspace: None,
+            worker: Some(WorkerGrant {
+                egress: vec![],
+                read: vec!["~/.rustup".to_owned(), "~/.cargo/bin".to_owned()],
+                env: vec![("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned())],
+            }),
+        },
+        check: false,
     }
 }
 
@@ -331,6 +398,43 @@ async fn workspace_tools() -> Result<()> {
     assert!(
         value.to_string().contains(SENTINEL),
         "the file's value must appear in the answer: {value}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs a provider key (e.g. OPENAI_API_KEY) and a Rust toolchain under `~/.rustup`; run with --run-ignored"]
+async fn shell_toolchain() -> Result<()> {
+    let scratch = omnia_test::host::scratch();
+    let tree = scratch.path().join("tree");
+    std::fs::create_dir_all(&tree)?;
+    let client = Client::connect_with(ConnectOptions {
+        shell_roots: vec![tree.clone()],
+        ..ConnectOptions::load_env()?
+    })
+    .await?;
+    let answer: Answer =
+        client.complete(shell_request(), Arc::new(LiveShell(tree))).await.map_err(|e| {
+            anyhow::anyhow!("live genai completion failed (is the API key valid?): {e}")
+        })?;
+
+    let transcript = answer.transcript.as_ref().expect("genai always records a transcript");
+    let shell_turn = transcript
+        .turns
+        .iter()
+        .find(|turn| turn.tool == "shell")
+        .expect("the model must run the command through the shell");
+    assert!(
+        shell_turn.result.as_str().is_some_and(|text| text.starts_with("cargo ")),
+        "the shell result must carry the command's output: {:?}",
+        shell_turn.result
+    );
+
+    let value = object(&answer);
+    assert!(
+        value.get("cargo").and_then(Value::as_str).is_some_and(|line| line.starts_with("cargo ")),
+        "the command's first line must be the answer: {value}"
     );
 
     Ok(())

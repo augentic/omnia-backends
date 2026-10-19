@@ -1,17 +1,21 @@
 //! A completion the backend fails: the guest sees a `backend` failure whose
 //! detail carries the needle the deployment named. The first operator
 //! argument is the needle; further arguments are flags — `tools` declares
-//! `lookup`, `check` asks for a check and rejects every candidate it is
-//! offered (so the failure must strike after at least one has reached the
-//! guest), `nudged` asks for a JSON answer with a check — so a reply that is
-//! not JSON is nudged before any check — and requires the failure to strike
-//! before any candidate has reached the guest, `budget` expects the typed
-//! `budget-exhausted` in the backend failure's place, and `without:<text>`
-//! asserts the detail does not carry `text`.
+//! `lookup`, `tool:<name>` declares a function tool of that name, `check`
+//! asks for a check and rejects every candidate it is offered (so the
+//! failure must strike after at least one has reached the guest), `nudged`
+//! asks for a JSON answer with a check — so a reply that is not JSON is
+//! nudged before any check — and requires the failure to strike before any
+//! candidate has reached the guest, `budget` expects the typed
+//! `budget-exhausted` in the backend failure's place, `invalid` the typed
+//! `invalid-request`, and `without:<text>` asserts the detail does not
+//! carry `text`.
 
 #![cfg(target_arch = "wasm32")]
 
-use omnia_sdk::model::{CHECK_TOOL, Error, Format, Model as _, Request, ToolCall, WasiModel};
+use omnia_sdk::model::{
+    CHECK_TOOL, Error, Format, Function, Model as _, Request, Tool, ToolCall, WasiModel,
+};
 use test_programs::{arguments, lend, lookup, user};
 
 omnia_sdk::command!(scenario);
@@ -19,10 +23,21 @@ omnia_sdk::command!(scenario);
 async fn scenario() {
     let arguments = arguments();
     let (needle, flags) = arguments.split_first().expect("the needle is the first argument");
-    let tools = if flags.iter().any(|flag| flag == "tools") { vec![lookup()] } else { vec![] };
+    let mut tools = if flags.iter().any(|flag| flag == "tools") { vec![lookup()] } else { vec![] };
+    tools.extend(flags.iter().filter_map(|flag| flag.strip_prefix("tool:")).map(|name| {
+        Tool::Function(
+            Function::builder().name(name).description("test tool").parameters("{}").build(),
+        )
+    }));
     let check = flags.iter().any(|flag| flag == "check");
     let nudged = flags.iter().any(|flag| flag == "nudged");
-    let budget = flags.iter().any(|flag| flag == "budget");
+    let expected = if flags.iter().any(|flag| flag == "budget") {
+        "budget-exhausted"
+    } else if flags.iter().any(|flag| flag == "invalid") {
+        "invalid-request"
+    } else {
+        "backend"
+    };
     let absent: Vec<&str> = flags.iter().filter_map(|flag| flag.strip_prefix("without:")).collect();
     let format = if nudged { Format::Json } else { Format::Text };
 
@@ -54,10 +69,11 @@ async fn scenario() {
         )
         .await
         .expect_err("the backend fails the completion");
-    let detail = match (&error, budget) {
-        (Error::Backend(detail), false) | (Error::BudgetExhausted(detail), true) => detail,
-        (_, false) => panic!("expected a backend failure, got {error:?}"),
-        (_, true) => panic!("expected the typed budget-exhausted, got {error:?}"),
+    let ((Error::Backend(detail), "backend")
+    | (Error::BudgetExhausted(detail), "budget-exhausted")
+    | (Error::InvalidRequest(detail), "invalid-request")) = (&error, expected)
+    else {
+        panic!("expected {expected}, got {error:?}");
     };
     assert!(detail.contains(needle), "expected {needle:?} in the detail: {detail}");
     for text in absent {

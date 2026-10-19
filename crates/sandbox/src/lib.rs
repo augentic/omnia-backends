@@ -13,7 +13,7 @@ use std::{env, fmt, io};
 
 use anyhow::{Context as _, Result, bail};
 
-pub use crate::child::{Child, Exit};
+pub use crate::child::{Child, Exit, TimedOut};
 pub use crate::session::{Access, Command, Session};
 
 // The kernel boundary around a process: Landlock and seccomp on Linux,
@@ -72,7 +72,7 @@ const STORES: &[&str] = &[
 ///
 /// [`Sandbox::connect`] validates the [`Options`] against the host and reads
 /// what a process inherits. [`Sandbox::prepare`] then validates one
-/// process's [`Grant`] and prepares the [`Session`] it runs in.
+/// session's [`Grant`] and prepares the [`Session`] its processes run in.
 pub struct Sandbox {
     options: Options,
     inherited: BTreeMap<OsString, OsString>,
@@ -130,16 +130,16 @@ impl Sandbox {
         &self.options
     }
 
-    /// Prepares the [`Session`] one process runs in: its working directory,
-    /// its environment, and what `grant` opens to it.
+    /// Prepares the [`Session`] a completion's processes run in: their
+    /// working directory, their environment, and what `grant` opens to them.
     ///
-    /// The process works in `workspace`, created and canonicalised, or in a
+    /// The processes work in `workspace`, created and canonicalised, or in a
     /// private directory when none is given. A workspace at or beneath one
     /// of the connected `shell_roots` runs with [`Access::Shell`], any other
     /// workspace with [`Access::Read`], and a private directory with
     /// [`Access::Private`].
     ///
-    /// Its environment is built from nothing:
+    /// Their environment is built from nothing:
     ///
     /// - the host's variables, as read at connect
     /// - `HOME` and `TMPDIR`, a scratch directory of its own, removed once
@@ -176,6 +176,43 @@ impl Sandbox {
     /// - the proxy cannot be bound
     pub async fn prepare(&self, workspace: Option<&Path>, grant: &Grant) -> Result<Session> {
         Session::prepare(self, workspace, grant).await
+    }
+
+    /// The [`Access`] a session over `workspace` would run with, before any
+    /// is prepared.
+    ///
+    /// The workspace is created and canonicalised as [`Sandbox::prepare`]
+    /// does: at or beneath one of the connected `shell_roots` it is
+    /// [`Access::Shell`], elsewhere [`Access::Read`], and none is
+    /// [`Access::Private`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace cannot be created or
+    /// canonicalised.
+    pub async fn access(&self, workspace: Option<&Path>) -> Result<Access> {
+        match workspace {
+            Some(path) => Ok(self.workspace(path).await?.1),
+            None => Ok(Access::Private),
+        }
+    }
+
+    // The workspace created and canonical, with what runs in it. A shell
+    // root is resolved again here: one that did not exist at connect may now.
+    pub(crate) async fn workspace(&self, path: &Path) -> Result<(PathBuf, Access)> {
+        tokio::fs::create_dir_all(path)
+            .await
+            .with_context(|| format!("creating {}", path.display()))?;
+        let cwd = tokio::fs::canonicalize(path)
+            .await
+            .with_context(|| format!("canonicalizing {}", path.display()))?;
+        for root in &self.options.shell_roots {
+            let root = tokio::fs::canonicalize(root).await.unwrap_or_else(|_| root.clone());
+            if cwd.starts_with(root) {
+                return Ok((cwd, Access::Shell));
+            }
+        }
+        Ok((cwd, Access::Read))
     }
 
     pub(crate) const fn kernel(&self) -> &Arc<Kernel> {

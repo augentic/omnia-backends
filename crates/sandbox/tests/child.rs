@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use omnia_sandbox::{Exit, Options};
+use omnia_sandbox::{Exit, Options, TimedOut};
 use support::{BOUND, Captured, alive, await_gone, connect, pid_of, session, sh, spawn_sh};
 use tokio::time::Instant;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -41,7 +41,7 @@ fn terminate(pid: u32) {
 async fn grandchild_on_exit() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
-    let mut child = spawn_sh(session, "sleep 600 & echo \"ready $!\" >&2; exit 3", Some(READY));
+    let mut child = spawn_sh(&session, "sleep 600 & echo \"ready $!\" >&2; exit 3", Some(READY));
 
     let grandchild = pid_of(&child.ready().await.expect("the ready line names the fork"));
     assert!(alive(grandchild));
@@ -57,7 +57,7 @@ async fn grandchild_on_exit() {
 async fn grandchild_on_drop() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
-    let mut child = spawn_sh(session, "sleep 600 & echo \"ready $!\" >&2; wait", Some(READY));
+    let mut child = spawn_sh(&session, "sleep 600 & echo \"ready $!\" >&2; wait", Some(READY));
 
     let grandchild = pid_of(&child.ready().await.expect("the ready line names the fork"));
     let pid = child.pid();
@@ -77,7 +77,7 @@ async fn stop_answered() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let script = "trap 'exit 0' TERM; echo \"ready $$\" >&2; while :; do sleep 1; done";
-    let mut child = spawn_sh(session, script, Some(READY));
+    let mut child = spawn_sh(&session, script, Some(READY));
 
     let pid = pid_of(&child.ready().await.expect("the ready line names the shell"));
     assert_eq!(pid, child.pid());
@@ -94,7 +94,7 @@ async fn stop_answered() {
 async fn stop_unanswered() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
-    let mut child = spawn_sh(session, "echo \"ready $$\" >&2; exec sleep 600", Some(READY));
+    let mut child = spawn_sh(&session, "echo \"ready $$\" >&2; exec sleep 600", Some(READY));
     child.ready().await.expect("the ready line");
 
     let asked = Arc::new(AtomicBool::new(false));
@@ -117,7 +117,7 @@ async fn stop_unanswered() {
 async fn fail_on_exit() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
-    let child = spawn_sh(session, "exit 7", None);
+    let child = spawn_sh(&session, "exit 7", None);
 
     let exit = child
         .fail_on_exit(std::future::pending::<Result<(), ()>>())
@@ -131,7 +131,7 @@ async fn fail_on_exit() {
 async fn fail_on_exit_grace() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
-    let child = spawn_sh(session, "sleep 0.1; exit 7", None);
+    let child = spawn_sh(&session, "sleep 0.1; exit 7", None);
 
     let exit = child
         .fail_on_exit(async { Err::<(), _>("connection reset") })
@@ -144,7 +144,7 @@ async fn fail_on_exit_grace() {
 async fn fail_on_exit_err() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
-    let child = spawn_sh(session, "exec sleep 600", None);
+    let child = spawn_sh(&session, "exec sleep 600", None);
 
     let outcome = child
         .fail_on_exit(async { Err::<(), _>("connection reset") })
@@ -158,7 +158,7 @@ async fn fail_on_exit_err() {
 async fn fail_on_exit_ok() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
-    let child = spawn_sh(session, "exec sleep 600", None);
+    let child = spawn_sh(&session, "exec sleep 600", None);
 
     let outcome = child.fail_on_exit(async { Ok::<_, ()>(5) }).await.expect("running");
     assert_eq!(outcome, Ok(5));
@@ -175,11 +175,11 @@ async fn controlling_tty() {
     let session = support::session(&sandbox, None).await;
     // in a subshell, since dash exits on a special builtin's redirection failing
     let script = "if ( : </dev/tty ) 2>/dev/null; then echo open; else echo none; fi";
-    let output = sh(session, script).output(BOUND).await.expect("sh answers");
+    let output = sh(&session, script).output(BOUND).await.expect("sh answers");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "none", "/dev/tty opened");
 
     let session = support::session(&sandbox, None).await;
-    let child = spawn_sh(session, "exec sleep 600", None);
+    let child = spawn_sh(&session, "exec sleep 600", None);
     let ps = std::process::Command::new("ps")
         .args(["-o", "tty=", "-p", &child.pid().to_string()])
         .output()
@@ -194,7 +194,7 @@ async fn controlling_tty() {
 async fn output_captured() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
-    let command = sh(session, "echo out; echo err >&2; exit 4");
+    let command = sh(&session, "echo out; echo err >&2; exit 4");
     let output = command.output(BOUND).await.expect("sh answers");
 
     assert_eq!(output.status.code(), Some(4));
@@ -207,14 +207,34 @@ async fn output_timeout() {
     let workspace = tempfile::tempdir().expect("a workspace");
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, Some(workspace.path())).await;
-    let command = sh(session, "sleep 600 & echo $! > pid; wait");
+    let command = sh(&session, "sleep 600 & echo $! > pid; wait");
     let error =
         command.output(Duration::from_millis(500)).await.expect_err("the shell waits on its fork");
 
     assert!(error.to_string().contains("did not exit within"), "{error:#}");
+    let timed_out = error.downcast_ref::<TimedOut>().expect("the bound's failure is typed");
+    assert_eq!((timed_out.program.as_str(), timed_out.bound), ("sh", Duration::from_millis(500)));
     let grandchild =
         pid_of(&std::fs::read_to_string(workspace.path().join("pid")).expect("the pid"));
     await_gone(grandchild).await;
+}
+
+// A run given up on mid-command takes the command and its fork with it.
+#[tokio::test]
+async fn output_dropped() {
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, Some(workspace.path())).await;
+    let command = sh(&session, "sleep 600 & echo \"$! $$\" > pid; wait");
+    let run = command.output(BOUND);
+    tokio::time::timeout(Duration::from_millis(500), run)
+        .await
+        .expect_err("the shell waits on its fork");
+
+    let pids = std::fs::read_to_string(workspace.path().join("pid")).expect("the pids");
+    let (grandchild, shell) = pids.trim().split_once(' ').expect("two pids");
+    await_gone(pid_of(grandchild)).await;
+    await_gone(pid_of(shell)).await;
 }
 
 // A fork left holding the pipes neither delays the exit nor outlives it.
@@ -224,7 +244,7 @@ async fn output_with_fork() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, Some(workspace.path())).await;
     let started = Instant::now();
-    let command = sh(session, "sleep 600 & echo $! > pid; echo done; exit 5");
+    let command = sh(&session, "sleep 600 & echo $! > pid; echo done; exit 5");
     let output = command.output(BOUND).await.expect("the shell answers");
 
     assert_eq!(output.status.code(), Some(5));
@@ -243,7 +263,7 @@ async fn output_capped() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let script = format!("head -c {} /dev/zero; echo tail >&2", CAP + 1024 * 1024);
-    let output = sh(session, &script).output(BOUND).await.expect("the shell answers");
+    let output = sh(&session, &script).output(BOUND).await.expect("the shell answers");
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout.len(), CAP);
@@ -261,7 +281,7 @@ async fn binary_before_ready() {
     let session = session(&sandbox, None).await;
     let script = "printf '\\377\\376 binary\\n' >&2; printf '\\377\\376 binary\\n'; \
                   echo 'ready token' >&2; echo after; exit 0";
-    let mut child = spawn_sh(session, script, Some(READY));
+    let mut child = spawn_sh(&session, script, Some(READY));
 
     assert_eq!(child.ready().await.as_deref(), Some("token"));
     let exit = child.exited().await;
@@ -281,7 +301,7 @@ async fn crash_log() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let script = "echo 'ready secret-token' >&2; echo 'line one' >&2; echo 'line two' >&2; exit 2";
-    let mut child = spawn_sh(session, script, Some(READY));
+    let mut child = spawn_sh(&session, script, Some(READY));
     assert_eq!(child.ready().await.as_deref(), Some("secret-token"));
     let exit = child.exited().await;
     assert_eq!(code(&exit), Some(2), "{exit}");

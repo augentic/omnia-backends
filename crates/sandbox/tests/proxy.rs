@@ -19,7 +19,7 @@ async fn proxy(hosts: &[&str]) -> (SocketAddr, Child) {
         egress: hosts.iter().map(ToString::to_string).collect(),
         ..Grant::default()
     };
-    proxy_of(support::granted(&sandbox, None, &grant).await).await
+    proxy_of(&support::granted(&sandbox, None, &grant).await).await
 }
 
 // One request to the proxy: the status line's code, the body, and the
@@ -199,7 +199,7 @@ async fn plain_http() {
 #[tokio::test]
 async fn proxy_env() {
     let sandbox = connect(Options::default()).await;
-    let output = support::run(support::session(&sandbox, None).await, "env").await;
+    let output = support::run(&support::session(&sandbox, None).await, "env").await;
     let env = String::from_utf8_lossy(&output.stdout).into_owned();
     let proxy = env
         .lines()
@@ -239,7 +239,7 @@ async fn confined_egress() {
     assert!(control.status.success(), "the resolver answers outside");
 
     let session = support::granted(&sandbox, Some(&tree), &grant).await;
-    let output = support::sh(session, "./probe resolve example.com")
+    let output = support::sh(&session, "./probe resolve example.com")
         .output(bound)
         .await
         .expect("the probe answers");
@@ -248,11 +248,11 @@ async fn confined_egress() {
     let session = support::granted(&sandbox, Some(&tree), &grant).await;
     let script = "env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY \
                   -u all_proxy curl -sS --max-time 10 https://example.com";
-    let output = support::sh(session, script).output(bound).await.expect("curl answers");
+    let output = support::sh(&session, script).output(bound).await.expect("curl answers");
     assert!(!output.status.success(), "a direct connect reached out: {output:?}");
 
     let session = support::granted(&sandbox, Some(&tree), &grant).await;
-    let output = support::sh(session, &format!("./probe tunnel 127.0.0.1:{}", server.port()))
+    let output = support::sh(&session, &format!("./probe tunnel 127.0.0.1:{}", server.port()))
         .output(bound)
         .await
         .expect("the probe answers");

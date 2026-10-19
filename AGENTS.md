@@ -6,6 +6,11 @@
 interfaces (Azure Blob/Table/Vault/Identity, Postgres, Redis, NATS, Kafka,
 MongoDB, OpenTelemetry, and the `genai`/`cursor` model backends). Each crate
 implements the corresponding `omnia` `WasiXxxCtx` trait against a real service.
+The two model backends run what a model does to a lent tree under
+`omnia-sandbox` — `cursor` the `cursor-sdk-bridge` process, `genai` the
+`shell` tool it advertises for a workspace under a configured shell root —
+so a completion's processes are held to the lend, a scratch home, and the
+request's own worker grant by the kernel, whichever model answers.
 `omnia-azure-blob` additionally implements `omnia_plugin::PackageStore` (the
 store the `RegistryClient` acquirer reads before any registry and writes
 what it fetches to); registry acquisition itself, and the local `FsStore`,
@@ -98,7 +103,7 @@ so the policy splits into three tiers:
   OData filter building (`azure-table/store/filter.rs`), Postgres type
   mapping, the Kafka partitioner, cursor's ready-line and Connect-frame
   parsing (`cursor/src/worker/discovery.rs`, `protocol.rs`), genai's
-  request translation (`genai/src/model/options.rs`). A behaviour a guest
+  request translation (`genai/src/request.rs`). A behaviour a guest
   boundary reaches is an e2e row, not a unit test: the scripted-server unit
   tests the model backends once carried inside `src/` were retired for
   exactly that reason, and a new in-crate loopback server is the signal to

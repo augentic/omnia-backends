@@ -4,7 +4,7 @@
 //! The process leads a process group of its own, so one kill reaches
 //! everything it forked. Whatever it left in its group is swept as its exit
 //! is seen. Nothing of a child outlives it. A one-shot runs the same way,
-//! held to a bound and killed past it.
+//! held to a bound and killed past it, or as its run is dropped.
 
 use std::collections::VecDeque;
 use std::ffi::OsStr;
@@ -223,12 +223,35 @@ impl fmt::Display for Exit {
 
 impl std::error::Error for Exit {}
 
+/// A one-shot that outlived its bound and was killed with everything it
+/// forked.
+///
+/// [`Command::output`](crate::Command::output) fails with one of these,
+/// downcastable from its error, where the process had not exited within
+/// the bound. A process that could not be spawned or waited on fails with a
+/// plain error.
+#[derive(Clone, Debug)]
+pub struct TimedOut {
+    /// The program, as the command named it.
+    pub program: String,
+    /// The bound the process outlived.
+    pub bound: Duration,
+}
+
+impl fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "`{}` did not exit within {:?}", self.program, self.bound)
+    }
+}
+
+impl std::error::Error for TimedOut {}
+
 // Past `bound` the process is killed with everything it forked. Once it has
 // exited on its own, what it forked is killed too, so a pipe left to a fork
 // closes with it.
 pub async fn output(command: Command, bound: Duration) -> Result<Output> {
     let program = program_of(&command);
-    let mut child = launch(command)?;
+    let mut child = OneShot(launch(command)?);
     let stdout = child.stdout().take();
     let stderr = child.stderr().take();
     let mut out = Vec::new();
@@ -251,7 +274,7 @@ pub async fn output(command: Command, bound: Duration) -> Result<Output> {
         Err(_elapsed) => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            bail!("`{program}` did not exit within {bound:?}");
+            bail!(TimedOut { program, bound });
         }
     };
 
@@ -267,6 +290,31 @@ pub async fn output(command: Command, bound: Duration) -> Result<Output> {
         stdout: out,
         stderr: err,
     })
+}
+
+// The one-shot's process: the group is killed as the run is dropped, so a
+// caller that gives up on it mid-command leaves nothing of it behind.
+// `KillOnDrop` alone reaches the leader, not what it forked.
+struct OneShot(Box<dyn ChildWrapper>);
+
+impl Drop for OneShot {
+    fn drop(&mut self) {
+        let _ = self.0.start_kill();
+    }
+}
+
+impl std::ops::Deref for OneShot {
+    type Target = dyn ChildWrapper;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl std::ops::DerefMut for OneShot {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut()
+    }
 }
 
 // Waits on the process, tears it down on request, and publishes its exit.

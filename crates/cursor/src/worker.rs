@@ -51,7 +51,7 @@ pub struct Worker {
 impl Worker {
     // The handshake is left to `Spawned::handshake`, so a pool lease can
     // occupy the slot first.
-    pub fn spawn(callback: &Registration, relay: &str, session: Session) -> Result<Spawned> {
+    pub fn spawn(callback: &Registration, relay: &str, session: &Session) -> Result<Spawned> {
         let state_root = session.scratch().to_owned();
         let mut command = session.command("cursor-sdk-bridge")?;
         command

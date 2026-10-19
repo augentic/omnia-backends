@@ -64,7 +64,7 @@ impl Pool {
 
     // Wait for a slot, in arrival order, then for the worker to run on,
     // spawned inside `session`.
-    pub async fn acquire(&self, session: Session) -> Result<Lease> {
+    pub async fn acquire(&self, session: &Session) -> Result<Lease> {
         let queued = Instant::now();
         let permit =
             Arc::clone(&self.permits).acquire_owned().await.context("the agent pool is closed")?;

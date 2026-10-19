@@ -3870,19 +3870,22 @@ dependencies = [
  "fromenv",
  "futures",
  "genai",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "omnia",
+ "omnia-sandbox",
  "omnia-test",
  "omnia-wasi-model",
  "schemars 1.2.3",
  "serde",
  "serde_json",
  "test-programs",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

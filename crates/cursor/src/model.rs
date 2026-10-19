@@ -97,7 +97,7 @@ impl Client {
             self.api_key.as_deref().ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))?;
         let session = self.prepare(request, tool_host.local_path()).await?;
         let turn = Turn::prepare(request, &session, &self.model, api_key)?;
-        let lease = self.pool.acquire(session).await?;
+        let lease = self.pool.acquire(&session).await?;
         Ok((lease, turn))
     }
 

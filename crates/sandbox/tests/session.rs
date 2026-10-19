@@ -9,12 +9,12 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use omnia_sandbox::{Access, Grant, Options, Sandbox, Session};
-use support::{BOUND, Captured, connect, proxy_of, session, sh};
+use support::{BOUND, Captured, connect, proxy_of, run, session, sh};
 use tracing_subscriber::layer::SubscriberExt as _;
 
 const PLANTED: &str = "OMNIA_SANDBOX_PLANTED";
 
-async fn environment(session: Session) -> BTreeMap<String, String> {
+async fn environment(session: &Session) -> BTreeMap<String, String> {
     let output = sh(session, "env").output(BOUND).await.expect("env answers");
     String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -23,13 +23,17 @@ async fn environment(session: Session) -> BTreeMap<String, String> {
         .collect()
 }
 
-async fn pwd(session: Session) -> String {
+async fn pwd(session: &Session) -> String {
     let output = sh(session, "pwd").output(BOUND).await.expect("pwd answers");
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+// What `prepare` runs `workspace` with, which `access` says beforehand.
 async fn access(sandbox: &Sandbox, workspace: Option<&Path>) -> Access {
-    session(sandbox, workspace).await.access()
+    let queried = sandbox.access(workspace).await.expect("the workspace resolves");
+    let prepared = session(sandbox, workspace).await.access();
+    assert_eq!(queried, prepared, "`access` and `prepare` agree on {workspace:?}");
+    prepared
 }
 
 // --- Environment ---
@@ -45,7 +49,7 @@ fn inherited_env() {
         let sandbox = connect(Options::default()).await;
         let session = session(&sandbox, None).await;
         let scratch = session.scratch().to_string_lossy().into_owned();
-        let seen = environment(session).await;
+        let seen = environment(&session).await;
 
         assert!(seen.contains_key("PATH"), "PATH is inherited: {seen:#?}");
         assert_eq!(seen.get("HOME"), Some(&scratch), "HOME is the scratch: {seen:#?}");
@@ -60,7 +64,7 @@ fn inherited_env() {
             ..Options::default()
         })
         .await;
-        let seen = environment(support::session(&sandbox, None).await).await;
+        let seen = environment(&support::session(&sandbox, None).await).await;
         assert_eq!(seen.get(PLANTED).map(String::as_str), Some("leaked"), "{seen:#?}");
     });
 }
@@ -81,7 +85,7 @@ async fn workspace_cwd() {
         std::fs::canonicalize(workspace.path().join("tree")).expect("the workspace was created"),
         "the workspace is created and canonical"
     );
-    assert_eq!(pwd(session).await, cwd.to_string_lossy());
+    assert_eq!(pwd(&session).await, cwd.to_string_lossy());
 }
 
 #[tokio::test]
@@ -94,7 +98,7 @@ async fn private_cwd() {
     let cwd = session.cwd().to_owned();
     let scratch = std::fs::canonicalize(session.scratch()).expect("the scratch exists");
     assert!(cwd.starts_with(&scratch), "{} is under the scratch", cwd.display());
-    assert_eq!(pwd(session).await, cwd.to_string_lossy());
+    assert_eq!(pwd(&session).await, cwd.to_string_lossy());
 }
 
 // --- Shell by location ---
@@ -199,7 +203,7 @@ async fn grant_path() {
 #[tokio::test]
 async fn command_env() {
     let sandbox = connect(Options::default()).await;
-    let mut command = sh(session(&sandbox, None).await, "printf '%s' \"$ANSWER\"");
+    let mut command = sh(&session(&sandbox, None).await, "printf '%s' \"$ANSWER\"");
     command.env("ANSWER", "42");
     let output = command.output(BOUND).await.expect("sh answers");
     assert_eq!(output.stdout, b"42");
@@ -362,7 +366,7 @@ fn grant_env() {
             ],
             ..Grant::default()
         };
-        let seen = environment(support::granted(&sandbox, None, &grant).await).await;
+        let seen = environment(&support::granted(&sandbox, None, &grant).await).await;
         let rustup = home.join(".rustup").display().to_string();
         assert_eq!(seen.get("RUSTUP_HOME"), Some(&rustup), "{seen:#?}");
         assert_eq!(seen.get("CARGO_TERM_COLOR").map(String::as_str), Some("never"));
@@ -413,7 +417,7 @@ fn missing_home() {
         assert!(error.contains("names the home, which the host has none of"), "{error}");
 
         // nothing `~/` asked, nothing missed
-        let seen = environment(session(&sandbox, None).await).await;
+        let seen = environment(&session(&sandbox, None).await).await;
         assert!(seen.contains_key("PATH"), "{seen:#?}");
     });
 }
@@ -422,14 +426,38 @@ fn missing_home() {
 #[tokio::test]
 async fn proxy_per_session() {
     let sandbox = connect(Options::default()).await;
-    let (first, _first_child) = proxy_of(session(&sandbox, None).await).await;
-    let (second, _second_child) = proxy_of(session(&sandbox, None).await).await;
+    let (first, _first_child) = proxy_of(&session(&sandbox, None).await).await;
+    let (second, _second_child) = proxy_of(&session(&sandbox, None).await).await;
     assert_ne!(first, second);
 
-    let seen = environment(session(&sandbox, None).await).await;
+    let seen = environment(&session(&sandbox, None).await).await;
     let third = seen.get("HTTPS_PROXY").expect("the proxy is in the environment");
     assert_ne!(third, &format!("http://{first}"));
     assert_ne!(third, &format!("http://{second}"));
+}
+
+// One session runs any number of commands in turn, every one in the same
+// scratch and behind the same proxy; the scratch goes with the last handle.
+#[tokio::test]
+async fn session_shared() {
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, None).await;
+    let scratch = session.scratch().to_owned();
+
+    let first = run(&session, "printf '%s' \"$HTTPS_PROXY\" > \"$HOME/proxy\"").await;
+    assert!(first.status.success(), "the first command writes under HOME");
+    assert!(scratch.join("proxy").is_file(), "the scratch stands between the commands");
+
+    let second = run(&session, "cat \"$HOME/proxy\"; printf ' %s' \"$HTTPS_PROXY\"").await;
+    let text = String::from_utf8_lossy(&second.stdout);
+    let (written, seen) =
+        text.split_once(' ').expect("the first command's proxy, then the second's");
+    assert!(written.starts_with("http://"), "the first command saw the proxy: {written}");
+    assert_eq!(written, seen, "both commands run behind the one proxy");
+
+    drop(second);
+    drop(session);
+    assert!(!scratch.exists(), "the scratch goes with the last handle: {}", scratch.display());
 }
 
 // --- Seatbelt (macOS) ---
@@ -472,7 +500,7 @@ mod seatbelt {
         let sandbox = support::connect(Options::default()).await;
 
         let inside = run(
-            support::session(&sandbox, Some(&tree)).await,
+            &support::session(&sandbox, Some(&tree)).await,
             "echo made > made.txt && cat made.txt && mkdir -p deep/er && rm -r deep",
         )
         .await;
@@ -480,12 +508,12 @@ mod seatbelt {
         assert_eq!(text(&inside.stdout), "made");
 
         let script = format!("echo x > '{}'", escape.display());
-        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+        let output = run(&support::session(&sandbox, Some(&tree)).await, &script).await;
         refused(&output, "writing outside the tree");
         assert!(!escape.exists(), "the write landed");
 
         let script = format!("echo x > '{}'", outside.path().join("sibling").display());
-        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+        let output = run(&support::session(&sandbox, Some(&tree)).await, &script).await;
         refused(&output, "creating beside the tree's parent");
     }
 
@@ -498,7 +526,7 @@ mod seatbelt {
         let scratch = std::fs::canonicalize(session.scratch()).expect("the scratch");
 
         let script = format!("cd \"$HOME\" && pwd && ls '{home}'");
-        let output = run(session, &script).await;
+        let output = run(&session, &script).await;
         refused(&output, "listing the host's home");
         assert_eq!(
             text(&output.stdout),
@@ -512,7 +540,7 @@ mod seatbelt {
         let (_workspace, tree) = tree();
         let sandbox = support::connect(Options::default()).await;
 
-        let output = run(support::session(&sandbox, Some(&tree)).await, "cat src/main.rs").await;
+        let output = run(&support::session(&sandbox, Some(&tree)).await, "cat src/main.rs").await;
         passed(&output, "reading a source file");
         assert_eq!(text(&output.stdout), "fn main() {}");
 
@@ -526,11 +554,12 @@ mod seatbelt {
             "mv .git elsewhere",
             "rm -r .emery",
         ] {
-            let output = run(support::session(&sandbox, Some(&tree)).await, attempt).await;
+            let output = run(&support::session(&sandbox, Some(&tree)).await, attempt).await;
             refused(&output, attempt);
         }
         // `rm -f` swallows the refusal, so what it removed is the check
-        let output = run(support::session(&sandbox, Some(&tree)).await, "rm -rf .git .emery").await;
+        let output =
+            run(&support::session(&sandbox, Some(&tree)).await, "rm -rf .git .emery").await;
         passed(&output, "rm -rf reports nothing");
         assert_eq!(
             std::fs::read_to_string(tree.join(".git/HEAD")).expect("HEAD stays"),
@@ -568,14 +597,14 @@ mod seatbelt {
         std::fs::write(copy.join("note.txt"), "a linked copy\n").expect("a file in the copy");
 
         let sandbox = support::connect(Options::default()).await;
-        let output = run(support::session(&sandbox, Some(&copy)).await, "git --version").await;
+        let output = run(&support::session(&sandbox, Some(&copy)).await, "git --version").await;
         passed(&output, "git itself runs inside");
 
-        let output = run(support::session(&sandbox, Some(&copy)).await, "git status").await;
+        let output = run(&support::session(&sandbox, Some(&copy)).await, "git status").await;
         refused(&output, "git status in the linked copy");
         assert!(text(&output.stderr).contains("not a git repository"), "{}", text(&output.stderr));
 
-        let output = run(support::session(&sandbox, Some(&copy)).await, "cat note.txt").await;
+        let output = run(&support::session(&sandbox, Some(&copy)).await, "cat note.txt").await;
         passed(&output, "the copy's own files");
     }
 
@@ -593,7 +622,7 @@ mod seatbelt {
         passed(&probe, "the sysctl answers outside the session");
 
         let script = format!("ps -o command= -p {host}");
-        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+        let output = run(&support::session(&sandbox, Some(&tree)).await, &script).await;
         assert!(
             !output.status.success() || text(&output.stdout).is_empty(),
             "the host process is visible to ps: {}",
@@ -601,7 +630,7 @@ mod seatbelt {
         );
 
         let script = format!("./probe procargs {host}");
-        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+        let output = run(&support::session(&sandbox, Some(&tree)).await, &script).await;
         refused(&output, "the host process's arguments");
     }
 
@@ -610,7 +639,7 @@ mod seatbelt {
         let (_workspace, tree) = tree();
         support::probe(&tree);
         let sandbox = support::connect(Options::default()).await;
-        let output = run(support::session(&sandbox, Some(&tree)).await, "./probe loopback").await;
+        let output = run(&support::session(&sandbox, Some(&tree)).await, "./probe loopback").await;
         passed(&output, "a server on port 0 over loopback");
         assert!(text(&output.stdout).parse::<u16>().is_ok(), "{}", text(&output.stdout));
     }
@@ -631,19 +660,19 @@ mod seatbelt {
             let grant = support::reading(&["~/shared"]);
 
             let script = format!("cat '{}'", shared.join("note.txt").display());
-            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
+            let output = run(&support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             passed(&output, "reading a read root");
             assert_eq!(text(&output.stdout), "shared");
 
-            let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+            let output = run(&support::session(&sandbox, Some(&tree)).await, &script).await;
             refused(&output, "reading a root another session was granted");
 
             let script = format!("echo x > '{}'", shared.join("written").display());
-            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
+            let output = run(&support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             refused(&output, "writing a read root");
 
             let script = format!("cat '{}'", private.join("secret.txt").display());
-            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
+            let output = run(&support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             refused(&output, "reading beside a read root");
         });
     }
@@ -703,7 +732,7 @@ mod landlock {
             "ioctl tioclinux",
         ] {
             let script = format!("./probe syscall {row}");
-            let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+            let output = run(&support::session(&sandbox, Some(&tree)).await, &script).await;
             refused(&output, row, "EPERM");
         }
     }
@@ -718,7 +747,7 @@ mod landlock {
             "socket netlink-route raw",
         ] {
             let script = format!("./probe syscall {row}");
-            let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+            let output = run(&support::session(&sandbox, Some(&tree)).await, &script).await;
             passed(&output, row);
         }
     }
@@ -734,11 +763,11 @@ mod landlock {
         refused(&control, "clone3 with too small a block outside", "EINVAL");
 
         let output =
-            run(support::session(&sandbox, Some(&tree)).await, "./probe syscall clone3").await;
+            run(&support::session(&sandbox, Some(&tree)).await, "./probe syscall clone3").await;
         refused(&output, "clone3", "ENOSYS");
 
         let output =
-            run(support::session(&sandbox, Some(&tree)).await, "./probe syscall thread").await;
+            run(&support::session(&sandbox, Some(&tree)).await, "./probe syscall thread").await;
         passed(&output, "a thread inside");
         assert_eq!(text(&output.stdout), "thread joined with 2");
     }
@@ -751,7 +780,7 @@ mod landlock {
         let sandbox = support::connect(Options::default()).await;
 
         let inside = run(
-            support::session(&sandbox, Some(&tree)).await,
+            &support::session(&sandbox, Some(&tree)).await,
             "echo made > made.txt && cat made.txt && mkdir -p deep/er && rm -r deep",
         )
         .await;
@@ -759,7 +788,7 @@ mod landlock {
         assert_eq!(text(&inside.stdout), "made");
 
         let script = format!("echo x > '{}'", escape.display());
-        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+        let output = run(&support::session(&sandbox, Some(&tree)).await, &script).await;
         refused(&output, "writing outside the tree", "Permission denied");
         assert!(!escape.exists(), "the write landed");
     }
@@ -773,7 +802,7 @@ mod landlock {
         let scratch = session.scratch().to_path_buf();
 
         let script = format!("cd \"$HOME\" && pwd && ls '{home}'");
-        let output = run(session, &script).await;
+        let output = run(&session, &script).await;
         refused(&output, "listing the host's home", "Permission denied");
         assert_eq!(text(&output.stdout), scratch.to_string_lossy(), "the process's own home");
     }
@@ -792,24 +821,24 @@ mod landlock {
             let grant = support::reading(&["~/shared"]);
 
             let script = format!("cat '{}'", shared.join("note.txt").display());
-            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
+            let output = run(&support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             passed(&output, "reading a read root");
             assert_eq!(text(&output.stdout), "shared");
 
-            let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+            let output = run(&support::session(&sandbox, Some(&tree)).await, &script).await;
             refused(&output, "reading a root another session was granted", "Permission denied");
 
             let script = format!("echo x > '{}'", shared.join("written").display());
-            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
+            let output = run(&support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             refused(&output, "writing a read root", "Permission denied");
 
             let script = format!("cat '{}'", home.join("secret.txt").display());
-            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
+            let output = run(&support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             refused(&output, "reading beside a read root", "Permission denied");
 
             // a rename out of the root is a removal there, which read does not grant
             let script = format!("mv '{}' ./taken.txt", shared.join("note.txt").display());
-            let output = run(support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
+            let output = run(&support::granted(&sandbox, Some(&tree), &grant).await, &script).await;
             assert!(!output.status.success(), "the file was moved out: {}", text(&output.stdout));
             assert!(shared.join("note.txt").exists(), "the read root kept its file");
         });
@@ -829,7 +858,7 @@ mod landlock {
         refused(&after, "the host's environment after connecting", "Permission denied");
 
         let script = format!("./probe environ {host}");
-        let output = run(support::session(&sandbox, Some(&tree)).await, &script).await;
+        let output = run(&support::session(&sandbox, Some(&tree)).await, &script).await;
         refused(&output, "the host's environment inside", "Permission denied");
     }
 
@@ -837,7 +866,7 @@ mod landlock {
     async fn loopback_bind() {
         let (_workspace, tree) = tree();
         let sandbox = support::connect(Options::default()).await;
-        let output = run(support::session(&sandbox, Some(&tree)).await, "./probe loopback").await;
+        let output = run(&support::session(&sandbox, Some(&tree)).await, "./probe loopback").await;
         passed(&output, "a server on port 0 over loopback");
         assert!(text(&output.stdout).parse::<u16>().is_ok(), "{}", text(&output.stdout));
     }

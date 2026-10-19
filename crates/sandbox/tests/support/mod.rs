@@ -86,14 +86,14 @@ pub async fn denied(sandbox: &Sandbox, grant: &Grant) -> String {
 }
 
 /// `/bin/sh -c <script>` inside `session`.
-pub fn sh(session: Session, script: &str) -> Command {
+pub fn sh(session: &Session, script: &str) -> Command {
     let mut command = session.command("/bin/sh").expect("`/bin/sh` is a path");
     command.args(["-c", script]);
     command
 }
 
 /// `/bin/sh -c <script>` spawned inside `session` under supervision.
-pub fn spawn_sh(session: Session, script: &str, ready: Option<&'static str>) -> Child {
+pub fn spawn_sh(session: &Session, script: &str, ready: Option<&'static str>) -> Child {
     let mut command = sh(session, script);
     if let Some(prefix) = ready {
         command.ready_prefix(prefix);
@@ -102,13 +102,13 @@ pub fn spawn_sh(session: Session, script: &str, ready: Option<&'static str>) -> 
 }
 
 /// `/bin/sh -c <script>` run once inside `session`, with what it wrote.
-pub async fn run(session: Session, script: &str) -> Output {
+pub async fn run(session: &Session, script: &str) -> Output {
     sh(session, script).output(BOUND).await.expect("the shell answers")
 }
 
 /// The egress proxy `session`'s process is pointed at, read from inside,
 /// with the process that keeps it serving.
-pub async fn proxy_of(session: Session) -> (SocketAddr, Child) {
+pub async fn proxy_of(session: &Session) -> (SocketAddr, Child) {
     let script = "echo \"ready $HTTPS_PROXY\" >&2; exec sleep 600";
     let mut child = spawn_sh(session, script, Some("ready "));
     let url = child.ready().await.expect("the proxy is in the environment");

@@ -12,11 +12,18 @@ use super::fake_openai::{self, FakeOpenAi};
 /// A client sending every request to `fake`, with the key the SDK's `OpenAI`
 /// adapter reads.
 pub async fn client(fake: &FakeOpenAi) -> Client {
+    client_with(fake, ConnectOptions::default()).await
+}
+
+/// A client sending every request to `fake` under `options`, its `model`
+/// and `endpoint` the fake's.
+pub async fn client_with(fake: &FakeOpenAi, options: ConnectOptions) -> Client {
     fake_openai::dummy_key();
     Client::connect_with(ConnectOptions {
         // A name the SDK routes to its OpenAI chat-completions adapter.
         model: "gpt-4o-mini".to_owned(),
         endpoint: Some(fake.url().to_owned()),
+        ..options
     })
     .await
     .expect("the endpoint is accepted")
@@ -44,7 +51,8 @@ pub async fn run_guest_over(
 }
 
 /// The `expect_error` guest: the completion fails and its detail carries
-/// `needle`; `flags` are its further arguments (`tools`, `without:<text>`).
+/// `needle`; `flags` are its further arguments (`tools`, `tool:<name>`,
+/// `invalid`, `without:<text>`).
 pub async fn expect_error(needle: &str, flags: &[&str], client: &Client) {
     let mut args = vec![needle];
     args.extend_from_slice(flags);

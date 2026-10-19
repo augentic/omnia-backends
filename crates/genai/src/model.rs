@@ -8,7 +8,8 @@
 //! sandbox session prepared for the completion. When the request asks for a
 //! `check`, each final text is offered to the guest through
 //! [`ToolHost::check`]; a rejection stays in the conversation with the
-//! guest's correction as the next user turn, and the loop goes round.
+//! guest's correction as the next user turn, and the loop goes round. What
+//! the request gets wrong is refused before any of that starts.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -41,8 +42,9 @@ impl WasiModelCtx for Client {
 
         Box::pin(
             async move {
-                let (access, shell) = client.prepare(&request, tool_host.local_path()).await?;
-                Conversation::prepare(&client, &request, model, access, tool_host, shell)?
+                let access = client.access(&request, tool_host.local_path()).await?;
+                Conversation::prepare(&client, &request, model, access, tool_host)
+                    .await?
                     .complete()
                     .await
             }
@@ -61,20 +63,15 @@ impl WasiModelCtx for Client {
 impl Client {
     // A worker grant needs a shell: a worker reaches beyond its workspace
     // through the commands it runs there, so one over a read-only workspace,
-    // or under a deployment with no shell root, is the request's fault. A
-    // session is prepared only where it opens a shell.
-    async fn prepare(
-        &self, request: &Request, workspace: Option<&Path>,
-    ) -> anyhow::Result<(Access, Option<Shell>)> {
-        let worker = request.grants.worker.as_ref();
-
+    // or under a deployment with no shell root, is the request's fault.
+    async fn access(&self, request: &Request, workspace: Option<&Path>) -> anyhow::Result<Access> {
         let access = match &self.sandbox {
             Some(sandbox) => sandbox.access(workspace).await?,
             None if workspace.is_some() => Access::Read,
             None => Access::Private,
         };
 
-        if worker.is_some() && access != Access::Shell {
+        if request.grants.worker.is_some() && access != Access::Shell {
             let detail = if !access.is_lent() {
                 "worker grant needs a workspace"
             } else if self.sandbox.is_none() {
@@ -84,18 +81,23 @@ impl Client {
             };
             return Err(Error::InvalidRequest(detail.to_owned()).into());
         }
+        Ok(access)
+    }
 
+    // A session is prepared only where the lend opens a shell.
+    pub(crate) async fn shell(
+        &self, request: &Request, access: Access, workspace: Option<&Path>,
+    ) -> anyhow::Result<Option<Shell>> {
         let (Some(sandbox), Access::Shell) = (&self.sandbox, access) else {
-            return Ok((access, None));
+            return Ok(None);
         };
-        let grant = worker.map_or_else(Grant::default, |worker| Grant {
+        let grant = request.grants.worker.as_ref().map_or_else(Grant::default, |worker| Grant {
             egress: worker.egress.clone(),
             read: worker.read.clone(),
             env: worker.env.clone(),
         });
         let session = sandbox.prepare(workspace, &grant).await.map_err(refusal)?;
-        let shell = Shell::new(session, self.shell_timeout, self.limits().max_result_bytes);
-        Ok((access, Some(shell)))
+        Ok(Some(Shell::new(session, self.shell_timeout, self.limits().max_result_bytes)))
     }
 }
 

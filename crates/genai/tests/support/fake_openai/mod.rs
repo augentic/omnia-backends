@@ -50,12 +50,13 @@ pub enum Fault {
     Park,
 }
 
-/// A fake's script, fault, and gate.
+/// A fake's script, fault, gate, and whether its replies carry a bill.
 #[derive(Clone, Debug)]
 pub struct Config {
     script: Script,
     fault: Option<Fault>,
     gate: Option<usize>,
+    billed: bool,
 }
 
 impl Config {
@@ -64,6 +65,7 @@ impl Config {
             script: Script::Echo,
             fault: None,
             gate: None,
+            billed: false,
         }
     }
 
@@ -72,6 +74,7 @@ impl Config {
             script: Script::Replies(replies.into_iter().map(Into::into).collect()),
             fault: None,
             gate: None,
+            billed: false,
         }
     }
 
@@ -87,6 +90,7 @@ impl Config {
             },
             fault: None,
             gate: None,
+            billed: false,
         }
     }
 
@@ -103,6 +107,15 @@ impl Config {
     #[must_use]
     pub const fn fault(mut self, fault: Fault) -> Self {
         self.fault = Some(fault);
+        self
+    }
+
+    /// Every reply carries the same usage block, 30 prompt tokens of which
+    /// 10 cached, 7 completion tokens of which 2 reasoning, 37 in all, so a
+    /// run's bill is that times the requests answered.
+    #[must_use]
+    pub const fn billed(mut self) -> Self {
+        self.billed = true;
         self
     }
 
@@ -372,7 +385,7 @@ async fn handle(
         None => {}
     }
 
-    let body = match &state.config.script {
+    let mut body = match &state.config.script {
         Script::Echo => completion(Some(&recorded.last("user").unwrap_or_default()), None),
         Script::Replies(replies) => {
             let reply = replies.get(round).or_else(|| replies.last());
@@ -397,7 +410,20 @@ async fn handle(
             }
         }
     };
+    if state.config.billed {
+        body["usage"] = usage();
+    }
     Ok(in_flight.answer(json_response(StatusCode::OK, Bytes::from(body.to_string()))))
+}
+
+fn usage() -> Value {
+    json!({
+        "prompt_tokens": 30,
+        "prompt_tokens_details": { "cached_tokens": 10 },
+        "completion_tokens": 7,
+        "completion_tokens_details": { "reasoning_tokens": 2 },
+        "total_tokens": 37,
+    })
 }
 
 // The answer a "model" gives for a tool result: the backend's repairable

@@ -176,9 +176,12 @@ Unreleased
   until the process is gone — and `Command::output` runs it once under a
   bound, each stream capped at sixteen mebibytes and the rest drained,
   killing what the process forked once it has exited so a fork left
-  holding the pipes neither delays the exit nor outlives it, and failing
+  holding the pipes neither delays the exit nor outlives it, failing
   with the typed `TimedOut` where the process outlived the bound, so a
-  caller tells a run cut short from one that never started. `Exit` is an
+  caller tells a run cut short from one that never started, and killing
+  the process with everything it forked where the run is dropped before
+  it exits, so a caller that gives up on a command mid-run leaves
+  nothing of it behind. `Exit` is an
   `Error`. The kernel holds the
   process to its workspace, its scratch, the system, and the grant's read
   roots, always, with no setting to turn it off: on macOS a Seatbelt
@@ -272,29 +275,51 @@ Unreleased
   `PATH`; with no shell root configured no kernel boundary is set up and
   the backend runs as before. A guest tool named `shell` is
   `invalid-request`, as one named `read` is the host's. The budgets are
-  two, as the Cursor backend's are, and either spent is the typed
+  three, as the Cursor backend's are, and any spent is the typed
   `budget-exhausted`: `max_rounds` (`GENAI_MAX_ROUNDS`, default `128`)
   bounds the provider round-trips one completion makes, a tool round, a
-  candidate, or a correction each one, and a rejected `check` candidate
-  is corrected once, the second rejection carrying the correction, so a
-  correction counts the same under either backend; `max_tool_calls`
-  (`GENAI_MAX_TOOL_CALLS`, default `128`) is answered to the host through
-  `WasiModelCtx::limits`, as the Cursor backend's is. The log carries
+  candidate, a nudge, or a correction each one, and a rejected `check`
+  candidate is corrected once, the second rejection carrying the
+  correction, so a correction counts the same under either backend;
+  `timeout_secs` (`GENAI_TIMEOUT_SECS`, default `600`) is the absolute
+  cap on one reply of the model, the tool rounds before it included and
+  a nudge or a correction starting a fresh one, as the Cursor backend's
+  `CURSOR_TIMEOUT_SECS` caps one send — past it the completion is ended,
+  the provider request given up on or the shell command killed with
+  everything it started, and the guest told what it was waiting on
+  (`completion timed out after 600s waiting on the shell (absolute cap on
+  one reply exceeded)`); `max_tool_calls` (`GENAI_MAX_TOOL_CALLS`,
+  default `128`) is answered to the host through `WasiModelCtx::limits`,
+  as the Cursor backend's is. Where JSON was asked for with a `check`, a
+  reply that is not one well-formed JSON value is nudged once, in the
+  Cursor backend's words and with what the parser said of it, before any
+  candidate reaches the guest, so a model that narrates before it answers
+  is not corrected for the narration. The request is refused whole before
+  anything starts or is billed: the worker grant's shell, the tool names,
+  and the translation each go before the sandbox session is prepared and
+  the `completion started` line written. The log carries
   every tool call as the Cursor backend's stream does — `tool call
   tool=… subject=…` before it and `tool call completed tool=… subject=…
   result_bytes=… duration_ms=…` after, with `exit=…` on a `shell`
   command, the subject a `read` or `list` path or the command's first
-  line — and the `completion` line gains `model_ms` and `tool_ms`, the
-  time waited on the provider and the time spent in tool rounds, so a
-  scorecard over the log tells a slow model from a slow
-  build. The `model` suite's fake provider scripts a list of tool calls
-  and a scripted final answer, and its shell rows run real commands
-  inside the sandbox: the grant's variable, the proxy, and `$WORKSPACE`
-  seen from inside, nothing of the host's environment, a failing exit
-  and a signal rendered, a command past the bound killed with its fork,
-  two commands in one session, and the refusals; `tests/live.rs` gains
-  an ignored row running `cargo --version` under the Rust toolchain's
-  grant.
+  line, and the arguments whole at TRACE under the target
+  `omnia_genai::tools` — an `in progress` line every 15s while a
+  completion is open (`elapsed_s`, `round`, `tool_calls`, `silent_s`, and
+  what it is `waiting` on: `the model`, a tool by name, `the shell`, or
+  `the guest's check`), and the `completion` line gains `model_ms`,
+  `tool_ms`, and `check_ms`, the time waited on the provider, in tool
+  rounds, and on the guest's check, so a scorecard over the log tells a
+  slow model from a slow build. The `model` suite's fake provider scripts
+  a list of tool calls and a scripted final answer, bills every reply
+  when a row asks, and its shell rows run real commands inside the
+  sandbox: the grant's variable, the proxy, and `$WORKSPACE` seen from
+  inside, nothing of the host's environment, a failing exit and a signal
+  rendered, a command past the bound killed with its fork, a command the
+  cap outlives killed the same way, two commands in one session, and the
+  refusals; the suites read the backend's `completion` line off a
+  capture of their own for the outcome and the bill; `tests/live.rs`
+  gains an ignored row running `cargo --version` under the Rust
+  toolchain's grant.
 
 ### Changed
 
@@ -358,6 +383,21 @@ Unreleased
   leaves it, as it leaves the rejected `check` candidate the same error
   already carried. The `completion` line's `outcome=exhausted` is
   unchanged.
+- `omnia-genai`'s `completion` line reads as the Cursor backend's does.
+  Its `outcome` gains `timeout`, `provider`, and `transport` beside `ok`,
+  `corrected`, `exhausted`, `abort`, and `error`, each read off the
+  failure's type — the cap's own error, the SDK's error status, its
+  unreadable body or a failed connection — and `corrected` is the
+  check's verdict, where it had been a second reply, so a nudged reply
+  reads `ok`. `attempts` counts the model's replies. The bill is every
+  round's together, the tool rounds included where only the rounds
+  answering in text were billed, and gains `cache_read_tokens`,
+  `cache_write_tokens`, and `total_tokens` — the provider's own total as
+  it reports it — beside `input_tokens`, `output_tokens`, and
+  `reasoning_tokens`; `check_ms` sits beside `model_ms` and `tool_ms`.
+  The `round answered` line at DEBUG carries each round's share of the
+  bill with its `reply_bytes` and `tool_calls`, where it carried
+  `result_bytes`, `tool_turns`, and the guest's `usage`.
 - `omnia-cursor` closes a tool call the stream never terminated when the
   model next reasons or speaks: the model resumes only once every call it
   issued has answered, so a call still pending then was answered off the

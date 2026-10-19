@@ -3,15 +3,18 @@
 //! the omnia runtime over an `omnia_genai::Client` whose
 //! `ConnectOptions::endpoint` is a fake OpenAI-compatible provider served
 //! in-process. The guest asserts what it observes and traps on failure; the
-//! test asserts what reached the provider.
+//! test asserts what reached the provider, and what the backend's own
+//! `completion` line reported of the run.
 
 mod support;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use omnia_genai::ConnectOptions;
 use omnia_test::host::{Scratch, scratch};
 use serde_json::json;
+use support::capture::Captured;
 use support::fake_openai::{self, Config, FakeOpenAi, Fault};
 use support::harness::{client, client_with, expect_error, run_guest, run_guest_over};
 
@@ -260,11 +263,46 @@ async fn model_worker_shell_bound() {
         requests[1].last("tool").as_deref(),
         Some("the command did not exit within 1s and was killed with everything it started")
     );
+    await_gone(&scratch).await;
+}
+
+// The cap holds a command the shell's own bound would let run: the reply
+// is given up on mid-command, the command killed with what it started, and
+// the guest sees the time budget spent after the one request.
+#[tokio::test]
+async fn model_shell_capped() {
+    let captured = Captured::install();
+    let (scratch, roots) = tree();
+    let fake = FakeOpenAi::serve(shell("sleep 30 & echo $! > pid; wait")).await;
+    let client = client_with(
+        &fake,
+        ConnectOptions {
+            timeout_secs: 1,
+            ..shelled(roots)
+        },
+    )
+    .await;
+    run_guest_over(
+        test_programs::MODEL_EXPECT_ERROR,
+        &["timed out after 1s", "budget", "lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
+
+    assert_eq!(fake.requests().len(), 1, "the command's result was never sent");
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="timeout""#), "{completion}");
+    await_gone(&scratch).await;
+}
+
+// The `sleep` whose pid a shell command wrote to `tree/pid` is gone.
+async fn await_gone(scratch: &Scratch) {
     let pid = scratch.read("tree/pid").expect("the sleep's pid was written");
     let pid: u32 = String::from_utf8_lossy(&pid).trim().parse().expect("a pid");
     fake_openai::poll(
         || !alive(pid),
-        std::time::Duration::from_secs(8),
+        Duration::from_secs(8),
         &format!("the sleep ({pid}) to be gone"),
     )
     .await;
@@ -346,9 +384,59 @@ async fn model_check_accepted() {
     );
 }
 
+// A reply that is not JSON where JSON was asked for is nudged once, with
+// what the parser said of it, before any candidate reaches the guest; the
+// JSON that follows passes the check first time, so the completion is `ok`
+// over two attempts, not corrected.
+#[tokio::test]
+async fn model_nudged() {
+    let captured = Captured::install();
+    let fake =
+        FakeOpenAi::serve(Config::replies(["Analyzing the claims to produce the verdict.", PASS]))
+            .await;
+    let client = client(&fake).await;
+    run_guest(test_programs::MODEL_CHECK_ACCEPTED, &[], &client).await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    let second = requests[1].messages();
+    let tail = &second[second.len() - 2..];
+    assert_eq!(
+        tail[0],
+        ("assistant".to_owned(), "Analyzing the claims to produce the verdict.".to_owned())
+    );
+    assert_eq!(tail[1].0, "user");
+    assert!(
+        tail[1].1.starts_with("Your last reply is not one well-formed JSON value ("),
+        "{}",
+        tail[1].1
+    );
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
+    assert!(completion.contains("attempts=2 "), "{completion}");
+}
+
+// The nudge is a round like any other: with none left after it, the
+// completion is exhausted before a candidate ever reaches the guest.
+#[tokio::test]
+async fn model_nudge_round() {
+    let fake = FakeOpenAi::serve(Config::replies(["Analyzing the claims."])).await;
+    let client = client_with(
+        &fake,
+        ConnectOptions {
+            max_rounds: 1,
+            ..ConnectOptions::default()
+        },
+    )
+    .await;
+    expect_error("no answer after 1 model round-trips", &["nudged", "budget"], &client).await;
+    assert_eq!(fake.requests().len(), 1);
+}
+
 #[tokio::test]
 async fn model_check_corrected() {
-    let fake = FakeOpenAi::serve(Config::replies([FAIL, PASS])).await;
+    let captured = Captured::install();
+    let fake = FakeOpenAi::serve(Config::replies([FAIL, PASS]).billed()).await;
     let client = client(&fake).await;
     run_guest(test_programs::MODEL_CHECK_CORRECTED, &[], &client).await;
 
@@ -364,6 +452,20 @@ async fn model_check_corrected() {
     assert!(correction.starts_with("## Previous answer (rejected)\n\n"), "{correction}");
     assert!(correction.contains(FAIL), "{correction}");
     assert!(correction.contains("## Findings\n\nverdict must be `pass`"), "{correction}");
+
+    // The completion line reports the correction and bills both rounds.
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="corrected""#), "{completion}");
+    assert!(completion.contains("attempts=2 "), "{completion}");
+    for billed in [
+        "input_tokens=60 ",
+        "cache_read_tokens=20 ",
+        "output_tokens=14 ",
+        "reasoning_tokens=4 ",
+        "total_tokens=74 ",
+    ] {
+        assert!(completion.contains(billed), "{billed}: {completion}");
+    }
 }
 
 #[tokio::test]
@@ -386,6 +488,7 @@ async fn model_check_exhausted() {
 // tools forever is ended as exhausted once the rounds are spent.
 #[tokio::test]
 async fn model_rounds_exhausted() {
+    let captured = Captured::install();
     let fake =
         FakeOpenAi::serve(Config::calls(std::iter::repeat_n(("lookup", json!({})), 8))).await;
     let client = client_with(
@@ -398,6 +501,8 @@ async fn model_rounds_exhausted() {
     .await;
     expect_error("no answer after 3 model round-trips", &["tools", "budget"], &client).await;
     assert_eq!(fake.requests().len(), 3);
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="exhausted""#), "{completion}");
 }
 
 #[tokio::test]

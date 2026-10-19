@@ -28,17 +28,19 @@ omnia-wasi-model.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tracing.workspace = true
 
 # Integration tests are separate crates and do not inherit the library's normal
 # dependencies, so the ones the suites drive are repeated here. The hyper
 # server stack stands up the fake OpenAI-compatible provider the `model` and
 # `provider` suites point `ConnectOptions::endpoint` at; `omnia-test` and
-# `test-programs` run the guest components through the runtime.
+# `test-programs` run the guest components through the runtime; the suites
+# read the `completion` line off a `tracing-subscriber` layer of their own.
 [dev-dependencies]
 bytes.workspace = true
 futures.workspace = true
+http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
@@ -46,3 +48,4 @@ libc.workspace = true
 omnia-test = { workspace = true, features = ["host"] }
 test-programs.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing-subscriber.workspace = true

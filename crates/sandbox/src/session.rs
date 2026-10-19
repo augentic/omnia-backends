@@ -263,7 +263,8 @@ impl Command {
     ///
     /// Each stream is kept to sixteen mebibytes; what the process writes
     /// past that is read and dropped. Once the process has exited,
-    /// everything it forked is killed.
+    /// everything it forked is killed. Dropping the run before then kills
+    /// the process with everything it forked.
     ///
     /// # Errors
     ///

@@ -106,6 +106,14 @@ impl Tools {
     pub async fn call(&self, call: &ToolCall) -> Result<String> {
         let subject = subject(&call.fn_arguments, self.shell.as_ref().map(Shell::cwd));
         tracing::debug!(tool = %call.fn_name, subject = subject.as_deref(), "tool call");
+        // the arguments whole, under a target of their own so a filter can
+        // open them without the rest of the trace
+        tracing::trace!(
+            target: "omnia_genai::tools",
+            tool = %call.fn_name,
+            args = %call.fn_arguments,
+            "tool call args"
+        );
         let started = Instant::now();
 
         let (result, exit) = match call.fn_name.as_str() {

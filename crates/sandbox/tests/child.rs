@@ -219,6 +219,24 @@ async fn output_timeout() {
     await_gone(grandchild).await;
 }
 
+// A run given up on mid-command takes the command and its fork with it.
+#[tokio::test]
+async fn output_dropped() {
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let sandbox = connect(Options::default()).await;
+    let session = session(&sandbox, Some(workspace.path())).await;
+    let command = sh(&session, "sleep 600 & echo \"$! $$\" > pid; wait");
+    let run = command.output(BOUND);
+    tokio::time::timeout(Duration::from_millis(500), run)
+        .await
+        .expect_err("the shell waits on its fork");
+
+    let pids = std::fs::read_to_string(workspace.path().join("pid")).expect("the pids");
+    let (grandchild, shell) = pids.trim().split_once(' ').expect("two pids");
+    await_gone(pid_of(grandchild)).await;
+    await_gone(pid_of(shell)).await;
+}
+
 // A fork left holding the pipes neither delays the exit nor outlives it.
 #[tokio::test]
 async fn output_with_fork() {

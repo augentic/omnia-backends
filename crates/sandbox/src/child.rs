@@ -4,7 +4,7 @@
 //! The process leads a process group of its own, so one kill reaches
 //! everything it forked. Whatever it left in its group is swept as its exit
 //! is seen. Nothing of a child outlives it. A one-shot runs the same way,
-//! held to a bound and killed past it.
+//! held to a bound and killed past it, or as its run is dropped.
 
 use std::collections::VecDeque;
 use std::ffi::OsStr;
@@ -251,7 +251,7 @@ impl std::error::Error for TimedOut {}
 // closes with it.
 pub async fn output(command: Command, bound: Duration) -> Result<Output> {
     let program = program_of(&command);
-    let mut child = launch(command)?;
+    let mut child = OneShot(launch(command)?);
     let stdout = child.stdout().take();
     let stderr = child.stderr().take();
     let mut out = Vec::new();
@@ -290,6 +290,31 @@ pub async fn output(command: Command, bound: Duration) -> Result<Output> {
         stdout: out,
         stderr: err,
     })
+}
+
+// The one-shot's process: the group is killed as the run is dropped, so a
+// caller that gives up on it mid-command leaves nothing of it behind.
+// `KillOnDrop` alone reaches the leader, not what it forked.
+struct OneShot(Box<dyn ChildWrapper>);
+
+impl Drop for OneShot {
+    fn drop(&mut self) {
+        let _ = self.0.start_kill();
+    }
+}
+
+impl std::ops::Deref for OneShot {
+    type Target = dyn ChildWrapper;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl std::ops::DerefMut for OneShot {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut()
+    }
 }
 
 // Waits on the process, tears it down on request, and publishes its exit.

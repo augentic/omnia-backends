@@ -3870,6 +3870,7 @@ dependencies = [
  "fromenv",
  "futures",
  "genai",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -3884,6 +3885,7 @@ dependencies = [
  "test-programs",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

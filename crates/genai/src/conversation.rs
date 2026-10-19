@@ -4,11 +4,13 @@
 //! draws on the configured round budget, so a completion terminates; a
 //! rejected candidate draws on the candidate budget beside it, so a model
 //! that cannot satisfy the check is ended with the correction rather than
-//! asked again until the rounds run out. Either budget spent is the typed
+//! asked again until the rounds run out. Each reply of the model runs under
+//! the configured cap, tool rounds included; a nudge or a correction starts
+//! a fresh one. Either budget spent, or the cap passed, is the typed
 //! `budget-exhausted`: the same request put again would spend it again.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ToolCall, ToolResponse};
@@ -17,11 +19,11 @@ use omnia_wasi_model::{
     Answer, Error, Format, Request, ToolHost, ToolTurn, Transcript, Usage, WasiModelCtx as _,
 };
 use serde_json::Value;
+use tokio::time::timeout;
 
 use crate::Client;
-use crate::observe::Completion;
+use crate::observe::{Completion, Phase, Timeout, to_usage};
 use crate::request::{chat_options, chat_request, prompt_bytes};
-use crate::shell::Shell;
 use crate::tools::Tools;
 
 // Candidates one completion may offer the guest's check: a rejection of the
@@ -39,17 +41,31 @@ pub struct Conversation {
     tool_host: Arc<dyn ToolHost>,
     tools: Tools,
     max_rounds: usize,
+    cap: Duration,
+    round: usize,
+    candidates: u32,
+    nudged: bool,
     transcript: Transcript,
     completion: Completion,
 }
 
+// The model's text once a round ends in one, with the round's counts.
+struct Reply {
+    text: String,
+    usage: Option<Usage>,
+}
+
 impl Conversation {
-    pub fn prepare(
+    // The request is translated before a session is prepared, and the
+    // completion started once nothing is left to refuse: the start event
+    // means a completion that will be billed.
+    pub async fn prepare(
         client: &Client, request: &Request, model: String, access: Access,
-        tool_host: Arc<dyn ToolHost>, shell: Option<Shell>,
+        tool_host: Arc<dyn ToolHost>,
     ) -> Result<Self> {
         let chat = chat_request(request, access)?;
         let options = chat_options(request)?;
+        let shell = client.shell(request, access, tool_host.local_path()).await?;
         let completion = Completion::start(prompt_bytes(request), request.tools.len());
 
         Ok(Self {
@@ -62,59 +78,97 @@ impl Conversation {
             tools: Tools::new(Arc::clone(&tool_host), shell, client.limits().max_result_bytes),
             tool_host,
             max_rounds: client.max_rounds,
+            cap: client.cap,
+            round: 0,
+            candidates: 0,
+            nudged: false,
             transcript: Transcript::default(),
             completion,
         })
     }
 
     pub async fn complete(mut self) -> Result<Answer> {
-        let result = self.run().await;
+        // the run, with the heartbeat beside it
+        let result = {
+            let mut heartbeat = self.completion.heartbeat();
+            let run = self.run();
+            tokio::pin!(run);
+            loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    () = heartbeat.tick() => {}
+                }
+            }
+        };
         self.completion.finish(&result);
         result
     }
 
     async fn run(&mut self) -> Result<Answer> {
-        for round in 1..=self.max_rounds {
-            let asked = Instant::now();
-            let response = self
-                .client
-                .exec_chat(&self.model, self.chat.clone(), Some(&self.options))
-                .await
-                .with_context(|| format!("genai exec_chat failed for model `{}`", self.model))?;
-            self.completion.model_time(asked.elapsed());
-
-            let text = response.first_text().map(ToOwned::to_owned);
-            let usage = to_usage(&response.usage);
-            let tool_calls = response.into_tool_calls();
-
-            if !tool_calls.is_empty() {
-                self.tool_round(tool_calls).await?;
-                continue;
-            }
-
-            let Some(text) = text else {
-                bail!("genai returned neither content nor tool calls (model `{}`)", self.model);
+        loop {
+            // the model's next reply, under the cap
+            let reply = match timeout(self.cap, self.next_reply()).await {
+                Ok(reply) => reply?,
+                Err(_elapsed) => {
+                    return Err(Timeout {
+                        cap_secs: self.cap.as_secs(),
+                        waiting: self.completion.phase(),
+                    }
+                    .into_error());
+                }
             };
-            self.completion.answered(text.len(), self.transcript.turns.len(), usage.as_ref());
+            let Some(Reply { text, usage }) = reply else {
+                bail!(Error::BudgetExhausted(format!(
+                    "no answer after {} model round-trips",
+                    self.max_rounds
+                )));
+            };
 
             let candidate = self.format.candidate(&text);
             if !self.check {
                 return Ok(self.answer(candidate, usage));
             }
 
+            // a reply that is not JSON is nudged once, told what the parser said of it
+            if !self.nudged
+                && matches!(self.format, Format::Json | Format::Schema(_))
+                && let Err(fault) = serde_json::from_str::<Value>(&candidate)
+            {
+                self.nudged = true;
+                tracing::debug!(
+                    round = self.round,
+                    reply_bytes = candidate.len(),
+                    %fault,
+                    "the reply is not JSON; nudging"
+                );
+                let nudge = format!(
+                    "Your last reply is not one well-formed JSON value ({fault}), so it is not \
+                     the answer. Reply now with only your final answer as a single JSON value in \
+                     the shape the prompt asked for, and nothing else."
+                );
+                self.chat = std::mem::take(&mut self.chat)
+                    .append_message(ChatMessage::assistant(candidate))
+                    .append_message(ChatMessage::user(nudge));
+                continue;
+            }
+
+            // the guest's verdict on the candidate
+            self.candidates += 1;
+            self.completion.enter(Phase::Check);
             match self.tool_host.check(candidate.clone()).await? {
                 Ok(()) => return Ok(self.answer(candidate, usage)),
                 // The guest's correction is the model's next turn, verbatim;
                 // with no candidate or round left it is the typed failure
                 // the guest sees.
                 Err(correction)
-                    if self.completion.attempts() >= MAX_CANDIDATES || round == self.max_rounds =>
+                    if self.candidates >= MAX_CANDIDATES || self.round == self.max_rounds =>
                 {
                     bail!(Error::BudgetExhausted(correction));
                 }
                 Err(correction) => {
+                    self.completion.rejected();
                     tracing::debug!(
-                        round,
+                        round = self.round,
                         candidate_bytes = candidate.len(),
                         "check rejected the candidate"
                     );
@@ -125,18 +179,46 @@ impl Conversation {
                 }
             }
         }
+    }
 
-        Err(Error::BudgetExhausted(format!(
-            "no answer after {} model round-trips",
-            self.max_rounds
-        ))
-        .into())
+    // The model's next text, through the tool rounds before it; `None` once
+    // the round budget is spent first.
+    async fn next_reply(&mut self) -> Result<Option<Reply>> {
+        while self.round < self.max_rounds {
+            self.round += 1;
+            self.completion.enter(Phase::Model);
+            let response = self
+                .client
+                .exec_chat(&self.model, self.chat.clone(), Some(&self.options))
+                .await
+                .with_context(|| format!("genai exec_chat failed for model `{}`", self.model))?;
+
+            let text = response.first_text().map(ToOwned::to_owned);
+            let usage = response.usage.clone();
+            let tool_calls = response.into_tool_calls();
+            let reply_bytes = text.as_deref().filter(|_| tool_calls.is_empty()).map(str::len);
+            self.completion.answered(&usage, reply_bytes, tool_calls.len());
+
+            if !tool_calls.is_empty() {
+                self.tool_round(tool_calls).await?;
+                continue;
+            }
+
+            let Some(text) = text else {
+                bail!("genai returned neither content nor tool calls (model `{}`)", self.model);
+            };
+            return Ok(Some(Reply {
+                text,
+                usage: to_usage(&usage),
+            }));
+        }
+        Ok(None)
     }
 
     async fn tool_round(&mut self, tool_calls: Vec<ToolCall>) -> Result<()> {
-        let started = Instant::now();
         let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
         for call in tool_calls {
+            self.completion.enter(Phase::of_tool(&call.fn_name));
             let result = self.tools.call(&call).await?;
             self.transcript.turns.push(ToolTurn {
                 tool: call.fn_name,
@@ -146,7 +228,6 @@ impl Conversation {
             chat = chat.append_message(ToolResponse::new(call.call_id, result));
         }
         self.chat = chat;
-        self.completion.tool_time(started.elapsed());
         Ok(())
     }
 
@@ -156,59 +237,5 @@ impl Conversation {
             usage,
             transcript: Some(std::mem::take(&mut self.transcript)),
         }
-    }
-}
-
-// `None` when the provider did not surface any counts.
-fn to_usage(usage: &genai::chat::Usage) -> Option<Usage> {
-    if usage.prompt_tokens.is_none() && usage.completion_tokens.is_none() {
-        return None;
-    }
-    Some(Usage {
-        input_tokens: usage.prompt_tokens.and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
-        output_tokens: usage.completion_tokens.and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
-        reasoning_tokens: usage
-            .completion_tokens_details
-            .as_ref()
-            .and_then(|d| d.reasoning_tokens)
-            .and_then(|v| u32::try_from(v).ok()),
-    })
-}
-
-// The provider's usage counts onto the boundary's `Usage`. The check loop
-// itself is covered by the `model` suite over the fake provider.
-#[cfg(test)]
-mod tests {
-    use genai::chat::{CompletionTokensDetails, Usage as ProviderUsage};
-
-    use super::to_usage;
-
-    #[test]
-    fn usage_counts() {
-        let counted = ProviderUsage {
-            prompt_tokens: Some(3),
-            completion_tokens: Some(1),
-            completion_tokens_details: Some(CompletionTokensDetails {
-                reasoning_tokens: Some(2),
-                ..CompletionTokensDetails::default()
-            }),
-            ..ProviderUsage::default()
-        };
-        let usage = to_usage(&counted).expect("counts surfaced");
-        assert_eq!(
-            (usage.input_tokens, usage.output_tokens, usage.reasoning_tokens),
-            (3, 1, Some(2))
-        );
-
-        // Reasoning is optional; a negative count is clamped, not an error.
-        let clamped = ProviderUsage {
-            prompt_tokens: Some(-1),
-            completion_tokens: Some(4),
-            ..ProviderUsage::default()
-        };
-        let usage = to_usage(&clamped).expect("counts surfaced");
-        assert_eq!((usage.input_tokens, usage.output_tokens, usage.reasoning_tokens), (0, 4, None));
-
-        assert!(to_usage(&ProviderUsage::default()).is_none(), "no counts, no usage");
     }
 }

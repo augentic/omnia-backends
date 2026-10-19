@@ -15,6 +15,7 @@ use genai::ServiceTarget;
 use genai::resolver::{Endpoint, ServiceTargetResolver};
 use omnia::Backend;
 use omnia_sandbox::{Options, Sandbox};
+use tokio::time::Instant;
 use tracing::instrument;
 
 use crate::conversation::Budgets;
@@ -81,6 +82,10 @@ impl Backend for Client {
             shell_timeout: Duration::from_secs(options.shell_timeout_secs),
         })
     }
+}
+
+fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]

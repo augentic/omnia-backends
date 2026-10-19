@@ -15,6 +15,7 @@ use omnia_wasi_model::{Answer, Error, Usage};
 use tokio::sync::watch;
 use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 
+use crate::elapsed_ms;
 use crate::tools::SHELL_TOOL;
 
 // How often an open completion says where it is.
@@ -55,7 +56,7 @@ pub enum Outcome {
     Ok,
     // Answered after the guest's check rejected a candidate.
     Corrected,
-    // The cap passed before the model's reply.
+    // The timeout passed before the model's reply.
     Timeout,
     // The completion was dropped before it finished.
     Abort,
@@ -295,7 +296,7 @@ impl Completion {
         }
         self.emitted = true;
         self.book();
-        let duration_ms = millis(self.started.elapsed());
+        let duration_ms = elapsed_ms(self.started);
 
         // an event's level is fixed at its callsite, so each level is its own event
         macro_rules! completion {
@@ -403,7 +404,7 @@ fn clamp(value: i32) -> u32 {
     u32::try_from(value).unwrap_or(0)
 }
 
-pub fn millis(duration: Duration) -> u64 {
+fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 

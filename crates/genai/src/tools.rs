@@ -1,13 +1,12 @@
-//! The model's tool calls, dispatched.
+//! The model's tool calls, dispatched, and the guest's check of a candidate.
 //!
 //! `read` and `list` go to the lent workspace, `shell` to the completion's
-//! session, and every other call through the guest. A workspace or shell
-//! failure goes back to the model as repairable tool output; a host failure
-//! ends the completion.
+//! session, and every other call through the guest, as the check does. A
+//! workspace or shell failure goes back to the model as repairable tool
+//! output; a host failure ends the completion.
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context as _, Result};
 use genai::chat::{Tool, ToolCall};
@@ -16,13 +15,19 @@ use omnia_wasi_model::ToolHost;
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::time::Instant;
 
-use crate::observe::millis;
+use crate::elapsed_ms;
 use crate::shell::{Run, Shell};
 
 // The one tool name this backend reserves beyond the host's: a guest tool
 // of the name would be shadowed where a shell is advertised.
 pub const SHELL_TOOL: &str = "shell";
+
+// A result the model repairs: `Err` is the text it is given in its next
+// turn, a failed call's reason or the check's correction. A host failure is
+// the outer `Err` that ends the completion, never this.
+type Repairable<T> = Result<T, String>;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -78,8 +83,9 @@ pub fn workspace_tools(access: Access) -> Vec<Tool> {
     tools
 }
 
-// Where one completion's tool calls go: the guest's host, and the shell
-// where the lend opened one.
+// Where one completion reaches the guest: its tool calls, to the guest's
+// host or to the shell where the lend opened one, and the check of a
+// candidate.
 pub struct Tools {
     host: Arc<dyn ToolHost>,
     shell: Option<Shell>,
@@ -131,13 +137,17 @@ impl Tools {
             subject = subject.as_deref(),
             result_bytes = result.len(),
             exit = exit.as_deref(),
-            duration_ms = millis(started.elapsed()),
+            duration_ms = elapsed_ms(started),
             "tool call completed"
         );
         Ok(result)
     }
 
-    async fn read(&self, arguments: &Value) -> Result<String, String> {
+    pub async fn check(&self, candidate: String) -> Result<Repairable<()>> {
+        self.host.check(candidate).await
+    }
+
+    async fn read(&self, arguments: &Value) -> Repairable<String> {
         let ReadArgs { path } = args(arguments)?;
         let bytes = self.host.read(path.clone()).await.map_err(|error| format!("{error:#}"))?;
         let text = String::from_utf8(bytes)
@@ -145,7 +155,7 @@ impl Tools {
         self.within_cap(text)
     }
 
-    async fn list(&self, arguments: &Value) -> Result<String, String> {
+    async fn list(&self, arguments: &Value) -> Repairable<String> {
         let ListArgs { path } = args(arguments)?;
         let entries =
             self.host.list(path.unwrap_or_default()).await.map_err(|error| format!("{error:#}"))?;
@@ -155,7 +165,7 @@ impl Tools {
 
     // A call where no shell was advertised is the model's slip, answered as
     // any bad call is; only a command that ran has an exit.
-    async fn shell(&self, arguments: &Value) -> Result<Result<Run, String>> {
+    async fn shell(&self, arguments: &Value) -> Result<Repairable<Run>> {
         let Some(shell) = &self.shell else {
             return Ok(Err("no shell on this workspace".to_owned()));
         };
@@ -166,7 +176,7 @@ impl Tools {
         Ok(Ok(shell.run(&command).await?))
     }
 
-    async fn guest(&self, call: &ToolCall) -> Result<Result<String, String>> {
+    async fn guest(&self, call: &ToolCall) -> Result<Repairable<String>> {
         self.host
             .call_tool(call.fn_name.clone(), call.fn_arguments.to_string())
             .await
@@ -174,7 +184,7 @@ impl Tools {
     }
 
     // A result past the cap is refused whole, the model told its size.
-    fn within_cap(&self, text: String) -> Result<String, String> {
+    fn within_cap(&self, text: String) -> Repairable<String> {
         if text.len() > self.max_result_bytes {
             return Err(format!(
                 "result of {} bytes exceeds the {}-byte cap",
@@ -187,7 +197,7 @@ impl Tools {
 }
 
 // The call's arguments as the tool's own; a mismatch is the model's to repair.
-fn args<'de, T: Deserialize<'de>>(arguments: &'de Value) -> Result<T, String> {
+fn args<'de, T: Deserialize<'de>>(arguments: &'de Value) -> Repairable<T> {
     T::deserialize(arguments).map_err(|error| format!("invalid arguments: {error}"))
 }
 

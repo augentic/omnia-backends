@@ -9,12 +9,11 @@
 //! budget spent, or the timeout passed, is the typed `budget-exhausted`: the
 //! same request put again would spend it again.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ToolCall, ToolResponse};
-use omnia_wasi_model::{Answer, Error, Format, ToolHost, ToolTurn, Transcript, Usage};
+use omnia_wasi_model::{Answer, Error, Format, ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::timeout;
 
@@ -39,7 +38,6 @@ pub struct Conversation {
     options: ChatOptions,
     format: Format,
     check: bool,
-    tool_host: Arc<dyn ToolHost>,
     tools: Tools,
     budgets: Budgets,
     round: u32,
@@ -58,10 +56,7 @@ struct Reply {
 impl Conversation {
     // The completion starts here, once nothing is left to refuse: the start
     // event means a completion that will be billed.
-    pub fn new(
-        client: genai::Client, turn: Turn, tools: Tools, tool_host: Arc<dyn ToolHost>,
-        budgets: Budgets,
-    ) -> Self {
+    pub fn new(client: genai::Client, turn: Turn, tools: Tools, budgets: Budgets) -> Self {
         let advertised = turn.chat.tools.as_ref().map_or(0, Vec::len);
         let completion = Completion::start(turn.prompt_bytes, advertised);
         let Turn {
@@ -80,7 +75,6 @@ impl Conversation {
             options,
             format,
             check,
-            tool_host,
             tools,
             budgets,
             round: 0,
@@ -159,7 +153,7 @@ impl Conversation {
             // the guest's verdict on the candidate
             self.candidates += 1;
             self.completion.enter(Phase::Check);
-            match self.tool_host.check(candidate.clone()).await? {
+            match self.tools.check(candidate.clone()).await? {
                 Ok(()) => return Ok(self.answer(candidate, usage)),
                 // The guest's correction is the model's next turn, verbatim;
                 // with no candidate or round left it is the typed failure

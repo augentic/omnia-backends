@@ -43,7 +43,7 @@ impl WasiModelCtx for Client {
         }
 
         Box::pin(
-            async move { client.stage(&request, &tool_host).await?.complete().await }
+            async move { client.stage(&request, tool_host).await?.complete().await }
                 .instrument(span),
         )
     }
@@ -61,15 +61,15 @@ impl Client {
     // resolved before a session is prepared, so what the request gets wrong
     // is refused with the least work done.
     async fn stage(
-        &self, request: &Request, tool_host: &Arc<dyn ToolHost>,
+        &self, request: &Request, tool_host: Arc<dyn ToolHost>,
     ) -> anyhow::Result<Conversation> {
         let workspace = tool_host.local_path();
         let mut turn = Turn::translate(request, &self.model)?;
         let access = self.access(workspace).await?;
         let shell = self.shell(request, access, workspace).await?;
         turn.advertise(workspace_tools(access));
-        let tools = Tools::new(Arc::clone(tool_host), shell, self.limits().max_result_bytes);
-        Ok(Conversation::new(self.inner.clone(), turn, tools, Arc::clone(tool_host), self.budgets))
+        let tools = Tools::new(tool_host, shell, self.limits().max_result_bytes);
+        Ok(Conversation::new(self.inner.clone(), turn, tools, self.budgets))
     }
 
     // What runs in the lend: the sandbox's answer where one is connected,

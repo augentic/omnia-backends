@@ -467,6 +467,13 @@ async fn model_nudged_off_schema() {
     assert!(nudge.contains("\"array\""), "the fault names the type due: {nudge}");
     assert_eq!(requests[1].tools(), ["read", "list"]);
     assert_eq!(requests[1].body["response_format"]["type"], "json_object");
+    let debug = captured
+        .events()
+        .into_iter()
+        .find(|event| event.contains("nudging under JSON mode"))
+        .expect("the nudge debug event");
+    assert!(debug.contains(r#"fault=at `/findings`: value is not of type "array""#), "{debug}");
+    assert!(!debug.contains("none"), "the debug event masks the instance value: {debug}");
     let completion = captured.completion();
     assert!(completion.contains(r#"outcome="ok""#), "{completion}");
     assert!(completion.contains("attempts=2 "), "{completion}");

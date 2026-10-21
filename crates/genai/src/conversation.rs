@@ -16,6 +16,7 @@
 //! is the typed `budget-exhausted`: the same request put again would spend
 //! it again.
 
+use std::fmt;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -154,16 +155,17 @@ impl Conversation {
             // told what the parser or the schema found, and answered in the
             // closing rounds under JSON mode
             if !self.nudged
-                && let Some(nudge) = self.off_shape(&candidate)
+                && let Some((fault, nudge)) = self.off_shape(&candidate)
             {
                 self.nudged = true;
                 self.closing = true;
                 tracing::debug!(
                     round = self.round,
                     reply_bytes = candidate.len(),
-                    %nudge,
+                    %fault,
                     "the reply is off the shape asked for; nudging under JSON mode"
                 );
+                tracing::trace!(%nudge, "nudge turn");
                 self.chat = std::mem::take(&mut self.chat)
                     .append_message(ChatMessage::assistant(candidate))
                     .append_message(ChatMessage::user(nudge));
@@ -255,40 +257,43 @@ impl Conversation {
         (chat, options)
     }
 
-    // The nudge a candidate earns, or `None` for one in the shape asked for:
-    // not JSON where JSON was asked for, with what the parser said of it, or
-    // JSON that does not fit the schema, with each fault at its path.
-    fn off_shape(&self, candidate: &str) -> Option<String> {
+    // The fault for the debug log and the nudge a candidate earns, or `None`
+    // for one in the shape asked for. The debug fault masks the failing
+    // instance value so no reply text crosses into `DEBUG`.
+    fn off_shape(&self, candidate: &str) -> Option<(String, String)> {
         if !matches!(self.format, Format::Json | Format::Schema(_)) {
             return None;
         }
         let value = match serde_json::from_str::<Value>(candidate) {
             Ok(value) => value,
             Err(fault) => {
-                return Some(format!(
+                let fault = fault.to_string();
+                let nudge = format!(
                     "Your last reply is not one well-formed JSON value ({fault}), so it is not \
                      the answer. Reply now with only your final answer as a single JSON value \
                      in the shape the prompt asked for, and nothing else."
-                ));
+                );
+                return Some((fault, nudge));
             }
         };
         let validator = self.validator.as_ref()?;
-        let faults: Vec<String> = validator
-            .iter_errors(&value)
-            .map(|fault| {
-                let path = fault.instance_path().to_string();
-                if path.is_empty() { fault.to_string() } else { format!("at `{path}`: {fault}") }
-            })
-            .collect();
-        if faults.is_empty() {
+        let mut masked = Vec::new();
+        let mut detailed = Vec::new();
+        for error in validator.iter_errors(&value) {
+            let path = error.instance_path().to_string();
+            masked.push(at_path(&path, error.masked()));
+            detailed.push(at_path(&path, &error));
+        }
+        if detailed.is_empty() {
             return None;
         }
-        Some(format!(
+        let nudge = format!(
             "Your last reply is JSON but not in the shape the prompt asked for ({}), so it is \
              not the answer. Reply now with only your final answer as a single JSON value in \
              exactly that shape, and nothing else.",
-            faults.join("; ")
-        ))
+            detailed.join("; ")
+        );
+        Some((masked.join("; "), nudge))
     }
 
     async fn tool_round(&mut self, tool_calls: Vec<ToolCall>) -> Result<()> {
@@ -335,4 +340,8 @@ impl Conversation {
             transcript: Some(std::mem::take(&mut self.transcript)),
         }
     }
+}
+
+fn at_path(path: &str, fault: impl fmt::Display) -> String {
+    if path.is_empty() { fault.to_string() } else { format!("at `{path}`: {fault}") }
 }

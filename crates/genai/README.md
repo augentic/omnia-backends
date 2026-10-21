@@ -25,8 +25,14 @@ the model produces is offered to the guest through `ToolHost::check`: `Ok`
 ends the completion with that candidate, `Err(correction)` appends the
 candidate and the guest's correction to the conversation verbatim and the
 loop goes round; where JSON was asked for, a reply that is not one
-well-formed JSON value is nudged once, with what the parser said of it,
-before any candidate reaches the guest. Three budgets bound a completion,
+well-formed JSON value, or that is JSON but does not fit the request's
+schema, is nudged once per candidate, with what the parser or the schema
+said of it (each fault at its path), before any candidate reaches the guest
+— in closing rounds that ask for the provider's JSON mode in place of the
+schema, since a provider that ignores the schema answers prose to it, with
+the tools still declared so a provider that caches the prompt by its prefix
+keeps the cache, and a tool call made there refused rather than run, the
+schema returning on a correction round. Three budgets bound a completion,
 and any spent is the typed `budget-exhausted`: every provider round-trip —
 a tool round, a candidate, a nudge, or a correction — draws on `max_rounds`
 (default 128), and the guest's `check` is offered at most `max_candidates`
@@ -228,7 +234,11 @@ row per guest program (`foreach_model!` fails to compile when a program has
 no row): echo, the three `check` outcomes (the rejected candidate and the
 correction become the next round's turns, the completion `corrected` and
 both rounds on its bill; the second rejection exhausts), a narration reply
-nudged before the JSON that passes (two attempts, `ok`), the nudge spending
+nudged before the JSON that passes (two attempts, `ok`, the closing round
+under JSON mode with the tools still declared), a JSON reply off the schema
+nudged with the fault at its path, a tool call in a closing round refused
+and the JSON after it accepted, a second narration after a correction
+nudged again (the schema back on the correction round), the nudge spending
 the last round, the round budget spent on a model that only calls tools
 (`exhausted`), a tool round-trip through `OpenAI` `tool_calls`, a repairable
 tool failure, an undeclared tool refused by the host, a four-way fan-out

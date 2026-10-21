@@ -32,8 +32,8 @@ tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "proce
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-landlock.workspace = true
-seccompiler.workspace = true
+landlock = "0.4.7"
+seccompiler = "0.5.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

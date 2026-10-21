@@ -154,7 +154,7 @@ version = "1.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.arc-swap]]
-version = "1.9.2"
+version = "1.9.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.arcstr]]
@@ -162,7 +162,7 @@ version = "1.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.async-compression]]
-version = "0.4.50"
+version = "0.4.51"
 criteria = "safe-to-deploy"
 
 [[exemptions.async-lock]]
@@ -298,7 +298,7 @@ version = "0.14.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.cc]]
-version = "1.8.0"
+version = "1.9.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.cfg-if]]
@@ -322,15 +322,15 @@ version = "0.5.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.combine]]
-version = "4.6.8"
+version = "4.6.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.compression-codecs]]
-version = "0.4.45"
+version = "0.4.46"
 criteria = "safe-to-deploy"
 
 [[exemptions.compression-core]]
-version = "0.4.33"
+version = "0.4.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.const-hex]]
@@ -382,7 +382,7 @@ version = "0.3.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.crc32fast]]
-version = "1.5.2"
+version = "1.5.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.critical-section]]
@@ -494,15 +494,15 @@ version = "0.3.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.defmt]]
-version = "1.1.1"
+version = "1.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.defmt-macros]]
-version = "1.1.1"
+version = "1.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.defmt-parser]]
-version = "1.0.0"
+version = "1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.der]]
@@ -622,7 +622,7 @@ version = "2.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.find-msvc-tools]]
-version = "0.1.14"
+version = "0.1.15"
 criteria = "safe-to-deploy"
 
 [[exemptions.fixedbitset]]
@@ -911,6 +911,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.lazy_static]]
 version = "1.5.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.libc]]
+version = "0.2.191"
 criteria = "safe-to-deploy"
 
 [[exemptions.libredox]]
@@ -1394,7 +1398,7 @@ version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-webpki]]
-version = "0.103.15"
+version = "0.103.16"
 criteria = "safe-to-deploy"
 
 [[exemptions.same-file]]
@@ -1402,7 +1406,7 @@ version = "1.0.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.schannel]]
-version = "0.1.29"
+version = "0.1.30"
 criteria = "safe-to-deploy"
 
 [[exemptions.schema-registry-client]]
@@ -1802,7 +1806,7 @@ version = "1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-root-certs]]
-version = "1.0.9"
+version = "1.0.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-roots]]
@@ -1810,7 +1814,7 @@ version = "0.26.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-roots]]
-version = "1.0.9"
+version = "1.0.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.whoami]]

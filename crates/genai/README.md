@@ -32,21 +32,32 @@ said of it (each fault at its path), before any candidate reaches the guest
 schema, since a provider that ignores the schema answers prose to it, with
 the tools still declared so a provider that caches the prompt by its prefix
 keeps the cache, and a tool call made there refused rather than run, the
-schema returning on a correction round. Three budgets bound a completion,
+schema returning on a correction round. A call to a tool the request never
+declared is answered as the model's slip — a tool failure saying the name
+is not declared and listing the tools that are, one round lost — in place
+of the host's refusal, which would end the completion. Four budgets bound
+a completion,
 and any spent is the typed `budget-exhausted`: every provider round-trip —
 a tool round, a candidate, a nudge, or a correction — draws on `max_rounds`
-(default 128), and the guest's `check` is offered at most `max_candidates`
+(default 128), the last round of which forbids tool calls with the tools
+still declared (`tool_choice` `none`), so a model that would act once more
+answers the question instead where the provider honours it and a call made
+there is refused as in a closing round; the guest's `check` is offered at most `max_candidates`
 candidates (default 2, the count the `omnia-cursor` backend keeps), every
 one but the last corrected once and the rejection of the last failing the
-completion with that correction as the detail; each reply of the
-model, the tool rounds before it included, runs under the `timeout_secs`
-cap (default 600), a nudge or a correction starting a fresh one, so a
-provider that never answers or a build that never ends holds no completion
-for longer; the host's per-completion tool-call limit is answered through
-`WasiModelCtx::limits()` as `max_tool_calls`. Without a `check` the guest
-sees the model's final text as-is. Whatever the request gets wrong — a
-reserved tool name, a worker grant with no shell to open — is refused
-before any of this starts, and before anything is billed.
+completion with that correction as the detail; a tool call that fails the
+same way with the same arguments is counted, the model told the count from
+the third, and `max_repeats` such failures (default 5) end the completion
+naming the call, since a model repeating one refused call is not going to
+answer; each reply of the model, the tool rounds before it included, runs
+under the `timeout_secs` cap (default 600), a nudge or a correction
+starting a fresh one, so a provider that never answers or a build that
+never ends holds no completion for longer; the host's per-completion
+tool-call limit is answered through `WasiModelCtx::limits()` as
+`max_tool_calls`. Without a `check` the guest sees the model's final text
+as-is. Whatever the request gets wrong — a reserved tool name, a worker
+grant with no shell to open — is refused before any of this starts, and
+before anything is billed.
 
 MSRV: Rust 1.99
 
@@ -60,6 +71,7 @@ MSRV: Rust 1.99
 | `GENAI_MAX_ROUNDS` | no | `128` | Provider round-trips one completion may make before it is ended as `budget-exhausted` |
 | `GENAI_MAX_TOOL_CALLS` | no | `128` | Guest tool calls one completion may make before `budget-exhausted` (the host's default is 32) |
 | `GENAI_MAX_CANDIDATES` | no | `2` | Candidates one completion may offer the guest's `check`; the rejection of the last is `budget-exhausted` carrying the correction |
+| `GENAI_MAX_REPEATS` | no | `5` | Failures one tool call may earn with the same arguments before the completion is `budget-exhausted` naming the call; the model is told the count from the third |
 | `GENAI_TIMEOUT_SECS` | no | `600` | Absolute cap in seconds on one reply of the model, tool rounds included, before the completion is ended as `budget-exhausted` |
 | `GENAI_SHELL_TIMEOUT_SECS` | no | `600` | Seconds one `shell` command may run before it is killed |
 | `OPENAI_API_KEY` | per provider | | `OpenAI` API key, read by genai from the ambient environment |
@@ -241,7 +253,11 @@ and the JSON after it accepted, a second narration after a correction
 nudged again (the schema back on the correction round), the nudge spending
 the last round, the round budget spent on a model that only calls tools
 (`exhausted`), a tool round-trip through `OpenAI` `tool_calls`, a repairable
-tool failure, an undeclared tool refused by the host, a four-way fan-out
+tool failure, an undeclared tool answered with the declared names and the
+completion going on, one call failing the same way until the repeat budget
+ends it (`exhausted`, the count named from the third), the repeat budget
+lowered and calls differing in their arguments counted apart, a four-way
+fan-out
 seen in flight at once, tool fan-out with each conversation carrying its
 own result, a fan-out whose losers are dropped mid-request (their requests
 abandoned, no further ones made), a provider failure reaching the guest,

@@ -285,11 +285,11 @@ async fn model_undeclared_tool() {
     run_guest(test_programs::MODEL_UNDECLARED_TOOL, &[], &client).await;
     await_gone(&fake).await;
 
-    // the endpoint refuses the call and aborts the completion; the agent is still torn down
+    // an undeclared call is a repairable failure: the model sees it, not the session
     let log = fake.log();
     let callbacks = log.callbacks();
     assert_eq!(callbacks.len(), 1);
-    assert_eq!(callbacks[0].arg["status"], 409, "{}", callbacks[0].arg);
+    assert_eq!(callbacks[0].arg["status"], 200, "{}", callbacks[0].arg);
     let (_, sequence) = sole_agent(&log);
     assert_eq!(sequence.first(), Some(&Rpc::CreateAgent));
     assert_eq!(sequence.last(), Some(&Rpc::DeleteAgent));

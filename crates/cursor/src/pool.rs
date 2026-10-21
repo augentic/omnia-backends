@@ -114,7 +114,9 @@ impl Lease {
         &self.worker
     }
 
-    pub fn attach(&self, agent_id: String, tool_host: Arc<dyn ToolHost>) -> Route {
-        self.registration.attach(agent_id, tool_host)
+    pub fn attach(
+        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, declared: Vec<String>,
+    ) -> Route {
+        self.registration.attach(agent_id, tool_host, declared)
     }
 }

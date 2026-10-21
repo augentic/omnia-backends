@@ -15,7 +15,7 @@ use omnia_genai::ConnectOptions;
 use omnia_test::host::{Scratch, scratch};
 use serde_json::json;
 use support::capture::Captured;
-use support::fake_openai::{self, Config, FakeOpenAi, Fault};
+use support::fake_openai::{self, Config, FakeOpenAi, Fault, Round};
 use support::harness::{client, client_with, expect_error, run_guest, run_guest_over};
 
 // Every guest program in `crates/test-programs` must have a matching test
@@ -385,9 +385,10 @@ async fn model_check_accepted() {
 }
 
 // A reply that is not JSON where JSON was asked for is nudged once, with
-// what the parser said of it, before any candidate reaches the guest; the
-// JSON that follows passes the check first time, so the completion is `ok`
-// over two attempts, not corrected.
+// what the parser said of it, before any candidate reaches the guest, in a
+// closing round that asks for JSON mode in place of the schema with the
+// tools still declared; the JSON that follows passes the check first time,
+// so the completion is `ok` over two attempts, not corrected.
 #[tokio::test]
 async fn model_nudged() {
     let captured = Captured::install();
@@ -395,10 +396,20 @@ async fn model_nudged() {
         FakeOpenAi::serve(Config::replies(["Analyzing the claims to produce the verdict.", PASS]))
             .await;
     let client = client(&fake).await;
-    run_guest(test_programs::MODEL_CHECK_ACCEPTED, &[], &client).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    run_guest_over(
+        test_programs::MODEL_CHECK_ACCEPTED,
+        &["lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
 
     let requests = fake.requests();
     assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].tools(), ["read", "list"], "the lend's tools on the first round");
+    assert_eq!(requests[0].body["response_format"]["type"], "json_schema");
     let second = requests[1].messages();
     let tail = &second[second.len() - 2..];
     assert_eq!(
@@ -411,9 +422,139 @@ async fn model_nudged() {
         "{}",
         tail[1].1
     );
+    assert!(!tail[1].1.contains("No tool"), "the nudge withdraws nothing: {}", tail[1].1);
+    assert_eq!(requests[1].tools(), ["read", "list"], "the closing round keeps the tools");
+    assert_eq!(requests[1].body["response_format"]["type"], "json_object");
     let completion = captured.completion();
     assert!(completion.contains(r#"outcome="ok""#), "{completion}");
     assert!(completion.contains("attempts=2 "), "{completion}");
+}
+
+// A reply that is JSON but does not fit the schema is nudged the same way,
+// the nudge naming each fault at its path, so a slip of shape never reaches
+// the guest as a candidate it cannot read.
+#[tokio::test]
+async fn model_nudged_off_schema() {
+    let captured = Captured::install();
+    let fake =
+        FakeOpenAi::serve(Config::replies([r#"{"findings":"none","verdict":"pass"}"#, PASS])).await;
+    let client = client(&fake).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    run_guest_over(
+        test_programs::MODEL_CHECK_ACCEPTED,
+        &["lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    let second = requests[1].messages();
+    let tail = &second[second.len() - 2..];
+    assert_eq!(
+        tail[0],
+        ("assistant".to_owned(), r#"{"findings":"none","verdict":"pass"}"#.to_owned())
+    );
+    assert_eq!(tail[1].0, "user");
+    let nudge = &tail[1].1;
+    assert!(
+        nudge.starts_with("Your last reply is JSON but not in the shape the prompt asked for ("),
+        "{nudge}"
+    );
+    assert!(nudge.contains("at `/findings`: "), "the fault names its path: {nudge}");
+    assert!(nudge.contains("\"array\""), "the fault names the type due: {nudge}");
+    assert_eq!(requests[1].tools(), ["read", "list"]);
+    assert_eq!(requests[1].body["response_format"]["type"], "json_object");
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
+    assert!(completion.contains("attempts=2 "), "{completion}");
+}
+
+// A tool call made in a closing round is not run: each is answered with the
+// JSON answer as what is due, the next round still under JSON mode with the
+// tools declared, so a provider whose JSON mode does not silence the tools
+// still ends; the text that follows is the candidate.
+#[tokio::test]
+async fn model_nudge_keeps_tools() {
+    let captured = Captured::install();
+    let fake = FakeOpenAi::serve(Config::rounds([
+        Round::Text("Let me check the tree first.".to_owned()),
+        Round::Call("list".to_owned(), json!({ "path": "." })),
+        Round::Text(PASS.to_owned()),
+    ]))
+    .await;
+    let client = client(&fake).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    run_guest_over(
+        test_programs::MODEL_CHECK_ACCEPTED,
+        &["lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    let formats: Vec<&str> =
+        requests.iter().map(|r| r.body["response_format"]["type"].as_str().unwrap()).collect();
+    assert_eq!(formats, ["json_schema", "json_object", "json_object"]);
+    for request in &requests {
+        assert_eq!(request.tools(), ["read", "list"]);
+    }
+    let refusal = requests[2].last("tool").expect("the refused call is answered as a tool result");
+    assert!(refusal.starts_with("not run: your final answer is due now."), "{refusal}");
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
+    assert!(completion.contains("attempts=2 "), "{completion}");
+}
+
+// The nudge is one per candidate: a correction turn carries the schema
+// again, and a second prose reply after it is given a second closing round
+// rather than put to the check as it stands; the tools are declared on
+// every round.
+#[tokio::test]
+async fn model_nudged_after_correction() {
+    let captured = Captured::install();
+    let fake = FakeOpenAi::serve(Config::replies([
+        "Let me look at the claims.",
+        FAIL,
+        "Revising the verdict now.",
+        PASS,
+    ]))
+    .await;
+    let client = client(&fake).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    run_guest_over(
+        test_programs::MODEL_CHECK_CORRECTED,
+        &["lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 4);
+    let formats: Vec<&str> =
+        requests.iter().map(|r| r.body["response_format"]["type"].as_str().unwrap()).collect();
+    assert_eq!(formats, ["json_schema", "json_object", "json_schema", "json_object"]);
+    for request in &requests {
+        assert_eq!(request.tools(), ["read", "list"], "the tools are declared on every round");
+    }
+    let third = requests[2].messages();
+    let tail = &third[third.len() - 2..];
+    assert_eq!(tail[0], ("assistant".to_owned(), FAIL.to_owned()));
+    assert!(tail[1].1.starts_with("## Previous answer (rejected)\n\n"), "{}", tail[1].1);
+    let fourth = requests[3].messages();
+    let tail = &fourth[fourth.len() - 2..];
+    assert_eq!(tail[0], ("assistant".to_owned(), "Revising the verdict now.".to_owned()));
+    assert!(tail[1].1.starts_with("Your last reply is not one well-formed JSON value ("));
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="corrected""#), "{completion}");
+    assert!(completion.contains("attempts=4 "), "{completion}");
 }
 
 // The nudge is a round like any other: with none left after it, the

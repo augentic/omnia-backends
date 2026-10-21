@@ -291,10 +291,21 @@ Unreleased
   one reply exceeded)`); `max_tool_calls` (`GENAI_MAX_TOOL_CALLS`,
   default `128`) is answered to the host through `WasiModelCtx::limits`,
   as the Cursor backend's is. Where JSON was asked for with a `check`, a
-  reply that is not one well-formed JSON value is nudged once, in the
-  Cursor backend's words and with what the parser said of it, before any
-  candidate reaches the guest, so a model that narrates before it answers
-  is not corrected for the narration. The request is refused whole before
+  reply that is not one well-formed JSON value, or that is JSON but does
+  not fit the request's schema, is nudged once per candidate, in the
+  Cursor backend's words and with what the parser or the schema said of
+  it, each fault at its path, before any candidate reaches the guest, so a
+  model that narrates before it answers is not corrected for the narration
+  and one that answers a map where a list is due is not refused by the
+  guest's deserialiser as the guest's own defect; the nudge opens the
+  closing rounds, the provider's JSON mode asked for in place of the
+  schema, since a provider that ignores the schema, as Ollama does, answers
+  prose to it, the tools still declared so a provider that caches the
+  prompt by its prefix keeps the cache through the nudge, and a tool call
+  made there answered as not run with the JSON answer due, until the model
+  answers in text; a correction round after it carries the schema again. A
+  format schema that is JSON but no JSON Schema is refused with the
+  request, as one that is not JSON is. The request is refused whole before
   anything starts or is billed: the worker grant's shell, the tool names,
   and the translation each go before the sandbox session is prepared and
   the `completion started` line written. The log carries

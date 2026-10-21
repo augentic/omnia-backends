@@ -30,12 +30,22 @@ pub enum Script {
     Echo,
     /// Request `n` gets `replies[n]`; the last reply repeats.
     Replies(Vec<String>),
+    /// Request `n` gets `rounds[n]`, a text or one tool call; the last
+    /// repeats.
+    Rounds(Vec<Round>),
     /// A conversation's requests get one call of `calls` each, in order,
     /// the request carrying `n` tool results the call after them; the
     /// request carrying every result gets `answer`, or without one the last
     /// result as the answer — a repairable failure line rephrased as `tool
     /// failed: reason`, the phrasing the shared guests expect.
     ToolCalls { calls: Vec<(String, Value)>, answer: Option<String> },
+}
+
+/// One scripted round: the model's text, or one tool call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Round {
+    Text(String),
+    Call(String, Value),
 }
 
 /// How every request fails, when one does.
@@ -72,6 +82,15 @@ impl Config {
     pub fn replies(replies: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             script: Script::Replies(replies.into_iter().map(Into::into).collect()),
+            fault: None,
+            gate: None,
+            billed: false,
+        }
+    }
+
+    pub fn rounds(rounds: impl IntoIterator<Item = Round>) -> Self {
+        Self {
+            script: Script::Rounds(rounds.into_iter().collect()),
             fault: None,
             gate: None,
             billed: false,
@@ -391,18 +410,16 @@ async fn handle(
             let reply = replies.get(round).or_else(|| replies.last());
             completion(Some(reply.map_or("", String::as_str)), None)
         }
+        Script::Rounds(rounds) => match rounds.get(round).or_else(|| rounds.last()) {
+            Some(Round::Call(name, args)) => completion(None, Some(tool_call(round, name, args))),
+            Some(Round::Text(text)) => completion(Some(text), None),
+            None => completion(Some(""), None),
+        },
         Script::ToolCalls { calls, answer } => {
             // the results the conversation carries count the calls answered
             let answered = recorded.messages().iter().filter(|(role, _)| role == "tool").count();
             if let Some((name, args)) = calls.get(answered) {
-                completion(
-                    None,
-                    Some(json!([{
-                        "id": format!("call_{}", answered + 1),
-                        "type": "function",
-                        "function": { "name": name, "arguments": args.to_string() },
-                    }])),
-                )
+                completion(None, Some(tool_call(answered, name, args)))
             } else {
                 let result = recorded.last("tool").unwrap_or_default();
                 let text = answer.clone().unwrap_or_else(|| answer_from(&result));
@@ -433,6 +450,15 @@ fn answer_from(result: &str) -> String {
         .strip_prefix("tool `")
         .and_then(|rest| rest.split_once("` failed: "))
         .map_or_else(|| result.to_owned(), |(_, reason)| format!("tool failed: {reason}"))
+}
+
+// One OpenAI-shaped `tool_calls` list holding the call `n` of a script.
+fn tool_call(n: usize, name: &str, args: &Value) -> Value {
+    json!([{
+        "id": format!("call_{}", n + 1),
+        "type": "function",
+        "function": { "name": name, "arguments": args.to_string() },
+    }])
 }
 
 // One OpenAI-shaped chat completion: `content`, or `tool_calls`.

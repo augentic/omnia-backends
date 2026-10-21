@@ -11,6 +11,7 @@ use anyhow::{Context as _, Result, bail};
 use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, JsonSpec, ReasoningEffort, Tool,
 };
+use jsonschema::Validator;
 use omnia_wasi_model::{Effort, Error, Format, Function, Request, Role, Tool as ModelTool};
 use serde_json::Value;
 
@@ -25,6 +26,9 @@ pub struct Turn {
     pub chat: ChatRequest,
     pub options: ChatOptions,
     pub format: Format,
+    // the request's schema compiled, for the shape a reply is held to
+    // before it reaches the check; `None` where the format declares none
+    pub validator: Option<Validator>,
     pub check: bool,
     // the system text and every message, in bytes
     pub prompt_bytes: u64,
@@ -37,6 +41,7 @@ impl Turn {
             chat: chat_request(request)?,
             options: chat_options(request)?,
             format: request.format.clone(),
+            validator: validator(request)?,
             check: request.check,
             prompt_bytes: prompt_bytes(request),
         })
@@ -142,6 +147,19 @@ fn chat_options(request: &Request) -> Result<ChatOptions> {
     }
 
     Ok(options)
+}
+
+// A schema that is JSON but no JSON Schema is the request's fault, refused
+// before anything is billed, as a schema that is not JSON is.
+fn validator(request: &Request) -> Result<Option<Validator>> {
+    let Format::Schema(spec) = &request.format else {
+        return Ok(None);
+    };
+    let schema: Value =
+        serde_json::from_str(&spec.schema).context("format schema is not valid JSON")?;
+    let validator = jsonschema::validator_for(&schema)
+        .with_context(|| format!("format schema `{}` is not a valid JSON Schema", spec.name))?;
+    Ok(Some(validator))
 }
 
 const fn reasoning_effort(effort: Effort) -> ReasoningEffort {

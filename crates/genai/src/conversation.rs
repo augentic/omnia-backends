@@ -5,14 +5,24 @@
 //! candidate draws on the candidate budget beside it, so a model that cannot
 //! satisfy the check is ended with the correction rather than asked again
 //! until the rounds run out. Each reply of the model runs under the timeout,
-//! tool rounds included; a nudge or a correction starts a fresh one. Either
-//! budget spent, or the timeout passed, is the typed `budget-exhausted`: the
-//! same request put again would spend it again.
+//! tool rounds included; a nudge or a correction starts a fresh one. A reply
+//! that is not JSON where JSON was asked for, or that is JSON but does not
+//! fit the request's schema, is nudged once per candidate: the nudge says
+//! what the parser or the schema found, and the rounds after it ask for the
+//! provider's JSON mode in place of the schema, the tools still declared so
+//! the provider's prompt keeps its prefix, until the model answers in text;
+//! a tool call made there is refused, not run. The schema steering returns
+//! for the correction after it. Either budget spent, or the timeout passed,
+//! is the typed `budget-exhausted`: the same request put again would spend
+//! it again.
 
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use genai::chat::{ChatMessage, ChatOptions, ChatRequest, ToolCall, ToolResponse};
+use genai::chat::{
+    ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ToolCall, ToolResponse,
+};
+use jsonschema::Validator;
 use omnia_wasi_model::{Answer, Error, Format, ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::timeout;
@@ -37,12 +47,16 @@ pub struct Conversation {
     chat: ChatRequest,
     options: ChatOptions,
     format: Format,
+    validator: Option<Validator>,
     check: bool,
     tools: Tools,
     budgets: Budgets,
     round: u32,
     candidates: u32,
     nudged: bool,
+    // The rounds after a nudge, until the model answers in text: JSON mode
+    // in place of the schema, a tool call refused.
+    closing: bool,
     transcript: Transcript,
     completion: Completion,
 }
@@ -52,6 +66,12 @@ struct Reply {
     text: String,
     usage: Option<Usage>,
 }
+
+// What the model is told of a tool call it makes where its JSON answer is
+// due: the result of every such call, in place of running it.
+const REFUSED_IN_CLOSING: &str = "not run: your final answer is due now. Reply with only your \
+                                  final answer as a single JSON value in the shape the prompt \
+                                  asked for, and nothing else.";
 
 impl Conversation {
     // The completion starts here, once nothing is left to refuse: the start
@@ -64,6 +84,7 @@ impl Conversation {
             chat,
             options,
             format,
+            validator,
             check,
             ..
         } = turn;
@@ -74,12 +95,14 @@ impl Conversation {
             chat,
             options,
             format,
+            validator,
             check,
             tools,
             budgets,
             round: 0,
             candidates: 0,
             nudged: false,
+            closing: false,
             transcript: Transcript::default(),
             completion,
         }
@@ -127,22 +150,19 @@ impl Conversation {
                 return Ok(self.answer(candidate, usage));
             }
 
-            // a reply that is not JSON is nudged once, told what the parser said of it
+            // a reply off the shape asked for is nudged once per candidate,
+            // told what the parser or the schema found, and answered in the
+            // closing rounds under JSON mode
             if !self.nudged
-                && matches!(self.format, Format::Json | Format::Schema(_))
-                && let Err(fault) = serde_json::from_str::<Value>(&candidate)
+                && let Some(nudge) = self.off_shape(&candidate)
             {
                 self.nudged = true;
+                self.closing = true;
                 tracing::debug!(
                     round = self.round,
                     reply_bytes = candidate.len(),
-                    %fault,
-                    "the reply is not JSON; nudging"
-                );
-                let nudge = format!(
-                    "Your last reply is not one well-formed JSON value ({fault}), so it is not \
-                     the answer. Reply now with only your final answer as a single JSON value in \
-                     the shape the prompt asked for, and nothing else."
+                    %nudge,
+                    "the reply is off the shape asked for; nudging under JSON mode"
                 );
                 self.chat = std::mem::take(&mut self.chat)
                     .append_message(ChatMessage::assistant(candidate))
@@ -172,6 +192,7 @@ impl Conversation {
                         "check rejected the candidate"
                     );
                     tracing::trace!(%correction, "correction turn");
+                    self.nudged = false;
                     self.chat = std::mem::take(&mut self.chat)
                         .append_message(ChatMessage::assistant(candidate))
                         .append_message(ChatMessage::user(correction));
@@ -186,11 +207,11 @@ impl Conversation {
         while self.round < self.budgets.max_rounds {
             self.round += 1;
             self.completion.enter(Phase::Model);
-            let response = self
-                .client
-                .exec_chat(&self.model, self.chat.clone(), Some(&self.options))
-                .await
-                .with_context(|| format!("genai exec_chat failed for model `{}`", self.model))?;
+            let (chat, options) = self.round_request();
+            let response =
+                self.client.exec_chat(&self.model, chat, Some(&options)).await.with_context(
+                    || format!("genai exec_chat failed for model `{}`", self.model),
+                )?;
 
             let text = response.first_text().map(ToOwned::to_owned);
             let usage = response.usage.clone();
@@ -199,19 +220,75 @@ impl Conversation {
             self.completion.answered(&usage, reply_bytes, tool_calls.len());
 
             if !tool_calls.is_empty() {
-                self.tool_round(tool_calls).await?;
+                if self.closing {
+                    self.refuse_round(tool_calls);
+                } else {
+                    self.tool_round(tool_calls).await?;
+                }
                 continue;
             }
 
             let Some(text) = text else {
                 bail!("genai returned neither content nor tool calls (model `{}`)", self.model);
             };
+            self.closing = false;
             return Ok(Some(Reply {
                 text,
                 usage: to_usage(&usage),
             }));
         }
         Ok(None)
+    }
+
+    // What this round puts to the provider: the chat and the options as
+    // translated, or, in the closing rounds after a nudge, under JSON mode in
+    // place of the schema, the one `response_format` every adapter sends. The
+    // tools stay declared either way: a provider that caches the prompt by
+    // its prefix keeps the cache, and a call made under JSON mode is refused
+    // rather than run.
+    fn round_request(&self) -> (ChatRequest, ChatOptions) {
+        let chat = self.chat.clone();
+        let mut options = self.options.clone();
+        if self.closing {
+            options = options.with_response_format(ChatResponseFormat::JsonMode);
+        }
+        (chat, options)
+    }
+
+    // The nudge a candidate earns, or `None` for one in the shape asked for:
+    // not JSON where JSON was asked for, with what the parser said of it, or
+    // JSON that does not fit the schema, with each fault at its path.
+    fn off_shape(&self, candidate: &str) -> Option<String> {
+        if !matches!(self.format, Format::Json | Format::Schema(_)) {
+            return None;
+        }
+        let value = match serde_json::from_str::<Value>(candidate) {
+            Ok(value) => value,
+            Err(fault) => {
+                return Some(format!(
+                    "Your last reply is not one well-formed JSON value ({fault}), so it is not \
+                     the answer. Reply now with only your final answer as a single JSON value \
+                     in the shape the prompt asked for, and nothing else."
+                ));
+            }
+        };
+        let validator = self.validator.as_ref()?;
+        let faults: Vec<String> = validator
+            .iter_errors(&value)
+            .map(|fault| {
+                let path = fault.instance_path().to_string();
+                if path.is_empty() { fault.to_string() } else { format!("at `{path}`: {fault}") }
+            })
+            .collect();
+        if faults.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Your last reply is JSON but not in the shape the prompt asked for ({}), so it is \
+             not the answer. Reply now with only your final answer as a single JSON value in \
+             exactly that shape, and nothing else.",
+            faults.join("; ")
+        ))
     }
 
     async fn tool_round(&mut self, tool_calls: Vec<ToolCall>) -> Result<()> {
@@ -228,6 +305,27 @@ impl Conversation {
         }
         self.chat = chat;
         Ok(())
+    }
+
+    // A tool round in the closing rounds: nothing runs, and every call is
+    // answered with the JSON answer as what is due, so a provider whose JSON
+    // mode does not silence the tools still ends.
+    fn refuse_round(&mut self, tool_calls: Vec<ToolCall>) {
+        tracing::debug!(
+            round = self.round,
+            tool_calls = tool_calls.len(),
+            "tool calls in a closing round refused; the JSON answer is due"
+        );
+        let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
+        for call in tool_calls {
+            self.transcript.turns.push(ToolTurn {
+                tool: call.fn_name,
+                args: call.fn_arguments,
+                result: Value::String(REFUSED_IN_CLOSING.to_owned()),
+            });
+            chat = chat.append_message(ToolResponse::new(call.call_id, REFUSED_IN_CLOSING));
+        }
+        self.chat = chat;
     }
 
     fn answer(&mut self, answer: String, usage: Option<Usage>) -> Answer {

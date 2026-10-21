@@ -3874,6 +3874,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "jsonschema 0.58.6",
  "libc",
  "omnia",
  "omnia-sandbox",

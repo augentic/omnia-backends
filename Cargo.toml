@@ -11,7 +11,7 @@ keywords = ["wasi", "wasm", "backend", "runtime", "omnia"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/augentic/omnia-backends"
 rust-version = "1.99"
-version = "0.31.0"
+version = "0.32.0"
 
 [workspace.lints.rust]
 meta_variable_misuse = "warn"
@@ -61,7 +61,7 @@ hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
 jsonschema = { version = "0.59.0", default-features = false }
 libc = "0.2"
-omnia-sandbox = { version = "0.31.0", path = "crates/sandbox" }
+omnia-sandbox = { version = "0.32.0", path = "crates/sandbox" }
 process-wrap = { version = "10.0.1", default-features = false }
 prost = "0.14.4"
 prost-types = "0.14.4"

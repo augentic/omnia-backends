@@ -338,6 +338,31 @@ Unreleased
   carrying the correction, so a deployment over a small local model can
   let a build turn's report be corrected more than once; `0` is refused
   at connect as the other budgets are.
+- `omnia-genai` answers a call to a tool the request never declared as the
+  model's slip — a tool failure saying the name is not declared and
+  listing every tool the turn declares, the lend's among them — in place
+  of handing it to the host, whose refusal ended the completion; one
+  round is lost and the completion goes on. A small model
+  that invents a tool name for its report, as two eval arms did, is told
+  the names and answers again.
+- `omnia-genai`'s repeat budget is a knob: `GENAI_MAX_REPEATS`
+  (`ConnectOptions::max_repeats`, default `5`) is how many times one tool
+  call — one tool, the same arguments — may fail with a result the model
+  was to repair before the completion is `budget-exhausted` naming the
+  call and the count; the result names the count from the third failure
+  so the model is told it is repeating itself, a success of the call
+  clears its count, and calls differing in their arguments are counted
+  apart. A model repeating one refused `write_files` call, as an eval arm
+  did 21 times over 41 minutes, now ends in five rounds; `0` is refused
+  at connect as the other budgets are.
+- `omnia-genai` puts the last round of the round budget as a finishing
+  round: the tools stay declared and `tool_choice` is `none`, so a
+  provider that honours it answers the question in text where the round
+  would have gone on a call and ended the completion `budget-exhausted`
+  with no answer asked for, and a call made there all the same is refused
+  as a closing round's is. A small model under vLLM that re-ran its
+  passing checks for 56 rounds, as an eval probe's verify did, is asked
+  for its verdict at the cap.
 
 ### Changed
 

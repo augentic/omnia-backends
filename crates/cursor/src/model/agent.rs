@@ -97,6 +97,7 @@ impl Agent {
         let mut completion = Completion::from(&turn);
         let Turn { agent, prompt } = turn;
         let AgentSpec { options, operation } = agent;
+        let declared = options.local.custom_tools.keys().cloned().collect();
 
         let worker = lease.worker();
         let window = deadlines.inactivity;
@@ -123,7 +124,7 @@ impl Agent {
         }
         .inspect_err(|error| completion.finish(Outcome::of(error)))?;
 
-        let route = lease.attach(id.clone(), Arc::clone(&tool_host));
+        let route = lease.attach(id.clone(), Arc::clone(&tool_host), declared);
 
         Ok(Self {
             handle: Handle {

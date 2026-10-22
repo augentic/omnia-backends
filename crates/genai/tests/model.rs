@@ -670,9 +670,46 @@ async fn model_rounds_exhausted() {
     )
     .await;
     expect_error("no answer after 3 model round-trips", &["tools", "budget"], &client).await;
-    assert_eq!(fake.requests().len(), 3);
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].body.get("tool_choice").is_none(), "{}", requests[0].body);
+    assert!(requests[1].body.get("tool_choice").is_none(), "{}", requests[1].body);
+    assert_eq!(requests[2].body["tool_choice"], "none", "the last round forbids tool calls");
+    assert_eq!(requests[2].tools(), ["lookup"], "the last round keeps the tools declared");
     let completion = captured.completion();
     assert!(completion.contains(r#"outcome="exhausted""#), "{completion}");
+}
+
+// The last round of the budget is the model's to answer in: the request
+// forbids tool calls with the tools still declared, so a provider that
+// honours `tool_choice` answers the question the rounds before it were spent
+// acting on, and the completion is `ok` where it would have been exhausted.
+#[tokio::test]
+async fn model_rounds_finish() {
+    let captured = Captured::install();
+    let fake = FakeOpenAi::serve(Config::rounds([
+        Round::Call("lookup".to_owned(), json!({})),
+        Round::Call("lookup".to_owned(), json!({})),
+        Round::Text("tool failed: no data".to_owned()),
+    ]))
+    .await;
+    let client = client_with(
+        &fake,
+        ConnectOptions {
+            max_rounds: 3,
+            ..ConnectOptions::default()
+        },
+    )
+    .await;
+    run_guest(test_programs::MODEL_TOOL_FAILURE, &[], &client).await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].body.get("tool_choice").is_none(), "{}", requests[1].body);
+    assert_eq!(requests[2].body["tool_choice"], "none");
+    assert_eq!(requests[2].tools(), ["lookup"]);
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
 }
 
 #[tokio::test]
@@ -706,16 +743,115 @@ async fn model_tool_failure() {
     assert_eq!(requests[1].last("tool").as_deref(), Some("tool `lookup` failed: no data"));
 }
 
+// A call to a tool the request never declared is answered as the model's
+// slip, naming what it may call, and the completion goes on: the host, which
+// would end it, is never asked.
 #[tokio::test]
 async fn model_undeclared_tool() {
     let fake = FakeOpenAi::serve(Config::tool("lookup", json!({}))).await;
     let client = client(&fake).await;
     run_guest(test_programs::MODEL_UNDECLARED_TOOL, &[], &client).await;
 
-    // The host refuses the call and the completion ends: no second round.
     let requests = fake.requests();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].tools(), Vec::<String>::new());
+    assert_eq!(
+        requests[1].last("tool").as_deref(),
+        Some("tool `lookup` failed: `lookup` is not declared; this request declares no tools")
+    );
+}
+
+// With tools declared, the refusal names them, so the model's next call is
+// one of them; the lend's tools are among the names.
+#[tokio::test]
+async fn model_undeclared_tool_named() {
+    let fake = FakeOpenAi::serve(Config::calls([
+        ("write", json!({ "path": "a" })),
+        ("lookup", json!({})),
+    ]))
+    .await;
+    let client = client(&fake).await;
+    let (scratch, _) = tree();
+    run_guest_over(
+        test_programs::MODEL_TOOL_ROUNDTRIP,
+        &["lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[1].last("tool").as_deref(),
+        Some(
+            "tool `write` failed: `write` is not declared; the tools are `lookup`, `read`, `list`"
+        )
+    );
+    assert_eq!(requests[2].last("tool").as_deref(), Some("42"), "the declared call ran");
+}
+
+// The same call failing the same way is counted: the result names the
+// count from the third failure, and the fifth ends the completion as
+// exhausted naming the call, with rounds to spare.
+#[tokio::test]
+async fn model_tool_repeated() {
+    let captured = Captured::install();
+    let fake =
+        FakeOpenAi::serve(Config::calls(std::iter::repeat_n(("lookup", json!({ "q": 1 })), 8)))
+            .await;
+    let client = client(&fake).await;
+    expect_error(
+        "tool `lookup` failed 5 times with the same arguments: tool `lookup` has no handler",
+        &["tools", "budget"],
+        &client,
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 5, "the fifth failure ends the completion before a sixth round");
+    let second = requests[2].last("tool").expect("the second failure");
+    assert!(!second.contains("has now failed"), "no note before the third: {second}");
+    let third = requests[3].last("tool").expect("the third failure");
+    assert!(third.starts_with("tool `lookup` failed: tool `lookup` has no handler"), "{third}");
+    assert!(third.contains("This exact call has now failed 3 times"), "{third}");
+    assert!(third.contains("after 5 identical failures"), "{third}");
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="exhausted""#), "{completion}");
+}
+
+// The repeat budget is the deployment's, and counts one call's arguments
+// alone: lowered, it ends the completion sooner, while calls differing in
+// their arguments are never counted together.
+#[tokio::test]
+async fn model_tool_repeats_knob() {
+    let fake =
+        FakeOpenAi::serve(Config::calls(std::iter::repeat_n(("lookup", json!({ "q": 1 })), 8)))
+            .await;
+    let client = client_with(
+        &fake,
+        ConnectOptions {
+            max_repeats: 2,
+            ..ConnectOptions::default()
+        },
+    )
+    .await;
+    expect_error("failed 2 times with the same arguments", &["tools", "budget"], &client).await;
+    assert_eq!(fake.requests().len(), 2);
+
+    let fake =
+        FakeOpenAi::serve(Config::calls((0..8).map(|n| ("lookup", json!({ "q": n }))))).await;
+    let client = client_with(
+        &fake,
+        ConnectOptions {
+            max_repeats: 2,
+            max_rounds: 6,
+            ..ConnectOptions::default()
+        },
+    )
+    .await;
+    expect_error("no answer after 6 model round-trips", &["tools", "budget"], &client).await;
+    assert_eq!(fake.requests().len(), 6, "distinct arguments spend the rounds, never the repeats");
 }
 
 #[tokio::test]

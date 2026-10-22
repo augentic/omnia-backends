@@ -1,9 +1,10 @@
 //! The model's tool calls, dispatched, and the guest's check of a candidate.
 //!
 //! `read` and `list` go to the lent workspace, `shell` to the completion's
-//! session, and every other call through the guest, as the check does. A
-//! workspace or shell failure goes back to the model as repairable tool
-//! output; a host failure ends the completion.
+//! session, and every other declared call through the guest, as the check
+//! does. A workspace or shell failure, and a call to a tool the request
+//! never declared, go back to the model as repairable tool output; a host
+//! failure ends the completion.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ pub const SHELL_TOOL: &str = "shell";
 // A result the model repairs: `Err` is the text it is given in its next
 // turn, a failed call's reason or the check's correction. A host failure is
 // the outer `Err` that ends the completion, never this.
-type Repairable<T> = Result<T, String>;
+pub type Repairable<T> = Result<T, String>;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -89,25 +90,31 @@ pub fn workspace_tools(access: Access) -> Vec<Tool> {
 pub struct Tools {
     host: Arc<dyn ToolHost>,
     shell: Option<Shell>,
+    // every tool the turn declares, the request's own and the lend's; a
+    // call to any other name never reaches the host, which would end the
+    // completion on it
+    declared: Vec<String>,
     max_result_bytes: usize,
 }
 
 impl Tools {
     pub const fn new(
-        host: Arc<dyn ToolHost>, shell: Option<Shell>, max_result_bytes: usize,
+        host: Arc<dyn ToolHost>, shell: Option<Shell>, declared: Vec<String>,
+        max_result_bytes: usize,
     ) -> Self {
         Self {
             host,
             shell,
+            declared,
             max_result_bytes,
         }
     }
 
-    // One call's result as the model reads it, logged as the cursor
-    // backend's stream is: the call with its subject before, the result's
-    // size, a command's exit, and the time taken after. A failure the model
-    // can repair is its result, named for the tool.
-    pub async fn call(&self, call: &ToolCall) -> Result<String> {
+    // One call's outcome, logged as the cursor backend's stream is: the
+    // call with its subject before, the result's size, a command's exit,
+    // and the time taken after. The inner `Err` is a failure the model
+    // repairs, its reason bare; the caller spells it as the tool's result.
+    pub async fn call(&self, call: &ToolCall) -> Result<Repairable<String>> {
         let subject = subject(&call.fn_arguments, self.shell.as_ref().map(Shell::cwd));
         tracing::debug!(tool = %call.fn_name, subject = subject.as_deref(), "tool call");
         // the arguments whole, under a target of their own so a filter can
@@ -127,20 +134,33 @@ impl Tools {
             },
             "read" => (self.read(&call.fn_arguments).await, None),
             "list" => (self.list(&call.fn_arguments).await, None),
+            name if !self.declared.iter().any(|declared| declared == name) => {
+                (Err(self.undeclared(name)), None)
+            }
             _ => (self.guest(call).await?, None),
         };
-        let result =
-            outcome.unwrap_or_else(|reason| format!("tool `{}` failed: {reason}", call.fn_name));
 
         tracing::debug!(
             tool = %call.fn_name,
             subject = subject.as_deref(),
-            result_bytes = result.len(),
+            result_bytes = outcome.as_ref().map_or_else(String::len, String::len),
+            failed = outcome.is_err(),
             exit = exit.as_deref(),
             duration_ms = elapsed_ms(started),
             "tool call completed"
         );
-        Ok(result)
+        Ok(outcome)
+    }
+
+    // The slip the host would end the completion on, answered instead with
+    // the names the model may call.
+    fn undeclared(&self, name: &str) -> String {
+        if self.declared.is_empty() {
+            return format!("`{name}` is not declared; this request declares no tools");
+        }
+        let names: Vec<String> =
+            self.declared.iter().map(|declared| format!("`{declared}`")).collect();
+        format!("`{name}` is not declared; the tools are {}", names.join(", "))
     }
 
     pub async fn check(&self, candidate: String) -> Result<Repairable<()>> {
@@ -236,47 +256,53 @@ mod tests {
     async fn text_read() {
         let result = dispatch("read", json!({"path": "refs.md"}), CAP)
             .await
-            .expect("a workspace read is never a hard failure");
+            .expect("a workspace read is never a hard failure")
+            .expect("the file is held");
         assert_eq!(result, "reference text", "the file body is the tool result");
     }
 
     #[tokio::test]
     async fn binary_read() {
-        let result = dispatch("read", json!({"path": "logo.bin"}), CAP)
+        let reason = dispatch("read", json!({"path": "logo.bin"}), CAP)
             .await
-            .expect("a binary read is model-visible, not a hard failure");
-        assert!(result.contains("is not UTF-8"), "unexpected result: {result}");
+            .expect("a binary read is model-visible, not a hard failure")
+            .expect_err("bytes that are not text are the model's to repair");
+        assert!(reason.contains("is not UTF-8"), "unexpected reason: {reason}");
     }
 
     #[tokio::test]
     async fn oversize_read() {
-        let result = dispatch("read", json!({"path": "refs.md"}), 8)
+        let reason = dispatch("read", json!({"path": "refs.md"}), 8)
             .await
-            .expect("an oversize read is model-visible, not a hard failure");
-        assert!(result.contains("exceeds the 8-byte cap"), "unexpected result: {result}");
+            .expect("an oversize read is model-visible, not a hard failure")
+            .expect_err("a result past the cap is the model's to repair");
+        assert!(reason.contains("exceeds the 8-byte cap"), "unexpected reason: {reason}");
     }
 
     #[tokio::test]
     async fn read_missing_file() {
-        let result = dispatch("read", json!({"path": "gone.md"}), CAP)
+        let reason = dispatch("read", json!({"path": "gone.md"}), CAP)
             .await
-            .expect("a missing file is model-visible, not a hard failure");
-        assert!(result.starts_with("tool `read` failed:"), "unexpected result: {result}");
-        assert!(result.contains("gone.md"), "the failure names the path: {result}");
+            .expect("a missing file is model-visible, not a hard failure")
+            .expect_err("a missing file is the model's to repair");
+        assert!(reason.contains("gone.md"), "the failure names the path: {reason}");
     }
 
     #[tokio::test]
     async fn read_missing_path() {
-        let result = dispatch("read", json!({}), CAP)
+        let reason = dispatch("read", json!({}), CAP)
             .await
-            .expect("malformed arguments are model-visible, not a hard failure");
-        assert!(result.contains("missing field `path`"), "unexpected result: {result}");
+            .expect("malformed arguments are model-visible, not a hard failure")
+            .expect_err("malformed arguments are the model's to repair");
+        assert!(reason.contains("missing field `path`"), "unexpected reason: {reason}");
     }
 
     #[tokio::test]
     async fn list_serialization() {
-        let result =
-            dispatch("list", json!({}), CAP).await.expect("a root listing is never a hard failure");
+        let result = dispatch("list", json!({}), CAP)
+            .await
+            .expect("a root listing is never a hard failure")
+            .expect("the root lists");
         assert_eq!(
             result,
             r#"[{"name":"refs","is_directory":true},{"name":"refs.md","is_directory":false}]"#,
@@ -285,22 +311,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_tool() {
+    async fn declared_tool() {
         let result = dispatch("lookup", json!({"name": "alpha"}), CAP)
             .await
-            .expect("the session stub answers");
+            .expect("the session stub answers")
+            .expect("the stub's answer is the result");
         assert_eq!(
             result, r#"session:lookup:{"name":"alpha"}"#,
-            "non-reserved names go through call_tool"
+            "a declared name goes through call_tool"
         );
     }
 
     #[tokio::test]
-    async fn shell_without_session() {
-        let result = dispatch("shell", json!({"command": "pwd"}), CAP)
+    async fn undeclared_tool() {
+        let reason = dispatch("write", json!({"content": "x"}), CAP)
             .await
-            .expect("a shell call with no shell is model-visible, not a hard failure");
-        assert_eq!(result, "tool `shell` failed: no shell on this workspace");
+            .expect("an undeclared name never reaches the host")
+            .expect_err("the slip is the model's to repair");
+        assert_eq!(reason, "`write` is not declared; the tools are `lookup`, `read`");
+
+        let reason = Tools::new(workspace_stub(), None, Vec::new(), CAP)
+            .call(&tool_call("write", json!({})))
+            .await
+            .expect("an undeclared name never reaches the host")
+            .expect_err("the slip is the model's to repair");
+        assert_eq!(reason, "`write` is not declared; this request declares no tools");
+    }
+
+    #[tokio::test]
+    async fn shell_without_session() {
+        let reason = dispatch("shell", json!({"command": "pwd"}), CAP)
+            .await
+            .expect("a shell call with no shell is model-visible, not a hard failure")
+            .expect_err("a shell call with no shell is the model's to repair");
+        assert_eq!(reason, "no shell on this workspace");
     }
 
     #[test]
@@ -351,8 +395,10 @@ mod tests {
         );
     }
 
-    async fn dispatch(name: &str, arguments: Value, cap: usize) -> Result<String> {
-        Tools::new(workspace_stub(), None, cap).call(&tool_call(name, arguments)).await
+    // A call over the stub with `lookup` and `read` declared.
+    async fn dispatch(name: &str, arguments: Value, cap: usize) -> Result<Repairable<String>> {
+        let declared = vec!["lookup".to_owned(), "read".to_owned()];
+        Tools::new(workspace_stub(), None, declared, cap).call(&tool_call(name, arguments)).await
     }
 
     #[derive(Debug)]

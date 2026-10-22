@@ -53,6 +53,7 @@ impl Backend for Client {
         ensure!(options.max_rounds > 0, "max_rounds must be greater than 0");
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
         ensure!(options.max_candidates > 0, "max_candidates must be greater than 0");
+        ensure!(options.max_repeats > 0, "max_repeats must be greater than 0");
         ensure!(options.timeout_secs > 0, "timeout_secs must be greater than 0");
         ensure!(options.shell_timeout_secs > 0, "shell_timeout_secs must be greater than 0");
         let inner = options.build_client()?;
@@ -76,6 +77,7 @@ impl Backend for Client {
             budgets: Budgets {
                 max_rounds: options.max_rounds,
                 max_candidates: options.max_candidates,
+                max_repeats: options.max_repeats,
                 timeout: Duration::from_secs(options.timeout_secs),
             },
             max_tool_calls: options.max_tool_calls,
@@ -100,10 +102,11 @@ mod config {
     /// from the ambient environment per request, routed by the model id's
     /// prefix. Each completion runs within the `max_rounds` provider budget
     /// alongside the `max_tool_calls` guest-tool budget, under the
-    /// `timeout_secs` cap on each reply of the model, and offers the
-    /// guest's `check` at most `max_candidates` candidates: the rejection
-    /// of the last ends the completion as `budget-exhausted` with the
-    /// correction.
+    /// `timeout_secs` cap on each reply of the model, offers the guest's
+    /// `check` at most `max_candidates` candidates — the rejection of the
+    /// last ends the completion as `budget-exhausted` with the correction —
+    /// and ends the same way once one tool call has failed `max_repeats`
+    /// times with the same arguments.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
         /// Default model id when a request leaves `model` unset.
@@ -140,6 +143,13 @@ mod config {
         /// counts the same under either.
         #[env(from = "GENAI_MAX_CANDIDATES", default = "2")]
         pub max_candidates: u32,
+        /// Failures one tool call may earn with the same arguments — one
+        /// tool, the arguments as sent, each answered a failure the model
+        /// was to repair — before the completion is ended as
+        /// `budget-exhausted` naming the call; the model is told the count
+        /// from the third, and a success of the call clears it.
+        #[env(from = "GENAI_MAX_REPEATS", default = "5")]
+        pub max_repeats: u32,
         /// Absolute cap in seconds on one reply of the model: the provider
         /// rounds and tool calls up to its next text, a nudge or a
         /// correction starting a fresh cap. Past it the completion is ended
@@ -169,6 +179,7 @@ impl Default for ConnectOptions {
             max_rounds: 128,
             max_tool_calls: 128,
             max_candidates: 2,
+            max_repeats: 5,
             timeout_secs: 600,
             shell_timeout_secs: 600,
         }

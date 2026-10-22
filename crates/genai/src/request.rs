@@ -53,6 +53,15 @@ impl Turn {
             self.chat.tools.get_or_insert_default().extend(tools);
         }
     }
+
+    // The names the model may call: every tool the turn declares, in order.
+    pub fn declared(&self) -> Vec<String> {
+        self.chat
+            .tools
+            .as_ref()
+            .map(|tools| tools.iter().map(|tool| tool.name.to_string()).collect())
+            .unwrap_or_default()
+    }
 }
 
 fn prompt_bytes(request: &Request) -> u64 {

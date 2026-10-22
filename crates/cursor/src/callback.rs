@@ -1,5 +1,6 @@
 //! Loopback `CallCustomTool` server: the worker calls back here to execute a
-//! guest-declared function tool, and the call routes into the completion
+//! guest-declared function tool. A name the request never declared is
+//! answered as a repairable failure; declared names route into the completion
 //! through [`ToolHost::call_tool`].
 //!
 //! The server binds `127.0.0.1:0` and accepts both Connect unary codecs (the
@@ -8,7 +9,8 @@
 //! table: agent ids are the worker's to choose, so two live processes may
 //! pick the same one, and a callback routes by the token it carries as well
 //! as the id it names. Budgets, per-call timeouts, oversize checks, and id
-//! correlation are enforced host-side inside [`ToolHost::call_tool`].
+//! correlation are enforced host-side inside [`ToolHost::call_tool`] once a
+//! declared name is accepted.
 
 mod proto;
 
@@ -146,12 +148,15 @@ impl Registration {
     // Route this worker's callbacks for `agent_id` into `tool_host` until
     // the returned guard drops; the guard also carries the abort the first
     // hard tool failure ends the completion with.
-    pub fn attach(&self, agent_id: String, tool_host: Arc<dyn ToolHost>) -> Route {
+    pub fn attach(
+        &self, agent_id: String, tool_host: Arc<dyn ToolHost>, declared: Vec<String>,
+    ) -> Route {
         let (abort, aborted) = oneshot::channel();
         self.routes.insert(
             agent_id.clone(),
             Target {
                 tool_host,
+                declared,
                 abort: Some(abort),
             },
         );
@@ -310,7 +315,7 @@ impl Routes {
     // root naming the tool alone; the guest's own line reports the call.
     #[instrument(name = "callback", level = "trace", skip_all, fields(tool = %call.tool_name))]
     async fn dispatch(&self, codec: Codec, call: ToolCall) -> Response<Full<Bytes>> {
-        let Some(tool_host) = self.tool_host(&call.agent_id) else {
+        let Some(target) = self.target(&call.agent_id) else {
             return connect_error(
                 StatusCode::NOT_FOUND,
                 "not_found",
@@ -318,7 +323,12 @@ impl Routes {
             );
         };
 
-        match tool_host.call_tool(call.tool_name.clone(), call.args.to_string()).await {
+        if !target.declared.iter().any(|declared| declared == &call.tool_name) {
+            let failure = undeclared(&target.declared, &call.tool_name);
+            return respond(codec, &json!({ "error": failure }));
+        }
+
+        match target.tool_host.call_tool(call.tool_name.clone(), call.args.to_string()).await {
             Ok(Ok(output)) => respond(codec, &wrap_output(&output)),
             Ok(Err(failure)) => respond(codec, &json!({ "error": failure })),
             Err(error) => {
@@ -329,8 +339,11 @@ impl Routes {
         }
     }
 
-    fn tool_host(&self, agent_id: &str) -> Option<Arc<dyn ToolHost>> {
-        lock(&self.entries).get(agent_id).map(|target| Arc::clone(&target.tool_host))
+    fn target(&self, agent_id: &str) -> Option<TargetGuard> {
+        lock(&self.entries).get(agent_id).map(|target| TargetGuard {
+            tool_host: Arc::clone(&target.tool_host),
+            declared: target.declared.clone(),
+        })
     }
 
     // End the completion live under `agent_id`, unless it is gone or an
@@ -350,7 +363,23 @@ impl Routes {
 #[derive(Debug)]
 struct Target {
     tool_host: Arc<dyn ToolHost>,
+    declared: Vec<String>,
     abort: Option<oneshot::Sender<String>>,
+}
+
+struct TargetGuard {
+    tool_host: Arc<dyn ToolHost>,
+    declared: Vec<String>,
+}
+
+// The slip the host would end the completion on, answered instead with the
+// names the model may call.
+fn undeclared(declared: &[String], name: &str) -> String {
+    if declared.is_empty() {
+        return format!("`{name}` is not declared; this request declares no tools");
+    }
+    let names: Vec<String> = declared.iter().map(|declared| format!("`{declared}`")).collect();
+    format!("`{name}` is not declared; the tools are {}", names.join(", "))
 }
 
 #[derive(Clone, Copy)]

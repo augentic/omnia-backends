@@ -68,7 +68,7 @@ impl Client {
         let access = self.access(workspace).await?;
         let shell = self.shell(request, access, workspace).await?;
         turn.advertise(workspace_tools(access));
-        let tools = Tools::new(tool_host, shell, self.limits().max_result_bytes);
+        let tools = Tools::new(tool_host, shell, turn.declared(), self.limits().max_result_bytes);
         Ok(Conversation::new(self.inner.clone(), turn, tools, self.budgets))
     }
 

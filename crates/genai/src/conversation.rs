@@ -12,16 +12,25 @@
 //! provider's JSON mode in place of the schema, the tools still declared so
 //! the provider's prompt keeps its prefix, until the model answers in text;
 //! a tool call made there is refused, not run. The schema steering returns
-//! for the correction after it. Either budget spent, or the timeout passed,
-//! is the typed `budget-exhausted`: the same request put again would spend
-//! it again.
+//! for the correction after it. The last round of the budget forbids tool
+//! calls the same way, the tools still declared and `tool_choice` `none`,
+//! so a model that would act once more answers instead where the provider
+//! honours it, and a call made there is refused. A tool call that fails is
+//! counted against the identical calls before it, one tool and the same
+//! arguments, the model told the count from the third, and the repeat budget
+//! spent on one ends the completion, since a model repeating one refused
+//! call is not going to answer. Any budget spent, or the timeout passed, is
+//! the typed `budget-exhausted`: the same request put again would spend it
+//! again.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ToolCall, ToolResponse,
+    ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ToolCall, ToolChoice, ToolResponse,
 };
 use jsonschema::Validator;
 use omnia_wasi_model::{Answer, Error, Format, ToolTurn, Transcript, Usage};
@@ -34,13 +43,20 @@ use crate::tools::Tools;
 
 // The budgets one completion runs within, from the connect options: the
 // provider rounds it may make, the candidates it may offer the guest's
-// check, and the time one reply of the model may take.
+// check, the identical failed tool calls it may make, and the time one
+// reply of the model may take.
 #[derive(Clone, Copy, Debug)]
 pub struct Budgets {
     pub max_rounds: u32,
     pub max_candidates: u32,
+    pub max_repeats: u32,
     pub timeout: Duration,
 }
+
+// The identical failed call from which its result names the count, so the
+// model is told it is repeating itself before the repeats end the
+// completion.
+const REPEAT_NOTE_FROM: u32 = 3;
 
 pub struct Conversation {
     client: genai::Client,
@@ -54,6 +70,9 @@ pub struct Conversation {
     budgets: Budgets,
     round: u32,
     candidates: u32,
+    // the failures so far of each call by its identity, a success of the
+    // same call clearing it
+    repeats: HashMap<u64, u32>,
     nudged: bool,
     // The rounds after a nudge, until the model answers in text: JSON mode
     // in place of the schema, a tool call refused.
@@ -102,6 +121,7 @@ impl Conversation {
             budgets,
             round: 0,
             candidates: 0,
+            repeats: HashMap::new(),
             nudged: false,
             closing: false,
             transcript: Transcript::default(),
@@ -222,7 +242,7 @@ impl Conversation {
             self.completion.answered(&usage, reply_bytes, tool_calls.len());
 
             if !tool_calls.is_empty() {
-                if self.closing {
+                if self.finishing() {
                     self.refuse_round(tool_calls);
                 } else {
                     self.tool_round(tool_calls).await?;
@@ -244,9 +264,10 @@ impl Conversation {
 
     // What this round puts to the provider: the chat and the options as
     // translated, or, in the closing rounds after a nudge, under JSON mode in
-    // place of the schema, the one `response_format` every adapter sends. The
-    // tools stay declared either way: a provider that caches the prompt by
-    // its prefix keeps the cache, and a call made under JSON mode is refused
+    // place of the schema, the one `response_format` every adapter sends. A
+    // finishing round declares the tools and forbids calling them: a provider
+    // that caches the prompt by its prefix keeps the cache, one that honours
+    // `tool_choice` answers in text, and a call made all the same is refused
     // rather than run.
     fn round_request(&self) -> (ChatRequest, ChatOptions) {
         let chat = self.chat.clone();
@@ -254,7 +275,17 @@ impl Conversation {
         if self.closing {
             options = options.with_response_format(ChatResponseFormat::JsonMode);
         }
+        if self.finishing() && chat.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
+            options = options.with_tool_choice(ToolChoice::None);
+        }
         (chat, options)
+    }
+
+    // Whether this round is one the model's text is due in: a closing round
+    // after a nudge, or the last round of the budget, which would otherwise
+    // be spent on a call and end the completion with no answer asked for.
+    const fn finishing(&self) -> bool {
+        self.closing || self.round == self.budgets.max_rounds
     }
 
     // The fault for the debug log and the nudge a candidate earns, or `None`
@@ -300,7 +331,13 @@ impl Conversation {
         let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
         for call in tool_calls {
             self.completion.enter(Phase::of_tool(&call.fn_name));
-            let result = self.tools.call(&call).await?;
+            let result = match self.tools.call(&call).await? {
+                Ok(result) => {
+                    self.repeats.remove(&identity(&call));
+                    result
+                }
+                Err(reason) => self.failed(&call, &reason)?,
+            };
             self.transcript.turns.push(ToolTurn {
                 tool: call.fn_name,
                 args: call.fn_arguments,
@@ -310,6 +347,38 @@ impl Conversation {
         }
         self.chat = chat;
         Ok(())
+    }
+
+    // A failed call as the model reads it, named for the tool, counted
+    // against the identical calls that failed before it: the count named
+    // from `REPEAT_NOTE_FROM`, and the repeat budget spent the typed
+    // failure, since the same call would fail the same way.
+    fn failed(&mut self, call: &ToolCall, reason: &str) -> Result<String> {
+        let count = self.repeats.entry(identity(call)).or_insert(0);
+        *count += 1;
+        let count = *count;
+        if count >= self.budgets.max_repeats {
+            tracing::debug!(
+                round = self.round,
+                tool = %call.fn_name,
+                count,
+                "the same call failed the same way up to the repeat budget"
+            );
+            bail!(Error::BudgetExhausted(format!(
+                "tool `{}` failed {count} times with the same arguments: {reason}",
+                call.fn_name
+            )));
+        }
+        let result = format!("tool `{}` failed: {reason}", call.fn_name);
+        if count < REPEAT_NOTE_FROM {
+            return Ok(result);
+        }
+        Ok(format!(
+            "{result}\n\nThis exact call has now failed {count} times, and the same call will \
+             fail the same way. Change the arguments or the approach: after {} identical \
+             failures the task ends.",
+            self.budgets.max_repeats
+        ))
     }
 
     // A tool round in the closing rounds: nothing runs, and every call is
@@ -344,4 +413,13 @@ impl Conversation {
 
 fn at_path(path: &str, fault: impl fmt::Display) -> String {
     if path.is_empty() { fault.to_string() } else { format!("at `{path}`: {fault}") }
+}
+
+// A call's identity for the repeat count: its tool and its arguments as
+// the model sent them.
+fn identity(call: &ToolCall) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    call.fn_name.hash(&mut hasher);
+    call.fn_arguments.to_string().hash(&mut hasher);
+    hasher.finish()
 }

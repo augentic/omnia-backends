@@ -90,6 +90,27 @@ async fn model_echo_text() {
         ]
     );
     assert!(requests[0].tools().is_empty(), "no tool is advertised without a workspace");
+    assert_eq!(requests[0].body["max_tokens"], 32_768, "the default bound rides on every round");
+}
+
+// The bound on one round's decoding is the deployment's where the request
+// names none.
+#[tokio::test]
+async fn model_max_tokens() {
+    let fake = FakeOpenAi::serve(Config::echo()).await;
+    let client = client_with(
+        &fake,
+        ConnectOptions {
+            max_tokens: 1234,
+            ..ConnectOptions::default()
+        },
+    )
+    .await;
+    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["max_tokens"], 1234);
 }
 
 // A lent workspace advertises the host-side `read` and `list` tools over it.
@@ -852,6 +873,120 @@ async fn model_tool_repeats_knob() {
     .await;
     expect_error("no answer after 6 model round-trips", &["tools", "budget"], &client).await;
     assert_eq!(fake.requests().len(), 6, "distinct arguments spend the rounds, never the repeats");
+}
+
+// The same call returning the same result is counted as a failing one is:
+// the result names the count from the third, and the fifth makes the next
+// round the model's to answer in, its tool calls forbidden with the tools
+// still declared, so the text it answers there is the candidate and the
+// completion is `ok` with rounds to spare.
+#[tokio::test]
+async fn model_tool_echoed() {
+    let captured = Captured::install();
+    let mut rounds = vec![Round::Call("list".to_owned(), json!({})); 5];
+    rounds.push(Round::Text(PASS.to_owned()));
+    let fake = FakeOpenAi::serve(Config::rounds(rounds)).await;
+    let client = client(&fake).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    run_guest_over(
+        test_programs::MODEL_CHECK_ACCEPTED,
+        &["lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 6, "the fifth identical result makes the sixth round the last");
+    for request in &requests[..5] {
+        assert!(request.body.get("tool_choice").is_none(), "{}", request.body);
+    }
+    assert_eq!(requests[5].body["tool_choice"], "none", "the answer is due");
+    assert_eq!(requests[5].tools(), ["read", "list"], "the tools stay declared");
+    let listing = r#"[{"name":".keep","is_directory":false}]"#;
+    let second = requests[2].last("tool").expect("the second result");
+    assert_eq!(second, listing, "no note before the third");
+    let third = requests[3].last("tool").expect("the third result");
+    assert!(third.starts_with(listing), "{third}");
+    assert!(third.contains("This exact call has now returned the same result 3 times"), "{third}");
+    assert!(third.contains("after 5 identical results your final answer is due"), "{third}");
+    let fifth = requests[5].last("tool").expect("the fifth result");
+    assert!(fifth.contains("returned the same result 5 times"), "{fifth}");
+    assert!(fifth.contains("Your final answer is due now"), "{fifth}");
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
+}
+
+// The echo count starts over at a correction: the repair may run the call
+// the answer was forced after, its result bare, and the rounds after it
+// open to tools again.
+#[tokio::test]
+async fn model_tool_echoed_correction() {
+    let captured = Captured::install();
+    let mut rounds = vec![Round::Call("list".to_owned(), json!({})); 5];
+    rounds.extend([
+        Round::Text(FAIL.to_owned()),
+        Round::Call("list".to_owned(), json!({})),
+        Round::Text(PASS.to_owned()),
+    ]);
+    let fake = FakeOpenAi::serve(Config::rounds(rounds)).await;
+    let client = client(&fake).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    run_guest_over(
+        test_programs::MODEL_CHECK_CORRECTED,
+        &["lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 8);
+    assert_eq!(requests[5].body["tool_choice"], "none", "the first candidate was forced");
+    assert!(requests[6].body.get("tool_choice").is_none(), "{}", requests[6].body);
+    let sixth = requests[6].messages();
+    assert!(sixth[sixth.len() - 1].1.starts_with("## Previous answer (rejected)"), "{sixth:?}");
+    assert_eq!(
+        requests[7].last("tool").as_deref(),
+        Some(r#"[{"name":".keep","is_directory":false}]"#),
+        "the call after the correction is the first of its count"
+    );
+    assert!(requests[7].body.get("tool_choice").is_none(), "{}", requests[7].body);
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="corrected""#), "{completion}");
+}
+
+// A result past the backend's cap reaches the model cut to its head and
+// its tail with the omitted count between them, where the host's cap would
+// have let it fill the context window.
+#[tokio::test]
+async fn model_result_capped() {
+    let fake = FakeOpenAi::serve(Config::rounds([
+        Round::Call("read".to_owned(), json!({ "path": "big.txt" })),
+        Round::Text(PASS.to_owned()),
+    ]))
+    .await;
+    let client = client(&fake).await;
+    let scratch = scratch();
+    scratch.write("tree/big.txt", "x".repeat(200_000));
+    run_guest_over(
+        test_programs::MODEL_CHECK_ACCEPTED,
+        &["lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    let result = requests[1].last("tool").expect("the read's result");
+    let marker = "\n[… 134464 bytes omitted …]\n";
+    assert_eq!(result.len(), 65_536 + marker.len(), "the cap, and the marker");
+    let (head, rest) = result.split_once(marker).expect("the marker between head and tail");
+    assert_eq!(head, "x".repeat(32_768), "the head is the first half of the cap");
+    assert_eq!(rest, "x".repeat(32_768), "the tail is the second");
 }
 
 #[tokio::test]

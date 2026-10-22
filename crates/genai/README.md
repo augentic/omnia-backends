@@ -35,7 +35,10 @@ keeps the cache, and a tool call made there refused rather than run, the
 schema returning on a correction round. A call to a tool the request never
 declared is answered as the model's slip — a tool failure saying the name
 is not declared and listing the tools that are, one round lost — in place
-of the host's refusal, which would end the completion. Four budgets bound
+of the host's refusal, which would end the completion. Every tool's result
+reaches the model cut to 64 kibibytes, its head and its tail kept with the
+omitted count between them, so one result cannot fill the context window
+where the host's cap of a mebibyte would let it. Four budgets bound
 a completion,
 and any spent is the typed `budget-exhausted`: every provider round-trip —
 a tool round, a candidate, a nudge, or a correction — draws on `max_rounds`
@@ -49,15 +52,22 @@ completion with that correction as the detail; a tool call that fails the
 same way with the same arguments is counted, the model told the count from
 the third, and `max_repeats` such failures (default 5) end the completion
 naming the call, since a model repeating one refused call is not going to
-answer; each reply of the model, the tool rounds before it included, runs
+answer, while a call that succeeds with the same result as the identical
+calls before it is counted the same way and `max_repeats` such results make
+the next round a finishing one, its tool calls forbidden and refused, since
+a model re-running one call whose result does not change has what it needs
+to answer, the count starting over at a correction; each reply of the
+model, the tool rounds before it included, runs
 under the `timeout_secs` cap (default 600), a nudge or a correction
 starting a fresh one, so a provider that never answers or a build that
 never ends holds no completion for longer; the host's per-completion
 tool-call limit is answered through `WasiModelCtx::limits()` as
-`max_tool_calls`. Without a `check` the guest sees the model's final text
-as-is. Whatever the request gets wrong — a reserved tool name, a worker
-grant with no shell to open — is refused before any of this starts, and
-before anything is billed.
+`max_tool_calls`. Every round carries a `max_tokens`, the request's own or
+`GENAI_MAX_TOKENS` (default 32768), so a reply that runs on is cut short of
+the context window rather than filling it. Without a `check` the guest
+sees the model's final text as-is. Whatever the request gets wrong — a
+reserved tool name, a worker grant with no shell to open — is refused
+before any of this starts, and before anything is billed.
 
 MSRV: Rust 1.99
 
@@ -71,7 +81,8 @@ MSRV: Rust 1.99
 | `GENAI_MAX_ROUNDS` | no | `128` | Provider round-trips one completion may make before it is ended as `budget-exhausted` |
 | `GENAI_MAX_TOOL_CALLS` | no | `128` | Guest tool calls one completion may make before `budget-exhausted` (the host's default is 32) |
 | `GENAI_MAX_CANDIDATES` | no | `2` | Candidates one completion may offer the guest's `check`; the rejection of the last is `budget-exhausted` carrying the correction |
-| `GENAI_MAX_REPEATS` | no | `5` | Failures one tool call may earn with the same arguments before the completion is `budget-exhausted` naming the call; the model is told the count from the third |
+| `GENAI_MAX_REPEATS` | no | `5` | Failures one tool call may earn with the same arguments before the completion is `budget-exhausted` naming the call, and identical results one succeeding call may return before the next round is the model's to answer in; the model is told the count from the third |
+| `GENAI_MAX_TOKENS` | no | `32768` | Tokens one reply of the model may decode in one round where the request names no `max_tokens` of its own |
 | `GENAI_TIMEOUT_SECS` | no | `600` | Absolute cap in seconds on one reply of the model, tool rounds included, before the completion is ended as `budget-exhausted` |
 | `GENAI_SHELL_TIMEOUT_SECS` | no | `600` | Seconds one `shell` command may run before it is killed |
 | `OPENAI_API_KEY` | per provider | | `OpenAI` API key, read by genai from the ambient environment |
@@ -124,7 +135,7 @@ completion, shared by every command of it, so a `cargo check` and the
 egress proxy. The result the model reads is what the command wrote, its
 stderr after `--- stderr ---` when any, and its exit after `--- exit ---`
 when not clean (`exit 3`, `killed by signal 9`; a silent clean command reads
-`exit 0`); a result past the host's per-result cap keeps its head and its
+`exit 0`); a result past the cap keeps its head and its
 tail with the omitted count between them, since a log's start names the
 step and its end holds the verdict; a command past `shell_timeout_secs` is
 killed with everything it started and the model told so as a result it can
@@ -256,7 +267,12 @@ the last round, the round budget spent on a model that only calls tools
 tool failure, an undeclared tool answered with the declared names and the
 completion going on, one call failing the same way until the repeat budget
 ends it (`exhausted`, the count named from the third), the repeat budget
-lowered and calls differing in their arguments counted apart, a four-way
+lowered and calls differing in their arguments counted apart, one call
+returning the same result until the repeat budget makes the next round the
+model's to answer in (`ok`, the count named from the third) and that count
+starting over at a correction, a result past the backend's cap cut to its
+head and tail, the default `max_tokens` on every round and the knob behind
+it, a four-way
 fan-out
 seen in flight at once, tool fan-out with each conversation carrying its
 own result, a fan-out whose losers are dropped mid-request (their requests

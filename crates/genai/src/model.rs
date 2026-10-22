@@ -64,7 +64,7 @@ impl Client {
         &self, request: &Request, tool_host: Arc<dyn ToolHost>,
     ) -> anyhow::Result<Conversation> {
         let workspace = tool_host.local_path();
-        let mut turn = Turn::translate(request, &self.model)?;
+        let mut turn = Turn::translate(request, &self.model, self.max_tokens)?;
         let access = self.access(workspace).await?;
         let shell = self.shell(request, access, workspace).await?;
         turn.advertise(workspace_tools(access));

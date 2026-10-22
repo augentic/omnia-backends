@@ -64,7 +64,16 @@ never ends holds no completion for longer; the host's per-completion
 tool-call limit is answered through `WasiModelCtx::limits()` as
 `max_tool_calls`. Every round carries a `max_tokens`, the request's own or
 `GENAI_MAX_TOKENS` (default 32768), so a reply that runs on is cut short of
-the context window rather than filling it. Without a `check` the guest
+the context window rather than filling it. A request that fails at the
+transport — the connection, before any reply: a server closing an idle
+keep-alive connection as the request is written on it, a tunnel between
+dropping — is put again unchanged after a wait of 1, 5, then 15 seconds,
+since a chat request applies nothing until its reply is read, and only
+past the third is the failure the completion's (`transport`); the
+client's pooled connections are dropped after 2 seconds idle, inside the
+5 seconds uvicorn (vLLM's server) keeps one, so the quick rounds reuse a
+connection and a tool round of a few seconds never hands a request to a
+socket the server is closing. Without a `check` the guest
 sees the model's final text as-is. Whatever the request gets wrong — a
 reserved tool name, a worker grant with no shell to open — is refused
 before any of this starts, and before anything is billed.
@@ -169,7 +178,8 @@ the `omnia-cursor` backend's log has.
 - `completion started` (DEBUG) / `completion` (INFO on an answer, WARN
   otherwise), with the `outcome` — `ok`, `corrected`, `timeout`, `abort`,
   `exhausted`, `provider`, `transport`, or `error`, read off the failure's
-  type, never its text — the `attempts` (the model's replies), the phase
+  type, never its text — the `attempts` (the model's replies), the
+  `retries` (requests put again after failing at the transport), the phase
   buckets `model_ms`, `tool_ms` (the shell included), and `check_ms`, and
   the bill every round of the completion together: `input_tokens`,
   `cache_read_tokens`, `cache_write_tokens`, `output_tokens`,
@@ -289,8 +299,11 @@ refusals — a lend outside the roots, no root configured, and a grant the
 sandbox denies. [`tests/provider.rs`](tests/provider.rs) is the fault and
 seam matrix: a 429 with `Retry-After` and a 503 (neither retried; the
 status and the provider's message reach the guest; `provider`), a
-truncated JSON body (`transport`), a reply the cap outlives (abandoned at
-the fake, `timeout`), an endpoint without its trailing slash, the URLs
+truncated JSON body (`transport`), a connection the server closed as the
+request was written on it (put again unchanged after a wait, `ok` with
+`retries=1`, one request read by the fake), a reply the cap outlives
+(abandoned at the fake, `timeout`), an endpoint without its trailing
+slash, the URLs
 `connect` rejects, and the zero budgets it rejects. Guests are compiled by
 the `test-programs` build script; there is no separate `--target` build to
 run.

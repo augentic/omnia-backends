@@ -58,6 +58,10 @@ pub enum Fault {
     TruncatedBody,
     /// Every reply is held until the test releases it.
     Park,
+    /// The first connection is closed as it opens, before any request on
+    /// it is read — the server's keep-alive timeout meeting a request on
+    /// the wire; every connection after it is served by the script.
+    DropFirstConnection,
 }
 
 /// A fake's script, fault, gate, and whether its replies carry a bill.
@@ -212,6 +216,8 @@ struct State {
     abandoned: AtomicUsize,
     parked: Mutex<Vec<oneshot::Sender<()>>>,
     gate: watch::Sender<bool>,
+    // connections accepted, for `Fault::DropFirstConnection`
+    connections: AtomicUsize,
 }
 
 /// The fake, serving until dropped.
@@ -235,6 +241,7 @@ impl FakeOpenAi {
             abandoned: AtomicUsize::new(0),
             parked: Mutex::new(Vec::new()),
             gate,
+            connections: AtomicUsize::new(0),
         });
         let serving = tokio::spawn(accept(listener, Arc::clone(&state)));
         Self {
@@ -307,6 +314,12 @@ impl Drop for FakeOpenAi {
 async fn accept(listener: TcpListener, state: Arc<State>) {
     while let Ok((stream, _)) = listener.accept().await {
         let state = Arc::clone(&state);
+        let opened = state.connections.fetch_add(1, Ordering::SeqCst);
+        if opened == 0 && state.config.fault == Some(Fault::DropFirstConnection) {
+            // closed unread: the client's request on it fails at the transport
+            drop(stream);
+            continue;
+        }
         tokio::spawn(async move {
             let service = service_fn(move |request| handle(Arc::clone(&state), request));
             let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), service).await;
@@ -401,7 +414,8 @@ async fn handle(
             let cut = Bytes::from(full[..full.len() / 2].to_owned());
             return Ok(in_flight.answer(json_response(StatusCode::OK, cut)));
         }
-        None => {}
+        // the first connection was dropped at `accept`; this one is served
+        Some(Fault::DropFirstConnection) | None => {}
     }
 
     let mut body = match &state.config.script {

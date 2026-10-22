@@ -200,13 +200,30 @@ impl Default for ConnectOptions {
     }
 }
 
+/// How long a pooled connection may sit idle before the client drops it
+/// rather than reuse it. Uvicorn, which serves vLLM, closes an idle
+/// keep-alive connection after 5 s by default, and a request written onto
+/// one at the same moment fails at the client before the server sees it
+/// (`error sending request`) — a tool call of four or five seconds between
+/// two rounds runs exactly that race. Dropping the connection well inside
+/// the server's timeout keeps reuse for the quick rounds and never hands a
+/// request to a socket the server is about to close.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+
 impl ConnectOptions {
     // A client sending every request to `endpoint` when set, in place of the
     // provider's own base URL. Auth is untouched: the SDK still reads the key
     // the model id's provider expects from the environment.
     fn build_client(&self) -> Result<genai::Client> {
+        let builder = genai::Client::builder().with_reqwest(
+            genai::WebConfig::default()
+                .apply_to_builder(reqwest::Client::builder())
+                .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+                .build()
+                .context("failed to create the web client")?,
+        );
         let Some(endpoint) = &self.endpoint else {
-            return genai::Client::new().context("failed to create genai client");
+            return builder.build().context("failed to create genai client");
         };
         ensure!(
             endpoint.starts_with("http://") || endpoint.starts_with("https://"),
@@ -225,7 +242,7 @@ impl ConnectOptions {
                 Ok(target)
             },
         );
-        genai::Client::builder()
+        builder
             .with_service_target_resolver(resolver)
             .build()
             .context("failed to create genai client with custom endpoint")

@@ -30,6 +30,7 @@ pub struct Client {
     sandbox: Option<Arc<Sandbox>>,
     budgets: Budgets,
     max_tool_calls: u32,
+    max_tokens: u32,
     shell_timeout: Duration,
 }
 
@@ -40,6 +41,7 @@ impl std::fmt::Debug for Client {
             .field("sandbox", &self.sandbox)
             .field("budgets", &self.budgets)
             .field("max_tool_calls", &self.max_tool_calls)
+            .field("max_tokens", &self.max_tokens)
             .field("shell_timeout", &self.shell_timeout)
             .finish_non_exhaustive()
     }
@@ -54,6 +56,7 @@ impl Backend for Client {
         ensure!(options.max_tool_calls > 0, "max_tool_calls must be greater than 0");
         ensure!(options.max_candidates > 0, "max_candidates must be greater than 0");
         ensure!(options.max_repeats > 0, "max_repeats must be greater than 0");
+        ensure!(options.max_tokens > 0, "max_tokens must be greater than 0");
         ensure!(options.timeout_secs > 0, "timeout_secs must be greater than 0");
         ensure!(options.shell_timeout_secs > 0, "shell_timeout_secs must be greater than 0");
         let inner = options.build_client()?;
@@ -81,6 +84,7 @@ impl Backend for Client {
                 timeout: Duration::from_secs(options.timeout_secs),
             },
             max_tool_calls: options.max_tool_calls,
+            max_tokens: options.max_tokens,
             shell_timeout: Duration::from_secs(options.shell_timeout_secs),
         })
     }
@@ -102,11 +106,13 @@ mod config {
     /// from the ambient environment per request, routed by the model id's
     /// prefix. Each completion runs within the `max_rounds` provider budget
     /// alongside the `max_tool_calls` guest-tool budget, under the
-    /// `timeout_secs` cap on each reply of the model, offers the guest's
-    /// `check` at most `max_candidates` candidates — the rejection of the
-    /// last ends the completion as `budget-exhausted` with the correction —
-    /// and ends the same way once one tool call has failed `max_repeats`
-    /// times with the same arguments.
+    /// `timeout_secs` cap on each reply of the model, each round decoding
+    /// at most `max_tokens` where the request names no bound, offers the
+    /// guest's `check` at most `max_candidates` candidates — the rejection
+    /// of the last ends the completion as `budget-exhausted` with the
+    /// correction — ends the same way once one tool call has failed
+    /// `max_repeats` times with the same arguments, and asks for the answer
+    /// once one has returned the same result that many times.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
         /// Default model id when a request leaves `model` unset.
@@ -147,9 +153,16 @@ mod config {
         /// tool, the arguments as sent, each answered a failure the model
         /// was to repair — before the completion is ended as
         /// `budget-exhausted` naming the call; the model is told the count
-        /// from the third, and a success of the call clears it.
+        /// from the third, and a success of the call clears it. The same
+        /// count of identical results from one succeeding call makes the
+        /// next round the model's to answer in, its tool calls refused.
         #[env(from = "GENAI_MAX_REPEATS", default = "5")]
         pub max_repeats: u32,
+        /// Tokens one reply of the model may decode in one round where the
+        /// request names no `max_tokens` of its own, so a round that runs
+        /// on is cut short of the context window.
+        #[env(from = "GENAI_MAX_TOKENS", default = "32768")]
+        pub max_tokens: u32,
         /// Absolute cap in seconds on one reply of the model: the provider
         /// rounds and tool calls up to its next text, a nudge or a
         /// correction starting a fresh cap. Past it the completion is ended
@@ -180,6 +193,7 @@ impl Default for ConnectOptions {
             max_tool_calls: 128,
             max_candidates: 2,
             max_repeats: 5,
+            max_tokens: 32_768,
             timeout_secs: 600,
             shell_timeout_secs: 600,
         }

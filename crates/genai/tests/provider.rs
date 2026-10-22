@@ -149,6 +149,13 @@ async fn zero_budget() {
             },
         ),
         (
+            "max_tokens",
+            ConnectOptions {
+                max_tokens: 0,
+                ..ConnectOptions::default()
+            },
+        ),
+        (
             "timeout_secs",
             ConnectOptions {
                 timeout_secs: 0,

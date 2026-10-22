@@ -1,11 +1,12 @@
 //! Provider request translation.
 //!
 //! A validated request becomes a [`Turn`]: the system text and messages as
-//! they are, the declared function tools, and the request's `format` as the
+//! they are, the declared function tools, the request's `format` as the
 //! provider `response_format` — steering only; acceptance is the guest's
-//! `check` when the request asks for one. Whatever the request gets wrong is
-//! refused here, before any lend is resolved; the tools a lend advertises
-//! join the turn once its access is known.
+//! `check` when the request asks for one — and the deployment's defaults
+//! where the request names no model or no `max_tokens`. Whatever the request
+//! gets wrong is refused here, before any lend is resolved; the tools a lend
+//! advertises join the turn once its access is known.
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{
@@ -35,11 +36,11 @@ pub struct Turn {
 }
 
 impl Turn {
-    pub fn translate(request: &Request, default_model: &str) -> Result<Self> {
+    pub fn translate(request: &Request, default_model: &str, max_tokens: u32) -> Result<Self> {
         Ok(Self {
             model: request.model.as_deref().unwrap_or(default_model).to_owned(),
             chat: chat_request(request)?,
-            options: chat_options(request)?,
+            options: chat_options(request, max_tokens)?,
             format: request.format.clone(),
             validator: validator(request)?,
             check: request.check,
@@ -118,7 +119,9 @@ fn function_tool(function: &Function) -> Result<Tool> {
         .with_schema(schema))
 }
 
-fn chat_options(request: &Request) -> Result<ChatOptions> {
+// Every round carries a `max_tokens`, the request's own or the deployment's
+// default, so a reply that runs on is cut short of the context window.
+fn chat_options(request: &Request, max_tokens: u32) -> Result<ChatOptions> {
     let mut options = ChatOptions::default().with_capture_usage(true);
 
     options = match &request.format {
@@ -134,15 +137,17 @@ fn chat_options(request: &Request) -> Result<ChatOptions> {
         Format::Text => options,
     };
 
-    if let Some(generation) = &request.generation {
+    let generation = request.generation.as_ref();
+    options = options.with_max_tokens(
+        generation.and_then(|generation| generation.max_tokens).unwrap_or(max_tokens),
+    );
+
+    if let Some(generation) = generation {
         if let Some(temperature) = generation.temperature {
             options = options.with_temperature(f64::from(temperature));
         }
         if let Some(top_p) = generation.top_p {
             options = options.with_top_p(f64::from(top_p));
-        }
-        if let Some(max_tokens) = generation.max_tokens {
-            options = options.with_max_tokens(max_tokens);
         }
         if !generation.stop.is_empty() {
             options = options.with_stop_sequences(generation.stop.clone());
@@ -185,13 +190,14 @@ const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
 #[cfg(test)]
 mod tests {
     use omnia_sandbox::Access;
-    use omnia_wasi_model::{Grants, Mcp, Message};
+    use omnia_wasi_model::{Generation, Grants, Mcp, Message};
     use serde_json::json;
 
     use super::*;
     use crate::tools::workspace_tools;
 
     const DEFAULT_MODEL: &str = "gpt-4o-mini";
+    const DEFAULT_MAX_TOKENS: u32 = 4096;
 
     fn request(tools: Vec<ModelTool>) -> Request {
         Request {
@@ -223,7 +229,7 @@ mod tests {
     // The request translated, the tools a lend of `access` advertises after
     // its own.
     fn turn(tools: Vec<ModelTool>, access: Access) -> Result<Turn> {
-        let mut turn = Turn::translate(&request(tools), DEFAULT_MODEL)?;
+        let mut turn = Turn::translate(&request(tools), DEFAULT_MODEL, DEFAULT_MAX_TOKENS)?;
         turn.advertise(workspace_tools(access));
         Ok(turn)
     }
@@ -244,8 +250,46 @@ mod tests {
 
         let mut request = request(vec![]);
         request.model = Some("claude-fable-5".to_owned());
-        let turn = Turn::translate(&request, DEFAULT_MODEL).expect("a named model translates");
+        let turn = Turn::translate(&request, DEFAULT_MODEL, DEFAULT_MAX_TOKENS)
+            .expect("a named model translates");
         assert_eq!(turn.model, "claude-fable-5", "a set model is the request's");
+    }
+
+    #[test]
+    fn request_max_tokens() {
+        let turn = turn(vec![], Access::Private).expect("a bare request translates");
+        assert_eq!(
+            turn.options.max_tokens,
+            Some(DEFAULT_MAX_TOKENS),
+            "a request naming no bound carries the default"
+        );
+
+        let mut bounded = request(vec![]);
+        bounded.generation = Some(generation(Some(512)));
+        let turn = Turn::translate(&bounded, DEFAULT_MODEL, DEFAULT_MAX_TOKENS)
+            .expect("a bounded request translates");
+        assert_eq!(turn.options.max_tokens, Some(512), "a set bound is the request's");
+
+        let mut unbounded = request(vec![]);
+        unbounded.generation = Some(generation(None));
+        let turn = Turn::translate(&unbounded, DEFAULT_MODEL, DEFAULT_MAX_TOKENS)
+            .expect("a request with other settings translates");
+        assert_eq!(
+            turn.options.max_tokens,
+            Some(DEFAULT_MAX_TOKENS),
+            "generation settings without a bound carry the default"
+        );
+    }
+
+    fn generation(max_tokens: Option<u32>) -> Generation {
+        Generation {
+            temperature: Some(0.5),
+            top_p: None,
+            max_tokens,
+            stop: Vec::new(),
+            seed: None,
+            effort: None,
+        }
     }
 
     #[test]

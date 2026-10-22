@@ -90,7 +90,7 @@ impl Shell {
 // A result past the cap keeps its head and its tail with the omitted count
 // between them, since a log's start names the step and its end holds the
 // verdict. The cuts fall on character boundaries.
-fn truncate(text: String, cap: usize) -> String {
+pub fn truncate(text: String, cap: usize) -> String {
     if text.len() <= cap {
         return text;
     }

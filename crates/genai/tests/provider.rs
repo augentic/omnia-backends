@@ -85,6 +85,21 @@ async fn truncated_body() {
 }
 
 #[tokio::test]
+async fn dropped_connection_retried() {
+    let captured = Captured::install();
+    let fake = FakeOpenAi::serve(Config::echo().fault(Fault::DropFirstConnection)).await;
+    let client = client(&fake).await;
+    // The request that met the closed connection was never read by the
+    // provider, so it is put again unchanged and the completion answers.
+    run_guest(test_programs::MODEL_ECHO_TEXT, &[], &client).await;
+    assert_eq!(fake.requests().len(), 1, "the fake read one request: the retry");
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
+    assert!(completion.contains("retries=1"), "{completion}");
+    assert!(completion.contains("attempts=1"), "a retry is not an attempt: {completion}");
+}
+
+#[tokio::test]
 async fn endpoint_no_slash() {
     fake_openai::dummy_key();
     let fake = FakeOpenAi::serve(Config::echo()).await;

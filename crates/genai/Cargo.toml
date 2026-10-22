@@ -26,6 +26,7 @@ jsonschema.workspace = true
 omnia.workspace = true
 omnia-sandbox.workspace = true
 omnia-wasi-model.workspace = true
+reqwest = { workspace = true, default-features = false }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

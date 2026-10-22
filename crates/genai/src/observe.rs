@@ -168,6 +168,8 @@ struct Activity {
 pub struct Completion {
     started: Instant,
     attempts: u32,
+    // requests put again after failing at the transport
+    retries: u32,
     // set by the check's rejection alone, so a nudged reply makes no `Corrected`
     corrected: bool,
     bill: Bill,
@@ -192,6 +194,7 @@ impl Completion {
         Self {
             started,
             attempts: 0,
+            retries: 0,
             corrected: false,
             bill: Bill::default(),
             model: Duration::ZERO,
@@ -267,6 +270,11 @@ impl Completion {
         self.corrected = true;
     }
 
+    // One request failed at the transport and is put again.
+    pub const fn retried(&mut self) {
+        self.retries = self.retries.saturating_add(1);
+    }
+
     // The `in progress` line, written every `PROGRESS` while awaited.
     pub fn heartbeat(&self) -> Heartbeat {
         let mut ticks = interval_at(Instant::now() + PROGRESS, PROGRESS);
@@ -304,6 +312,7 @@ impl Completion {
                 tracing::$level!(
                     outcome = outcome.as_str(),
                     attempts = self.attempts,
+                    retries = self.retries,
                     duration_ms,
                     model_ms = millis(self.model),
                     tool_ms = millis(self.tool),

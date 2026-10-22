@@ -26,8 +26,10 @@
 //! one makes the next round a finishing one, since a model re-running one
 //! call whose result does not change has what it needs to answer; the
 //! counts start over at a correction, so the repair may run the call again.
-//! Any budget spent, or the timeout passed, is the typed `budget-exhausted`:
-//! the same request put again would spend it again.
+//! A round's request that fails at the transport, before any reply, is put
+//! again unchanged after a wait, three times, and only then fails the
+//! completion. Any budget spent, or the timeout passed, is the typed
+//! `budget-exhausted`: the same request put again would spend it again.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -69,6 +71,15 @@ const REPEAT_NOTE_FROM: u32 = 3;
 // tail: the host's cap admits a mebibyte, which a context window of a
 // quarter-million tokens cannot hold beside the prompt.
 const MAX_RESULT_BYTES: usize = 64 * 1024;
+
+// The waits before a request that failed at the transport — a connection
+// the server closed as it was written on, a tunnel between — is put again,
+// unchanged. A chat request applies nothing until its reply is read, so
+// the same request is the same question; the last wait outlasts the ten
+// seconds a tunnel takes to reopen. Past the list the failure is the
+// completion's, `transport`, as before.
+const TRANSPORT_RETRY_WAITS: [Duration; 3] =
+    [Duration::from_secs(1), Duration::from_secs(5), Duration::from_secs(15)];
 
 pub struct Conversation {
     client: genai::Client,
@@ -257,10 +268,7 @@ impl Conversation {
             self.round += 1;
             self.completion.enter(Phase::Model);
             let (chat, options) = self.round_request();
-            let response =
-                self.client.exec_chat(&self.model, chat, Some(&options)).await.with_context(
-                    || format!("genai exec_chat failed for model `{}`", self.model),
-                )?;
+            let response = self.exec_chat(chat, &options).await?;
 
             let text = response.first_text().map(ToOwned::to_owned);
             let usage = response.usage.clone();
@@ -287,6 +295,40 @@ impl Conversation {
             }));
         }
         Ok(None)
+    }
+
+    // One round's request to the provider, put again after each wait of
+    // `TRANSPORT_RETRY_WAITS` where it failed at the transport — the
+    // connection, not the provider's answer — and otherwise failed as the
+    // provider failed it.
+    async fn exec_chat(
+        &mut self, chat: ChatRequest, options: &ChatOptions,
+    ) -> Result<genai::chat::ChatResponse> {
+        let mut waits = TRANSPORT_RETRY_WAITS.iter();
+        loop {
+            let error = match self.client.exec_chat(&self.model, chat.clone(), Some(options)).await
+            {
+                Ok(response) => return Ok(response),
+                Err(error) => error,
+            };
+            let transport = matches!(
+                &error,
+                genai::Error::WebModelCall { webc_error, .. }
+                | genai::Error::WebAdapterCall { webc_error, .. }
+                    if matches!(webc_error, genai::webc::Error::Reqwest(_))
+            );
+            let Some(wait) = transport.then(|| waits.next()).flatten() else {
+                return Err(error)
+                    .with_context(|| format!("genai exec_chat failed for model `{}`", self.model));
+            };
+            self.completion.retried();
+            tracing::warn!(
+                round = self.round,
+                wait_ms = wait.as_millis(),
+                "the request failed at the transport before any reply; putting it again"
+            );
+            tokio::time::sleep(*wait).await;
+        }
     }
 
     // What this round puts to the provider: the chat and the options as

@@ -21,7 +21,7 @@ all-features = true
 [dependencies]
 anyhow.workspace = true
 fromenv.workspace = true
-genai = "0.6.5"
+genai = "0.7.0"
 jsonschema.workspace = true
 omnia.workspace = true
 omnia-sandbox.workspace = true

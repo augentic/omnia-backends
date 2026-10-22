@@ -192,7 +192,7 @@ impl ConnectOptions {
     // the model id's provider expects from the environment.
     fn build_client(&self) -> Result<genai::Client> {
         let Some(endpoint) = &self.endpoint else {
-            return Ok(genai::Client::default());
+            return genai::Client::new().context("failed to create genai client");
         };
         ensure!(
             endpoint.starts_with("http://") || endpoint.starts_with("https://"),
@@ -211,7 +211,10 @@ impl ConnectOptions {
                 Ok(target)
             },
         );
-        Ok(genai::Client::builder().with_service_target_resolver(resolver).build())
+        genai::Client::builder()
+            .with_service_target_resolver(resolver)
+            .build()
+            .context("failed to create genai client with custom endpoint")
     }
 }
 

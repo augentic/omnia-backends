@@ -1,15 +1,15 @@
-//! A completion the backend fails: the guest sees a `backend` failure whose
-//! detail carries the needle the deployment named. The first operator
-//! argument is the needle; further arguments are flags — `tools` declares
-//! `lookup`, `tool:<name>` declares a function tool of that name, `check`
-//! asks for a check and rejects every candidate it is offered (so the
-//! failure must strike after at least one has reached the guest), `nudged`
-//! asks for a JSON answer with a check — so a reply that is not JSON is
-//! nudged before any check — and requires the failure to strike before any
-//! candidate has reached the guest, `budget` expects the typed
-//! `budget-exhausted` in the backend failure's place, `invalid` the typed
-//! `invalid-request`, and `without:<text>` asserts the detail does not
-//! carry `text`.
+//! Exercises typed completion failures from a guest.
+//!
+//! The first operator argument is a substring expected in the error detail.
+//! Remaining arguments configure the scenario:
+//!
+//! - `tools` declares the `lookup` tool.
+//! - `tool:<name>` declares a function tool with that name.
+//! - `check` rejects every candidate and requires one before the failure.
+//! - `nudged` requires failure after a JSON nudge but before a candidate.
+//! - `budget` expects `budget-exhausted` instead of `backend`.
+//! - `invalid` expects `invalid-request` instead of `backend`.
+//! - `without:<text>` requires the detail to omit `text`.
 
 #![cfg(target_arch = "wasm32")]
 

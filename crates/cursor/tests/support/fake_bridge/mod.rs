@@ -1,22 +1,21 @@
-//! A protocol-faithful fake `cursor-sdk-bridge`: bearer-checked Connect JSON,
-//! `agent-<n>` ids counted per process so two processes hand out the same
-//! id, `Send` as an enveloped run stream, `CallCustomTool` posted back to
-//! the client's own endpoint — and nothing else.
+//! Protocol-faithful fake `cursor-sdk-bridge`.
 //!
-//! [`Spawnable`] stands it up as the process the client spawns: a home
-//! holding the [`Config`] (script and faults), the shared JSONL log every
-//! spawned process appends to, and a `cursor-sdk-bridge` symlink to the
-//! `fake-cursor-sdk-bridge` binary (`main.rs`, this same module), put first
-//! on the test process's `PATH`. The client confines every process it spawns
-//! to its lend, so the home is also what every guest lends, mounted as
-//! [`Spawnable::MOUNT`] by the harness: the spawned fake reads its script
-//! and appends its log in its working directory, and one spawned with
-//! nothing lent runs as a plain echo that records nothing the test can see.
-//! A [`Fault::Park`] holds a request until the test releases it: the process
-//! records the park and waits for the release count the test writes beside
-//! the log to pass its ticket. The suites' side — [`Spawnable`] and the
-//! liveness probe — is `cfg(test)`, since the binary is built against the
-//! crate's `[dependencies]` alone.
+//! The fake implements only the protocol used by the client:
+//!
+//! - Bearer-checked Connect JSON.
+//! - Per-process `agent-<n>` ids.
+//! - `Send` as an enveloped run stream.
+//! - `CallCustomTool` callbacks to the client's endpoint.
+//!
+//! [`Spawnable`] creates a home containing the [`Config`], shared JSONL log,
+//! and expected `cursor-sdk-bridge` symlink. The harness puts it first on
+//! `PATH` and lends it at [`Spawnable::MOUNT`] so confined workers can read
+//! their script and append the log from their working directory.
+//!
+//! Without that lend, the fake is a plain echo with no test-visible log. A
+//! [`Fault::Park`] records its ticket and waits for the test's release count.
+//! Suite-side helpers are `cfg(test)` because the binary uses regular
+//! dependencies only.
 
 mod log;
 // The crate's own callback codec, by path: one codec on both sides of the

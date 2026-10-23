@@ -1,35 +1,21 @@
-//! Provider conversation loop.
+//! Runs a bounded provider conversation with tools, structured output, and guest checks.
 //!
-//! Tool calls and rejected checks each add a provider round. Every round
-//! draws on the round budget, so a completion terminates; a rejected
-//! candidate draws on the candidate budget beside it, so a model that cannot
-//! satisfy the check is ended with the correction rather than asked again
-//! until the rounds run out. Each reply of the model runs under the timeout,
-//! tool rounds included; a nudge or a correction starts a fresh one. A reply
-//! that is not JSON where JSON was asked for, or that is JSON but does not
-//! fit the request's schema, is nudged once per candidate: the nudge says
-//! what the parser or the schema found, and the rounds after it ask for the
-//! provider's JSON mode in place of the schema, the tools still declared so
-//! the provider's prompt keeps its prefix, until the model answers in text;
-//! a tool call made there is refused, not run. The schema steering returns
-//! for the correction after it. The last round of the budget forbids tool
-//! calls the same way, the tools still declared and `tool_choice` `none`,
-//! so a model that would act once more answers instead where the provider
-//! honours it, and a call made there is refused. A tool's result reaches
-//! the model cut to a cap, its head and its tail kept, so one result cannot
-//! fill the context window. A tool call that fails is counted against the
-//! identical calls before it, one tool and the same arguments, the model
-//! told the count from the third, and the repeat budget spent on one ends
-//! the completion, since a model repeating one refused call is not going to
-//! answer. A tool call that succeeds with the result the identical calls
-//! before it had is counted the same way, and the repeat budget spent on
-//! one makes the next round a finishing one, since a model re-running one
-//! call whose result does not change has what it needs to answer; the
-//! counts start over at a correction, so the repair may run the call again.
-//! A round's request that fails at the transport, before any reply, is put
-//! again unchanged after a wait, three times, and only then fails the
-//! completion. Any budget spent, or the timeout passed, is the typed
-//! `budget-exhausted`: the same request put again would spend it again.
+//! Each provider reply consumes one round and has its own timeout. Rejected
+//! candidates also consume the candidate budget.
+//!
+//! The loop applies these safeguards:
+//!
+//! - Invalid structured output gets one diagnostic nudge per candidate.
+//! - Checked requests reserve the final quarter of rounds for corrections.
+//! - Rounds that require an answer refuse tool calls.
+//! - Token-truncated replies do not execute possibly incomplete tool calls.
+//! - Tool results are capped while preserving their head and tail.
+//! - Repeated failed calls terminate the completion.
+//! - Repeated unchanged results make the next round require an answer.
+//! - Transport failures are retried three times with backoff.
+//!
+//! A correction resets tool-repeat tracking. Exhausted budgets and reply
+//! timeouts return the typed `budget-exhausted` error.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -38,7 +24,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ToolCall, ToolChoice, ToolResponse,
+    ChatMessage, ChatOptions, ChatRequest, ChatResponse, ChatResponseFormat, ToolCall, ToolChoice,
+    ToolResponse,
 };
 use jsonschema::Validator;
 use omnia_wasi_model::{Answer, Error, Format, ToolTurn, Transcript, Usage};
@@ -61,6 +48,20 @@ pub struct Budgets {
     pub max_repeats: u32,
     pub timeout: Duration,
 }
+
+impl Budgets {
+    // The round from which the first candidate is due where the request
+    // carries a check: the rounds before the corrections' share are spent,
+    // and a budget too small to share is due at its cap alone.
+    const fn due_at(&self) -> u32 {
+        self.max_rounds - self.max_rounds / CORRECTION_SHARE
+    }
+}
+
+// The share of the round budget kept for the check's corrections, one in
+// this many: a candidate forced at the cap is refused with no round left to
+// repair it in, so the first is made due while a quarter remain.
+const CORRECTION_SHARE: u32 = 4;
 
 // The identical call from which its result names the count, so the model
 // is told it is repeating itself before the repeats end the completion or
@@ -117,6 +118,16 @@ enum Due {
     Repeated,
 }
 
+// Why a round is one the model's text is due in, its tool calls refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Finishing {
+    // A nudge, the repeat budget, or the last round of the budget.
+    Closing,
+    // No candidate has reached the check and the rounds left are kept for
+    // its corrections.
+    Reserved,
+}
+
 // The model's text once a round ends in one, with the round's counts.
 struct Reply {
     text: String,
@@ -128,6 +139,13 @@ struct Reply {
 const REFUSED_IN_CLOSING: &str = "not run: your final answer is due now. Reply with only your \
                                   final answer as a single JSON value in the shape the prompt \
                                   asked for, and nothing else.";
+
+// The same, where what makes the answer due is the share of the rounds
+// kept for the corrections.
+const REFUSED_IN_RESERVE: &str = "not run: the rounds left are kept for correcting your answer, \
+                                  so your final answer is due now. Reply with only your final \
+                                  answer as a single JSON value in the shape the prompt asked \
+                                  for, and nothing else.";
 
 impl Conversation {
     // The completion starts here, once nothing is left to refuse: the start
@@ -267,20 +285,31 @@ impl Conversation {
         while self.round < self.budgets.max_rounds {
             self.round += 1;
             self.completion.enter(Phase::Model);
+            let finishing = self.finishing();
+            if finishing == Some(Finishing::Reserved) && self.completion.forced_at().is_none() {
+                tracing::debug!(
+                    round = self.round,
+                    left = self.budgets.max_rounds - self.round,
+                    "no candidate has reached the check; the answer is due, the rounds left \
+                     kept for the corrections"
+                );
+                self.completion.forced(self.round);
+            }
             let (chat, options) = self.round_request();
             let response = self.exec_chat(chat, &options).await?;
 
+            let cut = self.cut(&response);
             let text = response.first_text().map(ToOwned::to_owned);
             let usage = response.usage.clone();
             let tool_calls = response.into_tool_calls();
             let reply_bytes = text.as_deref().filter(|_| tool_calls.is_empty()).map(str::len);
-            self.completion.answered(&usage, reply_bytes, tool_calls.len());
+            self.completion.answered(&usage, reply_bytes, tool_calls.len(), cut);
 
             if !tool_calls.is_empty() {
-                if self.finishing() {
-                    self.refuse_round(tool_calls);
-                } else {
-                    self.tool_round(tool_calls).await?;
+                match finishing {
+                    Some(finishing) => self.refuse_round(tool_calls, finishing),
+                    None if cut => self.refuse_cut(tool_calls),
+                    None => self.tool_round(tool_calls).await?,
                 }
                 continue;
             }
@@ -344,18 +373,40 @@ impl Conversation {
         if self.due == Some(Due::Nudged) {
             options = options.with_response_format(ChatResponseFormat::JsonMode);
         }
-        if self.finishing() && chat.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
+        if self.finishing().is_some() && chat.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+        {
             options = options.with_tool_choice(ToolChoice::None);
         }
         (chat, options)
     }
 
-    // Whether this round is one the model's text is due in: a round after a
-    // nudge or after one call has returned the same result up to the repeat
-    // budget, or the last round of the budget, which would otherwise be
-    // spent on a call and end the completion with no answer asked for.
-    const fn finishing(&self) -> bool {
-        self.due.is_some() || self.round == self.budgets.max_rounds
+    // Why this round is one the model's text is due in, or `None` for a
+    // tool round: closing after a nudge, after one call has returned the
+    // same result up to the repeat budget, or at the last round of the
+    // budget, which would otherwise be spent on a call and end the
+    // completion with no answer asked for; reserved once the rounds before
+    // the corrections' share are spent with no candidate offered the check.
+    const fn finishing(&self) -> Option<Finishing> {
+        if self.due.is_some() || self.round == self.budgets.max_rounds {
+            Some(Finishing::Closing)
+        } else if self.check && self.candidates == 0 && self.round >= self.budgets.due_at() {
+            Some(Finishing::Reserved)
+        } else {
+            None
+        }
+    }
+
+    // Whether the provider cut the reply at the token bound: by its own
+    // finish reason, or, where it reports none, by a bill that reaches the
+    // bound the round was sent under.
+    fn cut(&self, response: &ChatResponse) -> bool {
+        if let Some(reason) = &response.stop_reason {
+            return reason.is_max_tokens();
+        }
+        match (self.options.max_tokens, response.usage.completion_tokens) {
+            (Some(bound), Some(spent)) => u32::try_from(spent).is_ok_and(|spent| spent >= bound),
+            _ => false,
+        }
     }
 
     // The fault for the debug log and the nudge a candidate earns, or `None`
@@ -486,23 +537,53 @@ impl Conversation {
         ))
     }
 
-    // A tool round in the closing rounds: nothing runs, and every call is
+    // A tool round in a finishing round: nothing runs, and every call is
     // answered with the JSON answer as what is due, so a provider whose JSON
     // mode does not silence the tools still ends.
-    fn refuse_round(&mut self, tool_calls: Vec<ToolCall>) {
+    fn refuse_round(&mut self, tool_calls: Vec<ToolCall>, finishing: Finishing) {
         tracing::debug!(
             round = self.round,
             tool_calls = tool_calls.len(),
+            ?finishing,
             "tool calls in a closing round refused; the JSON answer is due"
         );
+        let refusal = match finishing {
+            Finishing::Closing => REFUSED_IN_CLOSING,
+            Finishing::Reserved => REFUSED_IN_RESERVE,
+        };
+        self.refuse(tool_calls, refusal);
+    }
+
+    // A tool round of a reply the token bound cut: nothing runs, since the
+    // arguments the server handed over are not the ones the model wrote,
+    // and every call is answered with the bound and the way within it.
+    fn refuse_cut(&mut self, tool_calls: Vec<ToolCall>) {
+        let bound = self.options.max_tokens.unwrap_or_default();
+        tracing::debug!(
+            round = self.round,
+            tool_calls = tool_calls.len(),
+            bound,
+            "the reply was cut at the token bound; its tool calls refused, not run"
+        );
+        let refusal = format!(
+            "not run: your reply ran to the cap of {bound} tokens and was cut there, so the \
+             arguments of this call did not arrive as you wrote them. Send smaller calls, fewer \
+             files or edits a call and each shorter, so one reply stays within the cap."
+        );
+        self.refuse(tool_calls, &refusal);
+    }
+
+    // Every call answered with `refusal` in place of a result, the calls
+    // kept in the transcript as the model made them.
+    fn refuse(&mut self, tool_calls: Vec<ToolCall>, refusal: &str) {
         let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
         for call in tool_calls {
             self.transcript.turns.push(ToolTurn {
                 tool: call.fn_name,
                 args: call.fn_arguments,
-                result: Value::String(REFUSED_IN_CLOSING.to_owned()),
+                result: Value::String(refusal.to_owned()),
             });
-            chat = chat.append_message(ToolResponse::new(call.call_id, REFUSED_IN_CLOSING));
+            chat = chat.append_message(ToolResponse::new(call.call_id, refusal));
         }
         self.chat = chat;
     }

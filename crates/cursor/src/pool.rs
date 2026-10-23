@@ -1,16 +1,17 @@
 //! One `cursor-sdk-bridge` process per live agent, behind a fair semaphore.
 //!
-//! The pool is the worker nursery: the sandbox every worker runs under, the
-//! callback server its tool calls come back through, the relay its API goes
-//! out through, and the `max_agents` slots. A completion prepares its
-//! [`Session`] first, so a bad workspace or grant costs no wait, then takes
-//! a [`Lease`] before it creates its agent: a permit for one slot plus the
-//! worker the agent runs on — a freshly spawned process inside that session,
-//! registered with the callback server under its own token so its callbacks
-//! route to its own agent, and pointed at the relay. A task of the pool's
-//! holds the permit and the token until the process has exited, so a slot
-//! never reopens, and a token never routes, while its process is still
-//! around; dropping the lease only asks the worker to go.
+//! The pool owns the worker sandbox, callback server, API relay, and
+//! `max_agents` slots. A completion prepares its [`Session`] before waiting
+//! for a slot, so invalid workspaces and grants fail early.
+//!
+//! A [`Lease`] contains:
+//!
+//! - A permit for one slot.
+//! - A worker started inside the completion's session.
+//! - A callback token that routes to that worker's agent.
+//!
+//! The pool holds the permit and token until the worker exits. Dropping the
+//! lease requests shutdown while keeping its slot and callback route occupied.
 
 use std::fmt;
 use std::path::{Path, PathBuf};

@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest, ChatResponse, ChatResponseFormat, ToolCall, ToolChoice,
-    ToolResponse,
+    ChatMessage, ChatOptions, ChatRequest, ChatResponse, ChatResponseFormat, StopReason, ToolCall,
+    ToolChoice, ToolResponse,
 };
 use jsonschema::Validator;
 use omnia_wasi_model::{Answer, Error, Format, ToolTurn, Transcript, Usage};
@@ -37,10 +37,6 @@ use crate::request::Turn;
 use crate::shell::truncate;
 use crate::tools::Tools;
 
-// The budgets one completion runs within, from the connect options: the
-// provider rounds it may make, the candidates it may offer the guest's
-// check, the identical failed tool calls it may make, and the time one
-// reply of the model may take.
 #[derive(Clone, Copy, Debug)]
 pub struct Budgets {
     pub max_rounds: u32,
@@ -50,35 +46,15 @@ pub struct Budgets {
 }
 
 impl Budgets {
-    // The round from which the first candidate is due where the request
-    // carries a check: the rounds before the corrections' share are spent,
-    // and a budget too small to share is due at its cap alone.
+    // Reserve the final quarter of rounds for guest check corrections.
     const fn due_at(&self) -> u32 {
         self.max_rounds - self.max_rounds / CORRECTION_SHARE
     }
 }
 
-// The share of the round budget kept for the check's corrections, one in
-// this many: a candidate forced at the cap is refused with no round left to
-// repair it in, so the first is made due while a quarter remain.
 const CORRECTION_SHARE: u32 = 4;
-
-// The identical call from which its result names the count, so the model
-// is told it is repeating itself before the repeats end the completion or
-// make its answer due.
 const REPEAT_NOTE_FROM: u32 = 3;
-
-// The most of one tool's result the model is handed, its head and its
-// tail: the host's cap admits a mebibyte, which a context window of a
-// quarter-million tokens cannot hold beside the prompt.
 const MAX_RESULT_BYTES: usize = 64 * 1024;
-
-// The waits before a request that failed at the transport — a connection
-// the server closed as it was written on, a tunnel between — is put again,
-// unchanged. A chat request applies nothing until its reply is read, so
-// the same request is the same question; the last wait outlasts the ten
-// seconds a tunnel takes to reopen. Past the list the failure is the
-// completion's, `transport`, as before.
 const TRANSPORT_RETRY_WAITS: [Duration; 3] =
     [Duration::from_secs(1), Duration::from_secs(5), Duration::from_secs(15)];
 
@@ -94,62 +70,45 @@ pub struct Conversation {
     budgets: Budgets,
     round: u32,
     candidates: u32,
-    // the failures so far of each call by its identity, a success of the
-    // same call clearing it
+    // consecutive failures per (tool, args) hash
     repeats: HashMap<u64, u32>,
-    // the identical results so far of each succeeding call by its identity,
-    // a correction clearing them
+    // identical successes per (tool, args, result) hash
     echoes: HashMap<u64, u32>,
     nudged: bool,
-    // why the model's text is due in the rounds to come, until it arrives
     due: Option<Due>,
     transcript: Transcript,
     completion: Completion,
 }
 
-// What makes the model's text due before the round budget does: a tool
-// call is refused either way, and the rounds after a nudge ask for JSON
-// mode in place of the schema besides.
+// Reason a final text reply is forced before `max_rounds`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Due {
-    // A reply off the shape asked for was nudged.
     Nudged,
-    // One call returned the same result up to the repeat budget.
     Repeated,
 }
 
-// Why a round is one the model's text is due in, its tool calls refused.
+// Reason the current round refuses tool calls and requires a final answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Finishing {
-    // A nudge, the repeat budget, or the last round of the budget.
     Closing,
-    // No candidate has reached the check and the rounds left are kept for
-    // its corrections.
     Reserved,
 }
 
-// The model's text once a round ends in one, with the round's counts.
 struct Reply {
     text: String,
     usage: Option<Usage>,
 }
 
-// What the model is told of a tool call it makes where its JSON answer is
-// due: the result of every such call, in place of running it.
 const REFUSED_IN_CLOSING: &str = "not run: your final answer is due now. Reply with only your \
                                   final answer as a single JSON value in the shape the prompt \
                                   asked for, and nothing else.";
 
-// The same, where what makes the answer due is the share of the rounds
-// kept for the corrections.
 const REFUSED_IN_RESERVE: &str = "not run: the rounds left are kept for correcting your answer, \
                                   so your final answer is due now. Reply with only your final \
                                   answer as a single JSON value in the shape the prompt asked \
                                   for, and nothing else.";
 
 impl Conversation {
-    // The completion starts here, once nothing is left to refuse: the start
-    // event means a completion that will be billed.
     pub fn new(client: genai::Client, turn: Turn, tools: Tools, budgets: Budgets) -> Self {
         let advertised = turn.chat.tools.as_ref().map_or(0, Vec::len);
         let completion = Completion::start(turn.prompt_bytes, advertised);
@@ -185,7 +144,6 @@ impl Conversation {
     }
 
     pub async fn complete(mut self) -> Result<Answer> {
-        // the run, with the heartbeat beside it
         let result = {
             let mut heartbeat = self.completion.heartbeat();
             let run = self.run();
@@ -203,7 +161,7 @@ impl Conversation {
 
     async fn run(&mut self) -> Result<Answer> {
         loop {
-            // the model's next reply, under the timeout
+            // await next model reply within timeout
             let reply = match timeout(self.budgets.timeout, self.next_reply()).await {
                 Ok(reply) => reply?,
                 Err(_elapsed) => {
@@ -226,9 +184,7 @@ impl Conversation {
                 return Ok(self.answer(candidate, usage));
             }
 
-            // a reply off the shape asked for is nudged once per candidate,
-            // told what the parser or the schema found, and answered in the
-            // closing rounds under JSON mode
+            // nudge once on malformed JSON or schema mismatch
             if !self.nudged
                 && let Some((fault, nudge)) = self.off_shape(&candidate)
             {
@@ -247,14 +203,11 @@ impl Conversation {
                 continue;
             }
 
-            // the guest's verdict on the candidate
+            // validate candidate with guest check
             self.candidates += 1;
             self.completion.enter(Phase::Check);
             match self.tools.check(candidate.clone()).await? {
                 Ok(()) => return Ok(self.answer(candidate, usage)),
-                // The guest's correction is the model's next turn, verbatim;
-                // with no candidate or round left it is the typed failure
-                // the guest sees.
                 Err(correction)
                     if self.candidates >= self.budgets.max_candidates
                         || self.round == self.budgets.max_rounds =>
@@ -279,12 +232,12 @@ impl Conversation {
         }
     }
 
-    // The model's next text, through the tool rounds before it; `None` once
-    // the round budget is spent first.
     async fn next_reply(&mut self) -> Result<Option<Reply>> {
         while self.round < self.budgets.max_rounds {
             self.round += 1;
             self.completion.enter(Phase::Model);
+
+            // execute provider round
             let finishing = self.finishing();
             if finishing == Some(Finishing::Reserved) && self.completion.forced_at().is_none() {
                 tracing::debug!(
@@ -298,6 +251,7 @@ impl Conversation {
             let (chat, options) = self.round_request();
             let response = self.exec_chat(chat, &options).await?;
 
+            // record round telemetry
             let cut = self.cut(&response);
             let text = response.first_text().map(ToOwned::to_owned);
             let usage = response.usage.clone();
@@ -305,6 +259,7 @@ impl Conversation {
             let reply_bytes = text.as_deref().filter(|_| tool_calls.is_empty()).map(str::len);
             self.completion.answered(&usage, reply_bytes, tool_calls.len(), cut);
 
+            // dispatch or refuse tool calls
             if !tool_calls.is_empty() {
                 match finishing {
                     Some(finishing) => self.refuse_round(tool_calls, finishing),
@@ -326,10 +281,6 @@ impl Conversation {
         Ok(None)
     }
 
-    // One round's request to the provider, put again after each wait of
-    // `TRANSPORT_RETRY_WAITS` where it failed at the transport — the
-    // connection, not the provider's answer — and otherwise failed as the
-    // provider failed it.
     async fn exec_chat(
         &mut self, chat: ChatRequest, options: &ChatOptions,
     ) -> Result<genai::chat::ChatResponse> {
@@ -360,19 +311,14 @@ impl Conversation {
         }
     }
 
-    // What this round puts to the provider: the chat and the options as
-    // translated, or, in the closing rounds after a nudge, under JSON mode in
-    // place of the schema, the one `response_format` every adapter sends. A
-    // finishing round declares the tools and forbids calling them: a provider
-    // that caches the prompt by its prefix keeps the cache, one that honours
-    // `tool_choice` answers in text, and a call made all the same is refused
-    // rather than run.
     fn round_request(&self) -> (ChatRequest, ChatOptions) {
         let chat = self.chat.clone();
         let mut options = self.options.clone();
+        // Fall back to JSON mode after a nudge for adapters that ignore JsonSpec.
         if self.due == Some(Due::Nudged) {
             options = options.with_response_format(ChatResponseFormat::JsonMode);
         }
+        // Keep tools declared to preserve prompt prefix cache while forbidding calls.
         if self.finishing().is_some() && chat.tools.as_ref().is_some_and(|tools| !tools.is_empty())
         {
             options = options.with_tool_choice(ToolChoice::None);
@@ -380,12 +326,6 @@ impl Conversation {
         (chat, options)
     }
 
-    // Why this round is one the model's text is due in, or `None` for a
-    // tool round: closing after a nudge, after one call has returned the
-    // same result up to the repeat budget, or at the last round of the
-    // budget, which would otherwise be spent on a call and end the
-    // completion with no answer asked for; reserved once the rounds before
-    // the corrections' share are spent with no candidate offered the check.
     const fn finishing(&self) -> Option<Finishing> {
         if self.due.is_some() || self.round == self.budgets.max_rounds {
             Some(Finishing::Closing)
@@ -396,26 +336,22 @@ impl Conversation {
         }
     }
 
-    // Whether the provider cut the reply at the token bound: by its own
-    // finish reason, or, where it reports none, by a bill that reaches the
-    // bound the round was sent under.
+    // Also check token usage: vLLM reports `tool_calls` when it salvages a call from a truncated reply.
     fn cut(&self, response: &ChatResponse) -> bool {
-        if let Some(reason) = &response.stop_reason {
-            return reason.is_max_tokens();
-        }
-        match (self.options.max_tokens, response.usage.completion_tokens) {
+        let by_reason = response.stop_reason.as_ref().is_some_and(StopReason::is_max_tokens);
+        let by_bill = match (self.options.max_tokens, response.usage.completion_tokens) {
             (Some(bound), Some(spent)) => u32::try_from(spent).is_ok_and(|spent| spent >= bound),
             _ => false,
-        }
+        };
+        by_reason || by_bill
     }
 
-    // The fault for the debug log and the nudge a candidate earns, or `None`
-    // for one in the shape asked for. The debug fault masks the failing
-    // instance value so no reply text crosses into `DEBUG`.
     fn off_shape(&self, candidate: &str) -> Option<(String, String)> {
         if !matches!(self.format, Format::Json | Format::Schema(_)) {
             return None;
         }
+
+        // parse JSON
         let value = match serde_json::from_str::<Value>(candidate) {
             Ok(value) => value,
             Err(fault) => {
@@ -428,6 +364,8 @@ impl Conversation {
                 return Some((fault, nudge));
             }
         };
+
+        // validate against JSON schema, masking instance values in debug logs
         let validator = self.validator.as_ref()?;
         let mut masked = Vec::new();
         let mut detailed = Vec::new();
@@ -448,8 +386,6 @@ impl Conversation {
         Some((masked.join("; "), nudge))
     }
 
-    // Every result reaches the model cut to the cap, a repeat note at its
-    // tail included, since the tail is what the cut keeps.
     async fn tool_round(&mut self, tool_calls: Vec<ToolCall>) -> Result<()> {
         let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
         for call in tool_calls {
@@ -470,11 +406,6 @@ impl Conversation {
         Ok(())
     }
 
-    // A succeeding call's result as the model reads it, counted against
-    // the identical calls that had the same result before it: the count
-    // named from `REPEAT_NOTE_FROM`, and the repeat budget spent making the
-    // next round a finishing one, since the call has told the model all it
-    // will.
     fn succeeded(&mut self, call: &ToolCall, result: String) -> String {
         self.repeats.remove(&identity(call));
         let count = self.echoes.entry(echo(call, &result)).or_insert(0);
@@ -505,10 +436,6 @@ impl Conversation {
         )
     }
 
-    // A failed call as the model reads it, named for the tool, counted
-    // against the identical calls that failed before it: the count named
-    // from `REPEAT_NOTE_FROM`, and the repeat budget spent the typed
-    // failure, since the same call would fail the same way.
     fn failed(&mut self, call: &ToolCall, reason: &str) -> Result<String> {
         let count = self.repeats.entry(identity(call)).or_insert(0);
         *count += 1;
@@ -537,9 +464,6 @@ impl Conversation {
         ))
     }
 
-    // A tool round in a finishing round: nothing runs, and every call is
-    // answered with the JSON answer as what is due, so a provider whose JSON
-    // mode does not silence the tools still ends.
     fn refuse_round(&mut self, tool_calls: Vec<ToolCall>, finishing: Finishing) {
         tracing::debug!(
             round = self.round,
@@ -554,9 +478,6 @@ impl Conversation {
         self.refuse(tool_calls, refusal);
     }
 
-    // A tool round of a reply the token bound cut: nothing runs, since the
-    // arguments the server handed over are not the ones the model wrote,
-    // and every call is answered with the bound and the way within it.
     fn refuse_cut(&mut self, tool_calls: Vec<ToolCall>) {
         let bound = self.options.max_tokens.unwrap_or_default();
         tracing::debug!(
@@ -573,8 +494,6 @@ impl Conversation {
         self.refuse(tool_calls, &refusal);
     }
 
-    // Every call answered with `refusal` in place of a result, the calls
-    // kept in the transcript as the model made them.
     fn refuse(&mut self, tool_calls: Vec<ToolCall>, refusal: &str) {
         let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
         for call in tool_calls {
@@ -601,8 +520,6 @@ fn at_path(path: &str, fault: impl fmt::Display) -> String {
     if path.is_empty() { fault.to_string() } else { format!("at `{path}`: {fault}") }
 }
 
-// A call's identity for the repeat count: its tool and its arguments as
-// the model sent them.
 fn identity(call: &ToolCall) -> u64 {
     let mut hasher = DefaultHasher::new();
     call.fn_name.hash(&mut hasher);
@@ -610,8 +527,6 @@ fn identity(call: &ToolCall) -> u64 {
     hasher.finish()
 }
 
-// A succeeding call's identity for the echo count: the call and what it
-// returned.
 fn echo(call: &ToolCall, result: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     identity(call).hash(&mut hasher);

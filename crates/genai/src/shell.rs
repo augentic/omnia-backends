@@ -1,5 +1,4 @@
-//! The `shell` tool's command: `sh -c` inside the completion's sandbox
-//! session, what it wrote rendered for the model.
+//! Sandboxed `shell` tool execution and output formatting.
 
 use std::fmt::Write as _;
 use std::os::unix::process::ExitStatusExt as _;
@@ -10,12 +9,10 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use omnia_sandbox::{Session, TimedOut};
 
-// What a shell inherits of the host's environment beyond `PATH`: who runs
-// it, and where the system's certificates are.
+// Host environment variables inherited by the shell beyond `PATH`.
 pub const INHERIT: &[&str] = &["USER", "LOGNAME", "SSL_CERT_FILE", "SSL_CERT_DIR"];
 
-// The provider keys the SDK reads from the process environment, which no
-// grant may set for a shell.
+// Provider API keys blocked from worker grants.
 pub const REFUSED: &[&str] = &[
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -34,8 +31,6 @@ pub struct Shell {
     max_result_bytes: usize,
 }
 
-// One command as it came out: the result the model reads, and the exit as
-// the log carries it (`0`, `3`, `signal 9`, `timed out`).
 pub struct Run {
     pub result: String,
     pub exit: String,
@@ -50,16 +45,10 @@ impl Shell {
         }
     }
 
-    // The directory the commands run in, canonical.
     pub fn cwd(&self) -> &Path {
         self.session.cwd()
     }
 
-    // The result is the command's stdout, its stderr under a marker where
-    // any, its exit under one where not clean, cut to the cap. A command
-    // past the timeout is killed with everything it started and told so as
-    // a result the model can act on; one the host cannot spawn or wait on
-    // is the completion's failure.
     pub async fn run(&self, command: &str) -> Result<Run> {
         let mut process =
             self.session.command("sh").context("resolving `sh` for the shell tool")?;
@@ -87,9 +76,7 @@ impl Shell {
     }
 }
 
-// A result past the cap keeps its head and its tail with the omitted count
-// between them, since a log's start names the step and its end holds the
-// verdict. The cuts fall on character boundaries.
+// Keep both head and tail so the command's start and final verdict remain visible.
 pub fn truncate(text: String, cap: usize) -> String {
     if text.len() <= cap {
         return text;
@@ -130,7 +117,6 @@ fn end_line(text: &mut String) {
     }
 }
 
-// `0`, `3`, or `signal 9`, as the log carries it.
 fn exit_of(status: ExitStatus) -> String {
     match (status.code(), status.signal()) {
         (Some(code), _) => code.to_string(),
@@ -139,8 +125,7 @@ fn exit_of(status: ExitStatus) -> String {
     }
 }
 
-// The truncation of a result alone; a command run in a session, its
-// rendering included, is the `model` suite's.
+// Unit tests for output truncation.
 #[cfg(test)]
 mod tests {
     use super::truncate;

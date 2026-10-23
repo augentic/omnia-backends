@@ -883,6 +883,54 @@ async fn model_reply_cut() {
     assert!(round.contains("output_tokens=32768"), "{round}");
 }
 
+// A reply cut at the token bound whose provider reports `tool_calls` for
+// it — vLLM under auto tool choice, its parser having salvaged a call from
+// the cut text — is read as cut by its bill alone and treated the same: the
+// call refused, not run, and the round after open.
+#[tokio::test]
+async fn model_reply_cut_salvaged() {
+    let captured = Captured::install();
+    let fake = FakeOpenAi::serve(Config::rounds([
+        Round::Salvaged("list".to_owned(), json!({})),
+        Round::Call("list".to_owned(), json!({ "path": "." })),
+        Round::Text(PASS.to_owned()),
+    ]))
+    .await;
+    let client = client(&fake).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    run_guest_over(
+        test_programs::MODEL_CHECK_ACCEPTED,
+        &["lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    let refusal = requests[1].last("tool").expect("the cut call is answered, not run");
+    assert!(
+        refusal.starts_with("not run: your reply ran to the cap of 32768 tokens and was cut there"),
+        "{refusal}"
+    );
+    assert_eq!(
+        requests[2].last("tool").as_deref(),
+        Some(r#"[{"name":".keep","is_directory":false}]"#),
+        "the call sent whole ran"
+    );
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
+    assert!(completion.contains("cut=1 "), "{completion}");
+    assert!(
+        captured
+            .events()
+            .into_iter()
+            .any(|event| event.contains("message=round answered") && event.contains("cut=true")),
+        "the round answered event names the cut"
+    );
+}
+
 #[tokio::test]
 async fn model_tool_roundtrip() {
     let fake = FakeOpenAi::serve(Config::tool("lookup", json!({}))).await;

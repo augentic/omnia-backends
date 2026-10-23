@@ -1,10 +1,4 @@
-//! The model's tool calls, dispatched, and the guest's check of a candidate.
-//!
-//! `read` and `list` go to the lent workspace, `shell` to the completion's
-//! session, and every other declared call through the guest, as the check
-//! does. A workspace or shell failure, and a call to a tool the request
-//! never declared, go back to the model as repairable tool output; a host
-//! failure ends the completion.
+//! Tool-call dispatch across workspace tools, the sandboxed shell, and guest functions.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -21,13 +15,9 @@ use tokio::time::Instant;
 use crate::elapsed_ms;
 use crate::shell::{Run, Shell};
 
-// The one tool name this backend reserves beyond the host's: a guest tool
-// of the name would be shadowed where a shell is advertised.
 pub const SHELL_TOOL: &str = "shell";
 
-// A result the model repairs: `Err` is the text it is given in its next
-// turn, a failed call's reason or the check's correction. A host failure is
-// the outer `Err` that ends the completion, never this.
+// `Ok` is the tool output; `Err` is a model-visible failure message rather than a fatal host error.
 pub type Repairable<T> = Result<T, String>;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -48,10 +38,6 @@ struct ShellArgs {
     command: String,
 }
 
-// The tools a lend advertises beside the request's own: `read` and `list`
-// over any lent workspace, `shell` with them under a shell root. The host
-// reserves `read`, `list`, `write` and `check`, so no guest tool shadows
-// them; `shell` is this backend's, refused in the request's translation.
 pub fn workspace_tools(access: Access) -> Vec<Tool> {
     let mut tools = Vec::new();
     if access.is_lent() {
@@ -84,15 +70,9 @@ pub fn workspace_tools(access: Access) -> Vec<Tool> {
     tools
 }
 
-// Where one completion reaches the guest: its tool calls, to the guest's
-// host or to the shell where the lend opened one, and the check of a
-// candidate.
 pub struct Tools {
     host: Arc<dyn ToolHost>,
     shell: Option<Shell>,
-    // every tool the turn declares, the request's own and the lend's; a
-    // call to any other name never reaches the host, which would end the
-    // completion on it
     declared: Vec<String>,
     max_result_bytes: usize,
 }
@@ -110,15 +90,9 @@ impl Tools {
         }
     }
 
-    // One call's outcome, logged as the cursor backend's stream is: the
-    // call with its subject before, the result's size, a command's exit,
-    // and the time taken after. The inner `Err` is a failure the model
-    // repairs, its reason bare; the caller spells it as the tool's result.
     pub async fn call(&self, call: &ToolCall) -> Result<Repairable<String>> {
         let subject = subject(&call.fn_arguments, self.shell.as_ref().map(Shell::cwd));
         tracing::debug!(tool = %call.fn_name, subject = subject.as_deref(), "tool call");
-        // the arguments whole, under a target of their own so a filter can
-        // open them without the rest of the trace
         tracing::trace!(
             target: "omnia_genai::tools",
             tool = %call.fn_name,
@@ -152,8 +126,6 @@ impl Tools {
         Ok(outcome)
     }
 
-    // The slip the host would end the completion on, answered instead with
-    // the names the model may call.
     fn undeclared(&self, name: &str) -> String {
         if self.declared.is_empty() {
             return format!("`{name}` is not declared; this request declares no tools");
@@ -183,8 +155,6 @@ impl Tools {
         self.within_cap(json)
     }
 
-    // A call where no shell was advertised is the model's slip, answered as
-    // any bad call is; only a command that ran has an exit.
     async fn shell(&self, arguments: &Value) -> Result<Repairable<Run>> {
         let Some(shell) = &self.shell else {
             return Ok(Err("no shell on this workspace".to_owned()));
@@ -203,7 +173,6 @@ impl Tools {
             .with_context(|| format!("calling tool `{}`", call.fn_name))
     }
 
-    // A result past the cap is refused whole, the model told its size.
     fn within_cap(&self, text: String) -> Repairable<String> {
         if text.len() > self.max_result_bytes {
             return Err(format!(
@@ -216,14 +185,11 @@ impl Tools {
     }
 }
 
-// The call's arguments as the tool's own; a mismatch is the model's to repair.
 fn args<'de, T: Deserialize<'de>>(arguments: &'de Value) -> Repairable<T> {
     T::deserialize(arguments).map_err(|error| format!("invalid arguments: {error}"))
 }
 
-// The one argument worth a log line: a path, a pattern, a query, a URL, or
-// the first line of a command, every `<cwd>/` in it spelled `./`, cut to a
-// readable width.
+// Extract a short log summary from common argument keys, relativizing `<cwd>/` to `./`.
 fn subject(arguments: &Value, cwd: Option<&Path>) -> Option<String> {
     const KEYS: &[&str] = &["path", "command", "pattern", "query", "url"];
     const WIDTH: usize = 80;
@@ -241,8 +207,7 @@ fn subject(arguments: &Value, cwd: Option<&Path>) -> Option<String> {
     })
 }
 
-// Dispatch over a scripted host and the reading of a call's subject; a
-// call that reaches a workspace or a shell is the `model` suite's.
+// Unit tests for tool dispatch and log subject extraction.
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -395,7 +360,6 @@ mod tests {
         );
     }
 
-    // A call over the stub with `lookup` and `read` declared.
     async fn dispatch(name: &str, arguments: Value, cap: usize) -> Result<Repairable<String>> {
         let declared = vec!["lookup".to_owned(), "read".to_owned()];
         Tools::new(workspace_stub(), None, declared, cap).call(&tool_call(name, arguments)).await

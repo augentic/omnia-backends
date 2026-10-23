@@ -1,11 +1,4 @@
-//! Completion telemetry: the one line per completion, its bill, and where
-//! its time went.
-//!
-//! [`Completion`] emits the start event at DEBUG and the finish event at
-//! INFO for an answer, WARN for anything else, carrying the [`Outcome`],
-//! the bill, and how the wait split across the [`Phase`]s; its
-//! [`Heartbeat`] says where an open completion is every [`PROGRESS`]. The
-//! provider's token counts become the guest's [`Usage`] here too.
+//! Completion telemetry, phase timing, and token usage accounting.
 
 use std::fmt;
 use std::time::Duration;
@@ -18,12 +11,8 @@ use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 use crate::elapsed_ms;
 use crate::tools::SHELL_TOOL;
 
-// How often an open completion says where it is.
 pub const PROGRESS: Duration = Duration::from_secs(15);
 
-// What a completion is waiting on: the provider composing its next turn, a
-// tool call outstanding, the shell running a command, or the guest's check
-// of a candidate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Phase {
     Model,
@@ -49,32 +38,19 @@ impl fmt::Display for Phase {
     }
 }
 
-// How one completion came out: the closed set of `outcome` values the
-// `completion` event carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Ok,
-    // Answered after the guest's check rejected a candidate.
     Corrected,
-    // The timeout passed before the model's reply.
     Timeout,
-    // The completion was dropped before it finished.
     Abort,
-    // The rounds or the candidates spent.
     Exhausted,
-    // The provider answered a request with an error status.
     Provider,
-    // A request got no well-formed answer: the connection failed, or the
-    // body was not the provider's JSON.
     Transport,
-    // Anything else: the host refusing a tool call, a reply with nothing in
-    // it, a request the SDK could not shape.
     Error,
 }
 
 impl Outcome {
-    // A failed `complete` by its class, read off the error's type, never
-    // its text.
     pub fn of(error: &anyhow::Error) -> Self {
         if error.downcast_ref::<Timeout>().is_some() {
             return Self::Timeout;
@@ -119,8 +95,6 @@ impl Outcome {
     }
 }
 
-// The timeout passed before the model's reply, while the completion waited
-// on `waiting`.
 #[derive(Debug)]
 pub struct Timeout {
     pub after: Duration,
@@ -141,18 +115,13 @@ impl fmt::Display for Timeout {
 impl std::error::Error for Timeout {}
 
 impl Timeout {
-    // The error `complete` ends on. The timeout is the completion's time
-    // budget, so the guest sees the typed `budget-exhausted` carrying this
-    // text: the same request put again would take as long, where a backend
-    // failure invites a retry. The timeout stays beneath for `Outcome::of`.
+    // Surface `BudgetExhausted` to the guest while keeping `Timeout` in the chain for `Outcome::of`.
     pub fn into_error(self) -> anyhow::Error {
         let budget = Error::BudgetExhausted(self.to_string());
         anyhow::Error::new(self).context(budget)
     }
 }
 
-// The wait a completion is in: on what, since when, and how many provider
-// rounds and tool calls it has made.
 #[derive(Debug)]
 struct Activity {
     at: Instant,
@@ -161,24 +130,15 @@ struct Activity {
     tool_calls: u32,
 }
 
-// One completion's start/finish events: the outcome, what it cost, and
-// where its time went, on the `complete` span that names the model and
-// format. Drop without `finish` records `Outcome::Abort` (a cancelled
-// future).
+// Emits `Outcome::Abort` on drop if `finish` was not called.
 pub struct Completion {
     started: Instant,
     attempts: u32,
-    // requests put again after failing at the transport
     retries: u32,
-    // the round the first candidate was made due at, the rounds after it
-    // kept for the corrections; `None` where it was offered before
     forced_at: Option<u32>,
-    // replies the provider cut at the token bound
     cuts: u32,
-    // set by the check's rejection alone, so a nudged reply makes no `Corrected`
     corrected: bool,
     bill: Bill,
-    // the wait booked per phase, over every round
     model: Duration,
     tool: Duration,
     check: Duration,
@@ -187,7 +147,6 @@ pub struct Completion {
 }
 
 impl Completion {
-    // The start event: the clock runs from here, waiting on the model.
     pub fn start(prompt_bytes: u64, tools: usize) -> Self {
         tracing::debug!(prompt_bytes, tools, "completion started");
 
@@ -217,9 +176,6 @@ impl Completion {
         }
     }
 
-    // A wait begins on `phase`: the one before it is booked to its bucket.
-    // A wait on the model is a provider round, one on a tool or the shell a
-    // tool call.
     pub fn enter(&mut self, phase: Phase) {
         self.book();
         self.activity.send_modify(|activity| {
@@ -233,12 +189,10 @@ impl Completion {
         });
     }
 
-    // What the completion is waiting on right now.
     pub fn phase(&self) -> Phase {
         self.activity.borrow().phase.clone()
     }
 
-    // The wait so far on the current phase, into its bucket.
     fn book(&mut self) {
         let activity = self.activity.borrow();
         let bucket = match &activity.phase {
@@ -249,9 +203,6 @@ impl Completion {
         *bucket = bucket.saturating_add(activity.at.elapsed());
     }
 
-    // One provider round answered, its tokens on the bill: a reply of
-    // `reply_bytes` is an attempt, a round asking for `tool_calls` is not,
-    // and one the provider `cut` at the token bound is counted.
     pub fn answered(
         &mut self, usage: &genai::chat::Usage, reply_bytes: Option<usize>, tool_calls: usize,
         cut: bool,
@@ -278,30 +229,24 @@ impl Completion {
         self.bill.add(&bill);
     }
 
-    // The guest's check rejected a candidate and a correction follows.
     pub const fn rejected(&mut self) {
         self.corrected = true;
     }
 
-    // One request failed at the transport and is put again.
     pub const fn retried(&mut self) {
         self.retries = self.retries.saturating_add(1);
     }
 
-    // The first candidate was made due at `round`, the rounds after it
-    // kept for the corrections; recorded once.
     pub const fn forced(&mut self, round: u32) {
         if self.forced_at.is_none() {
             self.forced_at = Some(round);
         }
     }
 
-    // The round the first candidate was made due at, `None` so far.
     pub const fn forced_at(&self) -> Option<u32> {
         self.forced_at
     }
 
-    // The `in progress` line, written every `PROGRESS` while awaited.
     pub fn heartbeat(&self) -> Heartbeat {
         let mut ticks = interval_at(Instant::now() + PROGRESS, PROGRESS);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -312,9 +257,6 @@ impl Completion {
         }
     }
 
-    // The one line per completion: INFO for an answer, WARN for anything
-    // else, so a bare `info` run sees failed or aborted completions too.
-    // Emitted once, so a later `Drop` says nothing.
     pub fn finish(&mut self, result: &Result<Answer>) {
         let outcome = match result {
             Ok(_) if self.corrected => Outcome::Corrected,
@@ -332,7 +274,6 @@ impl Completion {
         self.book();
         let duration_ms = elapsed_ms(self.started);
 
-        // an event's level is fixed at its callsite, so each level is its own event
         macro_rules! completion {
             ($level:ident) => {
                 tracing::$level!(
@@ -365,8 +306,6 @@ impl Drop for Completion {
     }
 }
 
-// Where an open completion is, said every `PROGRESS`: how long it has run,
-// how far it has got, and what it has been waiting on for how long.
 pub struct Heartbeat {
     started: Instant,
     activity: watch::Receiver<Activity>,
@@ -374,7 +313,6 @@ pub struct Heartbeat {
 }
 
 impl Heartbeat {
-    // The next beat, written once it is due.
     pub async fn tick(&mut self) {
         self.ticks.tick().await;
         let current = self.activity.borrow();
@@ -389,8 +327,6 @@ impl Heartbeat {
     }
 }
 
-// The tokens a completion has been billed so far, every round together.
-// The total is the provider's own sum, absent until a round reports one.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Bill {
     input: u64,
@@ -431,12 +367,10 @@ impl Bill {
     }
 }
 
-// A wire count booked on the bill: absent or negative is 0.
 fn count(value: Option<i32>) -> u64 {
     value.map_or(0, |value| u64::from(clamp(value)))
 }
 
-// A wire count as the guest reads it: negative is 0.
 fn clamp(value: i32) -> u32 {
     u32::try_from(value).unwrap_or(0)
 }
@@ -445,7 +379,6 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-// The guest's `Usage`: `None` when the provider did not surface any counts.
 pub fn to_usage(usage: &genai::chat::Usage) -> Option<Usage> {
     if usage.prompt_tokens.is_none() && usage.completion_tokens.is_none() {
         return None;
@@ -461,9 +394,7 @@ pub fn to_usage(usage: &genai::chat::Usage) -> Option<Usage> {
     })
 }
 
-// The completion's books, the classes a failure falls under, and the
-// provider's counts onto the boundary's `Usage`; the events themselves are
-// read off a capture in the `model` and `provider` suites.
+// Unit tests for outcome classification, phase timing, and token accounting.
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -517,8 +448,6 @@ mod tests {
         assert_eq!(Outcome::of(&anyhow::anyhow!("provider unreachable")), Outcome::Error);
     }
 
-    // The timeout is the time budget: the guest's typed error is the budget,
-    // the completion event still reads `timeout`.
     #[test]
     fn timeout_budget() {
         let timeout = Timeout {
@@ -534,10 +463,6 @@ mod tests {
         assert_eq!(Outcome::of(&timeout), Outcome::Timeout);
     }
 
-    // Two rounds add up, cache and total included; an absent or negative
-    // wire count books nothing, a negative total included. The provider's
-    // total stays absent until a round reports one, and the cut replies
-    // are counted beside the attempts.
     #[test]
     fn bill() {
         let mut completion = Completion::new();
@@ -596,7 +521,6 @@ mod tests {
         completion.finish(&Ok(answer()));
     }
 
-    // The first forcing is the one recorded.
     #[test]
     fn forced_once() {
         let mut completion = Completion::new();
@@ -607,10 +531,6 @@ mod tests {
         completion.finish(&Ok(answer()));
     }
 
-    // Every wait lands in its phase's bucket, tool calls and the shell
-    // together, the guest's checks in their own, the open one at the
-    // finish; the counts follow the waits, the opening wait on the model
-    // being no round yet.
     #[tokio::test(start_paused = true)]
     async fn phase_buckets() {
         const TICK: Duration = Duration::from_millis(2);
@@ -653,8 +573,6 @@ mod tests {
             (3, 1, Some(2))
         );
 
-        // Reasoning is optional; a negative count is clamped, not an error,
-        // whichever count it is.
         let clamped = ProviderUsage {
             prompt_tokens: Some(-1),
             completion_tokens: Some(4),

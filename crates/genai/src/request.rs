@@ -1,12 +1,4 @@
-//! Provider request translation.
-//!
-//! A validated request becomes a [`Turn`]: the system text and messages as
-//! they are, the declared function tools, the request's `format` as the
-//! provider `response_format` — steering only; acceptance is the guest's
-//! `check` when the request asks for one — and the deployment's defaults
-//! where the request names no model or no `max_tokens`. Whatever the request
-//! gets wrong is refused here, before any lend is resolved; the tools a lend
-//! advertises join the turn once its access is known.
+//! Translates a validated [`Request`] into a provider [`Turn`].
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{
@@ -18,20 +10,14 @@ use serde_json::Value;
 
 use crate::tools::SHELL_TOOL;
 
-// Everything one completion derives from the request: the model to ask, the
-// provider's chat request and options, and what the guest asked of the
-// answer.
 #[derive(Debug)]
 pub struct Turn {
     pub model: String,
     pub chat: ChatRequest,
     pub options: ChatOptions,
     pub format: Format,
-    // the request's schema compiled, for the shape a reply is held to
-    // before it reaches the check; `None` where the format declares none
     pub validator: Option<Validator>,
     pub check: bool,
-    // the system text and every message, in bytes
     pub prompt_bytes: u64,
 }
 
@@ -48,14 +34,12 @@ impl Turn {
         })
     }
 
-    // The tools a lend advertises, after the request's own.
     pub fn advertise(&mut self, tools: Vec<Tool>) {
         if !tools.is_empty() {
             self.chat.tools.get_or_insert_default().extend(tools);
         }
     }
 
-    // The names the model may call: every tool the turn declares, in order.
     pub fn declared(&self) -> Vec<String> {
         self.chat
             .tools
@@ -71,10 +55,8 @@ fn prompt_bytes(request: &Request) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
-// The messages, the system text, and the declared function tools. A tool
-// named `shell` is the backend's, refused whatever the lend; an MCP server
-// is nothing genai can reach.
 fn chat_request(request: &Request) -> Result<ChatRequest> {
+    // map messages and system prompt
     let messages = request
         .messages
         .iter()
@@ -90,6 +72,7 @@ fn chat_request(request: &Request) -> Result<ChatRequest> {
         chat = chat.with_system(system.clone());
     }
 
+    // validate and translate tools
     let mut tools: Vec<Tool> = Vec::new();
     for tool in &request.tools {
         match tool {
@@ -109,7 +92,6 @@ fn chat_request(request: &Request) -> Result<ChatRequest> {
     Ok(chat)
 }
 
-// The host already guarantees `parameters` parses as JSON.
 fn function_tool(function: &Function) -> Result<Tool> {
     let schema: Value = serde_json::from_str(&function.parameters).with_context(|| {
         format!("function tool `{}` parameters is not valid JSON", function.name)
@@ -119,11 +101,10 @@ fn function_tool(function: &Function) -> Result<Tool> {
         .with_schema(schema))
 }
 
-// Every round carries a `max_tokens`, the request's own or the deployment's
-// default, so a reply that runs on is cut short of the context window.
 fn chat_options(request: &Request, max_tokens: u32) -> Result<ChatOptions> {
     let mut options = ChatOptions::default().with_capture_usage(true);
 
+    // response format
     options = match &request.format {
         Format::Schema(spec) => {
             let schema: Value =
@@ -137,6 +118,7 @@ fn chat_options(request: &Request, max_tokens: u32) -> Result<ChatOptions> {
         Format::Text => options,
     };
 
+    // generation parameters
     let generation = request.generation.as_ref();
     options = options.with_max_tokens(
         generation.and_then(|generation| generation.max_tokens).unwrap_or(max_tokens),
@@ -163,8 +145,6 @@ fn chat_options(request: &Request, max_tokens: u32) -> Result<ChatOptions> {
     Ok(options)
 }
 
-// A schema that is JSON but no JSON Schema is the request's fault, refused
-// before anything is billed, as a schema that is not JSON is.
 fn validator(request: &Request) -> Result<Option<Validator>> {
     let Format::Schema(spec) = &request.format else {
         return Ok(None);
@@ -185,8 +165,7 @@ const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
     }
 }
 
-// Request-to-turn translation; end-to-end round-trips run in
-// `tests/model.rs`.
+// Unit tests for request-to-turn translation.
 #[cfg(test)]
 mod tests {
     use omnia_sandbox::Access;
@@ -226,8 +205,6 @@ mod tests {
         })
     }
 
-    // The request translated, the tools a lend of `access` advertises after
-    // its own.
     fn turn(tools: Vec<ModelTool>, access: Access) -> Result<Turn> {
         let mut turn = Turn::translate(&request(tools), DEFAULT_MODEL, DEFAULT_MAX_TOKENS)?;
         turn.advertise(workspace_tools(access));

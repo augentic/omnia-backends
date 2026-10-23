@@ -25,8 +25,6 @@ use crate::conversation::Budgets;
 pub struct Client {
     model: String,
     inner: genai::Client,
-    // `None` where no shell root is configured: the kernel is never probed,
-    // and a worker grant is refused.
     sandbox: Option<Arc<Sandbox>>,
     budgets: Budgets,
     max_tool_calls: u32,
@@ -102,83 +100,58 @@ mod config {
 
     /// Connection options for the genai backend.
     ///
-    /// Provider API keys are never carried here: the genai SDK reads them
-    /// from the ambient environment per request, routed by the model id's
-    /// prefix. Each completion runs within the `max_rounds` provider budget
-    /// alongside the `max_tool_calls` guest-tool budget, under the
-    /// `timeout_secs` cap on each reply of the model, each round decoding
-    /// at most `max_tokens` where the request names no bound, offers the
-    /// guest's `check` at most `max_candidates` candidates — the first due
-    /// once three quarters of the rounds are spent, the rejection of the
-    /// last ending the completion as `budget-exhausted` with the correction
-    /// — ends the same way once one tool call has failed `max_repeats`
-    /// times with the same arguments, and asks for the answer once one has
-    /// returned the same result that many times.
+    /// Provider API keys are read from the ambient environment per request,
+    /// routed by the model ID's prefix.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
-        /// Default model id when a request leaves `model` unset.
+        /// Default model ID when a request leaves `model` unset.
         #[env(from = "GENAI_MODEL", default = "gpt-5.5")]
         pub model: String,
-        /// Base URL every request goes to in place of the provider's own —
-        /// a self-hosted gateway or proxy speaking the provider's API. The
-        /// request keeps the shape of the provider the model id routes to,
-        /// and auth is still that provider's key from the environment.
+        /// Base URL override for a self-hosted gateway or proxy.
+        ///
+        /// Requests keep the wire format and API key of the provider selected
+        /// by the model ID.
         #[env(from = "GENAI_ENDPOINT")]
         pub endpoint: Option<String>,
-        /// Trees a lent workspace at or beneath which runs with a `shell`
-        /// tool, `:`-separated and relative to the invocation directory; a
-        /// workspace lent elsewhere is read-only. What a shell reaches
-        /// beyond its workspace — hosts, `~/` roots, variables — is the
-        /// completion's `grants.worker`, held to the sandbox's own rules
-        /// and to nothing of the deployment's. With none, no kernel
-        /// boundary is set up and a worker grant is refused.
+        /// Colon-separated directories under which a lent workspace gets a
+        /// sandboxed `shell` tool.
+        ///
+        /// Workspaces outside these roots are read-only. When empty, no
+        /// sandbox is initialized and worker grants are refused.
         #[env(from = "GENAI_SHELL_ROOTS", default = "", with = paths)]
         pub shell_roots: Vec<PathBuf>,
-        /// Provider round-trips one completion may make — a tool round, a
-        /// candidate, or a correction each one — before it is ended as
-        /// `budget-exhausted`. Where the request carries a `check`, a
-        /// quarter of them are kept for its corrections: once the rest are
-        /// spent with no candidate offered, the rounds forbid tool calls
-        /// until one is, so the correction it earns has rounds to repair
-        /// in.
+        /// Maximum provider round-trips per completion before failing with
+        /// `budget-exhausted`.
+        ///
+        /// Checked requests reserve the final quarter of rounds for
+        /// corrections.
         #[env(from = "GENAI_MAX_ROUNDS", default = "128")]
         pub max_rounds: u32,
-        /// Guest tool calls one completion may make before it is ended as
-        /// `budget-exhausted`; the host's default is 32.
+        /// Maximum guest tool calls per completion before failing with
+        /// `budget-exhausted`.
         #[env(from = "GENAI_MAX_TOOL_CALLS", default = "128")]
         pub max_tool_calls: u32,
-        /// Candidates one completion may offer the guest's `check`: a
-        /// rejection of the last is `budget-exhausted` carrying the
-        /// correction, so every candidate but the last is corrected once.
-        /// The default is the cursor backend's figure, so a correction
-        /// counts the same under either.
+        /// Maximum candidate answers offered to the guest's `check`.
+        ///
+        /// Rejecting the final candidate fails the completion with
+        /// `budget-exhausted` carrying the guest's correction.
         #[env(from = "GENAI_MAX_CANDIDATES", default = "2")]
         pub max_candidates: u32,
-        /// Failures one tool call may earn with the same arguments — one
-        /// tool, the arguments as sent, each answered a failure the model
-        /// was to repair — before the completion is ended as
-        /// `budget-exhausted` naming the call; the model is told the count
-        /// from the third, and a success of the call clears it. The same
-        /// count of identical results from one succeeding call makes the
-        /// next round the model's to answer in, its tool calls refused.
+        /// Maximum identical tool-call failures or unchanged results.
+        ///
+        /// Reaching the limit on failures ends the completion with
+        /// `budget-exhausted`. Reaching it on unchanged results forces a final
+        /// answer on the next round.
         #[env(from = "GENAI_MAX_REPEATS", default = "5")]
         pub max_repeats: u32,
-        /// Tokens one reply of the model may decode in one round where the
-        /// request names no `max_tokens` of its own, so a round that runs
-        /// on is cut short of the context window; the tool calls of a reply
-        /// the provider cut there are refused rather than run, the model
-        /// told to send smaller calls.
+        /// Default per-round `max_tokens` when the request leaves it unset.
         #[env(from = "GENAI_MAX_TOKENS", default = "32768")]
         pub max_tokens: u32,
-        /// Absolute cap in seconds on one reply of the model: the provider
-        /// rounds and tool calls up to its next text, a nudge or a
-        /// correction starting a fresh cap. Past it the completion is ended
-        /// as `budget-exhausted`, a shell command still running killed with
-        /// everything it started.
+        /// Timeout in seconds for producing each candidate reply, including
+        /// tool rounds.
         #[env(from = "GENAI_TIMEOUT_SECS", default = "600")]
         pub timeout_secs: u64,
-        /// Seconds one `shell` command may run before it is killed with
-        /// everything it started and the model told so.
+        /// Timeout in seconds for a single `shell` command.
         #[env(from = "GENAI_SHELL_TIMEOUT_SECS", default = "600")]
         pub shell_timeout_secs: u64,
     }
@@ -207,15 +180,10 @@ impl Default for ConnectOptions {
     }
 }
 
-// Uvicorn closes vLLM keep-alive connections after five seconds. A shorter
-// client timeout avoids racing that closure after a long tool round while
-// still reusing connections between quick rounds.
+// Stay under uvicorn's 5s keep-alive timeout to avoid racing server-side close.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl ConnectOptions {
-    // A client sending every request to `endpoint` when set, in place of the
-    // provider's own base URL. Auth is untouched: the SDK still reads the key
-    // the model id's provider expects from the environment.
     fn build_client(&self) -> Result<genai::Client> {
         let builder = genai::Client::builder().with_reqwest(
             genai::WebConfig::default()
@@ -231,8 +199,7 @@ impl ConnectOptions {
             endpoint.starts_with("http://") || endpoint.starts_with("https://"),
             "endpoint must be an http(s) URL, got `{endpoint}`"
         );
-        // The SDK joins `chat/completions` onto the base with URL semantics, so a
-        // base without its trailing slash would lose its last path segment.
+        // Ensure a trailing slash so URL joining preserves the final path segment.
         let base: Arc<str> = if endpoint.ends_with('/') {
             endpoint.as_str().into()
         } else {

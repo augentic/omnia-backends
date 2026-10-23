@@ -71,10 +71,11 @@ tool-call limit is answered through `WasiModelCtx::limits()` as
 `max_tool_calls`. Every round carries a `max_tokens`, the request's own or
 `GENAI_MAX_TOKENS` (default 32768), so a reply that runs on is cut short of
 the context window rather than filling it; a reply the provider cut there
-— by its finish reason, or by a bill reaching the bound where it reports
-none — has its tool calls refused rather than run, each answered with the
-cap and told to send smaller calls, since the arguments a server hands
-over from a cut reply are not the ones the model wrote. A request that fails at the
+— by its finish reason, or by a bill reaching the bound whatever reason it
+reports, since vLLM answers `tool_calls` for a cut reply its parser
+salvaged a call from — has its tool calls refused rather than run, each
+answered with the cap and told to send smaller calls, since the arguments
+a server hands over from a cut reply are not the ones the model wrote. A request that fails at the
 transport — the connection, before any reply: a server closing an idle
 keep-alive connection as the request is written on it, a tunnel between
 dropping — is put again unchanged after a wait of 1, 5, then 15 seconds,
@@ -264,7 +265,8 @@ in-process on loopback, reached through `ConnectOptions::endpoint` — the
 same seam a self-hosted gateway uses, so the SDK's own request shaping and
 auth are what is under test. It records every request (path, bearer, body),
 answers by a script (`Echo`, `Replies`, `Rounds` — a text, a call, or a
-call cut at the request's `max_tokens` per round — `ToolCalls` — a list of
+call cut at the request's `max_tokens` per round, reported as `length` or
+salvaged under `tool_calls` — `ToolCalls` — a list of
 calls answered one per round, then a scripted answer or the last result), can
 gate requests until a fan-out is fully in flight, park replies until the
 test releases them, or fail every request one way (`Status` with an
@@ -292,7 +294,8 @@ the last round, the round budget spent on a model that only calls tools
 rounds under a check (the reserved round forbidding tool calls and refusing
 one made, the correction's rounds open to tools again, `forced_at` on the
 completion line) and never under none, a call cut at the token bound
-refused rather than run with the round after it open (`cut=1`), a tool
+refused rather than run with the round after it open (`cut=1`), under
+`length` and under a `tool_calls` reason with a full bill alike, a tool
 round-trip through `OpenAI` `tool_calls`, a repairable
 tool failure, an undeclared tool answered with the declared names and the
 completion going on, one call failing the same way until the repeat budget

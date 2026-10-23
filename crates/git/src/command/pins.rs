@@ -1,23 +1,20 @@
-//! The command-line config that holds one operation to host policy, so the
-//! repository's own configuration cannot choose a program git runs, on
-//! either side of a transport.
+//! Pins each Git operation to host policy.
 //!
-//! A guest with a writable mount owns everything beneath `.git`. Left to the
-//! repository, a planted hook, an `fsmonitor`, a signing program, a clean or
-//! smudge filter, a merge driver, or a credential helper would run on the
-//! host the moment the next operation touched the tree. Each such key is
-//! pinned on the command line, where git reads it last and the repository
-//! cannot reach: a fixed set is forced off, and the keys an operator carries
-//! for real — an SSH command, a credential prompt, a credential helper, a
-//! signing program — are kept from the host's own configuration (system,
-//! global, or this command line) and dropped from the repository's. A key
-//! the repository spells in bytes a pin cannot name refuses the operation.
+//! A writable repository can configure programs that Git executes on the
+//! host:
 //!
-//! The far side of a transport starts no process the near side's `-c` pins
-//! reach, so the pack command is named on the command line too: a local
-//! one wrapped to carry pins of its own, a remote one git's default rather
-//! than whatever `remote.<name>.uploadPack` or `receivePack` the repository
-//! set.
+//! - Hooks and file-system monitors.
+//! - Signing programs, filters, and merge drivers.
+//! - Credential and SSH helpers.
+//!
+//! Command-line configuration takes precedence over repository settings.
+//! Dangerous keys are disabled, while operator settings come only from host
+//! scopes. An operation is refused when a repository key cannot be named
+//! safely as a command-line pin.
+//!
+//! Transport pack commands are pinned separately because near-side `-c`
+//! settings do not reach the far side. Local commands carry the same pins,
+//! while remote commands use Git's defaults instead of repository overrides.
 
 use anyhow::Result;
 use omnia_wasi_vcs::{Error, Place};

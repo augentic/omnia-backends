@@ -1,15 +1,17 @@
 //! In-process `wasi-model` backend.
 //!
-//! Each completion translates a validated [`Request`] into a provider
-//! conversation and drives it within the configured budgets. Guest function
-//! calls are delegated through [`ToolHost::call_tool`], the `read` and
-//! `list` tools operate directly on a lent workspace, and a workspace lent
-//! under a shell root adds a `shell` tool whose commands run inside the
-//! sandbox session prepared for the completion. When the request asks for a
-//! `check`, each final text is offered to the guest through
-//! [`ToolHost::check`]; a rejection stays in the conversation with the
-//! guest's correction as the next user turn, and the loop goes round. What
-//! the request gets wrong is refused before any of that starts.
+//! Each validated [`Request`] becomes a provider conversation bounded by the
+//! configured budgets. Invalid requests fail before workspace access is
+//! resolved.
+//!
+//! Available tools depend on the request and its lend:
+//!
+//! - Guest functions run through [`ToolHost::call_tool`].
+//! - `read` and `list` operate on the lent workspace.
+//! - A workspace lent under a shell root adds a sandboxed `shell` tool.
+//!
+//! When a request includes a check, each answer goes to [`ToolHost::check`].
+//! A rejection appends the guest's correction and continues the conversation.
 
 use std::path::Path;
 use std::sync::Arc;

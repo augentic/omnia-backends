@@ -170,6 +170,11 @@ pub struct Completion {
     attempts: u32,
     // requests put again after failing at the transport
     retries: u32,
+    // the round the first candidate was made due at, the rounds after it
+    // kept for the corrections; `None` where it was offered before
+    forced_at: Option<u32>,
+    // replies the provider cut at the token bound
+    cuts: u32,
     // set by the check's rejection alone, so a nudged reply makes no `Corrected`
     corrected: bool,
     bill: Bill,
@@ -195,6 +200,8 @@ impl Completion {
             started,
             attempts: 0,
             retries: 0,
+            forced_at: None,
+            cuts: 0,
             corrected: false,
             bill: Bill::default(),
             model: Duration::ZERO,
@@ -243,17 +250,23 @@ impl Completion {
     }
 
     // One provider round answered, its tokens on the bill: a reply of
-    // `reply_bytes` is an attempt, a round asking for `tool_calls` is not.
+    // `reply_bytes` is an attempt, a round asking for `tool_calls` is not,
+    // and one the provider `cut` at the token bound is counted.
     pub fn answered(
         &mut self, usage: &genai::chat::Usage, reply_bytes: Option<usize>, tool_calls: usize,
+        cut: bool,
     ) {
         if reply_bytes.is_some() {
             self.attempts = self.attempts.saturating_add(1);
+        }
+        if cut {
+            self.cuts = self.cuts.saturating_add(1);
         }
         let bill = Bill::from(usage);
         tracing::debug!(
             reply_bytes,
             tool_calls,
+            cut,
             input_tokens = bill.input,
             cache_read_tokens = bill.cache_read,
             cache_write_tokens = bill.cache_write,
@@ -273,6 +286,19 @@ impl Completion {
     // One request failed at the transport and is put again.
     pub const fn retried(&mut self) {
         self.retries = self.retries.saturating_add(1);
+    }
+
+    // The first candidate was made due at `round`, the rounds after it
+    // kept for the corrections; recorded once.
+    pub const fn forced(&mut self, round: u32) {
+        if self.forced_at.is_none() {
+            self.forced_at = Some(round);
+        }
+    }
+
+    // The round the first candidate was made due at, `None` so far.
+    pub const fn forced_at(&self) -> Option<u32> {
+        self.forced_at
     }
 
     // The `in progress` line, written every `PROGRESS` while awaited.
@@ -313,6 +339,8 @@ impl Completion {
                     outcome = outcome.as_str(),
                     attempts = self.attempts,
                     retries = self.retries,
+                    forced_at = self.forced_at,
+                    cut = self.cuts,
                     duration_ms,
                     model_ms = millis(self.model),
                     tool_ms = millis(self.tool),
@@ -508,7 +536,8 @@ mod tests {
 
     // Two rounds add up, cache and total included; an absent or negative
     // wire count books nothing, a negative total included. The provider's
-    // total stays absent until a round reports one.
+    // total stays absent until a round reports one, and the cut replies
+    // are counted beside the attempts.
     #[test]
     fn bill() {
         let mut completion = Completion::new();
@@ -520,6 +549,7 @@ mod tests {
             },
             None,
             1,
+            true,
         );
         assert_eq!(completion.bill.total, None, "no round has reported a total");
         completion.answered(
@@ -539,6 +569,7 @@ mod tests {
             },
             Some(10),
             0,
+            false,
         );
         completion.answered(
             &ProviderUsage {
@@ -547,6 +578,7 @@ mod tests {
             },
             Some(10),
             0,
+            false,
         );
         assert_eq!(
             completion.bill,
@@ -560,6 +592,18 @@ mod tests {
             }
         );
         assert_eq!(completion.attempts, 2, "the replies are the attempts, the tool round none");
+        assert_eq!(completion.cuts, 1, "the cut tool round is counted");
+        completion.finish(&Ok(answer()));
+    }
+
+    // The first forcing is the one recorded.
+    #[test]
+    fn forced_once() {
+        let mut completion = Completion::new();
+        assert_eq!(completion.forced_at(), None);
+        completion.forced(48);
+        completion.forced(49);
+        assert_eq!(completion.forced_at(), Some(48));
         completion.finish(&Ok(answer()));
     }
 

@@ -1,14 +1,17 @@
-//! The store and workspace operations over git, from a guest: a repository
-//! initialised, read, committed, copied, labelled, and merged back; a merge
-//! that conflicts and one resolved under a policy; the log over a base;
-//! whether one commit descends from another, and a label read back as the
-//! branch alone where the host laid a tag of its name; what `pending`
-//! reports for each kind of change; a commit with nothing to seal; a dirty
-//! working copy removed; a working copy whose `.git` file was rewritten
-//! still addressed as the copy it was cut as. Each section runs in a
-//! repository of its own beneath the `.` mount, so the host reads each with
-//! git afterwards; the arguments name the repository the host laid with the
-//! tag, the commit its label sits at, and the commit its tag does.
+//! Exercises Git store and workspace operations from a guest.
+//!
+//! The matrix covers:
+//!
+//! - Repository creation, reads, commits, copies, labels, and merges.
+//! - Merge conflicts and policy-based resolution.
+//! - Logs, ancestry checks, and branch-versus-tag label lookup.
+//! - Every kind of pending change.
+//! - Empty commits and removal of dirty working copies.
+//! - A working copy whose `.git` file was rewritten.
+//!
+//! Each section uses its own repository beneath the `.` mount for host-side
+//! inspection. Operator arguments identify the tagged repository and its
+//! branch and tag commits.
 
 #![cfg(target_arch = "wasm32")]
 

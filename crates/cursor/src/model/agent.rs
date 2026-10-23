@@ -1,20 +1,24 @@
-//! An agent on a leased worker: one completion's `CreateAgent`, the `Send`
-//! of its prompt and of each correction the guest's check returns, and the
-//! `DeleteAgent` that gives the slot back.
+//! Drives one completion on a leased Cursor agent.
 //!
-//! The whole of it runs on a task of its own, because the completion future
-//! is the guest's to drop at any `.await`: the drop cancels a token the task
-//! watches, and the task ends its run — cancelled by id once the stream has
-//! named one — and still deletes its agent. The answer comes back before
-//! the delete: `CloseAgent` and `DeleteAgent` run on a task of their own
-//! once the completion's line is written, so a guest waits on the model,
-//! never on the bridge putting the agent away. No wait on the worker is
-//! unbounded — the inactivity window that stream progress rearms while the
-//! run waits on the bridge, the absolute cap that bounds it while the model
-//! composes, the callback's abort and the worker's own exit each end one —
-//! so a worker alive but silent unblocks the guest. A run cut short is
-//! cancelled and its bill read back before the completion's one line, so a
-//! timeout still reports what it cost.
+//! The lifecycle is `CreateAgent`, one or more `Send` calls, then
+//! `DeleteAgent`. Corrections from the guest's check use the same agent.
+//!
+//! The lifecycle runs in its own task because the guest may drop the
+//! completion at any `.await`. Dropping it cancels the active run once its
+//! stream reveals the run id, then deletes the agent.
+//!
+//! The answer returns before cleanup completes. `CloseAgent` and
+//! `DeleteAgent` continue on a cleanup task after the completion is recorded.
+//!
+//! Every worker wait ends on one of:
+//!
+//! - A progress-sensitive inactivity timeout.
+//! - The absolute run timeout.
+//! - A callback abort.
+//! - The worker exiting.
+//!
+//! An interrupted run is cancelled and its usage is collected before the
+//! result is recorded, so timeouts retain their cost.
 
 use std::mem;
 use std::pin::Pin;

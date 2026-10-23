@@ -1,0 +1,13 @@
+---
+description: Keep Rust documentation concise and scannable
+globs: "**/*.rs"
+alwaysApply: false
+---
+
+# Rustdoc readability
+
+- Open with one summary sentence.
+- Give each prose paragraph one idea and no more than three short sentences.
+- Use bullets for three or more facts, cases, invariants, or steps.
+- Summarize responsibilities and contracts without narrating control flow.
+- Put detailed rationale beside the code it explains.

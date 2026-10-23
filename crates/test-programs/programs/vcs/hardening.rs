@@ -1,25 +1,19 @@
-//! The guest half of the containment the backend owes: every program the
-//! repository's own configuration could choose to run on the host is
-//! neutralised before it runs, and every path it could point git at stays
-//! the place. The host lays a repository salted with a hostile
-//! `core.hooksPath`, `core.fsmonitor`, `core.alternateRefsCommand`,
-//! `core.worktree`, commit and push signing, signing program, smudge
-//! filter, and remote receive-pack, a working copy of its history that
-//! would write its checked-out branch on receive through a filter and
-//! monitor of its own, a bare origin with its own hostile hooks and
-//! alternate-refs command that asks for a signed push, a repository with no
-//! identity to seal a merge, one whose own `insteadOf` would carry an
-//! `https` remote onto a local path, one whose own `http.proxy` and
-//! `http.sslVerify` would carry the host's credentials through a proxy of
-//! its choosing, one naming the pack program the operator's ssh would run on
-//! a far host, a partial clone whose promisor remote is an ssh host under a
-//! pack command of its own, one naming a clean filter under a key no pin
-//! can spell, and a bare directory inside a sealed repository; this guest
-//! drives the operations that would fire each, and the host asserts no
-//! marker was written, nothing was carried or read from outside the place,
-//! the ssh was handed git's own programs and nothing for the promisor, the
-//! enclosing repository was neither read nor sealed, and the work still
-//! landed.
+//! Exercises Git containment against hostile repository configuration.
+//!
+//! The host prepares repositories that attempt to execute or redirect
+//! through:
+//!
+//! - Hooks, monitors, filters, signing, and alternate-reference commands.
+//! - Worktree settings and an enclosing repository.
+//! - URL rewrites, proxies, and disabled TLS verification.
+//! - SSH, remote pack commands, and a promisor remote.
+//! - Configuration keys whose raw bytes cannot be pinned.
+//! - A bare repository nested inside a sealed repository.
+//!
+//! The guest runs the operations that would trigger each vector. The host
+//! verifies that no marker ran, no data or credentials escaped the place,
+//! SSH received only Git's expected commands, the enclosing repository was
+//! untouched, and valid work still completed.
 
 #![cfg(target_arch = "wasm32")]
 

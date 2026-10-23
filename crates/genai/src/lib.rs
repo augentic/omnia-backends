@@ -108,11 +108,12 @@ mod config {
     /// alongside the `max_tool_calls` guest-tool budget, under the
     /// `timeout_secs` cap on each reply of the model, each round decoding
     /// at most `max_tokens` where the request names no bound, offers the
-    /// guest's `check` at most `max_candidates` candidates — the rejection
-    /// of the last ends the completion as `budget-exhausted` with the
-    /// correction — ends the same way once one tool call has failed
-    /// `max_repeats` times with the same arguments, and asks for the answer
-    /// once one has returned the same result that many times.
+    /// guest's `check` at most `max_candidates` candidates — the first due
+    /// once three quarters of the rounds are spent, the rejection of the
+    /// last ending the completion as `budget-exhausted` with the correction
+    /// — ends the same way once one tool call has failed `max_repeats`
+    /// times with the same arguments, and asks for the answer once one has
+    /// returned the same result that many times.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
         /// Default model id when a request leaves `model` unset.
@@ -135,7 +136,11 @@ mod config {
         pub shell_roots: Vec<PathBuf>,
         /// Provider round-trips one completion may make — a tool round, a
         /// candidate, or a correction each one — before it is ended as
-        /// `budget-exhausted`.
+        /// `budget-exhausted`. Where the request carries a `check`, a
+        /// quarter of them are kept for its corrections: once the rest are
+        /// spent with no candidate offered, the rounds forbid tool calls
+        /// until one is, so the correction it earns has rounds to repair
+        /// in.
         #[env(from = "GENAI_MAX_ROUNDS", default = "128")]
         pub max_rounds: u32,
         /// Guest tool calls one completion may make before it is ended as
@@ -160,7 +165,9 @@ mod config {
         pub max_repeats: u32,
         /// Tokens one reply of the model may decode in one round where the
         /// request names no `max_tokens` of its own, so a round that runs
-        /// on is cut short of the context window.
+        /// on is cut short of the context window; the tool calls of a reply
+        /// the provider cut there are refused rather than run, the model
+        /// told to send smaller calls.
         #[env(from = "GENAI_MAX_TOKENS", default = "32768")]
         pub max_tokens: u32,
         /// Absolute cap in seconds on one reply of the model: the provider
@@ -200,14 +207,9 @@ impl Default for ConnectOptions {
     }
 }
 
-/// How long a pooled connection may sit idle before the client drops it
-/// rather than reuse it. Uvicorn, which serves vLLM, closes an idle
-/// keep-alive connection after 5 s by default, and a request written onto
-/// one at the same moment fails at the client before the server sees it
-/// (`error sending request`) — a tool call of four or five seconds between
-/// two rounds runs exactly that race. Dropping the connection well inside
-/// the server's timeout keeps reuse for the quick rounds and never hands a
-/// request to a socket the server is about to close.
+// Uvicorn closes vLLM keep-alive connections after five seconds. A shorter
+// client timeout avoids racing that closure after a long tool round while
+// still reusing connections between quick rounds.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl ConnectOptions {

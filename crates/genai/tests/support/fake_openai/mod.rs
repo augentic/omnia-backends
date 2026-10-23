@@ -30,8 +30,8 @@ pub enum Script {
     Echo,
     /// Request `n` gets `replies[n]`; the last reply repeats.
     Replies(Vec<String>),
-    /// Request `n` gets `rounds[n]`, a text or one tool call; the last
-    /// repeats.
+    /// Request `n` gets `rounds[n]`, a text, one tool call, or one cut at
+    /// the token bound; the last repeats.
     Rounds(Vec<Round>),
     /// A conversation's requests get one call of `calls` each, in order,
     /// the request carrying `n` tool results the call after them; the
@@ -41,11 +41,15 @@ pub enum Script {
     ToolCalls { calls: Vec<(String, Value)>, answer: Option<String> },
 }
 
-/// One scripted round: the model's text, or one tool call.
+/// One scripted round: the model's text, one tool call, or one tool call
+/// the provider cut at the request's `max_tokens` — `finish_reason`
+/// `length`, its completion tokens the bound — as a server parses what a
+/// reply cut mid-call left.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Round {
     Text(String),
     Call(String, Value),
+    Cut(String, Value),
 }
 
 /// How every request fails, when one does.
@@ -426,6 +430,15 @@ async fn handle(
         }
         Script::Rounds(rounds) => match rounds.get(round).or_else(|| rounds.last()) {
             Some(Round::Call(name, args)) => completion(None, Some(tool_call(round, name, args))),
+            Some(Round::Cut(name, args)) => {
+                let mut body = completion(None, Some(tool_call(round, name, args)));
+                body["choices"][0]["finish_reason"] = json!("length");
+                body["usage"] = json!({
+                    "prompt_tokens": 30,
+                    "completion_tokens": recorded.body["max_tokens"],
+                });
+                body
+            }
             Some(Round::Text(text)) => completion(Some(text), None),
             None => completion(Some(""), None),
         },

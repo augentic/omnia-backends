@@ -122,9 +122,6 @@ mod config {
         pub shell_roots: Vec<PathBuf>,
         /// Maximum provider round-trips per completion before failing with
         /// `budget-exhausted`.
-        ///
-        /// Checked requests reserve the final quarter of rounds for
-        /// corrections.
         #[env(from = "GENAI_MAX_ROUNDS", default = "128")]
         pub max_rounds: u32,
         /// Maximum guest tool calls per completion before failing with
@@ -137,11 +134,8 @@ mod config {
         /// `budget-exhausted` carrying the guest's correction.
         #[env(from = "GENAI_MAX_CANDIDATES", default = "2")]
         pub max_candidates: u32,
-        /// Maximum identical tool-call failures or unchanged results.
-        ///
-        /// Reaching the limit on failures ends the completion with
-        /// `budget-exhausted`. Reaching it on unchanged results forces a final
-        /// answer on the next round.
+        /// Maximum identical tool-call failures before failing with
+        /// `budget-exhausted`.
         #[env(from = "GENAI_MAX_REPEATS", default = "5")]
         pub max_repeats: u32,
         /// Default per-round `max_tokens` when the request leaves it unset.

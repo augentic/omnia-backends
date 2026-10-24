@@ -135,7 +135,6 @@ pub struct Completion {
     started: Instant,
     attempts: u32,
     retries: u32,
-    forced_at: Option<u32>,
     cuts: u32,
     corrected: bool,
     bill: Bill,
@@ -159,7 +158,6 @@ impl Completion {
             started,
             attempts: 0,
             retries: 0,
-            forced_at: None,
             cuts: 0,
             corrected: false,
             bill: Bill::default(),
@@ -237,16 +235,6 @@ impl Completion {
         self.retries = self.retries.saturating_add(1);
     }
 
-    pub const fn forced(&mut self, round: u32) {
-        if self.forced_at.is_none() {
-            self.forced_at = Some(round);
-        }
-    }
-
-    pub const fn forced_at(&self) -> Option<u32> {
-        self.forced_at
-    }
-
     pub fn heartbeat(&self) -> Heartbeat {
         let mut ticks = interval_at(Instant::now() + PROGRESS, PROGRESS);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -280,7 +268,6 @@ impl Completion {
                     outcome = outcome.as_str(),
                     attempts = self.attempts,
                     retries = self.retries,
-                    forced_at = self.forced_at,
                     cut = self.cuts,
                     duration_ms,
                     model_ms = millis(self.model),
@@ -518,16 +505,6 @@ mod tests {
         );
         assert_eq!(completion.attempts, 2, "the replies are the attempts, the tool round none");
         assert_eq!(completion.cuts, 1, "the cut tool round is counted");
-        completion.finish(&Ok(answer()));
-    }
-
-    #[test]
-    fn forced_once() {
-        let mut completion = Completion::new();
-        assert_eq!(completion.forced_at(), None);
-        completion.forced(48);
-        completion.forced(49);
-        assert_eq!(completion.forced_at(), Some(48));
         completion.finish(&Ok(answer()));
     }
 

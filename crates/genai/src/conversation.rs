@@ -6,16 +6,14 @@
 //! The loop applies these safeguards:
 //!
 //! - Invalid structured output gets one diagnostic nudge per candidate.
-//! - Checked requests reserve the final quarter of rounds for corrections.
-//! - Rounds that require an answer refuse tool calls.
+//! - Closing rounds that require an answer refuse tool calls.
 //! - Token-truncated replies do not execute possibly incomplete tool calls.
 //! - Tool results are capped while preserving their head and tail.
 //! - Repeated failed calls terminate the completion.
-//! - Repeated unchanged results make the next round require an answer.
 //! - Transport failures are retried three times with backoff.
 //!
-//! A correction resets tool-repeat tracking. Exhausted budgets and reply
-//! timeouts return the typed `budget-exhausted` error.
+//! Exhausted budgets and reply timeouts return the typed `budget-exhausted`
+//! error.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -45,14 +43,6 @@ pub struct Budgets {
     pub timeout: Duration,
 }
 
-impl Budgets {
-    // Reserve the final quarter of rounds for guest check corrections.
-    const fn due_at(&self) -> u32 {
-        self.max_rounds - self.max_rounds / CORRECTION_SHARE
-    }
-}
-
-const CORRECTION_SHARE: u32 = 4;
 const REPEAT_NOTE_FROM: u32 = 3;
 const MAX_RESULT_BYTES: usize = 64 * 1024;
 const TRANSPORT_RETRY_WAITS: [Duration; 3] =
@@ -72,26 +62,9 @@ pub struct Conversation {
     candidates: u32,
     // consecutive failures per (tool, args) hash
     repeats: HashMap<u64, u32>,
-    // identical successes per (tool, args, result) hash
-    echoes: HashMap<u64, u32>,
     nudged: bool,
-    due: Option<Due>,
     transcript: Transcript,
     completion: Completion,
-}
-
-// Reason a final text reply is forced before `max_rounds`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Due {
-    Nudged,
-    Repeated,
-}
-
-// Reason the current round refuses tool calls and requires a final answer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Finishing {
-    Closing,
-    Reserved,
 }
 
 struct Reply {
@@ -102,11 +75,6 @@ struct Reply {
 const REFUSED_IN_CLOSING: &str = "not run: your final answer is due now. Reply with only your \
                                   final answer as a single JSON value in the shape the prompt \
                                   asked for, and nothing else.";
-
-const REFUSED_IN_RESERVE: &str = "not run: the rounds left are kept for correcting your answer, \
-                                  so your final answer is due now. Reply with only your final \
-                                  answer as a single JSON value in the shape the prompt asked \
-                                  for, and nothing else.";
 
 impl Conversation {
     pub fn new(client: genai::Client, turn: Turn, tools: Tools, budgets: Budgets) -> Self {
@@ -135,9 +103,7 @@ impl Conversation {
             round: 0,
             candidates: 0,
             repeats: HashMap::new(),
-            echoes: HashMap::new(),
             nudged: false,
-            due: None,
             transcript: Transcript::default(),
             completion,
         }
@@ -189,7 +155,6 @@ impl Conversation {
                 && let Some((fault, nudge)) = self.off_shape(&candidate)
             {
                 self.nudged = true;
-                self.due = Some(Due::Nudged);
                 tracing::debug!(
                     round = self.round,
                     reply_bytes = candidate.len(),
@@ -223,7 +188,6 @@ impl Conversation {
                     );
                     tracing::trace!(%correction, "correction turn");
                     self.nudged = false;
-                    self.echoes.clear();
                     self.chat = std::mem::take(&mut self.chat)
                         .append_message(ChatMessage::assistant(candidate))
                         .append_message(ChatMessage::user(correction));
@@ -238,16 +202,7 @@ impl Conversation {
             self.completion.enter(Phase::Model);
 
             // execute provider round
-            let finishing = self.finishing();
-            if finishing == Some(Finishing::Reserved) && self.completion.forced_at().is_none() {
-                tracing::debug!(
-                    round = self.round,
-                    left = self.budgets.max_rounds - self.round,
-                    "no candidate has reached the check; the answer is due, the rounds left \
-                     kept for the corrections"
-                );
-                self.completion.forced(self.round);
-            }
+            let closing = self.closing();
             let (chat, options) = self.round_request();
             let response = self.exec_chat(chat, &options).await?;
 
@@ -261,10 +216,12 @@ impl Conversation {
 
             // dispatch or refuse tool calls
             if !tool_calls.is_empty() {
-                match finishing {
-                    Some(finishing) => self.refuse_round(tool_calls, finishing),
-                    None if cut => self.refuse_cut(tool_calls),
-                    None => self.tool_round(tool_calls).await?,
+                if closing {
+                    self.refuse_closing(tool_calls);
+                } else if cut {
+                    self.refuse_cut(tool_calls);
+                } else {
+                    self.tool_round(tool_calls).await?;
                 }
                 continue;
             }
@@ -272,7 +229,6 @@ impl Conversation {
             let Some(text) = text else {
                 bail!("genai returned neither content nor tool calls (model `{}`)", self.model);
             };
-            self.due = None;
             return Ok(Some(Reply {
                 text,
                 usage: to_usage(&usage),
@@ -315,25 +271,18 @@ impl Conversation {
         let chat = self.chat.clone();
         let mut options = self.options.clone();
         // Fall back to JSON mode after a nudge for adapters that ignore JsonSpec.
-        if self.due == Some(Due::Nudged) {
+        if self.nudged {
             options = options.with_response_format(ChatResponseFormat::JsonMode);
         }
         // Keep tools declared to preserve prompt prefix cache while forbidding calls.
-        if self.finishing().is_some() && chat.tools.as_ref().is_some_and(|tools| !tools.is_empty())
-        {
+        if self.closing() && chat.tools.as_ref().is_some_and(|tools| !tools.is_empty()) {
             options = options.with_tool_choice(ToolChoice::None);
         }
         (chat, options)
     }
 
-    const fn finishing(&self) -> Option<Finishing> {
-        if self.due.is_some() || self.round == self.budgets.max_rounds {
-            Some(Finishing::Closing)
-        } else if self.check && self.candidates == 0 && self.round >= self.budgets.due_at() {
-            Some(Finishing::Reserved)
-        } else {
-            None
-        }
+    const fn closing(&self) -> bool {
+        self.nudged || self.round == self.budgets.max_rounds
     }
 
     // Also check token usage: vLLM reports `tool_calls` when it salvages a call from a truncated reply.
@@ -391,7 +340,10 @@ impl Conversation {
         for call in tool_calls {
             self.completion.enter(Phase::of_tool(&call.fn_name));
             let result = match self.tools.call(&call).await? {
-                Ok(result) => self.succeeded(&call, result),
+                Ok(result) => {
+                    self.repeats.remove(&identity(&call));
+                    result
+                }
                 Err(reason) => self.failed(&call, &reason)?,
             };
             let result = truncate(result, MAX_RESULT_BYTES);
@@ -404,36 +356,6 @@ impl Conversation {
         }
         self.chat = chat;
         Ok(())
-    }
-
-    fn succeeded(&mut self, call: &ToolCall, result: String) -> String {
-        self.repeats.remove(&identity(call));
-        let count = self.echoes.entry(echo(call, &result)).or_insert(0);
-        *count += 1;
-        let count = *count;
-        if count >= self.budgets.max_repeats {
-            tracing::debug!(
-                round = self.round,
-                tool = %call.fn_name,
-                count,
-                "the same call returned the same result up to the repeat budget; the answer is due"
-            );
-            self.due = Some(Due::Repeated);
-            return format!(
-                "{result}\n\nThis exact call has now returned the same result {count} times. \
-                 Your final answer is due now: reply with only your final answer in the shape \
-                 the prompt asked for, and nothing else."
-            );
-        }
-        if count < REPEAT_NOTE_FROM {
-            return result;
-        }
-        format!(
-            "{result}\n\nThis exact call has now returned the same result {count} times, and \
-             nothing has changed between them. Act on what it says rather than running it \
-             again: after {} identical results your final answer is due.",
-            self.budgets.max_repeats
-        )
     }
 
     fn failed(&mut self, call: &ToolCall, reason: &str) -> Result<String> {
@@ -464,18 +386,13 @@ impl Conversation {
         ))
     }
 
-    fn refuse_round(&mut self, tool_calls: Vec<ToolCall>, finishing: Finishing) {
+    fn refuse_closing(&mut self, tool_calls: Vec<ToolCall>) {
         tracing::debug!(
             round = self.round,
             tool_calls = tool_calls.len(),
-            ?finishing,
             "tool calls in a closing round refused; the JSON answer is due"
         );
-        let refusal = match finishing {
-            Finishing::Closing => REFUSED_IN_CLOSING,
-            Finishing::Reserved => REFUSED_IN_RESERVE,
-        };
-        self.refuse(tool_calls, refusal);
+        self.refuse(tool_calls, REFUSED_IN_CLOSING);
     }
 
     fn refuse_cut(&mut self, tool_calls: Vec<ToolCall>) {
@@ -524,12 +441,5 @@ fn identity(call: &ToolCall) -> u64 {
     let mut hasher = DefaultHasher::new();
     call.fn_name.hash(&mut hasher);
     call.fn_arguments.to_string().hash(&mut hasher);
-    hasher.finish()
-}
-
-fn echo(call: &ToolCall, result: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    identity(call).hash(&mut hasher);
-    result.hash(&mut hasher);
     hasher.finish()
 }

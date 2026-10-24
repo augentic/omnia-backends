@@ -48,21 +48,11 @@ answers the question instead where the provider honours it and a call made
 there is refused as in a closing round; the guest's `check` is offered at most `max_candidates`
 candidates (default 2, the count the `omnia-cursor` backend keeps), every
 one but the last corrected once and the rejection of the last failing the
-completion with that correction as the detail, and where a `check` stands
-a quarter of the rounds are kept for its corrections: once the rest are
-spent with no candidate offered (round 96 of 128, 48 of 64; a budget too
-small to share is due at its cap), every round forbids tool calls the same
-way until a candidate reaches the check, a call made there refused as
-kept for the corrections, so the correction it earns has rounds to repair
-in where a candidate forced at the cap would be refused with none; a tool call that fails the
+completion with that correction as the detail; a tool call that fails the
 same way with the same arguments is counted, the model told the count from
 the third, and `max_repeats` such failures (default 5) end the completion
 naming the call, since a model repeating one refused call is not going to
-answer, while a call that succeeds with the same result as the identical
-calls before it is counted the same way and `max_repeats` such results make
-the next round a finishing one, its tool calls forbidden and refused, since
-a model re-running one call whose result does not change has what it needs
-to answer, the count starting over at a correction; each reply of the
+answer; each reply of the
 model, the tool rounds before it included, runs
 under the `timeout_secs` cap (default 600), a nudge or a correction
 starting a fresh one, so a provider that never answers or a build that
@@ -98,10 +88,10 @@ MSRV: Rust 1.99
 | `GENAI_MODEL` | no | `gpt-5.5` | Default model id when a request leaves `model` unset |
 | `GENAI_ENDPOINT` | no | | Base URL every request goes to in place of the provider's own (a self-hosted gateway or proxy) |
 | `GENAI_SHELL_ROOTS` | no | | Trees a lent workspace at or beneath which runs with the `shell` tool, `:`-separated, relative to the invocation directory; none configures no shell |
-| `GENAI_MAX_ROUNDS` | no | `128` | Provider round-trips one completion may make before it is ended as `budget-exhausted`; under a `check`, the first candidate is due once three quarters of them are spent, the rest kept for the corrections |
+| `GENAI_MAX_ROUNDS` | no | `128` | Provider round-trips one completion may make before it is ended as `budget-exhausted` |
 | `GENAI_MAX_TOOL_CALLS` | no | `128` | Guest tool calls one completion may make before `budget-exhausted` (the host's default is 32) |
 | `GENAI_MAX_CANDIDATES` | no | `2` | Candidates one completion may offer the guest's `check`; the rejection of the last is `budget-exhausted` carrying the correction |
-| `GENAI_MAX_REPEATS` | no | `5` | Failures one tool call may earn with the same arguments before the completion is `budget-exhausted` naming the call, and identical results one succeeding call may return before the next round is the model's to answer in; the model is told the count from the third |
+| `GENAI_MAX_REPEATS` | no | `5` | Failures one tool call may earn with the same arguments before the completion is `budget-exhausted` naming the call; the model is told the count from the third |
 | `GENAI_MAX_TOKENS` | no | `32768` | Tokens one reply of the model may decode in one round where the request names no `max_tokens` of its own; the tool calls of a reply cut there are refused, not run |
 | `GENAI_TIMEOUT_SECS` | no | `600` | Absolute cap in seconds on one reply of the model, tool rounds included, before the completion is ended as `budget-exhausted` |
 | `GENAI_SHELL_TIMEOUT_SECS` | no | `600` | Seconds one `shell` command may run before it is killed |
@@ -191,8 +181,6 @@ the `omnia-cursor` backend's log has.
   `exhausted`, `provider`, `transport`, or `error`, read off the failure's
   type, never its text — the `attempts` (the model's replies), the
   `retries` (requests put again after failing at the transport),
-  `forced_at` (the round the first candidate was made due at, the rounds
-  after it kept for the corrections; absent where it was offered before),
   `cut` (replies the provider cut at the token bound), the phase
   buckets `model_ms`, `tool_ms` (the shell included), and `check_ms`, and
   the bill every round of the completion together: `input_tokens`,
@@ -290,20 +278,14 @@ nudged with the fault at its path, a tool call in a closing round refused
 and the JSON after it accepted, a second narration after a correction
 nudged again (the schema back on the correction round), the nudge spending
 the last round, the round budget spent on a model that only calls tools
-(`exhausted`), the first candidate made due at three quarters of the
-rounds under a check (the reserved round forbidding tool calls and refusing
-one made, the correction's rounds open to tools again, `forced_at` on the
-completion line) and never under none, a call cut at the token bound
+(`exhausted`), a call cut at the token bound
 refused rather than run with the round after it open (`cut=1`), under
 `length` and under a `tool_calls` reason with a full bill alike, a tool
 round-trip through `OpenAI` `tool_calls`, a repairable
 tool failure, an undeclared tool answered with the declared names and the
 completion going on, one call failing the same way until the repeat budget
 ends it (`exhausted`, the count named from the third), the repeat budget
-lowered and calls differing in their arguments counted apart, one call
-returning the same result until the repeat budget makes the next round the
-model's to answer in (`ok`, the count named from the third) and that count
-starting over at a correction, a result past the backend's cap cut to its
+lowered and calls differing in their arguments counted apart, a result past the backend's cap cut to its
 head and tail, the default `max_tokens` on every round and the knob behind
 it, a four-way
 fan-out

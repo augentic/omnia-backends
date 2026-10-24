@@ -1,17 +1,18 @@
-//! Translates a validated [`Request`] into a provider [`Turn`].
+//! Translates a validated [`Request`] into the [`PreparedRequest`] a conversation opens with.
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, JsonSpec, ReasoningEffort, Tool,
 };
 use jsonschema::Validator;
+use omnia_sandbox::Access;
 use omnia_wasi_model::{Effort, Error, Format, Function, Request, Role, Tool as ModelTool};
 use serde_json::Value;
 
-use crate::tools::SHELL_TOOL;
+use crate::tools::{SHELL_TOOL, workspace_tools};
 
 #[derive(Debug)]
-pub struct Turn {
+pub struct PreparedRequest {
     pub model: String,
     pub chat: ChatRequest,
     pub options: ChatOptions,
@@ -21,25 +22,25 @@ pub struct Turn {
     pub prompt_bytes: u64,
 }
 
-impl Turn {
-    pub fn translate(request: &Request, default_model: &str, max_tokens: u32) -> Result<Self> {
+impl PreparedRequest {
+    // A fault in the request is `Error::InvalidRequest`: a reserved or
+    // unsupported tool, or a schema that is not JSON or not a JSON Schema.
+    pub fn translate(
+        request: &Request, default_model: &str, max_tokens: u32, access: Access,
+    ) -> Result<Self> {
+        let (response_format, validator) = translate_format(&request.format)?;
         Ok(Self {
             model: request.model.as_deref().unwrap_or(default_model).to_owned(),
-            chat: chat_request(request)?,
-            options: chat_options(request, max_tokens)?,
+            chat: chat_request(request, access)?,
+            options: chat_options(request, max_tokens, response_format),
             format: request.format.clone(),
-            validator: validator(request)?,
+            validator,
             check: request.check,
             prompt_bytes: prompt_bytes(request),
         })
     }
 
-    pub fn advertise(&mut self, tools: Vec<Tool>) {
-        if !tools.is_empty() {
-            self.chat.tools.get_or_insert_default().extend(tools);
-        }
-    }
-
+    // The names of every tool the chat advertises, the workspace's included.
     pub fn declared(&self) -> Vec<String> {
         self.chat
             .tools
@@ -55,7 +56,7 @@ fn prompt_bytes(request: &Request) -> u64 {
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
-fn chat_request(request: &Request) -> Result<ChatRequest> {
+fn chat_request(request: &Request, access: Access) -> Result<ChatRequest> {
     // map messages and system prompt
     let messages = request
         .messages
@@ -72,7 +73,7 @@ fn chat_request(request: &Request) -> Result<ChatRequest> {
         chat = chat.with_system(system.clone());
     }
 
-    // validate and translate tools
+    // the declared tools first, then the workspace's
     let mut tools: Vec<Tool> = Vec::new();
     for tool in &request.tools {
         match tool {
@@ -82,9 +83,13 @@ fn chat_request(request: &Request) -> Result<ChatRequest> {
                 )));
             }
             ModelTool::Function(function) => tools.push(function_tool(function)?),
-            ModelTool::Mcp(_) => bail!("genai does not support MCP servers"),
+            ModelTool::Mcp(mcp) => bail!(Error::InvalidRequest(format!(
+                "MCP server `{}`: genai does not support MCP servers",
+                mcp.name
+            ))),
         }
     }
+    tools.extend(workspace_tools(access));
     if !tools.is_empty() {
         chat = chat.with_tools(tools);
     }
@@ -93,30 +98,45 @@ fn chat_request(request: &Request) -> Result<ChatRequest> {
 }
 
 fn function_tool(function: &Function) -> Result<Tool> {
-    let schema: Value = serde_json::from_str(&function.parameters).with_context(|| {
-        format!("function tool `{}` parameters is not valid JSON", function.name)
+    let schema: Value = serde_json::from_str(&function.parameters).map_err(|error| {
+        Error::InvalidRequest(format!(
+            "function tool `{}` parameters is not valid JSON: {error}",
+            function.name
+        ))
     })?;
     Ok(Tool::new(function.name.clone())
         .with_description(function.description.clone())
         .with_schema(schema))
 }
 
-fn chat_options(request: &Request, max_tokens: u32) -> Result<ChatOptions> {
-    let mut options = ChatOptions::default().with_capture_usage(true);
-
-    // response format
-    options = match &request.format {
-        Format::Schema(spec) => {
-            let schema: Value =
-                serde_json::from_str(&spec.schema).context("format schema is not valid JSON")?;
-            options.with_response_format(ChatResponseFormat::JsonSpec(JsonSpec::new(
-                spec.name.clone(),
-                schema,
-            )))
-        }
-        Format::Json => options.with_response_format(ChatResponseFormat::JsonMode),
-        Format::Text => options,
+// The provider's response format and the validator the same schema builds,
+// parsed once.
+fn translate_format(format: &Format) -> Result<(Option<ChatResponseFormat>, Option<Validator>)> {
+    let spec = match format {
+        Format::Text => return Ok((None, None)),
+        Format::Json => return Ok((Some(ChatResponseFormat::JsonMode), None)),
+        Format::Schema(spec) => spec,
     };
+    let schema: Value = serde_json::from_str(&spec.schema).map_err(|error| {
+        Error::InvalidRequest(format!("format schema is not valid JSON: {error}"))
+    })?;
+    let validator = jsonschema::validator_for(&schema).map_err(|error| {
+        Error::InvalidRequest(format!(
+            "format schema `{}` is not a valid JSON Schema: {error}",
+            spec.name
+        ))
+    })?;
+    let json_spec = JsonSpec::new(spec.name.clone(), schema);
+    Ok((Some(ChatResponseFormat::JsonSpec(json_spec)), Some(validator)))
+}
+
+fn chat_options(
+    request: &Request, max_tokens: u32, response_format: Option<ChatResponseFormat>,
+) -> ChatOptions {
+    let mut options = ChatOptions::default().with_capture_usage(true);
+    if let Some(response_format) = response_format {
+        options = options.with_response_format(response_format);
+    }
 
     // generation parameters
     let generation = request.generation.as_ref();
@@ -142,18 +162,7 @@ fn chat_options(request: &Request, max_tokens: u32) -> Result<ChatOptions> {
         }
     }
 
-    Ok(options)
-}
-
-fn validator(request: &Request) -> Result<Option<Validator>> {
-    let Format::Schema(spec) = &request.format else {
-        return Ok(None);
-    };
-    let schema: Value =
-        serde_json::from_str(&spec.schema).context("format schema is not valid JSON")?;
-    let validator = jsonschema::validator_for(&schema)
-        .with_context(|| format!("format schema `{}` is not a valid JSON Schema", spec.name))?;
-    Ok(Some(validator))
+    options
 }
 
 const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
@@ -165,15 +174,13 @@ const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
     }
 }
 
-// Unit tests for request-to-turn translation.
+// Unit tests for request translation.
 #[cfg(test)]
 mod tests {
-    use omnia_sandbox::Access;
-    use omnia_wasi_model::{Generation, Grants, Mcp, Message};
+    use omnia_wasi_model::{Generation, Grants, Mcp, Message, Schema};
     use serde_json::json;
 
     use super::*;
-    use crate::tools::workspace_tools;
 
     const DEFAULT_MODEL: &str = "gpt-4o-mini";
     const DEFAULT_MAX_TOKENS: u32 = 4096;
@@ -205,10 +212,12 @@ mod tests {
         })
     }
 
-    fn turn(tools: Vec<ModelTool>, access: Access) -> Result<Turn> {
-        let mut turn = Turn::translate(&request(tools), DEFAULT_MODEL, DEFAULT_MAX_TOKENS)?;
-        turn.advertise(workspace_tools(access));
-        Ok(turn)
+    fn translate(request: &Request, access: Access) -> Result<PreparedRequest> {
+        PreparedRequest::translate(request, DEFAULT_MODEL, DEFAULT_MAX_TOKENS, access)
+    }
+
+    fn prepared(tools: Vec<ModelTool>, access: Access) -> Result<PreparedRequest> {
+        translate(&request(tools), access)
     }
 
     fn tool_names(chat: &ChatRequest) -> Vec<String> {
@@ -220,39 +229,44 @@ mod tests {
             .collect()
     }
 
+    fn invalid_request(err: &anyhow::Error) -> &str {
+        let Some(Error::InvalidRequest(detail)) = err.downcast_ref::<Error>() else {
+            panic!("the refusal is the request's: {err:#}");
+        };
+        detail
+    }
+
     #[test]
     fn request_model() {
-        let turn = turn(vec![], Access::Private).expect("a bare request translates");
-        assert_eq!(turn.model, DEFAULT_MODEL, "an unset model is the default");
+        let prepared = prepared(vec![], Access::Private).expect("a bare request translates");
+        assert_eq!(prepared.model, DEFAULT_MODEL, "an unset model is the default");
 
         let mut request = request(vec![]);
         request.model = Some("claude-fable-5".to_owned());
-        let turn = Turn::translate(&request, DEFAULT_MODEL, DEFAULT_MAX_TOKENS)
-            .expect("a named model translates");
-        assert_eq!(turn.model, "claude-fable-5", "a set model is the request's");
+        let prepared = translate(&request, Access::Private).expect("a named model translates");
+        assert_eq!(prepared.model, "claude-fable-5", "a set model is the request's");
     }
 
     #[test]
     fn request_max_tokens() {
-        let turn = turn(vec![], Access::Private).expect("a bare request translates");
+        let prepared = prepared(vec![], Access::Private).expect("a bare request translates");
         assert_eq!(
-            turn.options.max_tokens,
+            prepared.options.max_tokens,
             Some(DEFAULT_MAX_TOKENS),
             "a request naming no bound carries the default"
         );
 
         let mut bounded = request(vec![]);
         bounded.generation = Some(generation(Some(512)));
-        let turn = Turn::translate(&bounded, DEFAULT_MODEL, DEFAULT_MAX_TOKENS)
-            .expect("a bounded request translates");
-        assert_eq!(turn.options.max_tokens, Some(512), "a set bound is the request's");
+        let prepared = translate(&bounded, Access::Private).expect("a bounded request translates");
+        assert_eq!(prepared.options.max_tokens, Some(512), "a set bound is the request's");
 
         let mut unbounded = request(vec![]);
         unbounded.generation = Some(generation(None));
-        let turn = Turn::translate(&unbounded, DEFAULT_MODEL, DEFAULT_MAX_TOKENS)
+        let prepared = translate(&unbounded, Access::Private)
             .expect("a request with other settings translates");
         assert_eq!(
-            turn.options.max_tokens,
+            prepared.options.max_tokens,
             Some(DEFAULT_MAX_TOKENS),
             "generation settings without a bound carry the default"
         );
@@ -271,9 +285,9 @@ mod tests {
 
     #[test]
     fn declared_tool() {
-        let turn = turn(vec![lookup_tool()], Access::Private)
+        let prepared = prepared(vec![lookup_tool()], Access::Private)
             .expect("a declared function tool translates");
-        let tools = turn.chat.tools.expect("the chat request advertises the tool");
+        let tools = prepared.chat.tools.expect("the chat request advertises the tool");
         assert_eq!(tools.len(), 1, "one declared tool, one advertised tool");
         assert_eq!(tools[0].name, "lookup".into());
         assert_eq!(
@@ -285,7 +299,7 @@ mod tests {
 
     #[test]
     fn mcp_grant() {
-        let err = turn(
+        let err = prepared(
             vec![ModelTool::Mcp(Mcp {
                 name: "docs".to_owned(),
                 tools: vec![],
@@ -294,16 +308,19 @@ mod tests {
             Access::Private,
         )
         .expect_err("genai rejects MCP grants");
-        assert!(err.to_string().contains("does not support MCP"), "unexpected error: {err}");
+        let detail = invalid_request(&err);
+        assert!(detail.contains("does not support MCP"), "unexpected detail: {detail}");
+        assert!(detail.contains("`docs`"), "the detail names the server: {detail}");
     }
 
     #[test]
     fn lent_workspace() {
-        let turn =
-            turn(vec![lookup_tool()], Access::Read).expect("declared and injected tools translate");
-        assert_eq!(tool_names(&turn.chat), ["lookup", "read", "list"], "declared tools first");
+        let prepared = prepared(vec![lookup_tool()], Access::Read)
+            .expect("declared and injected tools translate");
+        assert_eq!(tool_names(&prepared.chat), ["lookup", "read", "list"], "declared tools first");
+        assert_eq!(prepared.declared(), ["lookup", "read", "list"]);
 
-        let tools = turn.chat.tools.expect("the chat request advertises the tools");
+        let tools = prepared.chat.tools.expect("the chat request advertises the tools");
         let schema = tools[1].schema.as_ref().expect("read carries a schema");
         assert_eq!(schema.get("required"), Some(&json!(["path"])), "read requires a path argument");
         let schema = tools[2].schema.as_ref().expect("list carries a schema");
@@ -312,10 +329,14 @@ mod tests {
 
     #[test]
     fn shell_lend() {
-        let turn = turn(vec![], Access::Shell).expect("a shell lend translates");
-        assert_eq!(tool_names(&turn.chat), ["read", "list", "shell"], "the shell after read/list");
+        let prepared = prepared(vec![], Access::Shell).expect("a shell lend translates");
+        assert_eq!(
+            tool_names(&prepared.chat),
+            ["read", "list", "shell"],
+            "the shell after read/list"
+        );
 
-        let tools = turn.chat.tools.expect("the chat request advertises the tools");
+        let tools = prepared.chat.tools.expect("the chat request advertises the tools");
         let schema = tools[2].schema.as_ref().expect("shell carries a schema");
         assert_eq!(schema.get("required"), Some(&json!(["command"])), "shell requires a command");
     }
@@ -327,17 +348,54 @@ mod tests {
             description: "a guest's own shell".to_owned(),
             parameters: "{}".to_owned(),
         });
-        let err = turn(vec![shell], Access::Private)
+        let err = prepared(vec![shell], Access::Private)
             .expect_err("a guest tool named `shell` is refused whatever the access");
-        let Some(Error::InvalidRequest(detail)) = err.downcast_ref::<Error>() else {
-            panic!("the refusal is the request's: {err:#}");
-        };
-        assert_eq!(detail, "tool `shell` is reserved by the backend");
+        assert_eq!(invalid_request(&err), "tool `shell` is reserved by the backend");
     }
 
     #[test]
     fn no_workspace() {
-        let turn = turn(vec![], Access::Private).expect("an empty tool list translates");
-        assert!(turn.chat.tools.is_none(), "without a workspace lend nothing is advertised");
+        let prepared = prepared(vec![], Access::Private).expect("an empty tool list translates");
+        assert!(prepared.chat.tools.is_none(), "without a workspace lend nothing is advertised");
+        assert_eq!(prepared.declared(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn schema_format() {
+        let mut request = request(vec![]);
+        request.format = Format::Schema(Schema {
+            name: "verdict".to_owned(),
+            schema: r#"{"type":"object","properties":{"verdict":{"type":"string"}}}"#.to_owned(),
+        });
+        let prepared = translate(&request, Access::Private).expect("a schema translates");
+        assert!(
+            matches!(prepared.options.response_format, Some(ChatResponseFormat::JsonSpec(_))),
+            "the schema rides as the provider's response format"
+        );
+        let validator = prepared.validator.expect("the schema builds a validator");
+        assert!(validator.is_valid(&json!({ "verdict": "pass" })));
+        assert!(!validator.is_valid(&json!({ "verdict": 1 })));
+    }
+
+    #[test]
+    fn schema_invalid() {
+        let mut request = request(vec![]);
+        request.format = Format::Schema(Schema {
+            name: "verdict".to_owned(),
+            schema: r#"{"type":"nonsense"}"#.to_owned(),
+        });
+        let err = translate(&request, Access::Private).expect_err("a bad schema is refused");
+        let detail = invalid_request(&err);
+        assert!(
+            detail.starts_with("format schema `verdict` is not a valid JSON Schema"),
+            "{detail}"
+        );
+
+        request.format = Format::Schema(Schema {
+            name: "verdict".to_owned(),
+            schema: "{".to_owned(),
+        });
+        let err = translate(&request, Access::Private).expect_err("non-JSON is refused");
+        assert!(invalid_request(&err).starts_with("format schema is not valid JSON"));
     }
 }

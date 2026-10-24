@@ -28,21 +28,17 @@ pub const REFUSED: &[&str] = &[
 pub struct Shell {
     session: Session,
     timeout: Duration,
-    max_result_bytes: usize,
 }
 
+// What the model reads of a command, and the exit the log line carries.
 pub struct Run {
     pub result: String,
     pub exit: String,
 }
 
 impl Shell {
-    pub const fn new(session: Session, timeout: Duration, max_result_bytes: usize) -> Self {
-        Self {
-            session,
-            timeout,
-            max_result_bytes,
-        }
+    pub const fn new(session: Session, timeout: Duration) -> Self {
+        Self { session, timeout }
     }
 
     pub fn cwd(&self) -> &Path {
@@ -55,7 +51,7 @@ impl Shell {
         process.args(["-c", command]).env("WORKSPACE", self.cwd());
         match process.output(self.timeout).await {
             Ok(output) => Ok(Run {
-                result: truncate(render(&output), self.max_result_bytes),
+                result: render(&output),
                 exit: exit_of(output.status),
             }),
             Err(error) => match error.downcast::<TimedOut>() {
@@ -74,16 +70,6 @@ impl Shell {
             },
         }
     }
-}
-
-// Keep both head and tail so the command's start and final verdict remain visible.
-pub fn truncate(text: String, cap: usize) -> String {
-    if text.len() <= cap {
-        return text;
-    }
-    let head = text.floor_char_boundary(cap / 2);
-    let tail = text.ceil_char_boundary(text.len() - (cap - head));
-    format!("{}\n[… {} bytes omitted …]\n{}", &text[..head], tail - head, &text[tail..])
 }
 
 fn render(output: &Output) -> String {
@@ -122,30 +108,5 @@ fn exit_of(status: ExitStatus) -> String {
         (Some(code), _) => code.to_string(),
         (None, Some(signal)) => format!("signal {signal}"),
         (None, None) => "unknown".to_owned(),
-    }
-}
-
-// Unit tests for output truncation.
-#[cfg(test)]
-mod tests {
-    use super::truncate;
-
-    #[test]
-    fn within_cap() {
-        assert_eq!(truncate("short".to_owned(), 5), "short");
-        assert_eq!(truncate(String::new(), 0), "");
-    }
-
-    #[test]
-    fn head_and_tail() {
-        let text = "0123456789".to_owned();
-        assert_eq!(truncate(text, 4), "01\n[… 6 bytes omitted …]\n89");
-    }
-
-    #[test]
-    fn char_boundaries() {
-        // each `é` is two bytes, so the tail's byte cut at 5 would split one
-        let text = "éééé".to_owned();
-        assert_eq!(truncate(text, 5), "é\n[… 4 bytes omitted …]\né");
     }
 }

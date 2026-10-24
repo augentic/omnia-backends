@@ -1,8 +1,8 @@
 //! In-process `wasi-model` backend.
 //!
 //! Each validated [`Request`] becomes a provider conversation bounded by the
-//! configured budgets. Invalid requests fail before workspace access is
-//! resolved.
+//! configured budgets. Invalid requests fail before a shell session is
+//! prepared and before any provider request is made.
 //!
 //! Available tools depend on the request and its lend:
 //!
@@ -26,9 +26,9 @@ use tracing::{Instrument, info_span};
 
 use crate::Client;
 use crate::conversation::Conversation;
-use crate::request::Turn;
+use crate::request::PreparedRequest;
 use crate::shell::Shell;
-use crate::tools::{Tools, workspace_tools};
+use crate::tools::Tools;
 
 static COMPLETION_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -62,12 +62,12 @@ impl Client {
         &self, request: &Request, tool_host: Arc<dyn ToolHost>,
     ) -> anyhow::Result<Conversation> {
         let workspace = tool_host.local_path();
-        let mut turn = Turn::translate(request, &self.model, self.max_tokens)?;
         let access = self.access(workspace).await?;
+        let prepared = PreparedRequest::translate(request, &self.model, self.max_tokens, access)?;
         let shell = self.shell(request, access, workspace).await?;
-        turn.advertise(workspace_tools(access));
-        let tools = Tools::new(tool_host, shell, turn.declared(), self.limits().max_result_bytes);
-        Ok(Conversation::new(self.inner.clone(), turn, tools, self.budgets))
+        let tools =
+            Tools::new(tool_host, shell, prepared.declared(), self.limits().max_result_bytes);
+        Ok(Conversation::new(self.inner.clone(), prepared, tools, self.budgets))
     }
 
     async fn access(&self, workspace: Option<&Path>) -> anyhow::Result<Access> {
@@ -102,7 +102,7 @@ impl Client {
             env: worker.env.clone(),
         });
         let session = sandbox.prepare(workspace, &grant).await.map_err(refusal)?;
-        Ok(Some(Shell::new(session, self.shell_timeout, self.limits().max_result_bytes)))
+        Ok(Some(Shell::new(session, self.shell_timeout)))
     }
 }
 

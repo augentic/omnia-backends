@@ -201,10 +201,12 @@ impl Completion {
         *bucket = bucket.saturating_add(activity.at.elapsed());
     }
 
+    // Books one round, and returns its bill as the guest's `Usage`: `None`
+    // where the provider reported no count at all.
     pub fn answered(
         &mut self, usage: &genai::chat::Usage, reply_bytes: Option<usize>, tool_calls: usize,
         cut: bool,
-    ) {
+    ) -> Option<Usage> {
         if reply_bytes.is_some() {
             self.attempts = self.attempts.saturating_add(1);
         }
@@ -225,6 +227,19 @@ impl Completion {
             "round answered"
         );
         self.bill.add(&bill);
+
+        if usage.prompt_tokens.is_none() && usage.completion_tokens.is_none() {
+            return None;
+        }
+        Some(Usage {
+            input_tokens: usage.prompt_tokens.map_or(0, non_negative),
+            output_tokens: usage.completion_tokens.map_or(0, non_negative),
+            reasoning_tokens: usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens)
+                .map(non_negative),
+        })
     }
 
     pub const fn rejected(&mut self) {
@@ -355,30 +370,16 @@ impl Bill {
 }
 
 fn count(value: Option<i32>) -> u64 {
-    value.map_or(0, |value| u64::from(clamp(value)))
+    value.map_or(0, |value| u64::from(non_negative(value)))
 }
 
-fn clamp(value: i32) -> u32 {
+// A wire count booked: a negative one is 0.
+fn non_negative(value: i32) -> u32 {
     u32::try_from(value).unwrap_or(0)
 }
 
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
-pub fn to_usage(usage: &genai::chat::Usage) -> Option<Usage> {
-    if usage.prompt_tokens.is_none() && usage.completion_tokens.is_none() {
-        return None;
-    }
-    Some(Usage {
-        input_tokens: usage.prompt_tokens.map_or(0, clamp),
-        output_tokens: usage.completion_tokens.map_or(0, clamp),
-        reasoning_tokens: usage
-            .completion_tokens_details
-            .as_ref()
-            .and_then(|details| details.reasoning_tokens)
-            .map(clamp),
-    })
 }
 
 // Unit tests for outcome classification, phase timing, and token accounting.
@@ -392,7 +393,7 @@ mod tests {
     use http::{HeaderMap, StatusCode};
     use omnia_wasi_model::Answer;
 
-    use super::{Bill, Completion, Error, Outcome, Phase, Timeout, to_usage};
+    use super::{Bill, Completion, Error, Outcome, Phase, Timeout};
 
     fn web(webc_error: webc::Error) -> anyhow::Error {
         genai::Error::WebModelCall {
@@ -535,6 +536,9 @@ mod tests {
 
     #[test]
     fn usage_counts() {
+        let mut completion = Completion::new();
+        let mut usage_of = |usage: &ProviderUsage| completion.answered(usage, Some(1), 0, false);
+
         let counted = ProviderUsage {
             prompt_tokens: Some(3),
             completion_tokens: Some(1),
@@ -544,7 +548,7 @@ mod tests {
             }),
             ..ProviderUsage::default()
         };
-        let usage = to_usage(&counted).expect("counts surfaced");
+        let usage = usage_of(&counted).expect("counts surfaced");
         assert_eq!(
             (usage.input_tokens, usage.output_tokens, usage.reasoning_tokens),
             (3, 1, Some(2))
@@ -559,7 +563,7 @@ mod tests {
             }),
             ..ProviderUsage::default()
         };
-        let usage = to_usage(&clamped).expect("counts surfaced");
+        let usage = usage_of(&clamped).expect("counts surfaced");
         assert_eq!(
             (usage.input_tokens, usage.output_tokens, usage.reasoning_tokens),
             (0, 4, Some(0))
@@ -570,9 +574,10 @@ mod tests {
             completion_tokens: Some(1),
             ..ProviderUsage::default()
         };
-        let usage = to_usage(&unreported).expect("counts surfaced");
+        let usage = usage_of(&unreported).expect("counts surfaced");
         assert_eq!(usage.reasoning_tokens, None, "no reasoning count, none reported");
 
-        assert!(to_usage(&ProviderUsage::default()).is_none(), "no counts, no usage");
+        assert!(usage_of(&ProviderUsage::default()).is_none(), "no counts, no usage");
+        completion.finish(&Ok(answer()));
     }
 }

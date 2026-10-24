@@ -102,7 +102,7 @@ mod config {
     ///
     /// Provider API keys are read from the ambient environment per request,
     /// routed by the model ID's prefix.
-    #[derive(Debug, Clone, FromEnv)]
+    #[derive(Debug, Clone, PartialEq, Eq, FromEnv)]
     pub struct ConnectOptions {
         /// Default model ID when a request leaves `model` unset.
         #[env(from = "GENAI_MODEL", default = "gpt-5.5")]

@@ -16,9 +16,9 @@
 //! error.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::time::Duration;
+use std::{fmt, mem};
 
 use anyhow::{Context as _, Result, bail};
 use genai::chat::{
@@ -30,9 +30,8 @@ use omnia_wasi_model::{Answer, Error, Format, ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::timeout;
 
-use crate::observe::{Completion, Phase, Timeout, to_usage};
-use crate::request::Turn;
-use crate::shell::truncate;
+use crate::observe::{Completion, Phase, Timeout};
+use crate::request::PreparedRequest;
 use crate::tools::Tools;
 
 #[derive(Clone, Copy, Debug)]
@@ -72,23 +71,32 @@ struct Reply {
     usage: Option<Usage>,
 }
 
+// What an off-shape reply is told, and the fault logged for it with the
+// instance's values masked.
+struct Nudge {
+    fault: String,
+    prompt: String,
+}
+
 const REFUSED_IN_CLOSING: &str = "not run: your final answer is due now. Reply with only your \
                                   final answer as a single JSON value in the shape the prompt \
                                   asked for, and nothing else.";
 
 impl Conversation {
-    pub fn new(client: genai::Client, turn: Turn, tools: Tools, budgets: Budgets) -> Self {
-        let advertised = turn.chat.tools.as_ref().map_or(0, Vec::len);
-        let completion = Completion::start(turn.prompt_bytes, advertised);
-        let Turn {
+    pub fn new(
+        client: genai::Client, request: PreparedRequest, tools: Tools, budgets: Budgets,
+    ) -> Self {
+        let PreparedRequest {
             model,
             chat,
             options,
             format,
             validator,
             check,
-            ..
-        } = turn;
+            prompt_bytes,
+        } = request;
+        let advertised = chat.tools.as_ref().map_or(0, Vec::len);
+        let completion = Completion::start(prompt_bytes, advertised);
 
         Self {
             client,
@@ -152,7 +160,7 @@ impl Conversation {
 
             // nudge once on malformed JSON or schema mismatch
             if !self.nudged
-                && let Some((fault, nudge)) = self.off_shape(&candidate)
+                && let Some(Nudge { fault, prompt }) = self.off_shape(&candidate)
             {
                 self.nudged = true;
                 tracing::debug!(
@@ -161,10 +169,10 @@ impl Conversation {
                     %fault,
                     "the reply is off the shape asked for; nudging under JSON mode"
                 );
-                tracing::trace!(%nudge, "nudge turn");
-                self.chat = std::mem::take(&mut self.chat)
+                tracing::trace!(nudge = %prompt, "nudge turn");
+                self.chat = mem::take(&mut self.chat)
                     .append_message(ChatMessage::assistant(candidate))
-                    .append_message(ChatMessage::user(nudge));
+                    .append_message(ChatMessage::user(prompt));
                 continue;
             }
 
@@ -188,7 +196,7 @@ impl Conversation {
                     );
                     tracing::trace!(%correction, "correction turn");
                     self.nudged = false;
-                    self.chat = std::mem::take(&mut self.chat)
+                    self.chat = mem::take(&mut self.chat)
                         .append_message(ChatMessage::assistant(candidate))
                         .append_message(ChatMessage::user(correction));
                 }
@@ -207,12 +215,12 @@ impl Conversation {
             let response = self.exec_chat(chat, &options).await?;
 
             // record round telemetry
-            let cut = self.cut(&response);
+            let cut = self.is_cut(&response);
             let text = response.first_text().map(ToOwned::to_owned);
-            let usage = response.usage.clone();
+            let billed = response.usage.clone();
             let tool_calls = response.into_tool_calls();
             let reply_bytes = text.as_deref().filter(|_| tool_calls.is_empty()).map(str::len);
-            self.completion.answered(&usage, reply_bytes, tool_calls.len(), cut);
+            let usage = self.completion.answered(&billed, reply_bytes, tool_calls.len(), cut);
 
             // dispatch or refuse tool calls
             if !tool_calls.is_empty() {
@@ -229,17 +237,14 @@ impl Conversation {
             let Some(text) = text else {
                 bail!("genai returned neither content nor tool calls (model `{}`)", self.model);
             };
-            return Ok(Some(Reply {
-                text,
-                usage: to_usage(&usage),
-            }));
+            return Ok(Some(Reply { text, usage }));
         }
         Ok(None)
     }
 
     async fn exec_chat(
         &mut self, chat: ChatRequest, options: &ChatOptions,
-    ) -> Result<genai::chat::ChatResponse> {
+    ) -> Result<ChatResponse> {
         let mut waits = TRANSPORT_RETRY_WAITS.iter();
         loop {
             let error = match self.client.exec_chat(&self.model, chat.clone(), Some(options)).await
@@ -286,7 +291,7 @@ impl Conversation {
     }
 
     // Also check token usage: vLLM reports `tool_calls` when it salvages a call from a truncated reply.
-    fn cut(&self, response: &ChatResponse) -> bool {
+    fn is_cut(&self, response: &ChatResponse) -> bool {
         let by_reason = response.stop_reason.as_ref().is_some_and(StopReason::is_max_tokens);
         let by_bill = match (self.options.max_tokens, response.usage.completion_tokens) {
             (Some(bound), Some(spent)) => u32::try_from(spent).is_ok_and(|spent| spent >= bound),
@@ -295,7 +300,7 @@ impl Conversation {
         by_reason || by_bill
     }
 
-    fn off_shape(&self, candidate: &str) -> Option<(String, String)> {
+    fn off_shape(&self, candidate: &str) -> Option<Nudge> {
         if !matches!(self.format, Format::Json | Format::Schema(_)) {
             return None;
         }
@@ -305,12 +310,12 @@ impl Conversation {
             Ok(value) => value,
             Err(fault) => {
                 let fault = fault.to_string();
-                let nudge = format!(
+                let prompt = format!(
                     "Your last reply is not one well-formed JSON value ({fault}), so it is not \
                      the answer. Reply now with only your final answer as a single JSON value \
                      in the shape the prompt asked for, and nothing else."
                 );
-                return Some((fault, nudge));
+                return Some(Nudge { fault, prompt });
             }
         };
 
@@ -326,27 +331,29 @@ impl Conversation {
         if detailed.is_empty() {
             return None;
         }
-        let nudge = format!(
+        let prompt = format!(
             "Your last reply is JSON but not in the shape the prompt asked for ({}), so it is \
              not the answer. Reply now with only your final answer as a single JSON value in \
              exactly that shape, and nothing else.",
             detailed.join("; ")
         );
-        Some((masked.join("; "), nudge))
+        Some(Nudge {
+            fault: masked.join("; "),
+            prompt,
+        })
     }
 
     async fn tool_round(&mut self, tool_calls: Vec<ToolCall>) -> Result<()> {
-        let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
+        let mut chat = mem::take(&mut self.chat).append_message(tool_calls.clone());
         for call in tool_calls {
             self.completion.enter(Phase::of_tool(&call.fn_name));
             let result = match self.tools.call(&call).await? {
-                Ok(result) => {
+                Ok(output) => {
                     self.repeats.remove(&identity(&call));
-                    result
+                    truncate(output, MAX_RESULT_BYTES)
                 }
-                Err(reason) => self.failed(&call, &reason)?,
+                Err(reason) => self.failed(&call, &truncate(reason, MAX_RESULT_BYTES))?,
             };
-            let result = truncate(result, MAX_RESULT_BYTES);
             self.transcript.turns.push(ToolTurn {
                 tool: call.fn_name,
                 args: call.fn_arguments,
@@ -412,7 +419,7 @@ impl Conversation {
     }
 
     fn refuse(&mut self, tool_calls: Vec<ToolCall>, refusal: &str) {
-        let mut chat = std::mem::take(&mut self.chat).append_message(tool_calls.clone());
+        let mut chat = mem::take(&mut self.chat).append_message(tool_calls.clone());
         for call in tool_calls {
             self.transcript.turns.push(ToolTurn {
                 tool: call.fn_name,
@@ -428,7 +435,7 @@ impl Conversation {
         Answer {
             answer,
             usage,
-            transcript: Some(std::mem::take(&mut self.transcript)),
+            transcript: Some(mem::take(&mut self.transcript)),
         }
     }
 }
@@ -440,6 +447,41 @@ fn at_path(path: &str, fault: impl fmt::Display) -> String {
 fn identity(call: &ToolCall) -> u64 {
     let mut hasher = DefaultHasher::new();
     call.fn_name.hash(&mut hasher);
-    call.fn_arguments.to_string().hash(&mut hasher);
+    call.fn_arguments.hash(&mut hasher);
     hasher.finish()
+}
+
+// Keep both head and tail so the command's start and final verdict remain visible.
+fn truncate(text: String, cap: usize) -> String {
+    if text.len() <= cap {
+        return text;
+    }
+    let head = text.floor_char_boundary(cap / 2);
+    let tail = text.ceil_char_boundary(text.len() - (cap - head));
+    format!("{}\n[… {} bytes omitted …]\n{}", &text[..head], tail - head, &text[tail..])
+}
+
+// Unit tests for result capping; the loop itself is driven by the guests in `tests/model.rs`.
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn within_cap() {
+        assert_eq!(truncate("short".to_owned(), 5), "short");
+        assert_eq!(truncate(String::new(), 0), "");
+    }
+
+    #[test]
+    fn head_and_tail() {
+        let text = "0123456789".to_owned();
+        assert_eq!(truncate(text, 4), "01\n[… 6 bytes omitted …]\n89");
+    }
+
+    #[test]
+    fn char_boundaries() {
+        // each `é` is two bytes, so the tail's byte cut at 5 would split one
+        let text = "éééé".to_owned();
+        assert_eq!(truncate(text, 5), "é\n[… 4 bytes omitted …]\né");
+    }
 }

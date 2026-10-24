@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use genai::chat::{Tool, ToolCall};
 use omnia_sandbox::Access;
-use omnia_wasi_model::ToolHost;
+use omnia_wasi_model::{ToolHost, ToolOutcome};
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::Value;
@@ -17,8 +17,8 @@ use crate::shell::{Run, Shell};
 
 pub const SHELL_TOOL: &str = "shell";
 
-// `Ok` is the tool output; `Err` is a model-visible failure message rather than a fatal host error.
-pub type Repairable<T> = Result<T, String>;
+// `Err` is a failure the model reads and repairs, never a host failure.
+type Repairable<T> = Result<T, String>;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -90,7 +90,9 @@ impl Tools {
         }
     }
 
-    pub async fn call(&self, call: &ToolCall) -> Result<Repairable<String>> {
+    // A shell call is answered before the declared names are checked, so one
+    // made where no shell was advertised is told so rather than told the names.
+    pub async fn call(&self, call: &ToolCall) -> Result<ToolOutcome> {
         let subject = subject(&call.fn_arguments, self.shell.as_ref().map(Shell::cwd));
         tracing::debug!(tool = %call.fn_name, subject = subject.as_deref(), "tool call");
         tracing::trace!(
@@ -106,11 +108,11 @@ impl Tools {
                 Ok(Run { result, exit }) => (Ok(result), Some(exit)),
                 Err(reason) => (Err(reason), None),
             },
-            "read" => (self.read(&call.fn_arguments).await, None),
-            "list" => (self.list(&call.fn_arguments).await, None),
             name if !self.declared.iter().any(|declared| declared == name) => {
                 (Err(self.undeclared(name)), None)
             }
+            "read" => (self.read(&call.fn_arguments).await, None),
+            "list" => (self.list(&call.fn_arguments).await, None),
             _ => (self.guest(call).await?, None),
         };
 
@@ -139,7 +141,7 @@ impl Tools {
         self.host.check(candidate).await
     }
 
-    async fn read(&self, arguments: &Value) -> Repairable<String> {
+    async fn read(&self, arguments: &Value) -> ToolOutcome {
         let ReadArgs { path } = args(arguments)?;
         let bytes = self.host.read(path.clone()).await.map_err(|error| format!("{error:#}"))?;
         let text = String::from_utf8(bytes)
@@ -147,7 +149,7 @@ impl Tools {
         self.within_cap(text)
     }
 
-    async fn list(&self, arguments: &Value) -> Repairable<String> {
+    async fn list(&self, arguments: &Value) -> ToolOutcome {
         let ListArgs { path } = args(arguments)?;
         let entries =
             self.host.list(path.unwrap_or_default()).await.map_err(|error| format!("{error:#}"))?;
@@ -166,14 +168,14 @@ impl Tools {
         Ok(Ok(shell.run(&command).await?))
     }
 
-    async fn guest(&self, call: &ToolCall) -> Result<Repairable<String>> {
+    async fn guest(&self, call: &ToolCall) -> Result<ToolOutcome> {
         self.host
             .call_tool(call.fn_name.clone(), call.fn_arguments.to_string())
             .await
             .with_context(|| format!("calling tool `{}`", call.fn_name))
     }
 
-    fn within_cap(&self, text: String) -> Repairable<String> {
+    fn within_cap(&self, text: String) -> ToolOutcome {
         if text.len() > self.max_result_bytes {
             return Err(format!(
                 "result of {} bytes exceeds the {}-byte cap",
@@ -293,7 +295,7 @@ mod tests {
             .await
             .expect("an undeclared name never reaches the host")
             .expect_err("the slip is the model's to repair");
-        assert_eq!(reason, "`write` is not declared; the tools are `lookup`, `read`");
+        assert_eq!(reason, "`write` is not declared; the tools are `lookup`, `read`, `list`");
 
         let reason = Tools::new(workspace_stub(), None, Vec::new(), CAP)
             .call(&tool_call("write", json!({})))
@@ -301,6 +303,18 @@ mod tests {
             .expect("an undeclared name never reaches the host")
             .expect_err("the slip is the model's to repair");
         assert_eq!(reason, "`write` is not declared; this request declares no tools");
+    }
+
+    // A workspace tool named where no workspace was lent is a slip like any
+    // other: the host, which would fail the read, is never asked.
+    #[tokio::test]
+    async fn unlent_read() {
+        let reason = Tools::new(workspace_stub(), None, vec!["lookup".to_owned()], CAP)
+            .call(&tool_call("read", json!({"path": "refs.md"})))
+            .await
+            .expect("an unadvertised read never reaches the host")
+            .expect_err("the slip is the model's to repair");
+        assert_eq!(reason, "`read` is not declared; the tools are `lookup`");
     }
 
     #[tokio::test]
@@ -360,8 +374,8 @@ mod tests {
         );
     }
 
-    async fn dispatch(name: &str, arguments: Value, cap: usize) -> Result<Repairable<String>> {
-        let declared = vec!["lookup".to_owned(), "read".to_owned()];
+    async fn dispatch(name: &str, arguments: Value, cap: usize) -> Result<ToolOutcome> {
+        let declared = vec!["lookup".to_owned(), "read".to_owned(), "list".to_owned()];
         Tools::new(workspace_stub(), None, declared, cap).call(&tool_call(name, arguments)).await
     }
 

@@ -6,80 +6,118 @@
 Multi-provider generative-AI model backend for the Omnia WASI runtime,
 implementing the `omnia:model/completion` boundary (`wasi-model`).
 
-Wraps the [`genai`](https://crates.io/crates/genai) SDK (`OpenAI`, Anthropic,
-Gemini, Groq, Ollama, …). The backend maps the host-validated `Request`
-(`system` / `messages` channels) to a provider chat request, advertising the
-request's declared function tools — plus the host-injected `read`/`list`
-workspace tools when the guest lent a workspace through `grants.workspace`,
-and the `shell` tool when that workspace sits under one of the configured
-shell roots. The in-process tool loop is driven to completion: `read`/`list`
-execute host-side through the lent `ToolHost` workspace capability (bounded
-by the host; results must be UTF-8 text under the per-result byte cap, and
-failures such as a missing file are fed back to the model as repairable
-text), `shell` runs a command inside the completion's sandbox session (see
-[The shell](#the-shell)), while every other model tool call is forwarded
-through `ToolHost::call_tool` to the guest's session handler. The request's
-`format` rides as the provider `response_format` — steering only; nothing
-here validates the answer. When the request sets `check`, each final text
-the model produces is offered to the guest through `ToolHost::check`: `Ok`
-ends the completion with that candidate, `Err(correction)` appends the
-candidate and the guest's correction to the conversation verbatim and the
-loop goes round; where JSON was asked for, a reply that is not one
-well-formed JSON value, or that is JSON but does not fit the request's
-schema, is nudged once per candidate, with what the parser or the schema
-said of it (each fault at its path), before any candidate reaches the guest
-— in closing rounds that ask for the provider's JSON mode in place of the
-schema, since a provider that ignores the schema answers prose to it, with
-the tools still declared so a provider that caches the prompt by its prefix
-keeps the cache, and a tool call made there refused rather than run, the
-schema returning on a correction round. A call to a tool the request never
-declared is answered as the model's slip — a tool failure saying the name
-is not declared and listing the tools that are, one round lost — in place
-of the host's refusal, which would end the completion. Every tool's result
-reaches the model cut to 64 kibibytes, its head and its tail kept with the
-omitted count between them, so one result cannot fill the context window
-where the host's cap of a mebibyte would let it. Four budgets bound
-a completion,
-and any spent is the typed `budget-exhausted`: every provider round-trip —
-a tool round, a candidate, a nudge, or a correction — draws on `max_rounds`
-(default 128), the last round of which forbids tool calls with the tools
-still declared (`tool_choice` `none`), so a model that would act once more
-answers the question instead where the provider honours it and a call made
-there is refused as in a closing round; the guest's `check` is offered at most `max_candidates`
-candidates (default 2, the count the `omnia-cursor` backend keeps), every
-one but the last corrected once and the rejection of the last failing the
-completion with that correction as the detail; a tool call that fails the
-same way with the same arguments is counted, the model told the count from
-the third, and `max_repeats` such failures (default 5) end the completion
-naming the call, since a model repeating one refused call is not going to
-answer; each reply of the
-model, the tool rounds before it included, runs
-under the `timeout_secs` cap (default 600), a nudge or a correction
-starting a fresh one, so a provider that never answers or a build that
-never ends holds no completion for longer; the host's per-completion
-tool-call limit is answered through `WasiModelCtx::limits()` as
-`max_tool_calls`. Every round carries a `max_tokens`, the request's own or
-`GENAI_MAX_TOKENS` (default 32768), so a reply that runs on is cut short of
-the context window rather than filling it; a reply the provider cut there
-— by its finish reason, or by a bill reaching the bound whatever reason it
-reports, since vLLM answers `tool_calls` for a cut reply its parser
-salvaged a call from — has its tool calls refused rather than run, each
-answered with the cap and told to send smaller calls, since the arguments
-a server hands over from a cut reply are not the ones the model wrote. A request that fails at the
-transport — the connection, before any reply: a server closing an idle
-keep-alive connection as the request is written on it, a tunnel between
-dropping — is put again unchanged after a wait of 1, 5, then 15 seconds,
-since a chat request applies nothing until its reply is read, and only
-past the third is the failure the completion's (`transport`); the
-client's pooled connections are dropped after 2 seconds idle, inside the
-5 seconds uvicorn (vLLM's server) keeps one, so the quick rounds reuse a
-connection and a tool round of a few seconds never hands a request to a
-socket the server is closing. Without a `check` the guest
-sees the model's final text as-is. Whatever the request gets wrong — a
-reserved tool name, a worker grant with no shell to open — is refused
-before any of this starts, and before anything is billed.
+It wraps the [`genai`](https://crates.io/crates/genai) SDK (`OpenAI`,
+Anthropic, Gemini, Groq, Ollama, …) and maps the host-validated `Request`
+(`system` / `messages` channels) to a provider chat request. The tool loop
+runs in-process and is driven to completion. Whatever the request gets wrong
+is refused as `invalid-request` before a provider request is made, and before
+anything is billed: a reserved tool name, an MCP server, a format schema that
+is not a JSON Schema, a worker grant with no shell to open.
 
 MSRV: Rust 1.99
+
+## Tools
+
+The chat advertises the request's declared function tools, and beside them:
+
+- `read` and `list`, when the guest lent a workspace through
+  `grants.workspace`.
+- `shell`, when that workspace sits under one of the configured shell roots
+  (see [The shell](#the-shell)).
+
+Each call the model makes is dispatched by name:
+
+- `read` and `list` execute host-side through the lent `ToolHost` workspace
+  capability, bounded by the host: a result must be UTF-8 text under the
+  per-result byte cap, and a failure such as a missing file is fed back to
+  the model as repairable text.
+- `shell` runs a command inside the completion's sandbox session.
+- Every other call is forwarded through `ToolHost::call_tool` to the guest's
+  session handler.
+- A call to a tool the request never declared is answered as the model's
+  slip, one round lost: a tool failure saying the name is not declared and
+  listing the tools that are, in place of the host's refusal, which would end
+  the completion.
+
+Every result reaches the model cut to 64 kibibytes, its head and its tail
+kept with the omitted count between them, so one result cannot fill the
+context window where the host's cap of a mebibyte would let it.
+
+## Structured output and the guest's check
+
+The request's `format` rides as the provider's `response_format`. It steers
+only: without a `check` the guest sees the model's final text as-is, and
+nothing here validates the answer.
+
+When the request sets `check`, each final text the model produces is offered
+to the guest through `ToolHost::check`:
+
+- `Ok` ends the completion with that candidate.
+- `Err(correction)` appends the candidate and the guest's correction to the
+  conversation verbatim, and the loop goes round.
+
+Where JSON was asked for, a reply that is not one well-formed JSON value, or
+that is JSON but does not fit the request's schema, is nudged once per
+candidate before any candidate reaches the guest. The nudge carries what the
+parser or the schema said of the reply, each fault at its path, and the
+closing rounds it opens:
+
+- ask for the provider's JSON mode in place of the schema, since a provider
+  that ignores the schema answers prose to it;
+- keep the tools declared, so a provider that caches the prompt by its prefix
+  keeps the cache, and refuse rather than run a tool call made there;
+- give the schema back on a correction round.
+
+## Budgets
+
+Four budgets bound a completion, and any spent is the typed
+`budget-exhausted`:
+
+- `max_rounds` (default 128). Every provider round-trip draws on it: a tool
+  round, a candidate, a nudge, or a correction. The last round forbids tool
+  calls with the tools still declared (`tool_choice` `none`), so a model that
+  would act once more answers the question instead where the provider
+  honours it, and a call made there is refused as in a closing round.
+- `max_candidates` (default 2, the count the `omnia-cursor` backend keeps).
+  The guest's `check` is offered at most this many candidates, every one but
+  the last corrected once; the rejection of the last fails the completion
+  with that correction as the detail.
+- `max_repeats` (default 5). A tool call that fails the same way with the
+  same arguments is counted, the model told the count from the third, and
+  this many such failures end the completion naming the call, since a model
+  repeating one refused call is not going to answer.
+- `timeout_secs` (default 600). Each reply of the model, the tool rounds
+  before it included, runs under this cap, a nudge or a correction starting a
+  fresh one, so a provider that never answers or a build that never ends
+  holds no completion for longer.
+
+The host's per-completion tool-call limit is answered through
+`WasiModelCtx::limits()` as `max_tool_calls`.
+
+## The token bound
+
+Every round carries a `max_tokens`, the request's own or `GENAI_MAX_TOKENS`
+(default 32768), so a reply that runs on is cut short of the context window
+rather than filling it. A reply the provider cut there has its tool calls
+refused rather than run, each answered with the cap and told to send smaller
+calls, since the arguments a server hands over from a cut reply are not the
+ones the model wrote. A cut is read off the finish reason, or off a bill
+reaching the bound whatever reason it reports, since vLLM answers
+`tool_calls` for a cut reply its parser salvaged a call from.
+
+## Transport
+
+A request that fails at the transport is put again unchanged after a wait of
+1, 5, then 15 seconds, since a chat request applies nothing until its reply is
+read. The transport is the connection, before any reply: a server closing an
+idle keep-alive connection as the request is written on it, a tunnel between
+dropping. Only past the third wait is the failure the completion's
+(`transport`).
+
+The client's pooled connections are dropped after 2 seconds idle, inside the
+5 seconds uvicorn (vLLM's server) keeps one, so the quick rounds reuse a
+connection and a tool round of a few seconds never hands a request to a
+socket the server is closing.
 
 ## Configuration
 
@@ -247,80 +285,111 @@ let client = Client::connect_with(ConnectOptions {
 Two tiers run on every `cargo nextest run -p omnia-genai --all-features`,
 with no provider and no real key; the third is a real provider, by hand.
 
-**The fake provider.** [`tests/support/fake_openai`](tests/support/fake_openai)
-is a scripted `OpenAI`-compatible chat-completions endpoint served
-in-process on loopback, reached through `ConnectOptions::endpoint` — the
-same seam a self-hosted gateway uses, so the SDK's own request shaping and
-auth are what is under test. It records every request (path, bearer, body),
-answers by a script (`Echo`, `Replies`, `Rounds` — a text, a call, or a
-call cut at the request's `max_tokens` per round, reported as `length` or
-salvaged under `tool_calls` — `ToolCalls` — a list of
-calls answered one per round, then a scripted answer or the last result), can
-gate requests until a fan-out is fully in flight, park replies until the
-test releases them, or fail every request one way (`Status` with an
-optional `Retry-After`, `TruncatedBody`), and bills every reply with one
-fixed usage block when a row opts in (`billed()`), so the bill a run
-reports is that block times the requests answered.
+### The fake provider
 
-**Guests through the runtime.** Every scenario is a guest component from
+[`tests/support/fake_openai`](tests/support/fake_openai) is a scripted
+`OpenAI`-compatible chat-completions endpoint served in-process on loopback.
+It is reached through `ConnectOptions::endpoint`, the same seam a self-hosted
+gateway uses, so the SDK's own request shaping and auth are what is under
+test. It records every request (path, bearer, body), and:
+
+- answers by a script: `Echo`; `Replies`; `Rounds`, a text, a call, or a
+  call cut at the request's `max_tokens` per round, reported as `length` or
+  salvaged under `tool_calls`; `ToolCalls`, a list of calls answered one per
+  round, then a scripted answer or the last result;
+- gates requests until a fan-out is fully in flight, or parks replies until
+  the test releases them;
+- fails every request one way: `Status` with an optional `Retry-After`, or
+  `TruncatedBody`;
+- bills every reply with one fixed usage block when a row opts in
+  (`billed()`), so the bill a run reports is that block times the requests
+  answered.
+
+### Guests through the runtime
+
+Every scenario is a guest component from
 [`crates/test-programs`](../test-programs) run through
-`omnia_test::host::Deployment` over an `omnia_genai::Client`; the test then
-asserts what reached the provider, and, where the row installs a capture
-of the backend's own log (`tests/support/capture.rs`), what the one
-`completion` line said of the run. [`tests/model.rs`](tests/model.rs) is one
-row per guest program (`foreach_model!` fails to compile when a program has
-no row): echo, the three `check` outcomes (the rejected candidate and the
-correction become the next round's turns, the completion `corrected` and
-both rounds on its bill; the second rejection exhausts), a narration reply
-nudged before the JSON that passes (two attempts, `ok`, the closing round
-under JSON mode with the tools still declared), a JSON reply off the schema
-nudged with the fault at its path, a tool call in a closing round refused
-and the JSON after it accepted, a second narration after a correction
-nudged again (the schema back on the correction round), the nudge spending
-the last round, the round budget spent on a model that only calls tools
-(`exhausted`), a call cut at the token bound
-refused rather than run with the round after it open (`cut=1`), under
-`length` and under a `tool_calls` reason with a full bill alike, a tool
-round-trip through `OpenAI` `tool_calls`, a repairable
-tool failure, an undeclared tool answered with the declared names and the
-completion going on, one call failing the same way until the repeat budget
-ends it (`exhausted`, the count named from the third), the repeat budget
-lowered and calls differing in their arguments counted apart, a result past the backend's cap cut to its
-head and tail, the default `max_tokens` on every round and the knob behind
-it, a four-way
-fan-out
-seen in flight at once, tool fan-out with each conversation carrying its
-own result, a fan-out whose losers are dropped mid-request (their requests
-abandoned, no further ones made), a provider failure reaching the guest,
-and a guest tool named `shell` refused. The shell rows run real commands
-inside the sandbox over a lend under a shell root: the grant's variable,
-the proxy, `$WORKSPACE`, and the working directory seen from inside;
-nothing of the host's environment, the provider key among it; a failing
-exit and a signal rendered; a command past the bound killed with the
-process it forked; a command the completion's cap outlives killed the same
-way (`timeout`, one request); two commands sharing one session's `HOME`; a
-shell call with no shell advertised answered as the model's slip; and the
-refusals — a lend outside the roots, no root configured, and a grant the
-sandbox denies. [`tests/provider.rs`](tests/provider.rs) is the fault and
-seam matrix: a 429 with `Retry-After` and a 503 (neither retried; the
-status and the provider's message reach the guest; `provider`), a
-truncated JSON body (`transport`), a connection the server closed as the
-request was written on it (put again unchanged after a wait, `ok` with
-`retries=1`, one request read by the fake), a reply the cap outlives
-(abandoned at the fake, `timeout`), an endpoint without its trailing
-slash, the URLs
-`connect` rejects, and the zero budgets it rejects. Guests are compiled by
-the `test-programs` build script; there is no separate `--target` build to
-run.
+`omnia_test::host::Deployment` over an `omnia_genai::Client`. The test asserts
+what reached the provider and, where the row installs a capture of the
+backend's own log (`tests/support/capture.rs`), what the one `completion`
+line said of the run. Guests are compiled by the `test-programs` build
+script; there is no separate `--target` build to run.
 
-**The real provider.** [`tests/live.rs`](tests/live.rs) drives real
-completions through the `wasi-model` boundary: the in-process tool loop
-with function-tool dispatch, the host-injected `read`/`list` workspace
-tools (the model discovers and reads a file the prompt never names), the
-shell (the model runs `cargo --version` under the Rust toolchain's grant
-and answers with its first line), and the guest `check` loop (a stand-in
-check rejects the first candidate with a correction the model must follow,
-and one that rejects every candidate proves the typed `budget-exhausted`).
+[`tests/model.rs`](tests/model.rs) is one row per guest program
+(`foreach_model!` fails to compile when a program has no row):
+
+- an echoed reply
+- the three `check` outcomes: the rejected candidate and the correction
+  become the next round's turns, the completion `corrected` and both rounds
+  on its bill, and the second rejection exhausts
+- a narration reply nudged before the JSON that passes (two attempts, `ok`,
+  the closing round under JSON mode with the tools still declared)
+- a JSON reply off the schema nudged with the fault at its path
+- a tool call in a closing round refused, and the JSON after it accepted
+- a second narration after a correction nudged again, the schema back on the
+  correction round
+- the nudge spending the last round
+- the round budget spent on a model that only calls tools (`exhausted`)
+- a call cut at the token bound refused rather than run, with the round
+  after it open (`cut=1`), under `length` and under a `tool_calls` reason
+  with a full bill alike
+- a tool round-trip through `OpenAI` `tool_calls`
+- a repairable tool failure
+- an undeclared tool answered with the declared names, the completion going
+  on
+- one call failing the same way until the repeat budget ends it
+  (`exhausted`, the count named from the third)
+- the repeat budget lowered, and calls differing in their arguments counted
+  apart
+- a result past the backend's cap cut to its head and tail
+- the default `max_tokens` on every round, and the knob behind it
+- a four-way fan-out seen in flight at once
+- tool fan-out with each conversation carrying its own result
+- a fan-out whose losers are dropped mid-request: their requests abandoned,
+  no further ones made
+- a provider failure reaching the guest
+- a guest tool named `shell` refused
+
+The shell rows run real commands inside the sandbox over a lend under a
+shell root:
+
+- the grant's variable, the proxy, `$WORKSPACE`, and the working directory
+  seen from inside, and nothing of the host's environment, the provider key
+  among it
+- a failing exit and a signal rendered
+- a command past the bound killed with the process it forked, and a command
+  the completion's cap outlives killed the same way (`timeout`, one request)
+- two commands sharing one session's `HOME`
+- a shell call with no shell advertised answered as the model's slip
+- the refusals: a lend outside the roots, no root configured, and a grant
+  the sandbox denies
+
+[`tests/provider.rs`](tests/provider.rs) is the fault and seam matrix:
+
+- a 429 with `Retry-After` and a 503: neither retried, the status and the
+  provider's message reaching the guest (`provider`)
+- a truncated JSON body (`transport`)
+- a connection the server closed as the request was written on it: put
+  again unchanged after a wait, `ok` with `retries=1`, one request read by
+  the fake
+- a reply the cap outlives: abandoned at the fake, `timeout`
+- an endpoint without its trailing slash
+- the URLs `connect` rejects, and the zero budgets it rejects
+
+### The real provider
+
+[`tests/live.rs`](tests/live.rs) drives real completions through the
+`wasi-model` boundary:
+
+- the in-process tool loop with function-tool dispatch
+- the host-injected `read`/`list` workspace tools: the model discovers and
+  reads a file the prompt never names
+- the shell: the model runs `cargo --version` under the Rust toolchain's
+  grant and answers with its first line
+- the guest `check` loop: a stand-in check rejects the first candidate with
+  a correction the model must follow, and one that rejects every candidate
+  proves the typed `budget-exhausted`
+
 They are `#[ignore]`d so they never touch the network in CI; run them with
 a provider key:
 

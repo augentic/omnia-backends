@@ -1,5 +1,4 @@
-//! The `shell` tool's command: `sh -c` inside the completion's sandbox
-//! session, what it wrote rendered for the model.
+//! Sandboxed `shell` tool execution and output formatting.
 
 use std::fmt::Write as _;
 use std::os::unix::process::ExitStatusExt as _;
@@ -10,12 +9,10 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use omnia_sandbox::{Session, TimedOut};
 
-// What a shell inherits of the host's environment beyond `PATH`: who runs
-// it, and where the system's certificates are.
+// Host environment variables inherited by the shell beyond `PATH`.
 pub const INHERIT: &[&str] = &["USER", "LOGNAME", "SSL_CERT_FILE", "SSL_CERT_DIR"];
 
-// The provider keys the SDK reads from the process environment, which no
-// grant may set for a shell.
+// Provider API keys blocked from worker grants.
 pub const REFUSED: &[&str] = &[
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -31,42 +28,30 @@ pub const REFUSED: &[&str] = &[
 pub struct Shell {
     session: Session,
     timeout: Duration,
-    max_result_bytes: usize,
 }
 
-// One command as it came out: the result the model reads, and the exit as
-// the log carries it (`0`, `3`, `signal 9`, `timed out`).
+// What the model reads of a command, and the exit the log line carries.
 pub struct Run {
     pub result: String,
     pub exit: String,
 }
 
 impl Shell {
-    pub const fn new(session: Session, timeout: Duration, max_result_bytes: usize) -> Self {
-        Self {
-            session,
-            timeout,
-            max_result_bytes,
-        }
+    pub const fn new(session: Session, timeout: Duration) -> Self {
+        Self { session, timeout }
     }
 
-    // The directory the commands run in, canonical.
     pub fn cwd(&self) -> &Path {
         self.session.cwd()
     }
 
-    // The result is the command's stdout, its stderr under a marker where
-    // any, its exit under one where not clean, cut to the cap. A command
-    // past the timeout is killed with everything it started and told so as
-    // a result the model can act on; one the host cannot spawn or wait on
-    // is the completion's failure.
     pub async fn run(&self, command: &str) -> Result<Run> {
         let mut process =
             self.session.command("sh").context("resolving `sh` for the shell tool")?;
         process.args(["-c", command]).env("WORKSPACE", self.cwd());
         match process.output(self.timeout).await {
             Ok(output) => Ok(Run {
-                result: truncate(render(&output), self.max_result_bytes),
+                result: render(&output),
                 exit: exit_of(output.status),
             }),
             Err(error) => match error.downcast::<TimedOut>() {
@@ -85,18 +70,6 @@ impl Shell {
             },
         }
     }
-}
-
-// A result past the cap keeps its head and its tail with the omitted count
-// between them, since a log's start names the step and its end holds the
-// verdict. The cuts fall on character boundaries.
-pub fn truncate(text: String, cap: usize) -> String {
-    if text.len() <= cap {
-        return text;
-    }
-    let head = text.floor_char_boundary(cap / 2);
-    let tail = text.ceil_char_boundary(text.len() - (cap - head));
-    format!("{}\n[… {} bytes omitted …]\n{}", &text[..head], tail - head, &text[tail..])
 }
 
 fn render(output: &Output) -> String {
@@ -130,37 +103,10 @@ fn end_line(text: &mut String) {
     }
 }
 
-// `0`, `3`, or `signal 9`, as the log carries it.
 fn exit_of(status: ExitStatus) -> String {
     match (status.code(), status.signal()) {
         (Some(code), _) => code.to_string(),
         (None, Some(signal)) => format!("signal {signal}"),
         (None, None) => "unknown".to_owned(),
-    }
-}
-
-// The truncation of a result alone; a command run in a session, its
-// rendering included, is the `model` suite's.
-#[cfg(test)]
-mod tests {
-    use super::truncate;
-
-    #[test]
-    fn within_cap() {
-        assert_eq!(truncate("short".to_owned(), 5), "short");
-        assert_eq!(truncate(String::new(), 0), "");
-    }
-
-    #[test]
-    fn head_and_tail() {
-        let text = "0123456789".to_owned();
-        assert_eq!(truncate(text, 4), "01\n[… 6 bytes omitted …]\n89");
-    }
-
-    #[test]
-    fn char_boundaries() {
-        // each `é` is two bytes, so the tail's byte cut at 5 would split one
-        let text = "éééé".to_owned();
-        assert_eq!(truncate(text, 5), "é\n[… 4 bytes omitted …]\né");
     }
 }

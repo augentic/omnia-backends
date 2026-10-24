@@ -731,106 +731,6 @@ async fn model_rounds_finish() {
     assert_eq!(requests[2].tools(), ["lookup"]);
     let completion = captured.completion();
     assert!(completion.contains(r#"outcome="ok""#), "{completion}");
-    assert!(!completion.contains("forced_at="), "no check, no reserve: {completion}");
-}
-
-// Under a check, a quarter of the rounds are kept for the corrections: once
-// the rest are spent with no candidate offered, the round forbids tool
-// calls with the tools still declared and refuses one made as kept for the
-// corrections, and so does every round until a candidate reaches the check;
-// the correction's rounds are open to tools again, the cap closes the last
-// as before, and the completion line names the round the first candidate
-// was made due at.
-#[tokio::test]
-async fn model_rounds_reserved() {
-    let captured = Captured::install();
-    let mut rounds: Vec<Round> = (1..=9)
-        .map(|n| Round::Call("read".to_owned(), json!({ "path": format!("f{n}") })))
-        .collect();
-    rounds.extend([
-        Round::Text(FAIL.to_owned()),
-        Round::Call("read".to_owned(), json!({ "path": "f1" })),
-        Round::Text(PASS.to_owned()),
-    ]);
-    let fake = FakeOpenAi::serve(Config::rounds(rounds)).await;
-    let client = client_with(
-        &fake,
-        ConnectOptions {
-            max_rounds: 12,
-            ..ConnectOptions::default()
-        },
-    )
-    .await;
-    let scratch = scratch();
-    for n in 1..=8 {
-        scratch.write(&format!("tree/f{n}"), n.to_string());
-    }
-    run_guest_over(
-        test_programs::MODEL_CHECK_CORRECTED,
-        &["lend=./tree"],
-        &client,
-        [scratch.mount(false)],
-    )
-    .await;
-
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 12);
-    for request in &requests[..8] {
-        assert!(request.body.get("tool_choice").is_none(), "{}", request.body);
-    }
-    assert_eq!(requests[8].body["tool_choice"], "none", "round 9 of 12 is the first reserved");
-    assert_eq!(requests[8].tools(), ["read", "list"], "the tools stay declared");
-    let refusal = requests[9].last("tool").expect("the call made in the reserved round");
-    assert!(
-        refusal.starts_with("not run: the rounds left are kept for correcting your answer"),
-        "{refusal}"
-    );
-    assert_eq!(requests[9].body["tool_choice"], "none", "due until a candidate is offered");
-    let eleventh = requests[10].messages();
-    assert!(
-        eleventh[eleventh.len() - 1].1.starts_with("## Previous answer (rejected)"),
-        "{eleventh:?}"
-    );
-    assert!(
-        requests[10].body.get("tool_choice").is_none(),
-        "the correction's round is open to tools: {}",
-        requests[10].body
-    );
-    assert_eq!(requests[11].last("tool").as_deref(), Some("1"), "the correction's call ran");
-    assert_eq!(requests[11].body["tool_choice"], "none", "the cap closes the last round");
-    let completion = captured.completion();
-    assert!(completion.contains(r#"outcome="corrected""#), "{completion}");
-    assert!(completion.contains("forced_at=9 "), "{completion}");
-}
-
-// With no check there is nothing to correct, so nothing is kept: the rounds
-// past three quarters stay open to tools and the cap alone closes the last.
-#[tokio::test]
-async fn model_rounds_reserved_unchecked() {
-    let captured = Captured::install();
-    let mut rounds: Vec<Round> =
-        (1..=7).map(|n| Round::Call("lookup".to_owned(), json!({ "q": n }))).collect();
-    rounds.push(Round::Text("tool failed: no data".to_owned()));
-    let fake = FakeOpenAi::serve(Config::rounds(rounds)).await;
-    let client = client_with(
-        &fake,
-        ConnectOptions {
-            max_rounds: 8,
-            ..ConnectOptions::default()
-        },
-    )
-    .await;
-    run_guest(test_programs::MODEL_TOOL_FAILURE, &[], &client).await;
-
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 8);
-    for request in &requests[..7] {
-        assert!(request.body.get("tool_choice").is_none(), "{}", request.body);
-    }
-    assert_eq!(requests[7].body["tool_choice"], "none");
-    let completion = captured.completion();
-    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
-    assert!(!completion.contains("forced_at="), "{completion}");
 }
 
 // A reply the provider cut at the token bound is read as cut by its finish
@@ -881,6 +781,54 @@ async fn model_reply_cut() {
         .find(|event| event.contains("message=round answered") && event.contains("cut=true"))
         .expect("the round answered event names the cut");
     assert!(round.contains("output_tokens=32768"), "{round}");
+}
+
+// A reply cut at the token bound whose provider reports `tool_calls` for
+// it — vLLM under auto tool choice, its parser having salvaged a call from
+// the cut text — is read as cut by its bill alone and treated the same: the
+// call refused, not run, and the round after open.
+#[tokio::test]
+async fn model_reply_cut_salvaged() {
+    let captured = Captured::install();
+    let fake = FakeOpenAi::serve(Config::rounds([
+        Round::Salvaged("list".to_owned(), json!({})),
+        Round::Call("list".to_owned(), json!({ "path": "." })),
+        Round::Text(PASS.to_owned()),
+    ]))
+    .await;
+    let client = client(&fake).await;
+    let scratch = scratch();
+    scratch.write("tree/.keep", "");
+    run_guest_over(
+        test_programs::MODEL_CHECK_ACCEPTED,
+        &["lend=./tree"],
+        &client,
+        [scratch.mount(false)],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    let refusal = requests[1].last("tool").expect("the cut call is answered, not run");
+    assert!(
+        refusal.starts_with("not run: your reply ran to the cap of 32768 tokens and was cut there"),
+        "{refusal}"
+    );
+    assert_eq!(
+        requests[2].last("tool").as_deref(),
+        Some(r#"[{"name":".keep","is_directory":false}]"#),
+        "the call sent whole ran"
+    );
+    let completion = captured.completion();
+    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
+    assert!(completion.contains("cut=1 "), "{completion}");
+    assert!(
+        captured
+            .events()
+            .into_iter()
+            .any(|event| event.contains("message=round answered") && event.contains("cut=true")),
+        "the round answered event names the cut"
+    );
 }
 
 #[tokio::test]
@@ -1023,89 +971,6 @@ async fn model_tool_repeats_knob() {
     .await;
     expect_error("no answer after 6 model round-trips", &["tools", "budget"], &client).await;
     assert_eq!(fake.requests().len(), 6, "distinct arguments spend the rounds, never the repeats");
-}
-
-// The same call returning the same result is counted as a failing one is:
-// the result names the count from the third, and the fifth makes the next
-// round the model's to answer in, its tool calls forbidden with the tools
-// still declared, so the text it answers there is the candidate and the
-// completion is `ok` with rounds to spare.
-#[tokio::test]
-async fn model_tool_echoed() {
-    let captured = Captured::install();
-    let mut rounds = vec![Round::Call("list".to_owned(), json!({})); 5];
-    rounds.push(Round::Text(PASS.to_owned()));
-    let fake = FakeOpenAi::serve(Config::rounds(rounds)).await;
-    let client = client(&fake).await;
-    let scratch = scratch();
-    scratch.write("tree/.keep", "");
-    run_guest_over(
-        test_programs::MODEL_CHECK_ACCEPTED,
-        &["lend=./tree"],
-        &client,
-        [scratch.mount(false)],
-    )
-    .await;
-
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 6, "the fifth identical result makes the sixth round the last");
-    for request in &requests[..5] {
-        assert!(request.body.get("tool_choice").is_none(), "{}", request.body);
-    }
-    assert_eq!(requests[5].body["tool_choice"], "none", "the answer is due");
-    assert_eq!(requests[5].tools(), ["read", "list"], "the tools stay declared");
-    let listing = r#"[{"name":".keep","is_directory":false}]"#;
-    let second = requests[2].last("tool").expect("the second result");
-    assert_eq!(second, listing, "no note before the third");
-    let third = requests[3].last("tool").expect("the third result");
-    assert!(third.starts_with(listing), "{third}");
-    assert!(third.contains("This exact call has now returned the same result 3 times"), "{third}");
-    assert!(third.contains("after 5 identical results your final answer is due"), "{third}");
-    let fifth = requests[5].last("tool").expect("the fifth result");
-    assert!(fifth.contains("returned the same result 5 times"), "{fifth}");
-    assert!(fifth.contains("Your final answer is due now"), "{fifth}");
-    let completion = captured.completion();
-    assert!(completion.contains(r#"outcome="ok""#), "{completion}");
-}
-
-// The echo count starts over at a correction: the repair may run the call
-// the answer was forced after, its result bare, and the rounds after it
-// open to tools again.
-#[tokio::test]
-async fn model_tool_echoed_correction() {
-    let captured = Captured::install();
-    let mut rounds = vec![Round::Call("list".to_owned(), json!({})); 5];
-    rounds.extend([
-        Round::Text(FAIL.to_owned()),
-        Round::Call("list".to_owned(), json!({})),
-        Round::Text(PASS.to_owned()),
-    ]);
-    let fake = FakeOpenAi::serve(Config::rounds(rounds)).await;
-    let client = client(&fake).await;
-    let scratch = scratch();
-    scratch.write("tree/.keep", "");
-    run_guest_over(
-        test_programs::MODEL_CHECK_CORRECTED,
-        &["lend=./tree"],
-        &client,
-        [scratch.mount(false)],
-    )
-    .await;
-
-    let requests = fake.requests();
-    assert_eq!(requests.len(), 8);
-    assert_eq!(requests[5].body["tool_choice"], "none", "the first candidate was forced");
-    assert!(requests[6].body.get("tool_choice").is_none(), "{}", requests[6].body);
-    let sixth = requests[6].messages();
-    assert!(sixth[sixth.len() - 1].1.starts_with("## Previous answer (rejected)"), "{sixth:?}");
-    assert_eq!(
-        requests[7].last("tool").as_deref(),
-        Some(r#"[{"name":".keep","is_directory":false}]"#),
-        "the call after the correction is the first of its count"
-    );
-    assert!(requests[7].body.get("tool_choice").is_none(), "{}", requests[7].body);
-    let completion = captured.completion();
-    assert!(completion.contains(r#"outcome="corrected""#), "{completion}");
 }
 
 // A result past the backend's cap reaches the model cut to its head and

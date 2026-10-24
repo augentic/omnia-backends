@@ -42,14 +42,16 @@ pub enum Script {
 }
 
 /// One scripted round: the model's text, one tool call, or one tool call
-/// the provider cut at the request's `max_tokens` — `finish_reason`
-/// `length`, its completion tokens the bound — as a server parses what a
-/// reply cut mid-call left.
+/// the provider cut at the request's `max_tokens`, its completion tokens
+/// the bound — `Cut` under `finish_reason` `length`, as a server parses
+/// what a reply cut mid-call left; `Salvaged` under `tool_calls`, as vLLM
+/// reports a cut reply its parser salvaged a call from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Round {
     Text(String),
     Call(String, Value),
     Cut(String, Value),
+    Salvaged(String, Value),
 }
 
 /// How every request fails, when one does.
@@ -433,6 +435,14 @@ async fn handle(
             Some(Round::Cut(name, args)) => {
                 let mut body = completion(None, Some(tool_call(round, name, args)));
                 body["choices"][0]["finish_reason"] = json!("length");
+                body["usage"] = json!({
+                    "prompt_tokens": 30,
+                    "completion_tokens": recorded.body["max_tokens"],
+                });
+                body
+            }
+            Some(Round::Salvaged(name, args)) => {
+                let mut body = completion(None, Some(tool_call(round, name, args)));
                 body["usage"] = json!({
                     "prompt_tokens": 30,
                     "completion_tokens": recorded.body["max_tokens"],

@@ -1,8 +1,8 @@
 //! In-process `wasi-model` backend.
 //!
 //! Each validated [`Request`] becomes a provider conversation bounded by the
-//! configured budgets. Invalid requests fail before workspace access is
-//! resolved.
+//! configured budgets. Invalid requests fail before a shell session is
+//! prepared and before any provider request is made.
 //!
 //! Available tools depend on the request and its lend:
 //!
@@ -26,9 +26,9 @@ use tracing::{Instrument, info_span};
 
 use crate::Client;
 use crate::conversation::Conversation;
-use crate::request::Turn;
+use crate::request::PreparedRequest;
 use crate::shell::Shell;
-use crate::tools::{Tools, workspace_tools};
+use crate::tools::Tools;
 
 static COMPLETION_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -38,7 +38,6 @@ impl WasiModelCtx for Client {
         let model = request.model.as_deref().unwrap_or(&self.model);
         let n = COMPLETION_ID.fetch_add(1, Ordering::Relaxed) + 1;
 
-        // a schema's name is the guest's label for the question it asks
         let span = info_span!("complete", n, model, format = %request.format, label = Empty);
         if let Format::Schema(schema) = &request.format {
             span.record("label", schema.name.as_str());
@@ -59,23 +58,18 @@ impl WasiModelCtx for Client {
 }
 
 impl Client {
-    // The request is translated before the lend is resolved, and the lend
-    // resolved before a session is prepared, so what the request gets wrong
-    // is refused with the least work done.
     async fn stage(
         &self, request: &Request, tool_host: Arc<dyn ToolHost>,
     ) -> anyhow::Result<Conversation> {
         let workspace = tool_host.local_path();
-        let mut turn = Turn::translate(request, &self.model, self.max_tokens)?;
         let access = self.access(workspace).await?;
+        let prepared = PreparedRequest::translate(request, &self.model, self.max_tokens, access)?;
         let shell = self.shell(request, access, workspace).await?;
-        turn.advertise(workspace_tools(access));
-        let tools = Tools::new(tool_host, shell, turn.declared(), self.limits().max_result_bytes);
-        Ok(Conversation::new(self.inner.clone(), turn, tools, self.budgets))
+        let tools =
+            Tools::new(tool_host, shell, prepared.declared(), self.limits().max_result_bytes);
+        Ok(Conversation::new(self.inner.clone(), prepared, tools, self.budgets))
     }
 
-    // What runs in the lend: the sandbox's answer where one is connected,
-    // reads alone where none is.
     async fn access(&self, workspace: Option<&Path>) -> anyhow::Result<Access> {
         match &self.sandbox {
             Some(sandbox) => sandbox.access(workspace).await,
@@ -84,10 +78,6 @@ impl Client {
         }
     }
 
-    // A session is prepared only where the lend opens a shell. A worker
-    // grant needs one: a worker reaches beyond its workspace through the
-    // commands it runs there, so a grant over a read-only workspace, or
-    // under a deployment with no shell root, is the request's fault.
     async fn shell(
         &self, request: &Request, access: Access, workspace: Option<&Path>,
     ) -> anyhow::Result<Option<Shell>> {
@@ -112,12 +102,10 @@ impl Client {
             env: worker.env.clone(),
         });
         let session = sandbox.prepare(workspace, &grant).await.map_err(refusal)?;
-        Ok(Some(Shell::new(session, self.shell_timeout, self.limits().max_result_bytes)))
+        Ok(Some(Shell::new(session, self.shell_timeout)))
     }
 }
 
-// A session the sandbox denied for the grant's fault is the request's; a host
-// failure stays the backend's.
 fn refusal(error: anyhow::Error) -> anyhow::Error {
     match error.downcast::<Denied>() {
         Ok(denied) => Error::InvalidRequest(format!("worker grant: {denied}")).into(),

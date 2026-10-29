@@ -5,9 +5,10 @@ mod types;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use deadpool_postgres::{Pool, PoolConfig, Runtime};
+use deadpool_postgres::{ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime, Timeouts};
 use omnia::Backend;
 use rustls::crypto::{CryptoProvider, ring};
 use rustls::{ClientConfig, RootCertStore};
@@ -46,7 +47,15 @@ impl Backend for Client {
             pool_config.url = Some(entry.uri.clone());
             pool_config.pool = Some(PoolConfig {
                 max_size: entry.pool_size,
+                timeouts: Timeouts {
+                    wait: Some(WAIT_TIMEOUT),
+                    create: Some(CREATE_TIMEOUT),
+                    recycle: Some(RECYCLE_TIMEOUT),
+                },
                 ..PoolConfig::default()
+            });
+            pool_config.manager = Some(ManagerConfig {
+                recycling_method: RecyclingMethod::Verified,
             });
 
             let pool = if use_tls {
@@ -94,11 +103,37 @@ impl Backend for Client {
                 entry.name,
                 use_tls
             );
+            reap_idle(&pool);
             pools.insert(entry.name.clone(), pool);
         }
 
         Ok(Self(pools))
     }
+}
+
+// Kept well under Azure's ~4 minute idle TCP timeout, so no pooled connection
+// lives long enough to be silently dropped by the network.
+const REAP_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_IDLE: Duration = Duration::from_secs(60);
+
+// Per-step limits that stack within one checkout: a checkout pays
+// `RECYCLE_TIMEOUT` once per dead idle connection, then `CREATE_TIMEOUT`.
+// With every connection dead that is 10 s at pool size 10, inside the 15 s
+// checkout cap in `sql.rs` up to pool size 20.
+const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+const CREATE_TIMEOUT: Duration = Duration::from_secs(5);
+const RECYCLE_TIMEOUT: Duration = Duration::from_millis(500);
+
+// Holds a weak handle so the task ends once every `Client` clone is dropped.
+fn reap_idle(pool: &Pool) {
+    let weak = pool.weak();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(REAP_INTERVAL).await;
+            let Some(pool) = weak.upgrade() else { break };
+            pool.retain(|_, metrics| metrics.last_used() < MAX_IDLE);
+        }
+    });
 }
 
 /// A named connection pool entry.

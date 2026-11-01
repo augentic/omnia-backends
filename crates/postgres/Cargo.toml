@@ -33,7 +33,5 @@ tokio-postgres-rustls = { version = "0.14.0", default-features = false }
 tracing.workspace = true
 webpki-roots = { version = "1.0.10", default-features = false }
 
-# The live test (`tests/live.rs`) is a separate crate; it needs tokio's macros,
-# multi-threaded runtime and networking, which the library does not enable.
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

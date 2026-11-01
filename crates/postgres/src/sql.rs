@@ -1,7 +1,6 @@
 use std::convert::TryFrom;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -12,10 +11,6 @@ use tokio_postgres::row::Row as PgRow;
 
 use crate::Client;
 use crate::types::{Param, ParamRef, PgType};
-
-// Half a guest's 30 s budget. A larger pool whose connections all died may
-// need more than one checkout to clear them, since each discards what it checked.
-const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl WasiSqlCtx for Client {
     fn open(&self, name: String) -> FutureResult<Arc<dyn Connection>> {
@@ -29,10 +24,7 @@ impl WasiSqlCtx for Client {
             }
         };
         async move {
-            let cnn = tokio::time::timeout(CHECKOUT_TIMEOUT, pool.get())
-                .await
-                .context("timed out getting connection")?
-                .context("issue getting connection")?;
+            let cnn = pool.get().await.context("issue getting connection")?;
             Ok(Arc::new(PostgresConnection(Arc::new(cnn))) as Arc<dyn Connection>)
         }
         .boxed()

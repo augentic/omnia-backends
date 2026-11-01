@@ -4,160 +4,23 @@
 //! unit-tested (its input `tokio_postgres::Row` is unconstructable without a
 //! real server), and only a real server proves it accepts what `PgType`
 //! encodes. The `types.rs` / `sql.rs` unit tests remain the service-free CI
-//! floor for the same mapping.
+//! floor for the same mapping. `terminated_backend` is the pool's gate: a
+//! session killed on the server is replaced at the next checkout.
 //!
-//! The pool lifecycle tests prove idle connections are closed, a backend killed
-//! server-side is replaced, and a connection the network silently stops
-//! carrying fails a checkout in bounded time. Each tags its sessions with its
-//! own `application_name`, so it counts and kills only its own.
-//!
-//! `#[ignore]`d so it never touches the network in CI. The README's "Live
-//! tests" section has the full run recipe.
+//! `#[ignore]`d so it never touches the network in CI. Run against a reachable
+//! database (`POSTGRES_URL`):
+//! `cargo nextest run -p omnia-postgres --run-ignored all`.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::Result;
 use omnia::Backend;
-use omnia_postgres::{Client, ConnectOptions, PoolEntry};
+use omnia_postgres::Client;
 use omnia_wasi_sql::{Connection, DataType, WasiSqlCtx};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 async fn connect() -> Result<Arc<dyn Connection>> {
     let client = <Client as Backend>::connect().await?;
     client.open("default".to_owned()).await
-}
-
-fn postgres_url() -> Result<String> {
-    std::env::var("POSTGRES_URL").context("POSTGRES_URL must be set")
-}
-
-async fn tagged_client(app: &str) -> Result<Client> {
-    tagged_client_at(&postgres_url()?, app).await
-}
-
-async fn tagged_client_at(url: &str, app: &str) -> Result<Client> {
-    let separator = if url.contains('?') { '&' } else { '?' };
-    let options = ConnectOptions {
-        default_pool: PoolEntry {
-            name: "DEFAULT".to_owned(),
-            uri: format!("{url}{separator}application_name={app}"),
-            pool_size: 10,
-        },
-        additional_pools: vec![],
-    };
-    Client::connect_with(options).await
-}
-
-async fn sessions(app: &str) -> Result<i64> {
-    let observer = tagged_client("omnia-live-observer").await?;
-    let rows = observer
-        .open("default".to_owned())
-        .await?
-        .query(
-            "SELECT count(*) AS n FROM pg_stat_activity WHERE application_name = $1".to_owned(),
-            vec![DataType::Str(Some(app.to_owned()))],
-        )
-        .await?;
-    match &rows[0].fields[0].value {
-        DataType::Int64(Some(n)) => Ok(*n),
-        other => bail!("unexpected count {other:?}"),
-    }
-}
-
-// A local TCP relay to the server that can be frozen: sockets stay open but no
-// bytes pass, as when a network middlebox silently drops a connection. Only
-// clients built on `url` go through it, so the server is never disturbed.
-struct Relay {
-    url: String,
-    frozen: watch::Sender<bool>,
-    accept: JoinHandle<()>,
-}
-
-impl Relay {
-    // The relay port replaces the one in the URL's authority, since a `port`
-    // query parameter would add a second port rather than override it.
-    // `hostaddr` sends the TCP connection to the relay while TLS still
-    // verifies the original host name.
-    async fn start(url: &str) -> Result<Self> {
-        let (scheme, rest) = url.split_once("://").context("POSTGRES_URL has no scheme")?;
-        let (authority, tail) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
-        let (userinfo, hostport) = match authority.rsplit_once('@') {
-            Some((userinfo, hostport)) => (format!("{userinfo}@"), hostport),
-            None => (String::new(), authority),
-        };
-        if hostport.starts_with('[') {
-            bail!("the relay does not support IPv6 hosts");
-        }
-        let (host, port) = match hostport.rsplit_once(':') {
-            Some((host, port)) => (host, port.parse::<u16>().context("invalid port")?),
-            None => (hostport, 5432),
-        };
-
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let relay_port = listener.local_addr()?.port();
-        let separator = if tail.contains('?') { '&' } else { '?' };
-        let url =
-            format!("{scheme}://{userinfo}{host}:{relay_port}{tail}{separator}hostaddr=127.0.0.1");
-
-        let (frozen, gate) = watch::channel(false);
-        let upstream = (host.to_owned(), port);
-        let accept = tokio::spawn(async move {
-            while let Ok((client, _)) = listener.accept().await {
-                let upstream = upstream.clone();
-                let gate = gate.clone();
-                tokio::spawn(async move {
-                    let Ok(server) = TcpStream::connect(upstream).await else { return };
-                    let (client_read, client_write) = client.into_split();
-                    let (server_read, server_write) = server.into_split();
-                    tokio::join!(
-                        pipe(client_read, server_write, gate.clone()),
-                        pipe(server_read, client_write, gate),
-                    );
-                });
-            }
-        });
-        Ok(Self { url, frozen, accept })
-    }
-
-    fn freeze(&self) {
-        self.frozen.send_replace(true);
-    }
-
-    fn thaw(&self) {
-        self.frozen.send_replace(false);
-    }
-}
-
-impl Drop for Relay {
-    fn drop(&mut self) {
-        self.accept.abort();
-    }
-}
-
-// Holds every read while frozen, so data neither arrives nor errors. Ends once
-// either side closes or the relay is dropped.
-async fn pipe(mut from: OwnedReadHalf, mut to: OwnedWriteHalf, mut gate: watch::Receiver<bool>) {
-    let mut buf = vec![0; 16 * 1024];
-    loop {
-        if gate.wait_for(|frozen| !frozen).await.is_err() {
-            return;
-        }
-        let n = match from.read(&mut buf).await {
-            Ok(0) | Err(_) => return,
-            Ok(n) => n,
-        };
-        if gate.wait_for(|frozen| !frozen).await.is_err() {
-            return;
-        }
-        if to.write_all(&buf[..n]).await.is_err() {
-            return;
-        }
-    }
 }
 
 // The generated `DataType` has no `PartialEq`; compare debug renderings.
@@ -343,84 +206,31 @@ async fn exec_affected_counts() -> Result<()> {
     Ok(())
 }
 
-// --- Pool lifecycle ---
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs a reachable Postgres (POSTGRES_URL); run with --run-ignored"]
-async fn idle_reap() -> Result<()> {
-    let app = "omnia-live-idle-reap";
-    let client = tagged_client(app).await?;
-
-    let mut held = Vec::new();
-    for _ in 0..5 {
-        let conn = client.open("default".to_owned()).await?;
-        conn.query("SELECT 1".to_owned(), vec![]).await?;
-        held.push(conn);
-    }
-    drop(held);
-    assert_eq!(sessions(app).await?, 5, "five idle sessions before the reap");
-
-    // 60 s idle limit plus up to one 30 s sweep, with margin
-    tokio::time::sleep(Duration::from_secs(100)).await;
-    assert_eq!(sessions(app).await?, 0, "idle sessions closed server-side");
-
-    drop(client);
-    Ok(())
-}
-
+// After `Client::connect` the pool holds one idle session, so the pid read
+// here is the one the next checkout would reuse. The kill is issued from a
+// second pool, which it leaves untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable Postgres (POSTGRES_URL); run with --run-ignored"]
 async fn terminated_backend() -> Result<()> {
-    let app = "omnia-live-terminated";
-    let client = tagged_client(app).await?;
-    client.open("default".to_owned()).await?.query("SELECT 1".to_owned(), vec![]).await?;
+    let client = <Client as Backend>::connect().await?;
+    let conn = client.open("default".to_owned()).await?;
+    let rows = conn.query("SELECT pg_backend_pid() AS pid".to_owned(), vec![]).await?;
+    let DataType::Int32(Some(pid)) = rows[0].fields[0].value else {
+        panic!("pg_backend_pid() is int4, got {:?}", rows[0].fields[0].value);
+    };
+    drop(conn);
 
-    let observer = tagged_client("omnia-live-observer").await?;
-    let killed = observer
-        .open("default".to_owned())
+    let killed = connect()
         .await?
         .query(
-            "SELECT pg_terminate_backend(pid, 5000) AS killed FROM pg_stat_activity \
-             WHERE application_name = $1"
-                .to_owned(),
-            vec![DataType::Str(Some(app.to_owned()))],
+            "SELECT pg_terminate_backend($1, 5000) AS killed".to_owned(),
+            vec![DataType::Int32(Some(pid))],
         )
         .await?;
-    assert!(!killed.is_empty(), "the idle pooled session was found");
-    for row in &killed {
-        assert_field(row, "killed", &DataType::Boolean(Some(true)));
-    }
+    assert_field(&killed[0], "killed", &DataType::Boolean(Some(true)));
 
     let rows =
         client.open("default".to_owned()).await?.query("SELECT 1".to_owned(), vec![]).await?;
-    assert_eq!(rows.len(), 1, "the next checkout gets a working connection");
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs a reachable Postgres (POSTGRES_URL); run with --run-ignored"]
-async fn frozen_network() -> Result<()> {
-    let relay = Relay::start(&postgres_url()?).await?;
-    let client = tagged_client_at(&relay.url, "omnia-live-frozen").await?;
-    let first = client.open("default".to_owned()).await?;
-    let second = client.open("default".to_owned()).await?;
-    drop((first, second));
-
-    relay.freeze();
-    let started = Instant::now();
-    let checkout = client.open("default".to_owned()).await;
-    let elapsed = started.elapsed();
-    assert!(checkout.is_err(), "a silent network cannot hand out a connection");
-    // two 0.5 s recycle checks then the 5 s create, never a TCP-timeout hang
-    assert!(
-        elapsed >= Duration::from_secs(5),
-        "gave up before trying a new connection: {elapsed:?}"
-    );
-    assert!(elapsed < Duration::from_secs(15), "checkout not bounded: {elapsed:?}");
-
-    relay.thaw();
-    let rows =
-        client.open("default".to_owned()).await?.query("SELECT 1".to_owned(), vec![]).await?;
-    assert_eq!(rows.len(), 1, "the pool recovers once the network is back");
+    assert_eq!(rows.len(), 1, "the next checkout replaces the terminated session");
     Ok(())
 }

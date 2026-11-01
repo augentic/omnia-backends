@@ -19,6 +19,11 @@ MSRV: Rust 1.99
 | `POSTGRES_URL__<NAME>` | per pool | | URI for named pool |
 | `POSTGRES_POOL_SIZE__<NAME>` | no | inherited | Pool size for named pool |
 
+Pool size is a ceiling. Connections open on demand and close after a minute
+idle, so a quiet runtime holds few of the server's `max_connections`. Each
+connection is checked with a round trip before it is handed out, so one the
+server or network has dropped is replaced, not returned.
+
 ## Usage
 
 Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouched
@@ -50,14 +55,15 @@ let client = Client::connect_with(options).await?;
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-sql` boundary against a real
 database — the acceptance gate for the `into_param` / `into_wasi_row` mapping
 pair: scalar, temporal, JSON, binary, and null round-trips, uint64 overflow
-rejection, and `exec` affected counts. The tests are `#[ignore]`d so they never
-run in CI; run them explicitly:
+rejection, and `exec` affected counts. `terminated_backend` kills a pooled
+session on the server and checks the next checkout replaces it. The tests are
+`#[ignore]`d so they never run in CI; run them explicitly:
 
 ```bash
 docker run -d --name postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:17
 
 POSTGRES_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable' \
-  cargo nextest run -p omnia-postgres --run-ignored all
+  cargo nextest run -p omnia-postgres --all-features --run-ignored all
 ```
 
 ## License

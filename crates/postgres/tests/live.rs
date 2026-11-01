@@ -4,7 +4,8 @@
 //! unit-tested (its input `tokio_postgres::Row` is unconstructable without a
 //! real server), and only a real server proves it accepts what `PgType`
 //! encodes. The `types.rs` / `sql.rs` unit tests remain the service-free CI
-//! floor for the same mapping.
+//! floor for the same mapping. `terminated_backend` is the pool's gate: a
+//! session killed on the server is replaced at the next checkout.
 //!
 //! `#[ignore]`d so it never touches the network in CI. Run against a reachable
 //! database (`POSTGRES_URL`):
@@ -202,5 +203,34 @@ async fn exec_affected_counts() -> Result<()> {
     assert_field(&rows[0], "label", &DataType::Str(Some("one!".to_owned())));
     assert_field(&rows[1], "id", &DataType::Int32(Some(2)));
     assert_field(&rows[1], "label", &DataType::Str(Some("two!".to_owned())));
+    Ok(())
+}
+
+// After `Client::connect` the pool holds one idle session, so the pid read
+// here is the one the next checkout would reuse. The kill is issued from a
+// second pool, which it leaves untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs a reachable Postgres (POSTGRES_URL); run with --run-ignored"]
+async fn terminated_backend() -> Result<()> {
+    let client = <Client as Backend>::connect().await?;
+    let conn = client.open("default".to_owned()).await?;
+    let rows = conn.query("SELECT pg_backend_pid() AS pid".to_owned(), vec![]).await?;
+    let DataType::Int32(Some(pid)) = rows[0].fields[0].value else {
+        panic!("pg_backend_pid() is int4, got {:?}", rows[0].fields[0].value);
+    };
+    drop(conn);
+
+    let killed = connect()
+        .await?
+        .query(
+            "SELECT pg_terminate_backend($1, 5000) AS killed".to_owned(),
+            vec![DataType::Int32(Some(pid))],
+        )
+        .await?;
+    assert_field(&killed[0], "killed", &DataType::Boolean(Some(true)));
+
+    let rows =
+        client.open("default".to_owned()).await?.query("SELECT 1".to_owned(), vec![]).await?;
+    assert_eq!(rows.len(), 1, "the next checkout replaces the terminated session");
     Ok(())
 }

@@ -108,7 +108,10 @@ impl KvBucket {
             headers.insert(NATS_MESSAGE_TTL, HeaderValue::from(ttl.as_secs().max(1)));
         }
         let prefix = self.store.put_prefix.as_deref().unwrap_or(&self.store.prefix);
-        self.jetstream.publish_with_headers(format!("{prefix}{key}"), headers, value.into()).await?.await?;
+        self.jetstream
+            .publish_with_headers(format!("{prefix}{key}"), headers, value.into())
+            .await?
+            .await?;
         Ok(())
     }
 

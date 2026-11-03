@@ -211,7 +211,7 @@ async fn increment_encoding() {
 
     bucket.set("text".to_string(), b"not a number".to_vec(), None).await.expect("set");
     let err = bucket.increment("text".to_string(), 1).await.expect_err("must refuse");
-    assert!(err.to_string().contains("big-endian"), "unexpected error: {err}");
+    assert!(format!("{err:#}").contains("big-endian"), "unexpected error: {err:#}");
 }
 
 #[tokio::test]

@@ -49,7 +49,7 @@ as published crates.io dependencies (currently 0.38.0), declared once under
 ## Testing policy (integration-first, service-free CI)
 
 These crates talk to real services, so the boundary that matters is
-`backend ⇄ real service ⇄ omnia WasiXxxCtx`. CI cannot stand those services up,
+`backend ⇄ real service ⇄ omnia *Client`. CI cannot stand those services up,
 so the policy splits into three tiers:
 
 - **Guest-driven e2e over a protocol-faithful fake is the primary tier**
@@ -109,7 +109,7 @@ so the policy splits into three tiers:
   exactly that reason, and a new in-crate loopback server is the signal to
   extend the fake instead.
 - **Real-service tests are `#[ignore]`-gated live tests** in `tests/live.rs`,
-  env/credential-gated, driving the backend's `WasiXxxCtx` against a real
+  env/credential-gated, driving the backend's `XxxClient` against a real
   service. They never run (or spawn a process) in CI. Exemplar:
   [crates/cursor/tests/live.rs](crates/cursor/tests/live.rs). Document the run
   recipe (`cargo nextest run --all-features --run-ignored all` plus required
@@ -155,7 +155,7 @@ so the policy splits into three tiers:
   side of its module (`Spawnable`, the liveness probe and its `libc`) is
   `cfg(test)`, which the binary never is (`test = false`, `bench = false`).
 - The omnia crates come from crates.io, pinned by the single
-  `[workspace.dependencies]` declarations (`omnia = "0.36.0"` and friends);
+  `[workspace.dependencies]` declarations (`omnia = "0.38.0"` and friends);
   every `omnia-*` must stay on the same line, so bump them all together and
   never add a `[patch.crates-io]` git or path override to chase an
   unreleased change. `.cargo/config.toml` sets

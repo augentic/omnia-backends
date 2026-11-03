@@ -161,7 +161,7 @@ async fn invalid_options() {
 }
 
 // The tool-call budget the host enforces on each completion is read from
-// the backend through `WasiModelCtx::limits`, so the option is what the
+// the backend through `ModelClient::limits`, so the option is what the
 // session counts against; the other bounds stay the host's.
 #[tokio::test]
 async fn option_limits() {

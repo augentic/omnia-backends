@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use omnia_backend::FutureResult;
-use omnia_backend::keyvalue::{Bucket, KeyValueClient};
+use omnia_backend::keyvalue::{Bucket, KeyValueClient, add_i64};
 
 use crate::{Client, blocking, collect, segment_ok};
 
@@ -140,13 +140,9 @@ impl Bucket for FsBucket {
         blocking(move || {
             let _guard = lock.lock().expect("key lock poisoned");
 
-            let base = match read_live(&dir, &ttl_dir, &key)? {
-                None => 0,
-                Some(value) => decode_counter(&key, &value)?,
-            };
-            let incremented = base
-                .checked_add(delta)
-                .with_context(|| format!("incrementing `{key}` by {delta} overflows i64"))?;
+            let existing = read_live(&dir, &ttl_dir, &key)?;
+            let incremented = add_i64(existing.as_deref(), delta)
+                .with_context(|| format!("incrementing `{key}` by {delta}"))?;
             write_value(&dir, &key, &incremented.to_be_bytes())?;
             Ok(incremented)
         })
@@ -248,14 +244,6 @@ fn write_value(dir: &Path, key: &str, value: &[u8]) -> Result<()> {
     temp.as_file().sync_all().with_context(|| format!("syncing key `{key}`"))?;
     temp.persist(&path).with_context(|| format!("persisting key `{key}`"))?;
     Ok(())
-}
-
-// `increment` stores counters as big-endian `i64` values.
-fn decode_counter(key: &str, value: &[u8]) -> Result<i64> {
-    let bytes: [u8; 8] = value.try_into().map_err(|_len_mismatch| {
-        anyhow!("value at `{key}` is {} bytes, not an 8-byte big-endian integer", value.len())
-    })?;
-    Ok(i64::from_be_bytes(bytes))
 }
 
 fn bucket_dir(root: &Path, name: &str) -> Result<PathBuf> {

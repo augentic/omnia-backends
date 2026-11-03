@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use async_nats::header::{
     HeaderMap, HeaderValue, NATS_EXPECTED_LAST_SUBJECT_SEQUENCE, NATS_MARKER_REASON,
     NATS_MESSAGE_TTL,
@@ -10,7 +10,7 @@ use async_nats::jetstream;
 use async_nats::jetstream::context::{KeyValueErrorKind, PublishError, PublishErrorKind};
 use async_nats::jetstream::kv::{self, Config};
 use async_nats::jetstream::message::StreamMessage;
-use async_nats::jetstream::stream::LastRawMessageErrorKind;
+use async_nats::jetstream::stream::{DirectGetErrorKind, LastRawMessageErrorKind};
 use futures::TryStreamExt;
 use futures::future::FutureExt;
 use omnia_backend::FutureResult;
@@ -71,17 +71,16 @@ struct Snapshot {
 
 impl KvBucket {
     async fn snapshot(&self, key: &str) -> Result<Snapshot> {
+        validate_key(key)?;
         let subject = format!("{}{key}", self.store.prefix);
-        let message = match self.store.stream.get_last_raw_message_by_subject(&subject).await {
-            Ok(message) => message,
-            Err(err) if err.kind() == LastRawMessageErrorKind::NoMessageFound => {
-                return Ok(Snapshot {
-                    revision: 0,
-                    value: None,
-                    ttl: None,
-                });
-            }
-            Err(err) => return Err(anyhow::Error::new(err).context(format!("reading `{key}`"))),
+        let Some(message) =
+            self.last_message(&subject).await.with_context(|| format!("reading `{key}`"))?
+        else {
+            return Ok(Snapshot {
+                revision: 0,
+                value: None,
+                ttl: None,
+            });
         };
 
         // a marker, or a put past its TTL the server has not swept yet, reads as absent
@@ -92,6 +91,22 @@ impl KvBucket {
             value: live.then(|| message.payload.to_vec()),
             ttl: ttl.filter(|_| live),
         })
+    }
+
+    async fn last_message(&self, subject: &str) -> Result<Option<StreamMessage>> {
+        if self.store.stream.cached_info().config.allow_direct {
+            match self.store.stream.direct_get_last_for_subject(subject).await {
+                Ok(message) => Ok(Some(message)),
+                Err(err) if err.kind() == DirectGetErrorKind::NotFound => Ok(None),
+                Err(err) => Err(anyhow::Error::new(err)),
+            }
+        } else {
+            match self.store.stream.get_last_raw_message_by_subject(subject).await {
+                Ok(message) => Ok(Some(message)),
+                Err(err) if err.kind() == LastRawMessageErrorKind::NoMessageFound => Ok(None),
+                Err(err) => Err(anyhow::Error::new(err)),
+            }
+        }
     }
 
     // Every write is the one publish `Store::put` makes, plus the headers the
@@ -119,6 +134,7 @@ impl KvBucket {
     async fn update(
         &self, key: &str, value: Vec<u8>, revision: u64, ttl: Option<Duration>,
     ) -> Result<bool> {
+        validate_key(key)?;
         match self.publish(key, value, Some(revision), ttl).await {
             Ok(()) => Ok(true),
             Err(err) if err.kind() == PublishErrorKind::WrongLastSequence => Ok(false),
@@ -138,6 +154,7 @@ impl Bucket for KvBucket {
         tracing::trace!("setting key: {key}");
         let bucket = self.clone();
         async move {
+            validate_key(&key)?;
             bucket.publish(&key, value, None, ttl).await.with_context(|| format!("writing `{key}`"))
         }
         .boxed()
@@ -221,4 +238,41 @@ fn remaining_ttl(message: &StreamMessage) -> Option<Duration> {
     let stored = SystemTime::from(message.time);
     let elapsed = SystemTime::now().duration_since(stored).unwrap_or_default();
     Some(Duration::from_secs(ttl).saturating_sub(elapsed))
+}
+
+// JetStream KV keys: non-empty, no leading or trailing `.`, and only
+// `[-/_=.a-zA-Z0-9]` so subject wildcards (`*`, `>`, whitespace) cannot
+// reach the stream.
+fn validate_key(key: &str) -> Result<()> {
+    let valid = !key.is_empty()
+        && !key.starts_with('.')
+        && !key.ends_with('.')
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'/' | b'_' | b'=' | b'.'));
+    ensure!(
+        valid,
+        "invalid key `{key}`: cannot be empty, start/end with `.`, or contain characters outside [-/_=.a-zA-Z0-9]"
+    );
+    Ok(())
+}
+
+// Key validation for JetStream KV subjects; live round-trips are in `tests/live.rs`.
+#[cfg(test)]
+mod tests {
+    use super::validate_key;
+
+    #[test]
+    fn valid_keys() {
+        for key in ["k", "conformance/get-set-delete", "a.b.c", "user_1=active-2"] {
+            validate_key(key).expect(key);
+        }
+    }
+
+    #[test]
+    fn invalid_keys() {
+        for key in ["", ".leading", "trailing.", "wild*card", "wild>card", "with space", "a:b"] {
+            validate_key(key).expect_err(key);
+        }
+    }
 }

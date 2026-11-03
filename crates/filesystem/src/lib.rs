@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
-use omnia::Backend;
+use omnia_backend::Connect;
 use tracing::instrument;
 
 /// Filesystem backend for `wasi:blobstore` and `wasi:keyvalue`.
@@ -20,7 +20,7 @@ pub struct Client {
     locks: keyvalue::LockRegistry,
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[instrument(name = "Filesystem::connect")]
@@ -61,7 +61,7 @@ mod config {
 }
 pub use config::ConnectOptions;
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }

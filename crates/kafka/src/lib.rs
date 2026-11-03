@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use omnia::Backend;
+use omnia_backend::Connect;
 use rand::random_range;
 use rdkafka::consumer::Consumer;
 use rdkafka::producer::{DeliveryResult, Producer, ProducerContext, ThreadedProducer};
@@ -60,7 +60,7 @@ impl Drop for Inner {
     }
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[instrument]
@@ -272,7 +272,7 @@ impl From<&ConnectOptions> for ClientConfig {
     }
 }
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }

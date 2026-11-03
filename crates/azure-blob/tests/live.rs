@@ -1,23 +1,25 @@
 //! Live blob round-trip for the Azure Blob Storage backend, driven through the
-//! `omnia:blobstore` host boundary (`WasiBlobstoreCtx`).
+//! `omnia:blobstore` contract (`BlobStoreClient`).
 //!
 //! `#[ignore]`d so it never touches the network in CI. Run against a real
 //! storage account (`AZURE_BLOB_ENDPOINT` plus credentials, or Azurite):
 //! `cargo nextest run -p omnia-azure-blob --run-ignored all`.
 
 use anyhow::Result;
-use omnia::Backend;
 use omnia_azure_blob::Client;
-use omnia_wasi_blobstore::{Container, WasiBlobstoreCtx};
+use omnia_backend::Connect;
+use omnia_backend::blobstore::{BlobStoreClient, Container};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
 async fn write_read_delete() -> Result<()> {
-    let client = <Client as Backend>::connect().await?;
+    let client = <Client as Connect>::connect().await?;
 
     // Container names are lowercase alphanumeric + dashes, 3-63 chars.
     let container = format!("omnia-live-{}", std::process::id());
     let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
+
+    assert_eq!(store.get_data("missing".to_owned(), 0, 0).await?, None);
 
     let object = "greeting".to_owned();
     store.write_data(object.clone(), b"payload".to_vec().into()).await?;
@@ -44,7 +46,7 @@ async fn write_read_delete() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
 async fn ranged_reads() -> Result<()> {
-    let client = <Client as Backend>::connect().await?;
+    let client = <Client as Connect>::connect().await?;
 
     let container = format!("omnia-live-range-{}", std::process::id());
     let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
@@ -90,9 +92,9 @@ async fn ranged_reads() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
 async fn package_store() -> Result<()> {
-    use omnia_plugin::{PackageStore, Reference};
+    use omnia_backend::plugins::{PackageStore, Reference};
 
-    let client = <Client as Backend>::connect().await?;
+    let client = <Client as Connect>::connect().await?;
 
     // a reference of this run's own, so a rerun never meets a stale blob
     let reference: Reference = format!("live:component-{}@1.2.3", std::process::id()).parse()?;
@@ -124,14 +126,14 @@ async fn package_store() -> Result<()> {
 // The blobstore view refuses the store's container (`tests/blobstore.rs`),
 // so cleanup reaches the blob through the SDK under the same connection
 // options the client connected with.
-async fn delete_stored(reference: &omnia_plugin::Reference) -> Result<()> {
+async fn delete_stored(reference: &omnia_backend::plugins::Reference) -> Result<()> {
     use std::sync::Arc;
 
     use azure_core::credentials::{Secret, TokenCredential};
     use azure_identity::{ClientSecretCredential, DeveloperToolsCredential};
     use azure_storage_blob::BlobServiceClient;
-    use omnia::FromEnv as _;
     use omnia_azure_blob::ConnectOptions;
+    use omnia_backend::FromEnv as _;
 
     let options = ConnectOptions::load_env()?;
     let credential: Arc<dyn TokenCredential> = match &options.credential {

@@ -6,16 +6,18 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use omnia_wasi_keyvalue::{Bucket, Cas, FutureResult, WasiKeyValueCtx};
+use omnia_backend::FutureResult;
+use omnia_backend::keyvalue::{Bucket, KeyValueClient};
 
 use crate::{Client, blocking, collect, segment_ok};
 
 type KeyLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
 pub type LockRegistry = Arc<Mutex<HashMap<String, KeyLocks>>>;
 
-impl WasiKeyValueCtx for Client {
+impl KeyValueClient for Client {
     fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
         tracing::trace!("opening bucket: {identifier}");
         let root = self.root.join("keyvalue");
@@ -61,7 +63,7 @@ impl Bucket for FsBucket {
         blocking(move || read_value(&key_path(&dir, &key)?, &key))
     }
 
-    fn set(&self, key: String, value: Vec<u8>) -> FutureResult<()> {
+    fn set(&self, key: String, value: Vec<u8>, _ttl: Option<Duration>) -> FutureResult<()> {
         tracing::trace!("setting key: {key} in bucket: {}", self.name);
         let dir = self.dir.clone();
         let lock = self.key_lock(&key);
@@ -123,24 +125,23 @@ impl Bucket for FsBucket {
         })
     }
 
-    fn swap(&self, cas: Cas, value: Vec<u8>) -> FutureResult<Result<(), Cas>> {
-        tracing::trace!("swapping key: {} in bucket: {}", cas.key, self.name);
+    fn cas(
+        &self, key: String, expected: Option<Vec<u8>>, value: Vec<u8>,
+    ) -> FutureResult<Result<(), Option<Vec<u8>>>> {
+        tracing::trace!("swapping key: {key} in bucket: {}", self.name);
         let dir = self.dir.clone();
-        let lock = self.key_lock(&cas.key);
+        let lock = self.key_lock(&key);
 
         blocking(move || {
-            let path = key_path(&dir, &cas.key)?;
+            let path = key_path(&dir, &key)?;
             let _guard = lock.lock().expect("key lock poisoned");
 
-            let observed = read_value(&path, &cas.key)?;
-            if observed == cas.current {
-                write_value(&dir, &cas.key, &value)?;
+            let observed = read_value(&path, &key)?;
+            if observed == expected {
+                write_value(&dir, &key, &value)?;
                 Ok(Ok(()))
             } else {
-                Ok(Err(Cas {
-                    current: observed,
-                    ..cas
-                }))
+                Ok(Err(observed))
             }
         })
     }

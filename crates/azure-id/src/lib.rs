@@ -5,7 +5,7 @@ mod identity;
 use std::fmt::Debug;
 
 use anyhow::Result;
-use omnia::Backend;
+use omnia_backend::Connect;
 use tracing::instrument;
 
 /// Azure Identity backend client, authenticating via Managed Identity.
@@ -18,7 +18,7 @@ impl Debug for Client {
     }
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[instrument]
@@ -32,7 +32,7 @@ impl Backend for Client {
 #[derive(Debug, Clone, Default)]
 pub struct ConnectOptions;
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Ok(Self)
     }

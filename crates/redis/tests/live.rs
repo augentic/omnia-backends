@@ -1,5 +1,5 @@
 //! Live key-value round-trip for the Redis backend, driven through the
-//! `omnia:keyvalue` host boundary (`WasiKeyValueCtx`).
+//! `omnia:keyvalue` contract (`KeyValueClient`).
 //!
 //! `#[ignore]`d so it never touches the network in CI. Run against a reachable
 //! Redis (`REDIS_URL`, default `redis://localhost:6379`):
@@ -8,18 +8,18 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use omnia::Backend;
+use omnia_backend::Connect;
+use omnia_backend::keyvalue::{Bucket, KeyValueClient};
 use omnia_redis::Client;
-use omnia_wasi_keyvalue::{Bucket, Cas, WasiKeyValueCtx};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable Redis; run with --run-ignored"]
 async fn set_get_delete() -> Result<()> {
-    let client = <Client as Backend>::connect().await?;
+    let client = <Client as Connect>::connect().await?;
     let bucket: Arc<dyn Bucket> = client.open_bucket("omnia-live".to_owned()).await?;
 
     let key = unique("k");
-    bucket.set(key.clone(), b"payload".to_vec()).await?;
+    bucket.set(key.clone(), b"payload".to_vec(), None).await?;
     assert_eq!(bucket.get(key.clone()).await?.as_deref(), Some(b"payload".as_slice()));
     assert!(bucket.exists(key.clone()).await?, "key exists after set");
     assert!(bucket.keys().await?.contains(&key), "keys() returns unprefixed key");
@@ -32,35 +32,26 @@ async fn set_get_delete() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable Redis; run with --run-ignored"]
 async fn keyvalue_atomics() -> Result<()> {
-    let client = <Client as Backend>::connect().await?;
+    let client = <Client as Connect>::connect().await?;
     let bucket: Arc<dyn Bucket> = client.open_bucket("omnia-live".to_owned()).await?;
 
-    // Increment is native `INCRBY` plus the same one-day expiry as `set`.
+    // Increment is native `INCRBY`.
     let counter = unique("counter");
     assert_eq!(bucket.increment(counter.clone(), 5).await?, 5);
     assert_eq!(bucket.increment(counter, -2).await?, 3);
 
-    // Absent-expected swap creates the key.
+    // Absent-expected CAS creates the key.
     let pointer = unique("pointer");
-    let handle = Cas {
-        bucket: Arc::clone(&bucket),
-        key: pointer.clone(),
-        current: None,
-    };
-    bucket.swap(handle, b"first".to_vec()).await?.expect("absent-expected commits");
+    bucket.cas(pointer.clone(), None, b"first".to_vec()).await?.expect("absent-expected commits");
 
-    // A stale snapshot refuses, leaves the value, and refreshes the handle.
-    let stale = Cas {
-        bucket: Arc::clone(&bucket),
-        key: pointer.clone(),
-        current: None,
-    };
-    let fresh = bucket.swap(stale, b"lost".to_vec()).await?.expect_err("stale must mismatch");
-    assert_eq!(fresh.current.as_deref(), Some(b"first".as_slice()));
+    // A stale snapshot refuses, leaves the value, and returns the observed value.
+    let observed =
+        bucket.cas(pointer.clone(), None, b"lost".to_vec()).await?.expect_err("stale must mismatch");
+    assert_eq!(observed.as_deref(), Some(b"first".as_slice()));
     assert_eq!(bucket.get(pointer.clone()).await?.as_deref(), Some(b"first".as_slice()));
 
-    // The refreshed handle retries cleanly.
-    bucket.swap(fresh, b"second".to_vec()).await?.expect("retry commits");
+    // Retrying with the observed value commits cleanly.
+    bucket.cas(pointer.clone(), observed, b"second".to_vec()).await?.expect("retry commits");
     assert_eq!(bucket.get(pointer).await?.as_deref(), Some(b"second".as_slice()));
     Ok(())
 }

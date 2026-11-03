@@ -9,7 +9,7 @@ Maps blobstore containers to Azure Blob containers and blobs to block blobs usin
 
 ## Package store
 
-`Client` also implements `omnia_plugin::PackageStore`, the store omnia's
+`Client` also implements `omnia_backend::plugins::PackageStore`, the store omnia's
 registry acquirer reads before any registry and writes what it fetches to,
 in a dedicated container the backend names itself: `omnia-plugins`. One
 blob per release, named as omnia's `FsStore` files it
@@ -45,11 +45,11 @@ Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouche
 
 ```rust,ignore
 use omnia_azure_blob::Client as AzureBlob;
-use omnia_wasi_blobstore::WasiBlobstore;
+use omnia_wasi_blobstore::WasiBlobStore;
 
 omnia::runtime!({
     hosts: {
-        WasiBlobstore: AzureBlob,
+        WasiBlobStore: AzureBlob,
     }
 });
 ```
@@ -57,8 +57,8 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::{Backend, FromEnv};
 use omnia_azure_blob::Client;
+use omnia_backend::{Connect, FromEnv};
 
 let options = omnia_azure_blob::ConnectOptions::load_env()?;
 let client = Client::connect_with(options).await?;

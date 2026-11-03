@@ -92,7 +92,7 @@ Four budgets bound a completion, and any spent is the typed
   holds no completion for longer.
 
 The host's per-completion tool-call limit is answered through
-`WasiModelCtx::limits()` as `max_tool_calls`.
+`ModelClient::limits()` as `max_tool_calls`.
 
 ## The token bound
 
@@ -255,7 +255,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::{Backend, FromEnv};
+use omnia_backend::{Connect, FromEnv};
 use omnia_genai::{Client, ConnectOptions};
 
 // GENAI_MODEL and GENAI_ENDPOINT when set; else `gpt-5.5` at the

@@ -11,7 +11,7 @@ use azure_core::credentials::TokenCredential;
 use azure_core::http::Url;
 use azure_identity::{ClientSecretCredential, DeveloperToolsCredential};
 use azure_storage_blob::BlobServiceClient;
-use omnia::Backend;
+use omnia_backend::Connect;
 use tracing::instrument;
 
 // The package store's own container: `PackageStore` writes it, the
@@ -30,7 +30,7 @@ impl Debug for Client {
     }
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[instrument]
@@ -101,7 +101,7 @@ mod config {
 }
 pub use config::{ConnectOptions, CredentialOptions};
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading azure blob connection options")
     }

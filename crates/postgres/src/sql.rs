@@ -6,13 +6,14 @@ use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use deadpool_postgres::Object;
 use futures::future::FutureExt;
-use omnia_wasi_sql::{Connection, DataType, Field, FutureResult, Row, WasiSqlCtx};
+use omnia_backend::FutureResult;
+use omnia_backend::sql::{Connection, DataType, Field, Row, SqlClient};
 use tokio_postgres::row::Row as PgRow;
 
 use crate::Client;
 use crate::types::{Param, ParamRef, PgType};
 
-impl WasiSqlCtx for Client {
+impl SqlClient for Client {
     fn open(&self, name: String) -> FutureResult<Arc<dyn Connection>> {
         tracing::debug!("getting connection {name}");
 

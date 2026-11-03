@@ -6,13 +6,14 @@ use async_nats::jetstream::context::KeyValueErrorKind;
 use async_nats::jetstream::kv::{self, Config};
 use futures::TryStreamExt;
 use futures::future::FutureExt;
-use omnia_wasi_keyvalue::{Bucket, Cas, FutureResult, WasiKeyValueCtx};
+use omnia_backend::FutureResult;
+use omnia_backend::keyvalue::{Bucket, KeyValueClient};
 
 use crate::Client;
 
 const MAX_INCREMENT_RETRIES: usize = 64;
 
-impl WasiKeyValueCtx for Client {
+impl KeyValueClient for Client {
     fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
         tracing::trace!("opening bucket: {identifier}");
         let jetstream = self.jetstream.clone();
@@ -24,7 +25,6 @@ impl WasiKeyValueCtx for Client {
                     .create_key_value(Config {
                         bucket: identifier,
                         history: 1,
-                        max_age: Duration::from_mins(10),
                         max_bytes: 100 * 1024 * 1024,
                         ..Config::default()
                     })
@@ -54,7 +54,7 @@ impl Bucket for KvBucket {
         .boxed()
     }
 
-    fn set(&self, key: String, value: Vec<u8>) -> FutureResult<()> {
+    fn set(&self, key: String, value: Vec<u8>, _ttl: Option<Duration>) -> FutureResult<()> {
         tracing::trace!("setting key: {key}");
         let store = self.0.clone();
 
@@ -138,25 +138,24 @@ impl Bucket for KvBucket {
         .boxed()
     }
 
-    fn swap(&self, cas: Cas, value: Vec<u8>) -> FutureResult<std::result::Result<(), Cas>> {
-        tracing::trace!("swapping key: {}", cas.key);
+    fn cas(
+        &self, key: String, expected: Option<Vec<u8>>, value: Vec<u8>,
+    ) -> FutureResult<std::result::Result<(), Option<Vec<u8>>>> {
+        tracing::trace!("swapping key: {key}");
         let store = self.0.clone();
 
         async move {
             // Snapshot the live entry: value for the compare, revision for
             // the conditioned write.
-            let live = live_entry(&store, &cas.key).await?;
+            let live = live_entry(&store, &key).await?;
             let observed = live.as_ref().map(|entry| entry.value.to_vec());
-            if observed != cas.current {
-                return Ok(Err(Cas {
-                    current: observed,
-                    ..cas
-                }));
+            if observed != expected {
+                return Ok(Err(observed));
             }
 
             let outcome = match &live {
                 Some(entry) => store
-                    .update(&cas.key, value.into(), entry.revision)
+                    .update(&key, value.into(), entry.revision)
                     .await
                     .map(|_rev| ())
                     .map_err(|err| {
@@ -164,7 +163,7 @@ impl Bucket for KvBucket {
                         (raced, anyhow::Error::new(err))
                     }),
                 // Absent-expected: `create` refuses if the key appeared meanwhile.
-                None => store.create(&cas.key, value.into()).await.map(|_rev| ()).map_err(|err| {
+                None => store.create(&key, value.into()).await.map(|_rev| ()).map_err(|err| {
                     let raced = err.kind() == kv::CreateErrorKind::AlreadyExists;
                     (raced, anyhow::Error::new(err))
                 }),
@@ -172,17 +171,13 @@ impl Bucket for KvBucket {
 
             match outcome {
                 Ok(()) => Ok(Ok(())),
-                // Lost the race between snapshot and write: refresh the
-                // handle at the observed value so the caller can retry.
+                // Lost the race between snapshot and write: return the
+                // observed value so the caller can retry.
                 Err((true, _raced)) => {
-                    let observed =
-                        live_entry(&store, &cas.key).await?.map(|entry| entry.value.to_vec());
-                    Ok(Err(Cas {
-                        current: observed,
-                        ..cas
-                    }))
+                    let observed = live_entry(&store, &key).await?.map(|entry| entry.value.to_vec());
+                    Ok(Err(observed))
                 }
-                Err((false, err)) => Err(err.context(format!("swapping `{}`", cas.key))),
+                Err((false, err)) => Err(err.context(format!("swapping `{key}`"))),
             }
         }
         .boxed()

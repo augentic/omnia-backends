@@ -26,7 +26,7 @@ use genai::chat::{
     ToolChoice, ToolResponse,
 };
 use jsonschema::Validator;
-use omnia_wasi_model::{Answer, Error, Format, ToolTurn, Transcript, Usage};
+use omnia_backend::model::{Answer, Error, Format, ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::timeout;
 

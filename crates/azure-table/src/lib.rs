@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64ct::{Base64, Encoding};
-use omnia::Backend;
+use omnia_backend::Connect;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -27,7 +27,7 @@ impl Debug for Client {
     }
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[tracing::instrument(skip(options))]
@@ -97,7 +97,7 @@ mod config {
 pub use config::ConnectOptions;
 pub use store::document::{decode_id, encode_id};
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> anyhow::Result<Self> {
         Self::from_env().finalize().context("issue loading azure table connection options")
     }

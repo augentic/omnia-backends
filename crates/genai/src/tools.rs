@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use genai::chat::{Tool, ToolCall};
+use omnia_backend::model::{ToolHost, ToolOutcome};
 use omnia_sandbox::Access;
-use omnia_wasi_model::{ToolHost, ToolOutcome};
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::Value;
@@ -214,7 +214,8 @@ fn subject(arguments: &Value, cwd: Option<&Path>) -> Option<String> {
 mod tests {
     use std::collections::HashMap;
 
-    use omnia_wasi_model::{DirEntry, FutureResult};
+    use omnia_backend::FutureResult;
+    use omnia_backend::model::DirEntry;
     use serde_json::json;
 
     use super::*;

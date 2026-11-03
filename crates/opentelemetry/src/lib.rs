@@ -5,7 +5,7 @@ mod otel;
 use std::fmt::Debug;
 
 use anyhow::{Context, Result};
-use omnia::Backend;
+use omnia_backend::Connect;
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_client::TraceServiceClient;
 use tonic::transport::Channel;
@@ -24,7 +24,7 @@ impl Debug for Client {
     }
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[instrument(name = "OpenTelemetry::connect_with")]
@@ -63,7 +63,7 @@ mod config {
 }
 pub use config::ConnectOptions;
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }

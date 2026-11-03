@@ -6,7 +6,8 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use omnia_sdk::model::{Error, Model as _, Request, WasiModel, WorkerGrant};
+use omnia_sdk::WasiProvider;
+use omnia_sdk::model::{Error, Model as _, Request, WorkerGrant};
 use test_programs::{arguments, lend, user};
 
 omnia_sdk::command!(scenario);
@@ -30,7 +31,7 @@ async fn scenario() {
 
     let request =
         Request::builder().messages(vec![user("hi")]).maybe_workspace(lend()).worker(grant).build();
-    let outcome = WasiModel.complete(request).await;
+    let outcome = WasiProvider.complete(request).await;
     match (outcome, refused) {
         (Ok(reply), None) => assert_eq!(reply.answer, "hi"),
         (Err(Error::InvalidRequest(detail)), Some(needle)) => {

@@ -1,5 +1,5 @@
 //! Live blob round-trip for the MongoDB backend, driven through the
-//! `omnia:blobstore` host boundary (`WasiBlobstoreCtx`; containers map to
+//! `omnia:blobstore` contract (`BlobStoreClient`; containers map to
 //! MongoDB collections).
 //!
 //! `#[ignore]`d so it never touches the network in CI. Run against a reachable
@@ -7,14 +7,14 @@
 //! `cargo nextest run -p omnia-mongodb --run-ignored all`.
 
 use anyhow::Result;
-use omnia::Backend;
+use omnia_backend::Connect;
+use omnia_backend::blobstore::{BlobStoreClient, Container};
 use omnia_mongodb::Client;
-use omnia_wasi_blobstore::{Container, WasiBlobstoreCtx};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable MongoDB (MONGODB_URL); run with --run-ignored"]
 async fn write_read_delete() -> Result<()> {
-    let client = <Client as Backend>::connect().await?;
+    let client = <Client as Connect>::connect().await?;
 
     let container = format!("omnia-live-{}", std::process::id());
     let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;

@@ -46,16 +46,16 @@ backend.
 ## Usage
 
 Bind the backend in your host's `runtime!` map — one `Client` can back both
-`WasiBlobstore` and `WasiKeyValue`:
+`WasiBlobStore` and `WasiKeyValue`:
 
 ```rust,ignore
 use omnia_filesystem::Client as Filesystem;
-use omnia_wasi_blobstore::WasiBlobstore;
+use omnia_wasi_blobstore::WasiBlobStore;
 use omnia_wasi_keyvalue::WasiKeyValue;
 
 omnia::runtime!({
     hosts: {
-        WasiBlobstore: Filesystem,
+        WasiBlobStore: Filesystem,
         WasiKeyValue: Filesystem,
     }
 });

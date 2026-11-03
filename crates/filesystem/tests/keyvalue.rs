@@ -1,14 +1,15 @@
-//! The filesystem backend at the `omnia:keyvalue` host boundary
-//! (`WasiKeyValueCtx`): round trips, CAS under contention, counters and
+//! The filesystem backend at the `omnia:keyvalue` contract boundary
+//! (`KeyValueClient`): round trips, CAS under contention, counters and
 //! their encoding, and a bucket's tree kept apart from a same-named
 //! container's, against a temporary directory. No service, so it runs in
 //! CI.
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+use omnia_backend::blobstore::BlobStoreClient;
+use omnia_backend::keyvalue::{Bucket, KeyValueClient};
 use omnia_filesystem::Client;
-use omnia_wasi_blobstore::{Bytes, WasiBlobstoreCtx};
-use omnia_wasi_keyvalue::{Bucket, Cas, WasiKeyValueCtx};
 use tempfile::TempDir;
 
 fn client(root: &TempDir) -> Client {
@@ -19,14 +20,6 @@ async fn state(client: &Client) -> Arc<dyn Bucket> {
     client.open_bucket("state".to_string()).await.expect("open bucket")
 }
 
-fn cas(bucket: &Arc<dyn Bucket>, key: &str, current: Option<&[u8]>) -> Cas {
-    Cas {
-        bucket: Arc::clone(bucket),
-        key: key.to_string(),
-        current: current.map(<[u8]>::to_vec),
-    }
-}
-
 #[tokio::test]
 async fn round_trip() {
     let root = TempDir::new().expect("tempdir");
@@ -34,8 +27,8 @@ async fn round_trip() {
     let bucket = state(&store).await;
 
     assert_eq!(bucket.get("missing".to_string()).await.expect("get"), None);
-    bucket.set("a".to_string(), b"one".to_vec()).await.expect("set");
-    bucket.set("b/c".to_string(), b"two".to_vec()).await.expect("set");
+    bucket.set("a".to_string(), b"one".to_vec(), None).await.expect("set");
+    bucket.set("b/c".to_string(), b"two".to_vec(), None).await.expect("set");
     assert_eq!(bucket.get("a".to_string()).await.expect("get").as_deref(), Some(b"one".as_slice()));
     assert!(bucket.exists("b/c".to_string()).await.expect("exists"));
 
@@ -63,7 +56,7 @@ async fn same_named_disjoint() {
     let bucket = state(&store).await;
     let container = store.create_container("state".to_string()).await.expect("create container");
 
-    bucket.set("entry".to_string(), b"kv".to_vec()).await.expect("set");
+    bucket.set("entry".to_string(), b"kv".to_vec(), None).await.expect("set");
     container.write_data("entry".to_string(), Bytes::from_static(b"blob")).await.expect("write");
 
     assert_eq!(
@@ -85,7 +78,7 @@ async fn names_sanitized() {
     let bucket = state(&store).await;
 
     for key in ["", ".", "..", "../escape", "/abs", "a//b", "a/../b", "a\\b"] {
-        let err = bucket.set(key.to_string(), b"x".to_vec()).await.expect_err("must refuse");
+        let err = bucket.set(key.to_string(), b"x".to_vec(), None).await.expect_err("must refuse");
         assert!(err.to_string().contains("bucket-relative"), "`{key}`: {err}");
     }
     for name in ["", "..", "a/b", "/abs"] {
@@ -100,18 +93,19 @@ async fn cas_absent_expected() {
     let store = client(&root);
     let bucket = state(&store).await;
 
-    let handle = cas(&bucket, "pointer", None);
-    bucket.swap(handle, b"first".to_vec()).await.expect("swap").expect("must commit");
+    bucket.cas("pointer".to_string(), None, b"first".to_vec()).await.expect("cas").expect("must commit");
     assert_eq!(
         bucket.get("pointer".to_string()).await.expect("get").as_deref(),
         Some(b"first".as_slice())
     );
 
-    // A repeated absent-expected swap returns the current value.
-    let stale = cas(&bucket, "pointer", None);
-    let fresh =
-        bucket.swap(stale, b"second".to_vec()).await.expect("swap").expect_err("must mismatch");
-    assert_eq!(fresh.current.as_deref(), Some(b"first".as_slice()));
+    // A repeated absent-expected CAS returns the current value.
+    let observed = bucket
+        .cas("pointer".to_string(), None, b"second".to_vec())
+        .await
+        .expect("cas")
+        .expect_err("must mismatch");
+    assert_eq!(observed.as_deref(), Some(b"first".as_slice()));
     assert_eq!(
         bucket.get("pointer".to_string()).await.expect("get").as_deref(),
         Some(b"first".as_slice())
@@ -124,21 +118,26 @@ async fn cas_stale_expected() {
     let store = client(&root);
     let bucket = state(&store).await;
 
-    bucket.set("pointer".to_string(), b"v1".to_vec()).await.expect("seed");
-    let handle = cas(&bucket, "pointer", Some(b"v1"));
+    bucket.set("pointer".to_string(), b"v1".to_vec(), None).await.expect("seed");
+    bucket.set("pointer".to_string(), b"v2".to_vec(), None).await.expect("interfere");
 
-    bucket.set("pointer".to_string(), b"v2".to_vec()).await.expect("interfere");
-
-    let fresh =
-        bucket.swap(handle, b"lost".to_vec()).await.expect("swap").expect_err("must mismatch");
-    assert_eq!(fresh.current.as_deref(), Some(b"v2".as_slice()), "refreshed at observed value");
+    let observed = bucket
+        .cas("pointer".to_string(), Some(b"v1".to_vec()), b"lost".to_vec())
+        .await
+        .expect("cas")
+        .expect_err("must mismatch");
+    assert_eq!(observed.as_deref(), Some(b"v2".as_slice()), "returns observed value");
     assert_eq!(
         bucket.get("pointer".to_string()).await.expect("get").as_deref(),
         Some(b"v2".as_slice()),
         "stale swap must not overwrite"
     );
 
-    bucket.swap(fresh, b"v3".to_vec()).await.expect("swap").expect("retry commits");
+    bucket
+        .cas("pointer".to_string(), observed, b"v3".to_vec())
+        .await
+        .expect("cas")
+        .expect("retry commits");
     assert_eq!(
         bucket.get("pointer".to_string()).await.expect("get").as_deref(),
         Some(b"v3".as_slice())
@@ -150,19 +149,18 @@ async fn cas_contention() {
     let root = TempDir::new().expect("tempdir");
     let store = client(&root);
     let bucket = state(&store).await;
-    bucket.set("pointer".to_string(), b"seed".to_vec()).await.expect("seed");
+    bucket.set("pointer".to_string(), b"seed".to_vec(), None).await.expect("seed");
 
     // Exactly one contender may swap from the shared snapshot.
     let mut attempts = tokio::task::JoinSet::new();
     for i in 0..16_u8 {
         let bucket = Arc::clone(&bucket);
         attempts.spawn(async move {
-            let handle = Cas {
-                bucket: Arc::clone(&bucket),
-                key: "pointer".to_string(),
-                current: Some(b"seed".to_vec()),
-            };
-            let won = bucket.swap(handle, vec![i]).await.expect("swap").is_ok();
+            let won = bucket
+                .cas("pointer".to_string(), Some(b"seed".to_vec()), vec![i])
+                .await
+                .expect("cas")
+                .is_ok();
             (i, won)
         });
     }
@@ -207,7 +205,7 @@ async fn increment_encoding() {
     assert_eq!(bucket.increment("counter".to_string(), 5).await.expect("increment"), 5);
     assert_eq!(bucket.increment("counter".to_string(), -2).await.expect("increment"), 3);
 
-    bucket.set("text".to_string(), b"not a number".to_vec()).await.expect("set");
+    bucket.set("text".to_string(), b"not a number".to_vec(), None).await.expect("set");
     let err = bucket.increment("text".to_string(), 1).await.expect_err("must refuse");
     assert!(err.to_string().contains("big-endian"), "unexpected error: {err}");
 }

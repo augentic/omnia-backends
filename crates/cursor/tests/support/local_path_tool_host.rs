@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use omnia_wasi_model::{DirEntry, FutureResult, ToolHost};
+use omnia_backend::FutureResult;
+use omnia_backend::model::{DirEntry, ToolHost};
 use serde_json::json;
 
 /// A unique token returned by the stub session's `lookup` tool.

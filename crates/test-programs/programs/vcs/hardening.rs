@@ -19,7 +19,8 @@
 
 use std::fs;
 
-use omnia_sdk::vcs::{Error, Vcs as _, WasiVcs};
+use omnia_sdk::WasiProvider;
+use omnia_sdk::vcs::{Error, Vcs as _};
 
 omnia_sdk::command!(scenario);
 
@@ -48,9 +49,9 @@ async fn scenario() {
 // directory alone neither reads nor seals the repository around it.
 async fn an_enclosing_repository_is_not_reached() {
     for result in [
-        WasiVcs.head(INNER).await.map(drop),
-        WasiVcs.pending(INNER).await.map(drop),
-        WasiVcs.commit(INNER, "steal").await.map(drop),
+        WasiProvider.head(INNER).await.map(drop),
+        WasiProvider.pending(INNER).await.map(drop),
+        WasiProvider.commit(INNER, "steal").await.map(drop),
     ] {
         assert!(
             matches!(result, Err(Error::NotARepository)),
@@ -63,7 +64,7 @@ async fn an_enclosing_repository_is_not_reached() {
 // which a pin spelled as text cannot name; the operation is refused rather
 // than run it over the change.
 async fn an_unnameable_key_is_refused() {
-    match WasiVcs.commit(BYTES, "seal").await {
+    match WasiProvider.commit(BYTES, "seal").await {
         Err(Error::Other(message)) => assert!(message.contains("UTF-8"), "{message}"),
         other => panic!("{BYTES} is refused, not {other:?}"),
     }
@@ -74,7 +75,7 @@ async fn an_unnameable_key_is_refused() {
 // on the command line instead, and the operation fails on the host's ssh,
 // which answers nothing.
 async fn a_repository_names_no_pack_program() {
-    for result in [WasiVcs.fetch(PACKER, "evil").await, WasiVcs.push(PACKER, "evil", "main").await]
+    for result in [WasiProvider.fetch(PACKER, "evil").await, WasiProvider.push(PACKER, "evil", "main").await]
     {
         assert!(matches!(result, Err(Error::Access(_))), "the host's ssh answered: {result:?}");
     }
@@ -84,8 +85,8 @@ async fn a_repository_names_no_pack_program() {
 // operator's ssh would carry there is the repository's own; a checkout that
 // needs a blob it lacks fails rather than fetch it, so the ssh never runs.
 async fn a_lazy_fetch_reaches_no_command() {
-    let head = WasiVcs.head(LAZY).await.expect("head");
-    let added = WasiVcs.add(LAZY, "./lazy-copy", &head).await;
+    let head = WasiProvider.head(LAZY).await.expect("head");
+    let added = WasiProvider.add(LAZY, "./lazy-copy", &head).await;
     assert!(added.is_err(), "a blob only the promisor could supply: {added:?}");
 }
 
@@ -96,7 +97,7 @@ async fn a_lazy_fetch_reaches_no_command() {
 // a transport runs is refused on every transport instead, the key named.
 async fn a_shaping_repository_is_refused() {
     for (repo, key) in [(REWRITER, "insteadof"), (PROXIED, "http.")] {
-        for result in [WasiVcs.fetch(repo, "evil").await, WasiVcs.push(repo, "evil", "main").await]
+        for result in [WasiProvider.fetch(repo, "evil").await, WasiProvider.push(repo, "evil", "main").await]
         {
             match result {
                 Err(Error::Other(message)) => {
@@ -109,40 +110,40 @@ async fn a_shaping_repository_is_refused() {
 }
 
 async fn repo_config_runs_nothing() {
-    let head = WasiVcs.head(REPO).await.expect("head");
+    let head = WasiProvider.head(REPO).await.expect("head");
 
     // a working copy checked out of the hostile repository runs no smudge
-    WasiVcs.add(REPO, WORK, &head).await.expect("add");
+    WasiProvider.add(REPO, WORK, &head).await.expect("add");
 
     // a commit runs no hook, fsmonitor, or signing program, reads the place
     // and not the `core.worktree` the repository points elsewhere, and seals
     fs::write("repo/b.txt", "b\n").expect("writing b");
-    let pending = WasiVcs.pending(REPO).await.expect("pending");
+    let pending = WasiProvider.pending(REPO).await.expect("pending");
     assert_eq!(pending.len(), 1, "one change, in the place: {pending:?}");
     assert_eq!(pending[0].path, "b.txt");
-    let sealed = WasiVcs.commit(REPO, "seal").await.expect("commit").expect("a commit");
+    let sealed = WasiProvider.commit(REPO, "seal").await.expect("commit").expect("a commit");
     assert_ne!(sealed, head, "the commit landed");
-    assert_eq!(WasiVcs.pending(REPO).await.expect("pending"), []);
+    assert_eq!(WasiProvider.pending(REPO).await.expect("pending"), []);
 
     // a push runs neither the client's receive-pack nor the origin's hooks or
     // alternate-refs command, signs no certificate the origin asks for, and a
     // fetch runs no alternate-refs command of the repository's own
-    WasiVcs.label(REPO, "emery/hardened", &sealed).await.expect("label");
-    WasiVcs.push(REPO, "origin", "emery/hardened").await.expect("push");
-    WasiVcs.fetch(REPO, "origin").await.expect("fetch");
+    WasiProvider.label(REPO, "emery/hardened", &sealed).await.expect("label");
+    WasiProvider.push(REPO, "origin", "emery/hardened").await.expect("push");
+    WasiProvider.fetch(REPO, "origin").await.expect("fetch");
 
     // a push into a working copy lands a branch it has not checked out, and
     // refuses the one it has rather than write the copy's tree through its
     // own filters and monitor, as its `receive.denyCurrentBranch` asks
-    WasiVcs.push(REPO, "checked", "emery/hardened").await.expect("push to a working copy");
-    let current = WasiVcs.push(REPO, "checked", "main").await;
+    WasiProvider.push(REPO, "checked", "emery/hardened").await.expect("push to a working copy");
+    let current = WasiProvider.push(REPO, "checked", "main").await;
     assert!(matches!(current, Err(Error::Other(_))), "the checked-out branch stays: {current:?}");
 }
 
 async fn a_failed_merge_leaves_no_merge() {
-    let before = WasiVcs.head(NOIDENT).await.expect("head");
-    let merged = WasiVcs.merge(NOIDENT, "feature", "merge", &[]).await;
+    let before = WasiProvider.head(NOIDENT).await.expect("head");
+    let merged = WasiProvider.merge(NOIDENT, "feature", "merge", &[]).await;
     assert!(merged.is_err(), "a merge with no identity cannot be sealed: {merged:?}");
-    assert_eq!(WasiVcs.head(NOIDENT).await.expect("head"), before, "the head did not move");
-    assert_eq!(WasiVcs.pending(NOIDENT).await.expect("pending"), [], "nothing is left staged");
+    assert_eq!(WasiProvider.head(NOIDENT).await.expect("head"), before, "the head did not move");
+    assert_eq!(WasiProvider.pending(NOIDENT).await.expect("pending"), [], "nothing is left staged");
 }

@@ -1,13 +1,13 @@
-//! Service-free rows of the `omnia:blobstore` host boundary (`WasiBlobstoreCtx`).
+//! Service-free rows of the `omnia:blobstore` contract (`BlobStoreClient`).
 //!
 //! Connecting with service-principal options reaches no network, so what the
 //! view refuses before any request is asserted here; the round-trips the
 //! service must answer live in `tests/live.rs`.
 
 use anyhow::Result;
-use omnia::Backend;
 use omnia_azure_blob::{Client, ConnectOptions, CredentialOptions};
-use omnia_wasi_blobstore::WasiBlobstoreCtx;
+use omnia_backend::Connect;
+use omnia_backend::blobstore::BlobStoreClient;
 
 async fn connect() -> Result<Client> {
     Client::connect_with(ConnectOptions {

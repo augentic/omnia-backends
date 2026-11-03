@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use futures::future::FutureExt;
-use omnia_wasi_messaging::{
-    Client, FutureResult, Handler, Message, Metadata, RequestOptions, WasiMessagingCtx,
+use omnia_backend::FutureResult;
+use omnia_backend::messaging::{
+    Endpoint, Handler, Message, MessagingClient, Metadata, RequestOptions,
 };
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::ToBytes;
@@ -16,14 +17,14 @@ use crate::{DeliveryContext, consume};
 // One retry, long enough for a full queue to drain a slot.
 const QUEUE_RETRY: Duration = Duration::from_millis(20);
 
-impl WasiMessagingCtx for crate::Client {
-    fn connect(&self) -> FutureResult<Arc<dyn Client>> {
+impl MessagingClient for crate::Client {
+    fn endpoint(&self) -> FutureResult<Arc<dyn Endpoint>> {
         let client = self.clone();
-        async move { Ok(Arc::new(client) as Arc<dyn Client>) }.boxed()
+        async move { Ok(Arc::new(client) as Arc<dyn Endpoint>) }.boxed()
     }
 }
 
-impl Client for crate::Client {
+impl Endpoint for crate::Client {
     // A client consumes once: the loop ends only with a record it could not
     // deliver, and the process restarts to replay from the committed offset.
     fn consume(&self, handler: Arc<dyn Handler>) -> FutureResult<()> {

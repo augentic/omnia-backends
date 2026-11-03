@@ -8,13 +8,13 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use omnia_wasi_blobstore::{
-    Bytes, Container, ContainerMetadata, FutureResult, ObjectMetadata, WasiBlobstoreCtx,
-};
+use bytes::Bytes;
+use omnia_backend::FutureResult;
+use omnia_backend::blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
 
 use crate::{Client, blocking, collect, segment_ok};
 
-impl WasiBlobstoreCtx for Client {
+impl BlobStoreClient for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("creating container: {name}");
         let root = self.root.join("blobstore");

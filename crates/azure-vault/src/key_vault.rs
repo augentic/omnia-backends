@@ -8,11 +8,12 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use futures::TryStreamExt;
 use futures::future::FutureExt;
 use http::StatusCode;
-use omnia_wasi_vault::{FutureResult, Locker, WasiVaultCtx};
+use omnia_backend::FutureResult;
+use omnia_backend::vault::{Locker, VaultClient};
 
 use crate::Client;
 
-impl WasiVaultCtx for Client {
+impl VaultClient for Client {
     fn open_locker(&self, identifier: String) -> FutureResult<Arc<dyn Locker>> {
         tracing::trace!("opening locker: {identifier}");
 

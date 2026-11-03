@@ -5,8 +5,8 @@ use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, JsonSpec, ReasoningEffort, Tool,
 };
 use jsonschema::Validator;
+use omnia_backend::model::{Effort, Error, Format, Function, Request, Role, Tool as ModelTool};
 use omnia_sandbox::Access;
-use omnia_wasi_model::{Effort, Error, Format, Function, Request, Role, Tool as ModelTool};
 use serde_json::Value;
 
 use crate::tools::{SHELL_TOOL, workspace_tools};
@@ -177,7 +177,7 @@ const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
 // Unit tests for request translation.
 #[cfg(test)]
 mod tests {
-    use omnia_wasi_model::{Generation, Grants, Mcp, Message, Schema};
+    use omnia_backend::model::{Generation, Mcp, Message, Schema};
     use serde_json::json;
 
     use super::*;
@@ -196,10 +196,8 @@ mod tests {
             generation: None,
             format: Format::Text,
             tools,
-            grants: Grants {
-                workspace: None,
-                worker: None,
-            },
+            workspace: None,
+            worker: None,
             check: false,
         }
     }

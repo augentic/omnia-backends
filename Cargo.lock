@@ -1801,9 +1801,8 @@ dependencies = [
  "omnia",
  "omnia-azure-blob",
  "omnia-azure-table",
+ "omnia-backend",
  "omnia-cursor",
- "omnia-wasi-blobstore",
- "omnia-wasi-docstore",
  "omnia-wasi-model",
  "omnia-wasi-otel",
  "serde",
@@ -1812,7 +1811,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wasip3",
- "wit-bindgen 0.63.0",
+ "wit-bindgen 0.62.0",
 ]
 
 [[package]]
@@ -3680,9 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "omnia"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61f84f1a83308d34a65cd7b5a1eb2818638736fc18dc3f64d4f717155715c777"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -3707,11 +3704,10 @@ dependencies = [
  "azure_core",
  "azure_identity",
  "azure_storage_blob",
+ "bytes",
  "fromenv",
  "futures",
- "omnia",
- "omnia-plugin",
- "omnia-wasi-blobstore",
+ "omnia-backend",
  "tokio",
  "tracing",
 ]
@@ -3724,8 +3720,7 @@ dependencies = [
  "azure_core",
  "azure_identity",
  "futures",
- "omnia",
- "omnia-wasi-identity",
+ "omnia-backend",
  "tokio",
  "tracing",
 ]
@@ -3740,8 +3735,7 @@ dependencies = [
  "fromenv",
  "futures",
  "hmac 0.13.0",
- "omnia",
- "omnia-wasi-docstore",
+ "omnia-backend",
  "reqwest 0.13.5",
  "serde_json",
  "sha2 0.11.1",
@@ -3762,17 +3756,58 @@ dependencies = [
  "fromenv",
  "futures",
  "http",
- "omnia",
- "omnia-wasi-vault",
+ "omnia-backend",
  "tokio",
  "tracing",
 ]
 
 [[package]]
+name = "omnia-backend"
+version = "0.38.0"
+dependencies = [
+ "anyhow",
+ "base64ct",
+ "bon",
+ "bytes",
+ "cap-fs-ext",
+ "cap-std",
+ "chrono",
+ "dashmap 6.2.1",
+ "fromenv",
+ "futures",
+ "futures-channel",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "moka",
+ "oauth2",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry-proto",
+ "opentelemetry_sdk",
+ "parking_lot 0.13.0",
+ "reqwest 0.13.5",
+ "rusqlite",
+ "rustls",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "wasm-pkg-common",
+ "x509-cert 0.3.0",
+]
+
+[[package]]
 name = "omnia-cli"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "175f552610c62b18e3514dd6329ae19c80bd5d9b0cefa02e3069f460c0f8b95c"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3780,9 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-compile"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bb9ebd33437b455878da30f1f87bbd122c2f105a8fe84bf5d4cc71590f3e9cf"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "wasmtime",
@@ -3790,30 +3823,21 @@ dependencies = [
 
 [[package]]
 name = "omnia-core"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70fe5fd23b5850b7514904bc7df547fbda1a23ba9a50648bd599084d6d934445"
+version = "0.38.0"
 dependencies = [
  "anyhow",
- "cap-fs-ext",
- "cap-std",
  "fromenv",
  "futures",
  "http",
+ "omnia-backend",
  "omnia-compile",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "pastey",
  "serde",
  "sha2 0.11.1",
  "tokio",
  "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
  "wasmtime",
  "wasmtime-wasi",
- "wasmtime-wasi-http",
 ]
 
 [[package]]
@@ -3831,6 +3855,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "omnia",
+ "omnia-backend",
  "omnia-sandbox",
  "omnia-test",
  "omnia-wasi-model",
@@ -3854,11 +3879,10 @@ name = "omnia-filesystem"
 version = "0.32.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "fromenv",
  "futures",
- "omnia",
- "omnia-wasi-blobstore",
- "omnia-wasi-keyvalue",
+ "omnia-backend",
  "tempfile",
  "tokio",
  "tracing",
@@ -3880,6 +3904,7 @@ dependencies = [
  "jsonschema 0.59.0",
  "libc",
  "omnia",
+ "omnia-backend",
  "omnia-sandbox",
  "omnia-test",
  "omnia-wasi-model",
@@ -3902,6 +3927,7 @@ dependencies = [
  "futures",
  "libc",
  "omnia",
+ "omnia-backend",
  "omnia-test",
  "omnia-wasi-vcs",
  "process-wrap",
@@ -3913,9 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-guest-macros"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ec85b73d6375855cd4a0e35306c8b191f413e452926944e03bbdc330df6c90a"
+version = "0.38.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3924,9 +3948,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-host-macros"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ba64620ed7be672b684ec5a91eda9882120461b92e1608eb161d6cde86b0409"
+version = "0.38.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3943,8 +3965,7 @@ dependencies = [
  "futures",
  "http",
  "jsonschema 0.59.0",
- "omnia",
- "omnia-wasi-messaging",
+ "omnia-backend",
  "rand 0.10.3",
  "rdkafka",
  "reqwest 0.13.5",
@@ -3957,9 +3978,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-link"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b6c2b980bf99fbd0824ed31c3660a11d2ae5389172e7661214bea35858b0c60"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -3973,14 +3992,13 @@ name = "omnia-mongodb"
 version = "0.32.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "chrono",
  "fromenv",
  "futures",
  "mongodb",
- "omnia",
- "omnia-wasi-blobstore",
+ "omnia-backend",
  "serde",
- "serde_json",
  "tokio",
  "tracing",
 ]
@@ -3991,14 +4009,12 @@ version = "0.32.0"
 dependencies = [
  "anyhow",
  "async-nats",
+ "bytes",
  "chrono",
  "fromenv",
  "futures",
  "nkeys",
- "omnia",
- "omnia-wasi-blobstore",
- "omnia-wasi-keyvalue",
- "omnia-wasi-messaging",
+ "omnia-backend",
  "tokio",
  "tracing",
 ]
@@ -4010,8 +4026,7 @@ dependencies = [
  "anyhow",
  "fromenv",
  "futures",
- "omnia",
- "omnia-wasi-otel",
+ "omnia-backend",
  "opentelemetry-proto",
  "tokio",
  "tonic",
@@ -4020,13 +4035,12 @@ dependencies = [
 
 [[package]]
 name = "omnia-plugin"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b53cc6e4e5b62199e2d69a178ff49f6b90f4dc354cb672269b640c40daeaa086"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "cap-std",
  "futures",
+ "omnia-backend",
  "omnia-core",
  "tokio",
  "tracing",
@@ -4042,8 +4056,7 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "futures",
- "omnia",
- "omnia-wasi-sql",
+ "omnia-backend",
  "rustls",
  "serde_json",
  "tokio",
@@ -4060,8 +4073,7 @@ dependencies = [
  "anyhow",
  "fromenv",
  "futures",
- "omnia",
- "omnia-wasi-keyvalue",
+ "omnia-backend",
  "redis",
  "tokio",
  "tracing",
@@ -4089,26 +4101,28 @@ dependencies = [
 
 [[package]]
 name = "omnia-sdk"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b05ca71a6c9efc6472085aa142220944942c6f6dd5be2a6cc089789682a17f9c"
+version = "0.38.0"
 dependencies = [
  "anyhow",
- "bon",
  "bytes",
  "clap",
  "clap_complete",
  "futures",
  "http",
  "http-body",
+ "omnia-backend",
+ "omnia-guest-macros",
  "omnia-wasi-blobstore",
  "omnia-wasi-config",
+ "omnia-wasi-docstore",
  "omnia-wasi-http",
  "omnia-wasi-identity",
  "omnia-wasi-keyvalue",
  "omnia-wasi-messaging",
  "omnia-wasi-model",
  "omnia-wasi-otel",
+ "omnia-wasi-sql",
+ "omnia-wasi-vault",
  "omnia-wasi-vcs",
  "omnia-wasi-websocket",
  "schemars 1.2.3",
@@ -4122,13 +4136,16 @@ dependencies = [
 
 [[package]]
 name = "omnia-test"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aad8efa5cd8c562a7b408e7a8bd23c6e0b67e951d9b19584d1c6cc632fa334e1"
+version = "0.38.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "futures",
+ "http",
+ "http-body-util",
  "omnia",
+ "omnia-backend",
+ "omnia-sdk",
  "omnia-wasi-blobstore",
  "omnia-wasi-config",
  "omnia-wasi-docstore",
@@ -4147,15 +4164,12 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-blobstore"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00049a3b4e42e1e93ac30015937fe6d7a0c53e8425c276b9598e96dde3a81506"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "bytes",
- "futures",
+ "omnia-backend",
  "omnia-core",
- "parking_lot 0.13.0",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
@@ -4164,29 +4178,24 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-config"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5a3b069595edcf77bb626124a5b39f1b9a7a209692240524e9c252211a1254c"
+version = "0.38.0"
 dependencies = [
  "anyhow",
+ "omnia-backend",
  "omnia-core",
  "tracing",
  "wasmtime",
- "wasmtime-wasi-config",
+ "wasmtime-wasi",
  "wit-bindgen 0.62.0",
 ]
 
 [[package]]
 name = "omnia-wasi-docstore"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4723dd2ce72cc97c58f650c10de473959124045cf1b9f3c261cdf6a7a41ae9a"
+version = "0.38.0"
 dependencies = [
  "anyhow",
- "chrono",
- "futures",
+ "omnia-backend",
  "omnia-core",
- "serde_json",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
@@ -4195,44 +4204,33 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-http"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3535055b325beb7d7ee6e4c395ed0b252528b26f393dae0125e25457a0b1de57"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64ct",
  "bytes",
- "fromenv",
  "futures",
  "http",
  "http-body",
  "http-body-util",
  "hyper",
+ "omnia-backend",
  "omnia-core",
- "reqwest 0.13.5",
- "rustls",
  "tokio",
  "tower",
  "tracing",
  "wasip3",
  "wasmtime",
  "wasmtime-wasi-http",
- "x509-cert 0.3.0",
 ]
 
 [[package]]
 name = "omnia-wasi-identity"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59143a2e9c5b212778706b4b9000987a03dad2e024fce1620180ebdab9bcd574"
+version = "0.38.0"
 dependencies = [
  "anyhow",
- "fromenv",
- "futures",
- "oauth2",
+ "omnia-backend",
  "omnia-core",
- "serde",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
@@ -4241,17 +4239,11 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-keyvalue"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "218a87cb890aa9fe9a3cf76b22efd91ce4d26f99819d29d6d827db90df90ab05"
+version = "0.38.0"
 dependencies = [
  "anyhow",
- "chrono",
- "futures",
- "moka",
+ "omnia-backend",
  "omnia-core",
- "serde",
- "serde_json",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
@@ -4260,15 +4252,13 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-messaging"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "253b61cbdc10411d0f48e9f67dfdc4592c98eb0117c1f18673feb8befdb30188"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "futures",
+ "omnia-backend",
  "omnia-core",
  "tokio",
- "tokio-stream",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
@@ -4277,16 +4267,14 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-model"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "795990a482309c0e4d436a48b2616e0e3e11e68905384b125731a68e595e22f1"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "cap-std",
  "futures",
+ "omnia-backend",
  "omnia-core",
  "serde",
- "serde_json",
  "tokio",
  "tracing",
  "wasip3",
@@ -4297,14 +4285,12 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-otel"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63155bb652c825437c6bf0926ea211daa7e73c4dc8ff855b6d2cd9cd7845cc65"
+version = "0.38.0"
 dependencies = [
  "anyhow",
- "futures",
  "getrandom 0.4.3",
  "hex",
+ "omnia-backend",
  "omnia-core",
  "omnia-guest-macros",
  "opentelemetry",
@@ -4320,17 +4306,11 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-sql"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f45a07e5101758fb67beedcdf56c88494ae04bebcc855a03d47aa331515d6a6"
+version = "0.38.0"
 dependencies = [
  "anyhow",
- "fromenv",
- "futures",
+ "omnia-backend",
  "omnia-core",
- "parking_lot 0.13.0",
- "rusqlite",
- "tokio",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
@@ -4339,14 +4319,11 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-vault"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd8d4ea9438a275c305c8bc9d9378a9ca4f8749c24b570947e2bc9717f46ef9e"
+version = "0.38.0"
 dependencies = [
  "anyhow",
- "futures",
+ "omnia-backend",
  "omnia-core",
- "parking_lot 0.13.0",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
@@ -4355,12 +4332,11 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-vcs"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f301fb0fc3ca8c915ac9857089a32a0aa53d48aff32480455e5acd3429b11e94"
+version = "0.38.0"
 dependencies = [
  "anyhow",
  "cap-std",
+ "omnia-backend",
  "omnia-core",
  "tracing",
  "wasip3",
@@ -4371,19 +4347,13 @@ dependencies = [
 
 [[package]]
 name = "omnia-wasi-websocket"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c997425369b46db4bc50d021744468c110693c482a7cef87239f553b5ee592f5"
+version = "0.38.0"
 dependencies = [
  "anyhow",
- "dashmap 6.2.1",
  "futures",
- "futures-channel",
- "futures-util",
+ "omnia-backend",
  "omnia-core",
  "tokio",
- "tokio-stream",
- "tokio-tungstenite",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
@@ -7344,16 +7314,6 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.262.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4495a6f85dd94c411c749303efcbc5defade0b0cbdbc0541495241ab917a9b5a"
-dependencies = [
- "leb128fmt",
- "wasmparser 0.262.0",
-]
-
-[[package]]
-name = "wasm-encoder"
 version = "0.263.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b883a26aea02eaabe2d2c3fba7eb039ef5cdcb5d5201ae5551e73d5e251a81f"
@@ -7415,18 +7375,6 @@ dependencies = [
  "indexmap 2.14.2",
  "wasm-encoder 0.261.0",
  "wasmparser 0.261.0",
-]
-
-[[package]]
-name = "wasm-metadata"
-version = "0.262.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c86ff6668190d9fb70372b306b4f9fe8930f0e2f57ce72e4922bf2f117900949"
-dependencies = [
- "anyhow",
- "indexmap 2.14.2",
- "wasm-encoder 0.262.0",
- "wasmparser 0.262.0",
 ]
 
 [[package]]
@@ -7546,18 +7494,6 @@ dependencies = [
  "indexmap 2.14.2",
  "semver",
  "serde",
-]
-
-[[package]]
-name = "wasmparser"
-version = "0.262.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "974d643b125b272607e2fff8012ea14a8328acd7621e4bafa7afb32500052b1b"
-dependencies = [
- "bitflags 2.13.2",
- "hashbrown 0.17.1",
- "indexmap 2.14.2",
- "semver",
 ]
 
 [[package]]
@@ -7805,15 +7741,6 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi-io",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "wasmtime-wasi-config"
-version = "50.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b8e2841ed16bd9aa38650827727f3a45eba8759b153b5d33aaef7722286708f"
-dependencies = [
- "wasmtime",
 ]
 
 [[package]]
@@ -8217,18 +8144,7 @@ checksum = "53cb4b5556c3a791e86838ea287782bdafa704d55b0e68b5b81a3a16b9ea5f4b"
 dependencies = [
  "bitflags 2.13.2",
  "futures",
- "wit-bindgen-rust-macro 0.62.0",
-]
-
-[[package]]
-name = "wit-bindgen"
-version = "0.63.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b85a987ab61d365382d25c7d47e26edd48941b3bf6e3fbf76eff918bc71dab06"
-dependencies = [
- "bitflags 2.13.2",
- "futures",
- "wit-bindgen-rust-macro 0.63.0",
+ "wit-bindgen-rust-macro",
 ]
 
 [[package]]
@@ -8243,17 +8159,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wit-bindgen-core"
-version = "0.63.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "775e122e390603abfacd548027016cd0113a6e2bf2f8ce6bdd3658b013456ea8"
-dependencies = [
- "anyhow",
- "heck",
- "wit-parser 0.262.0",
-]
-
-[[package]]
 name = "wit-bindgen-rust"
 version = "0.62.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8265,24 +8170,8 @@ dependencies = [
  "prettyplease 0.3.0",
  "syn 3.0.9",
  "wasm-metadata 0.259.0",
- "wit-bindgen-core 0.62.0",
+ "wit-bindgen-core",
  "wit-component 0.259.0",
-]
-
-[[package]]
-name = "wit-bindgen-rust"
-version = "0.63.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84e26e13b9d972026778d2ffb7985736de116026fdc8d9464f966e12df2eb240"
-dependencies = [
- "anyhow",
- "heck",
- "indexmap 2.14.2",
- "prettyplease 0.3.0",
- "syn 3.0.9",
- "wasm-metadata 0.262.0",
- "wit-bindgen-core 0.63.0",
- "wit-component 0.262.0",
 ]
 
 [[package]]
@@ -8297,24 +8186,8 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
- "wit-bindgen-core 0.62.0",
- "wit-bindgen-rust 0.62.0",
-]
-
-[[package]]
-name = "wit-bindgen-rust-macro"
-version = "0.63.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16a008a0d6b4840677326beb4edbeb210a2f1b7d0183fb7cc33f466b90fd7fb6"
-dependencies = [
- "anyhow",
- "macro-string",
- "prettyplease 0.3.0",
- "proc-macro2",
- "quote",
- "syn 3.0.9",
- "wit-bindgen-core 0.63.0",
- "wit-bindgen-rust 0.63.0",
+ "wit-bindgen-core",
+ "wit-bindgen-rust",
 ]
 
 [[package]]
@@ -8395,25 +8268,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wit-component"
-version = "0.262.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "078def49fdb49cab405c3006e05793b3fdaf7069126ba6b9c97d01ec8c98fe4c"
-dependencies = [
- "anyhow",
- "bitflags 2.13.2",
- "indexmap 2.14.2",
- "log",
- "serde",
- "serde_derive",
- "serde_json",
- "wasm-encoder 0.262.0",
- "wasm-metadata 0.262.0",
- "wasmparser 0.262.0",
- "wit-parser 0.262.0",
-]
-
-[[package]]
 name = "wit-parser"
 version = "0.253.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8487,25 +8341,6 @@ dependencies = [
  "serde_json",
  "unicode-ident",
  "wasmparser 0.261.0",
-]
-
-[[package]]
-name = "wit-parser"
-version = "0.262.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00f0dc051466ffe46787721fca3d088536f158ae400be044f1b1c386ba9397ad"
-dependencies = [
- "anyhow",
- "hashbrown 0.17.1",
- "id-arena",
- "indexmap 2.14.2",
- "log",
- "semver",
- "serde",
- "serde_derive",
- "serde_json",
- "unicode-ident",
- "wasmparser 0.262.0",
 ]
 
 [[package]]
@@ -8681,3 +8516,7 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[patch.unused]]
+name = "omnia-native"
+version = "0.38.0"

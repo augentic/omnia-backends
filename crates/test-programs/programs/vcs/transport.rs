@@ -9,7 +9,8 @@
 
 use std::fs;
 
-use omnia_sdk::vcs::{CloneOptions, Vcs as _, WasiVcs};
+use omnia_sdk::WasiProvider;
+use omnia_sdk::vcs::{CloneOptions, Vcs as _};
 use test_programs::arguments;
 
 omnia_sdk::command!(scenario);
@@ -25,28 +26,28 @@ async fn scenario() {
     let url = arguments.first().expect("the origin's URL is the first argument");
 
     // a clone of the empty origin, with one commit labelled and pushed
-    WasiVcs.clone_repo(url, FIRST, WHOLE).await.expect("clone");
+    WasiProvider.clone_repo(url, FIRST, WHOLE).await.expect("clone");
     fs::write("clones/first/a.txt", "a\n").expect("writing a");
-    let first = WasiVcs.commit(FIRST, "a").await.expect("commit").expect("a");
-    WasiVcs.label(FIRST, LABEL, &first).await.expect("label");
-    WasiVcs.push(FIRST, "origin", LABEL).await.expect("push");
+    let first = WasiProvider.commit(FIRST, "a").await.expect("commit").expect("a");
+    WasiProvider.label(FIRST, LABEL, &first).await.expect("label");
+    WasiProvider.push(FIRST, "origin", LABEL).await.expect("push");
 
     // a second clone sees the label; a later push reaches it by fetch
-    WasiVcs.clone_repo(url, SECOND, WHOLE).await.expect("clone");
-    assert_eq!(WasiVcs.fetched(SECOND, "origin", LABEL).await.expect("fetched"), first);
+    WasiProvider.clone_repo(url, SECOND, WHOLE).await.expect("clone");
+    assert_eq!(WasiProvider.fetched(SECOND, "origin", LABEL).await.expect("fetched"), first);
     fs::write("clones/first/b.txt", "b\n").expect("writing b");
-    let next = WasiVcs.commit(FIRST, "b").await.expect("commit").expect("b");
-    WasiVcs.label(FIRST, LABEL, &next).await.expect("move label");
-    WasiVcs.push(FIRST, "origin", LABEL).await.expect("push");
+    let next = WasiProvider.commit(FIRST, "b").await.expect("commit").expect("b");
+    WasiProvider.label(FIRST, LABEL, &next).await.expect("move label");
+    WasiProvider.push(FIRST, "origin", LABEL).await.expect("push");
     assert_eq!(
-        WasiVcs.fetched(SECOND, "origin", LABEL).await.expect("stale"),
+        WasiProvider.fetched(SECOND, "origin", LABEL).await.expect("stale"),
         first,
         "a clone sees nothing before it fetches"
     );
-    WasiVcs.fetch(SECOND, "origin").await.expect("fetch");
-    assert_eq!(WasiVcs.fetched(SECOND, "origin", LABEL).await.expect("fresh"), next);
+    WasiProvider.fetch(SECOND, "origin").await.expect("fetch");
+    assert_eq!(WasiProvider.fetched(SECOND, "origin", LABEL).await.expect("fresh"), next);
 
     // a shallow clone holds every label at the one commit it asked for
-    WasiVcs.clone_repo(url, SHALLOW, CloneOptions { depth: Some(1) }).await.expect("shallow");
-    assert_eq!(WasiVcs.fetched(SHALLOW, "origin", LABEL).await.expect("fetched"), next);
+    WasiProvider.clone_repo(url, SHALLOW, CloneOptions { depth: Some(1) }).await.expect("shallow");
+    assert_eq!(WasiProvider.fetched(SHALLOW, "origin", LABEL).await.expect("fetched"), next);
 }

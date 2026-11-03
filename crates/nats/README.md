@@ -27,13 +27,13 @@ Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouche
 use omnia_nats::Client as Nats;
 use omnia_wasi_messaging::WasiMessaging;
 use omnia_wasi_keyvalue::WasiKeyValue;
-use omnia_wasi_blobstore::WasiBlobstore;
+use omnia_wasi_blobstore::WasiBlobStore;
 
 omnia::runtime!({
     hosts: {
         WasiMessaging: Nats,
         WasiKeyValue: Nats,
-        WasiBlobstore: Nats,
+        WasiBlobStore: Nats,
     }
 });
 ```
@@ -41,7 +41,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::{Backend, FromEnv};
+use omnia_backend::{Connect, FromEnv};
 use omnia_nats::Client;
 
 let options = omnia_nats::ConnectOptions::load_env()?;

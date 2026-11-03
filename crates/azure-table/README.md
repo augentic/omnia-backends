@@ -144,7 +144,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::{Backend, FromEnv};
+use omnia_backend::{Connect, FromEnv};
 use omnia_azure_table::Client;
 
 let options = omnia_azure_table::ConnectOptions::load_env()?;

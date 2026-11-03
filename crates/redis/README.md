@@ -6,8 +6,7 @@
 Redis key-value backend for the Omnia WASI runtime, implementing the `wasi-keyvalue` interface.
 
 Uses the `redis` crate with a `ConnectionManager` for automatic reconnection and retry.
-Keys are namespaced by bucket (`{bucket}:{key}`), and writes (`set`, `increment`, `swap`)
-apply a 24-hour TTL (`86400` seconds).
+Keys are namespaced by bucket (`{bucket}:{key}`), `set` accepts an optional TTL (`SET … EX`, persisting when `None`), and `cas` performs a single-round-trip Lua compare-and-swap preserving any remaining TTL (`KEEPTTL`).
 
 MSRV: Rust 1.99
 
@@ -38,7 +37,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::{Backend, FromEnv};
+use omnia_backend::{Connect, FromEnv};
 use omnia_redis::Client;
 
 let options = omnia_redis::ConnectOptions::load_env()?;

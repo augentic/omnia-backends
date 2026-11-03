@@ -6,7 +6,7 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use omnia::Backend;
+use omnia_backend::Connect;
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use tracing::instrument;
 
@@ -20,7 +20,7 @@ impl Debug for Client {
     }
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[instrument(name = "Redis::connect_with", skip(options))]
@@ -73,7 +73,7 @@ mod config {
 }
 pub use config::ConnectOptions;
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }

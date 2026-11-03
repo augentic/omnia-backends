@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use async_nats::{AuthError, jetstream};
-use omnia::Backend;
+use omnia_backend::Connect;
 use tracing::instrument;
 
 /// NATS backend client for messaging, key-value, and blobstore.
@@ -26,7 +26,7 @@ impl fmt::Debug for Client {
     }
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[instrument]
@@ -87,7 +87,7 @@ mod config {
             f.debug_struct("ConnectOptions")
                 .field("address", &self.address)
                 .field("topics", &self.topics)
-                .field("jwt", &self.jwt)
+                .field("jwt", &self.jwt.as_ref().map(|_| "<redacted>"))
                 .field("seed", &self.seed.as_ref().map(|_| "<redacted>"))
                 .finish()
         }
@@ -104,7 +104,7 @@ mod config {
 }
 pub use config::ConnectOptions;
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }

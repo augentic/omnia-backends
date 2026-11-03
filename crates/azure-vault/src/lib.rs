@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use azure_core::credentials::{Secret, TokenCredential};
 use azure_identity::{ClientSecretCredential, DeveloperToolsCredential};
 use azure_security_keyvault_secrets::SecretClient;
-use omnia::Backend;
+use omnia_backend::Connect;
 use tracing::instrument;
 
 /// Azure Key Vault secrets backend client.
@@ -24,7 +24,7 @@ impl Debug for Client {
     }
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[instrument]
@@ -99,7 +99,7 @@ mod config {
 }
 pub use config::{ConnectOptions, CredentialOptions};
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }

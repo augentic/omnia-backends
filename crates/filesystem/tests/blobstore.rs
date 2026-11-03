@@ -1,11 +1,12 @@
-//! The filesystem backend at the `omnia:blobstore` host boundary
-//! (`WasiBlobstoreCtx`): container lifecycle, ranged reads, listing and
+//! The filesystem backend at the `omnia:blobstore` contract boundary
+//! (`BlobStoreClient`): container lifecycle, ranged reads, listing and
 //! name sanitising, against a temporary directory. No service, so it runs
 //! in CI.
 
 use std::sync::Arc;
 
-use omnia_wasi_blobstore::{Bytes, Container, WasiBlobstoreCtx};
+use bytes::Bytes;
+use omnia_backend::blobstore::{BlobStoreClient, Container};
 use tempfile::TempDir;
 
 fn client(root: &TempDir) -> omnia_filesystem::Client {

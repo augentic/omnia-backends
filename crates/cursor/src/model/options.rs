@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result};
+use omnia_backend::model::{Format, Mcp, Request, Tool};
 use omnia_sandbox::{Access, Session};
-use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::Value;
 
 use crate::protocol::{
@@ -149,8 +149,8 @@ fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
 // accepted by `tests/live.rs`.
 #[cfg(test)]
 mod tests {
+    use omnia_backend::model::{Format, Mcp, Message, Request, Role, Tool};
     use omnia_sandbox::Access;
-    use omnia_wasi_model::{Format, Grants, Mcp, Message, Request, Role, Tool};
 
     use super::{agent_options, with_mcp_hint};
 
@@ -236,10 +236,8 @@ mod tests {
             generation: None,
             format: Format::Text,
             tools: vec![],
-            grants: Grants {
-                workspace: None,
-                worker: None,
-            },
+            workspace: None,
+            worker: None,
             check: false,
         }
     }

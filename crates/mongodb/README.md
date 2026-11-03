@@ -22,11 +22,11 @@ Bind the backend in your host's `runtime!` map — the guest `.wasm` is untouche
 
 ```rust,ignore
 use omnia_mongodb::Client as MongoDb;
-use omnia_wasi_blobstore::WasiBlobstore;
+use omnia_wasi_blobstore::WasiBlobStore;
 
 omnia::runtime!({
     hosts: {
-        WasiBlobstore: MongoDb,
+        WasiBlobStore: MongoDb,
     }
 });
 ```
@@ -34,7 +34,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::{Backend, FromEnv};
+use omnia_backend::{Connect, FromEnv};
 use omnia_mongodb::Client;
 
 let options = omnia_mongodb::ConnectOptions::load_env()?;

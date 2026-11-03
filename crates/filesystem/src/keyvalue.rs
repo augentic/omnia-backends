@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
@@ -17,7 +17,7 @@ use omnia_backend::keyvalue::{Bucket, KeyValueClient, add_i64};
 
 use crate::{Client, blocking, collect, segment_ok};
 
-type KeyLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
+type KeyLocks = Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>;
 pub type LockRegistry = Arc<Mutex<HashMap<String, KeyLocks>>>;
 
 impl KeyValueClient for Client {
@@ -47,7 +47,7 @@ impl KeyValueClient for Client {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct FsBucket {
     name: String,
     dir: PathBuf,
@@ -58,7 +58,13 @@ struct FsBucket {
 impl FsBucket {
     fn key_lock(&self, key: &str) -> Arc<Mutex<()>> {
         let mut locks = self.locks.lock().expect("key lock registry poisoned");
-        Arc::clone(locks.entry(key.to_string()).or_default())
+        if let Some(existing) = locks.get(key).and_then(Weak::upgrade) {
+            return existing;
+        }
+        locks.retain(|_, weak| weak.strong_count() > 0);
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(key.to_string(), Arc::downgrade(&lock));
+        lock
     }
 }
 
@@ -114,15 +120,16 @@ impl Bucket for FsBucket {
 
     fn keys(&self) -> FutureResult<Vec<String>> {
         tracing::trace!("listing keys in bucket: {}", self.name);
-        let dir = self.dir.clone();
-        let ttl_dir = self.ttl_dir.clone();
+        let bucket = self.clone();
 
         blocking(move || {
-            let candidates = collect(&dir, "")?;
+            let candidates = collect(&bucket.dir, "")?;
             let mut live = Vec::with_capacity(candidates.len());
             for key in candidates {
-                if is_expired(&ttl_dir, &key)? {
-                    let _ = remove_entry(&dir, &ttl_dir, &key);
+                let lock = bucket.key_lock(&key);
+                let _guard = lock.lock().expect("key lock poisoned");
+                if is_expired(&bucket.ttl_dir, &key)? {
+                    let _ = remove_entry(&bucket.dir, &bucket.ttl_dir, &key);
                 } else {
                     live.push(key);
                 }

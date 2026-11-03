@@ -30,4 +30,4 @@ tracing.workspace = true
 
 # Container operations are futures; the test suite needs a runtime.
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

@@ -222,8 +222,9 @@ async fn ttl_expires_and_survives_cas() {
     let store = client(&root);
     let bucket = state(&store).await;
 
+    bucket.set("persistent".to_string(), b"stay".to_vec(), None).await.expect("set persistent");
     bucket
-        .set("ephemeral".to_string(), b"v1".to_vec(), Some(Duration::from_millis(80)))
+        .set("ephemeral".to_string(), b"v1".to_vec(), Some(Duration::from_millis(150)))
         .await
         .expect("set ephemeral");
     bucket
@@ -231,14 +232,13 @@ async fn ttl_expires_and_survives_cas() {
         .await
         .expect("cas")
         .expect("cas commits");
-    bucket.set("persistent".to_string(), b"stay".to_vec(), None).await.expect("set persistent");
 
     assert_eq!(
         bucket.get("ephemeral".to_string()).await.expect("get").as_deref(),
         Some(b"v2".as_slice())
     );
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     assert_eq!(bucket.get("ephemeral".to_string()).await.expect("get expired"), None);
     assert!(!bucket.exists("ephemeral".to_string()).await.expect("exists expired"));

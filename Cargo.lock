@@ -4183,7 +4183,6 @@ dependencies = [
  "futures",
  "omnia-backend",
  "omnia-core",
- "serde_json",
  "tracing",
  "wasmtime",
  "wasmtime-wasi",

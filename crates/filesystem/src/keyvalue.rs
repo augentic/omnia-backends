@@ -121,10 +121,10 @@ impl Bucket for FsBucket {
             let candidates = collect(&dir, "")?;
             let mut live = Vec::with_capacity(candidates.len());
             for key in candidates {
-                if !is_expired(&ttl_dir, &key)? {
-                    live.push(key);
-                } else {
+                if is_expired(&ttl_dir, &key)? {
                     let _ = remove_entry(&dir, &ttl_dir, &key);
+                } else {
+                    live.push(key);
                 }
             }
             Ok(live)

@@ -154,14 +154,14 @@ impl Bucket for KvBucket {
             }
 
             let outcome = match &live {
-                Some(entry) => store
-                    .update(&key, value.into(), entry.revision)
-                    .await
-                    .map(|_rev| ())
-                    .map_err(|err| {
-                        let raced = err.kind() == kv::UpdateErrorKind::WrongLastRevision;
-                        (raced, anyhow::Error::new(err))
-                    }),
+                Some(entry) => {
+                    store.update(&key, value.into(), entry.revision).await.map(|_rev| ()).map_err(
+                        |err| {
+                            let raced = err.kind() == kv::UpdateErrorKind::WrongLastRevision;
+                            (raced, anyhow::Error::new(err))
+                        },
+                    )
+                }
                 // Absent-expected: `create` refuses if the key appeared meanwhile.
                 None => store.create(&key, value.into()).await.map(|_rev| ()).map_err(|err| {
                     let raced = err.kind() == kv::CreateErrorKind::AlreadyExists;
@@ -174,7 +174,8 @@ impl Bucket for KvBucket {
                 // Lost the race between snapshot and write: return the
                 // observed value so the caller can retry.
                 Err((true, _raced)) => {
-                    let observed = live_entry(&store, &key).await?.map(|entry| entry.value.to_vec());
+                    let observed =
+                        live_entry(&store, &key).await?.map(|entry| entry.value.to_vec());
                     Ok(Err(observed))
                 }
                 Err((false, err)) => Err(err.context(format!("swapping `{key}`"))),

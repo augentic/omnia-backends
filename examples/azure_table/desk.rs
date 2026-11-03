@@ -67,16 +67,7 @@ fn cmp(field: &str, op: ComparisonOp, value: ScalarValue) -> Filter {
 async fn q(
     client: &Client, collection: &str, filter: Option<Filter>, opts: QueryOptions,
 ) -> QueryResult {
-    client
-        .query(
-            collection.into(),
-            QueryOptions {
-                filter,
-                ..opts
-            },
-        )
-        .await
-        .expect("query")
+    client.query(collection.into(), QueryOptions { filter, ..opts }).await.expect("query")
 }
 
 async fn q_err(client: &Client, filter: Filter) -> String {
@@ -422,11 +413,7 @@ pub async fn main() {
     let r = q(
         &client,
         SCOPE_DESK,
-        Some(Filter::Not(Box::new(cmp(
-            "IsActive",
-            ComparisonOp::Eq,
-            ScalarValue::Bool(true),
-        )))),
+        Some(Filter::Not(Box::new(cmp("IsActive", ComparisonOp::Eq, ScalarValue::Bool(true))))),
         QueryOptions::default(),
     )
     .await;

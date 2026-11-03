@@ -75,7 +75,8 @@ async fn an_unnameable_key_is_refused() {
 // on the command line instead, and the operation fails on the host's ssh,
 // which answers nothing.
 async fn a_repository_names_no_pack_program() {
-    for result in [WasiProvider.fetch(PACKER, "evil").await, WasiProvider.push(PACKER, "evil", "main").await]
+    for result in
+        [WasiProvider.fetch(PACKER, "evil").await, WasiProvider.push(PACKER, "evil", "main").await]
     {
         assert!(matches!(result, Err(Error::Access(_))), "the host's ssh answered: {result:?}");
     }
@@ -97,7 +98,8 @@ async fn a_lazy_fetch_reaches_no_command() {
 // a transport runs is refused on every transport instead, the key named.
 async fn a_shaping_repository_is_refused() {
     for (repo, key) in [(REWRITER, "insteadof"), (PROXIED, "http.")] {
-        for result in [WasiProvider.fetch(repo, "evil").await, WasiProvider.push(repo, "evil", "main").await]
+        for result in
+            [WasiProvider.fetch(repo, "evil").await, WasiProvider.push(repo, "evil", "main").await]
         {
             match result {
                 Err(Error::Other(message)) => {

@@ -41,8 +41,10 @@ async fn keyvalue_atomics() -> Result<()> {
     bucket.cas(pointer.clone(), None, b"first".to_vec()).await?.expect("absent-expected commits");
 
     // A stale snapshot refuses, leaves the value, and returns the observed value.
-    let observed =
-        bucket.cas(pointer.clone(), None, b"lost".to_vec()).await?.expect_err("stale must mismatch");
+    let observed = bucket
+        .cas(pointer.clone(), None, b"lost".to_vec())
+        .await?
+        .expect_err("stale must mismatch");
     assert_eq!(observed.as_deref(), Some(b"first".as_slice()));
     assert_eq!(bucket.get(pointer.clone()).await?.as_deref(), Some(b"first".as_slice()));
 

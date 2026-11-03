@@ -565,9 +565,7 @@ async fn at_least_once() -> Result<()> {
     client.send(topic.clone(), keyed_message("f0", &[("key", "f")])).await?;
     let rejected = consuming.next().await?;
     assert_eq!(rejected.offset(), tail);
-    rejected.complete(Err(HandleError::Rejected(MessagingError::Other(
-        "rejected f".to_owned(),
-    ))));
+    rejected.complete(Err(HandleError::Rejected(MessagingError::Other("rejected f".to_owned()))));
     let ended = (&mut consuming.task).await.context("the consume task joins")?;
     let error = ended.expect_err("a rejected record ends the consumer");
     assert!(

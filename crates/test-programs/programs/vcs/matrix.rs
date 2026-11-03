@@ -91,7 +91,10 @@ async fn init_commit_add_merge() {
     assert_eq!(WasiProvider.pending(repo).await.expect("pending"), []);
 
     write("repo/a.txt", "a\n");
-    assert_eq!(WasiProvider.pending(repo).await.expect("pending"), [change("a.txt", ChangeKind::Added)]);
+    assert_eq!(
+        WasiProvider.pending(repo).await.expect("pending"),
+        [change("a.txt", ChangeKind::Added)]
+    );
     let first = WasiProvider.commit(repo, "a").await.expect("commit").expect("a commit");
     assert_eq!(WasiProvider.head(repo).await.expect("head"), first);
     assert_eq!(WasiProvider.resolve(repo, &first).await.expect("whole id"), first);
@@ -277,7 +280,10 @@ async fn descends_and_labelled() {
 
     assert!(WasiProvider.descends(repo, &base, &side).await.expect("descends"));
     assert!(WasiProvider.descends(repo, &base, &base).await.expect("descends"), "itself included");
-    assert!(!WasiProvider.descends(repo, &side, &base).await.expect("descends"), "the reversed pair");
+    assert!(
+        !WasiProvider.descends(repo, &side, &base).await.expect("descends"),
+        "the reversed pair"
+    );
     assert_eq!(
         WasiProvider.descends(repo, "nope", &base).await,
         Err(Error::NotFound("nope".to_owned())),
@@ -397,11 +403,15 @@ async fn merge_policy_rename() {
     assert!(merged.commit.is_some(), "the merge sealed");
     assert_eq!(read("renamed/old.txt"), "ours\n");
     assert!(fs::metadata("renamed/new.txt").is_err(), "the new name was kept beside the old");
-    assert!(WasiProvider.pending("./renamed").await.expect("pending").is_empty(), "the copy is sealed");
+    assert!(
+        WasiProvider.pending("./renamed").await.expect("pending").is_empty(),
+        "the copy is sealed"
+    );
 
     let theirs = renamed("./renamed-theirs", "./renamed-theirs-work").await;
     let policy = [rule("*.txt", Strategy::Theirs)];
-    let merged = WasiProvider.merge("./renamed-theirs", &theirs, "merge", &policy).await.expect("merge");
+    let merged =
+        WasiProvider.merge("./renamed-theirs", &theirs, "merge", &policy).await.expect("merge");
     assert_eq!(merged.conflicts, Vec::<String>::new());
     assert!(merged.commit.is_some(), "the merge sealed");
     assert_eq!(
@@ -435,7 +445,11 @@ async fn merge_policy_binary() {
     let refused = WasiProvider.merge(repo, &theirs, "merge", &union).await;
     assert!(matches!(refused, Err(Error::Other(_))), "a binary has no lines to union: {refused:?}");
     assert_eq!(WasiProvider.head(repo).await.expect("head"), ours, "the head did not move");
-    assert_eq!(WasiProvider.pending(repo).await.expect("pending"), [], "nothing of the attempt is left");
+    assert_eq!(
+        WasiProvider.pending(repo).await.expect("pending"),
+        [],
+        "nothing of the attempt is left"
+    );
     assert_eq!(
         fs::read("binary/blob.bin").expect("the blob"),
         ours_bytes,
@@ -463,7 +477,8 @@ async fn label_the_checked_out_branch() {
 async fn merge_up_to_date() {
     let repo = "./ancestor";
     let first = seeded(repo).await;
-    let merged = WasiProvider.merge(repo, &first, "nothing", &[]).await.expect("merging an ancestor");
+    let merged =
+        WasiProvider.merge(repo, &first, "nothing", &[]).await.expect("merging an ancestor");
     assert_eq!(merged.commit, Some(first));
     assert_eq!(merged.conflicts, Vec::<String>::new());
 }

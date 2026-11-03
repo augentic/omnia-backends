@@ -84,7 +84,10 @@ async fn scenario() {
     assert_eq!(WasiProvider.fetched(ELSEWHERE, "origin", "main").await, Err(Error::NotARepository));
     WasiProvider.clone_repo(url, "./clone", WHOLE).await.expect("clone");
     assert_eq!(WasiProvider.push("./clone", "origin", "nolabel").await, Err(not_found("nolabel")));
-    assert_eq!(WasiProvider.fetched("./clone", "origin", "nolabel").await, Err(not_found("nolabel")));
+    assert_eq!(
+        WasiProvider.fetched("./clone", "origin", "nolabel").await,
+        Err(not_found("nolabel"))
+    );
 
     // a guest string git would read as an option, or the empty one it reads
     // as a default, is nothing the repository knows — refused before any git
@@ -93,7 +96,10 @@ async fn scenario() {
     assert_eq!(WasiProvider.merge(REPO, "", "m", &[]).await, Err(not_found("")));
     assert_eq!(WasiProvider.add(REPO, "./dashed", "-x").await, Err(not_found("-x")));
     assert_eq!(WasiProvider.label(REPO, "-b", &first).await, Err(not_found("-b")));
-    assert_eq!(WasiProvider.fetch(REPO, "--upload-pack=sh").await, Err(not_found("--upload-pack=sh")));
+    assert_eq!(
+        WasiProvider.fetch(REPO, "--upload-pack=sh").await,
+        Err(not_found("--upload-pack=sh"))
+    );
     assert_eq!(WasiProvider.fetched(REPO, "origin", "-x").await, Err(not_found("-x")));
     assert_eq!(
         WasiProvider.push(REPO, "--receive-pack=sh", "main").await,
@@ -111,10 +117,15 @@ async fn scenario() {
     WasiProvider.label("./clone-a", "emery/x", &ours).await.expect("label a");
     WasiProvider.push("./clone-a", "origin", "emery/x").await.expect("push a");
     fs::write("clone-b/b.txt", "b\n").expect("writing b's file");
-    let theirs = WasiProvider.commit("./clone-b", "b's").await.expect("commit").expect("b's commit");
+    let theirs =
+        WasiProvider.commit("./clone-b", "b's").await.expect("commit").expect("b's commit");
     WasiProvider.label("./clone-b", "emery/x", &theirs).await.expect("label b");
     let diverged = Err(Error::Diverged("emery/x".to_owned()));
     assert_eq!(WasiProvider.push("./clone-b", "origin", "emery/x").await, diverged, "fetch first");
     WasiProvider.fetch("./clone-b", "origin").await.expect("fetch");
-    assert_eq!(WasiProvider.push("./clone-b", "origin", "emery/x").await, diverged, "non-fast-forward");
+    assert_eq!(
+        WasiProvider.push("./clone-b", "origin", "emery/x").await,
+        diverged,
+        "non-fast-forward"
+    );
 }

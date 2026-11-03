@@ -54,7 +54,8 @@ async fn scenario() {
         paths: "README.md".to_owned(),
         strategy: Strategy::Theirs,
     }];
-    let merged = WasiProvider.merge(PROJECT, "emery/rev1", "merge rev1", &policy).await.expect("merge");
+    let merged =
+        WasiProvider.merge(PROJECT, "emery/rev1", "merge rev1", &policy).await.expect("merge");
     assert!(merged.commit.is_some(), "the policy resolves the one conflict");
     assert_eq!(merged.conflicts, Vec::<String>::new());
     assert_eq!(fs::read_to_string("project/README.md").expect("readme"), "# project\n\nbuilt\n");
@@ -65,8 +66,10 @@ async fn scenario() {
     let slice_2 = WasiProvider.commit(WORK, "slice 2").await.expect("commit").expect("a commit");
     WasiProvider.label(PROJECT, "emery/rev2", &slice_2).await.expect("label");
     fs::write("project/README.md", "# project\n\nproject again\n").expect("editing the readme");
-    let before = WasiProvider.commit(PROJECT, "project again").await.expect("commit").expect("a commit");
-    let conflicted = WasiProvider.merge(PROJECT, "emery/rev2", "merge rev2", &[]).await.expect("merge");
+    let before =
+        WasiProvider.commit(PROJECT, "project again").await.expect("commit").expect("a commit");
+    let conflicted =
+        WasiProvider.merge(PROJECT, "emery/rev2", "merge rev2", &[]).await.expect("merge");
     assert_eq!(conflicted.commit, None);
     assert_eq!(conflicted.conflicts, ["README.md"]);
     assert_eq!(WasiProvider.head(PROJECT).await.expect("head"), before);
@@ -79,7 +82,10 @@ async fn scenario() {
     // the first label reaches the origin and comes back by fetch
     WasiProvider.push(PROJECT, "origin", "emery/rev1").await.expect("push");
     WasiProvider.fetch(PROJECT, "origin").await.expect("fetch");
-    assert_eq!(WasiProvider.fetched(PROJECT, "origin", "emery/rev1").await.expect("fetched"), slice_1);
+    assert_eq!(
+        WasiProvider.fetched(PROJECT, "origin", "emery/rev1").await.expect("fetched"),
+        slice_1
+    );
 
     // the working copy goes
     WasiProvider.remove(WORK).await.expect("remove");

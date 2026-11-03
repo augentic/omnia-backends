@@ -93,7 +93,11 @@ async fn cas_absent_expected() {
     let store = client(&root);
     let bucket = state(&store).await;
 
-    bucket.cas("pointer".to_string(), None, b"first".to_vec()).await.expect("cas").expect("must commit");
+    bucket
+        .cas("pointer".to_string(), None, b"first".to_vec())
+        .await
+        .expect("cas")
+        .expect("must commit");
     assert_eq!(
         bucket.get("pointer".to_string()).await.expect("get").as_deref(),
         Some(b"first".as_slice())

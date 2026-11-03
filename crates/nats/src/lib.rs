@@ -4,10 +4,9 @@ mod blobstore;
 mod keyvalue;
 mod messaging;
 
-use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use async_nats::{AuthError, jetstream};
@@ -21,7 +20,6 @@ pub struct Client {
     jetstream: jetstream::Context,
     topics: Option<Vec<String>>,
     kv_max_age: Option<Duration>,
-    expiries: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl fmt::Debug for Client {
@@ -63,7 +61,6 @@ impl Connect for Client {
             jetstream,
             topics: options.topics,
             kv_max_age: options.kv_max_age_secs.map(Duration::from_secs),
-            expiries: Arc::default(),
         })
     }
 }
@@ -89,7 +86,8 @@ mod config {
         /// Optional `NKey` seed used to sign server nonce challenges.
         #[env(from = "NATS_SEED")]
         pub seed: Option<String>,
-        /// Optional bucket-level max age in seconds for newly created JetStream KV buckets.
+        /// Bucket-wide max age in seconds, applied to each JetStream KV bucket
+        /// this client creates (`NATS_KV_MAX_AGE_SECS`, default none).
         #[env(from = "NATS_KV_MAX_AGE_SECS")]
         pub kv_max_age_secs: Option<u64>,
     }

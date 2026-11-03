@@ -17,6 +17,19 @@ MSRV: Rust 1.99
 | `NATS_TOPICS` | no | | Comma-separated subscription topics |
 | `NATS_JWT` | no | | JWT for authentication |
 | `NATS_SEED` | no | | `NKey` seed for signing |
+| `NATS_KV_MAX_AGE_SECS` | no | | Bucket-wide max age for each JetStream KV bucket this client creates; unset, keys persist until deleted |
+
+## Key-value
+
+A bucket is a JetStream KV bucket created on first open with per-message TTL
+enabled, which needs NATS server 2.11 or later:
+
+- `set` with a TTL publishes the entry with a `Nats-TTL` header, and the
+  server expires it; `cas` and `increment` carry the remaining TTL over to
+  the value they write.
+- A bucket created by an earlier release has per-message TTL disabled, so the
+  server refuses a write with a TTL until `allow_msg_ttl` is enabled on the
+  bucket's stream (or the bucket is recreated).
 
 ## Usage
 
@@ -51,8 +64,8 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging` and `wasi-keyvalue`
-boundaries against a real server. It is `#[ignore]`d so it never runs in CI; run it
-explicitly (the default `NATS_ADDR` is the public `demo.nats.io`):
+boundaries against a real server, per-key TTL included. It is `#[ignore]`d so it never
+runs in CI; run it explicitly (the default `NATS_ADDR` is the public `demo.nats.io`):
 
 ```bash
 # or run a local server with JetStream instead of the public demo instance:

@@ -20,7 +20,8 @@ all-features = true
 
 [dependencies]
 anyhow.workspace = true
-async-nats = "0.50.0"
+# `server_2_11` carries the per-message TTL the key-value bucket expires entries by.
+async-nats = { version = "0.50.0", features = ["server_2_11"] }
 bytes.workspace = true
 chrono.workspace = true
 fromenv.workspace = true

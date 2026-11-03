@@ -1,5 +1,6 @@
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_nats::jetstream::context::KeyValueErrorKind;
@@ -17,14 +18,17 @@ impl KeyValueClient for Client {
     fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
         tracing::trace!("opening bucket: {identifier}");
         let jetstream = self.jetstream.clone();
+        let max_age = self.kv_max_age.unwrap_or_default();
+        let expiries = Arc::clone(&self.expiries);
 
         async move {
             let store = match jetstream.get_key_value(&identifier).await {
                 Ok(store) => store,
                 Err(err) if err.kind() == KeyValueErrorKind::GetBucket => jetstream
                     .create_key_value(Config {
-                        bucket: identifier,
+                        bucket: identifier.clone(),
                         history: 1,
+                        max_age,
                         max_bytes: 100 * 1024 * 1024,
                         ..Config::default()
                     })
@@ -33,30 +37,74 @@ impl KeyValueClient for Client {
                 Err(err) => return Err(err).context("failed to open bucket"),
             };
 
-            Ok(Arc::new(KvBucket(store)) as Arc<dyn Bucket>)
+            Ok(Arc::new(KvBucket {
+                name: identifier,
+                store,
+                expiries,
+            }) as Arc<dyn Bucket>)
         }
         .boxed()
     }
 }
 
 #[derive(Debug)]
-struct KvBucket(kv::Store);
+struct KvBucket {
+    name: String,
+    store: kv::Store,
+    expiries: Arc<Mutex<HashMap<String, Instant>>>,
+}
+
+impl KvBucket {
+    fn scoped(&self, key: &str) -> String {
+        format!("{}:{key}", self.name)
+    }
+
+    fn set_expiry(&self, key: &str, ttl: Option<Duration>) {
+        let mut expiries = self.expiries.lock().expect("expiries lock poisoned");
+        let scoped = self.scoped(key);
+        match ttl {
+            Some(ttl) => {
+                expiries.insert(scoped, Instant::now() + ttl);
+            }
+            None => {
+                expiries.remove(&scoped);
+            }
+        }
+    }
+
+    fn take_if_expired(&self, key: &str) -> bool {
+        let mut expiries = self.expiries.lock().expect("expiries lock poisoned");
+        let scoped = self.scoped(key);
+        if expiries.get(&scoped).is_some_and(|&at| Instant::now() >= at) {
+            expiries.remove(&scoped);
+            true
+        } else {
+            false
+        }
+    }
+}
 
 impl Bucket for KvBucket {
     fn get(&self, key: String) -> FutureResult<Option<Vec<u8>>> {
         tracing::trace!("getting key: {key}");
-        let store = self.0.clone();
+        let store = self.store.clone();
+        let expired = self.take_if_expired(&key);
 
         async move {
+            if expired {
+                let _ = store.delete(&key).await;
+                return Ok(None);
+            }
             let entry = store.get(key).await.context("getting key")?;
             Ok(entry.map(Into::into))
         }
         .boxed()
     }
 
-    fn set(&self, key: String, value: Vec<u8>, _ttl: Option<Duration>) -> FutureResult<()> {
+    fn set(&self, key: String, value: Vec<u8>, ttl: Option<Duration>) -> FutureResult<()> {
         tracing::trace!("setting key: {key}");
-        let store = self.0.clone();
+        let store = self.store.clone();
+        self.set_expiry(&key, ttl);
 
         async move {
             store.put(key, value.into()).await.context("setting key")?;
@@ -67,7 +115,8 @@ impl Bucket for KvBucket {
 
     fn delete(&self, key: String) -> FutureResult<()> {
         tracing::trace!("deleting key: {key}");
-        let store = self.0.clone();
+        let store = self.store.clone();
+        self.set_expiry(&key, None);
 
         async move {
             store.delete(key).await.context("deleting key")?;
@@ -78,9 +127,14 @@ impl Bucket for KvBucket {
 
     fn exists(&self, key: String) -> FutureResult<bool> {
         tracing::trace!("checking existence of key: {key}");
-        let store = self.0.clone();
+        let store = self.store.clone();
+        let expired = self.take_if_expired(&key);
 
         async move {
+            if expired {
+                let _ = store.delete(&key).await;
+                return Ok(false);
+            }
             let entry = store.get(key).await.context("checking key")?;
             Ok(entry.is_some())
         }
@@ -88,14 +142,30 @@ impl Bucket for KvBucket {
     }
 
     fn keys(&self) -> FutureResult<Vec<String>> {
-        let store = self.0.clone();
+        let store = self.store.clone();
+        let bucket_name = self.name.clone();
+        let expiries = Arc::clone(&self.expiries);
 
         async move {
             tracing::trace!("listing keys");
 
             let key_results = store.keys().await.context("listing keys")?;
-            let keys =
+            let raw_keys: Vec<String> =
                 key_results.try_filter_map(|k| async move { Ok(Some(k)) }).try_collect().await?;
+            let now = Instant::now();
+            let mut guard = expiries.lock().expect("expiries lock poisoned");
+            let keys = raw_keys
+                .into_iter()
+                .filter(|k| {
+                    let scoped = format!("{bucket_name}:{k}");
+                    if guard.get(&scoped).is_some_and(|&at| now >= at) {
+                        guard.remove(&scoped);
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
 
             Ok(keys)
         }
@@ -104,9 +174,13 @@ impl Bucket for KvBucket {
 
     fn increment(&self, key: String, delta: i64) -> FutureResult<i64> {
         tracing::trace!("incrementing key: {key}");
-        let store = self.0.clone();
+        let store = self.store.clone();
+        let expired = self.take_if_expired(&key);
 
         async move {
+            if expired {
+                let _ = store.delete(&key).await;
+            }
             // JetStream KV has no native increment; loop a revision-conditioned
             // read-modify-write, retrying only on lost races.
             for _ in 0..MAX_INCREMENT_RETRIES {
@@ -142,9 +216,13 @@ impl Bucket for KvBucket {
         &self, key: String, expected: Option<Vec<u8>>, value: Vec<u8>,
     ) -> FutureResult<std::result::Result<(), Option<Vec<u8>>>> {
         tracing::trace!("swapping key: {key}");
-        let store = self.0.clone();
+        let store = self.store.clone();
+        let expired = self.take_if_expired(&key);
 
         async move {
+            if expired {
+                let _ = store.delete(&key).await;
+            }
             // Snapshot the live entry: value for the compare, revision for
             // the conditioned write.
             let live = live_entry(&store, &key).await?;

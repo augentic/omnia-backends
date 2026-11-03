@@ -213,3 +213,34 @@ async fn increment_encoding() {
     let err = bucket.increment("text".to_string(), 1).await.expect_err("must refuse");
     assert!(err.to_string().contains("big-endian"), "unexpected error: {err}");
 }
+
+#[tokio::test]
+async fn ttl_expires_and_survives_cas() {
+    use std::time::Duration;
+
+    let root = TempDir::new().expect("tempdir");
+    let store = client(&root);
+    let bucket = state(&store).await;
+
+    bucket
+        .set("ephemeral".to_string(), b"v1".to_vec(), Some(Duration::from_millis(80)))
+        .await
+        .expect("set ephemeral");
+    bucket
+        .cas("ephemeral".to_string(), Some(b"v1".to_vec()), b"v2".to_vec())
+        .await
+        .expect("cas")
+        .expect("cas commits");
+    bucket.set("persistent".to_string(), b"stay".to_vec(), None).await.expect("set persistent");
+
+    assert_eq!(
+        bucket.get("ephemeral".to_string()).await.expect("get").as_deref(),
+        Some(b"v2".as_slice())
+    );
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    assert_eq!(bucket.get("ephemeral".to_string()).await.expect("get expired"), None);
+    assert!(!bucket.exists("ephemeral".to_string()).await.expect("exists expired"));
+    assert_eq!(bucket.keys().await.expect("keys"), ["persistent"]);
+}

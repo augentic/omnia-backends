@@ -129,7 +129,7 @@ omnia::runtime!({
 
 At startup the generated code calls each backend's `connect()` (reading its environment variables), links every WASI interface into the shared linker, and starts the trigger servers. See the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md) for the full walk-through.
 
-This workspace consumes the `omnia` runtime as published crates.io dependencies, declared once under `[workspace.dependencies]` in the workspace `Cargo.toml` (currently the 0.36.0 line). Each release of this repository pairs with one omnia line; see [RELEASES.md](../RELEASES.md).
+This workspace consumes the `omnia` runtime as published crates.io dependencies, declared once under `[workspace.dependencies]` in the workspace `Cargo.toml` (currently the 0.38.0 line). Each release of this repository pairs with one omnia line; see [RELEASES.md](../RELEASES.md).
 
 ## Configuration
 
@@ -152,7 +152,7 @@ Each crate's README documents its variable set.
 CI cannot stand up the real services, so the testing policy (see [AGENTS.md](../AGENTS.md)) splits coverage:
 
 - **Unit tests** cover pure, service-free translation logic (OData filter building, Postgres type mapping, the Kafka partitioner, cursor prompt build/parse). These run in CI.
-- **Live tests** (`tests/live.rs`, `#[ignore]`-gated) drive the backend's `WasiXxxCtx` implementation against the real service. Run them locally:
+- **Live tests** (`tests/live.rs`, `#[ignore]`-gated) drive the backend's `XxxClient` implementation against the real service. Run them locally:
 
 ```bash
 cargo nextest run -p <crate> --run-ignored all   # with the service + credentials available
@@ -161,8 +161,8 @@ cargo nextest run -p <crate> --run-ignored all   # with the service + credential
 ## Adding a New Backend
 
 1. Create `crates/<name>/`
-2. Implement the `Backend` trait with a `FromEnv`-derived `ConnectOptions`
-3. Implement the `WasiXxxCtx` context trait(s) for the interfaces it serves
+2. Implement the `Connect` trait with a `FromEnv`-derived `ConnectOptions`
+3. Implement the `XxxClient` contract trait(s) for the interfaces it serves
 4. Add `#[ignore]`-gated live tests in `tests/live.rs` and document the run recipe in the crate README
 5. Add example(s) under `examples/` if the backend benefits from an end-to-end demo
 

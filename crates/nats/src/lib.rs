@@ -4,8 +4,10 @@ mod blobstore;
 mod keyvalue;
 mod messaging;
 
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use async_nats::{AuthError, jetstream};
@@ -18,11 +20,16 @@ pub struct Client {
     inner: async_nats::Client,
     jetstream: jetstream::Context,
     topics: Option<Vec<String>>,
+    kv_max_age: Option<Duration>,
+    expiries: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Client").field("topics", &self.topics).finish_non_exhaustive()
+        f.debug_struct("Client")
+            .field("topics", &self.topics)
+            .field("kv_max_age", &self.kv_max_age)
+            .finish_non_exhaustive()
     }
 }
 
@@ -55,6 +62,8 @@ impl Connect for Client {
             inner: client,
             jetstream,
             topics: options.topics,
+            kv_max_age: options.kv_max_age_secs.map(Duration::from_secs),
+            expiries: Arc::default(),
         })
     }
 }
@@ -80,6 +89,9 @@ mod config {
         /// Optional `NKey` seed used to sign server nonce challenges.
         #[env(from = "NATS_SEED")]
         pub seed: Option<String>,
+        /// Optional bucket-level max age in seconds for newly created JetStream KV buckets.
+        #[env(from = "NATS_KV_MAX_AGE_SECS")]
+        pub kv_max_age_secs: Option<u64>,
     }
 
     impl fmt::Debug for ConnectOptions {
@@ -89,6 +101,7 @@ mod config {
                 .field("topics", &self.topics)
                 .field("jwt", &self.jwt.as_ref().map(|_| "<redacted>"))
                 .field("seed", &self.seed.as_ref().map(|_| "<redacted>"))
+                .field("kv_max_age_secs", &self.kv_max_age_secs)
                 .finish()
         }
     }

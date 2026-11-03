@@ -1,4 +1,4 @@
-//! `WasiVcsCtx` over git: one process per operation, run in the place the
+//! `VcsClient` over git: one process per operation, run in the place the
 //! runtime opened, under the host-policy pins that keep the repository's own
 //! configuration from choosing a program git runs, and what git says read
 //! into the typed error.

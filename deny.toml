@@ -53,10 +53,8 @@ wildcards = "allow"
 [bans.workspace-dependencies]
 duplicates = "deny"
 include-path-dependencies = true
-# `exclude-dev = true` and `exclude = ["examples", "test-programs"]` prune
-# dev-only and example-only workspace dependencies from the graph.
 unused = "allow"
 
 [sources]
 unknown-git = "deny"
-# allow-git = ["https://github.com/augentic/omnia"]
+allow-git = ["https://github.com/augentic/omnia"]

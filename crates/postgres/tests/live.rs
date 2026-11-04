@@ -1,5 +1,5 @@
 //! Live round-trips for the Postgres backend, driven through the `omnia:sql`
-//! host boundary (`WasiSqlCtx`). This is the acceptance gate for the
+//! contract (`SqlClient`). This is the acceptance gate for the
 //! `into_param` / `into_wasi_row` mapping pair: `into_wasi_row` cannot be
 //! unit-tested (its input `tokio_postgres::Row` is unconstructable without a
 //! real server), and only a real server proves it accepts what `PgType`
@@ -14,23 +14,22 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use omnia::Backend;
+use omnia_backend::Connect;
+use omnia_backend::sql::{Connection, DataType, Row, SqlClient};
 use omnia_postgres::Client;
-use omnia_wasi_sql::{Connection, DataType, WasiSqlCtx};
 
 async fn connect() -> Result<Arc<dyn Connection>> {
-    let client = <Client as Backend>::connect().await?;
+    let client = <Client as Connect>::connect().await?;
     client.open("default".to_owned()).await
 }
 
-// The generated `DataType` has no `PartialEq`; compare debug renderings.
-fn assert_field(row: &omnia_wasi_sql::Row, name: &str, expected: &DataType) {
+fn assert_field(row: &Row, name: &str, expected: &DataType) {
     let field = row
         .fields
         .iter()
         .find(|f| f.name == name)
         .unwrap_or_else(|| panic!("column '{name}' missing from row"));
-    assert_eq!(format!("{:?}", field.value), format!("{expected:?}"), "column '{name}' round-trip");
+    assert_eq!(&field.value, expected, "column '{name}' round-trip");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -212,7 +211,7 @@ async fn exec_affected_counts() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable Postgres (POSTGRES_URL); run with --run-ignored"]
 async fn terminated_backend() -> Result<()> {
-    let client = <Client as Backend>::connect().await?;
+    let client = <Client as Connect>::connect().await?;
     let conn = client.open("default".to_owned()).await?;
     let rows = conn.query("SELECT pg_backend_pid() AS pid".to_owned(), vec![]).await?;
     let DataType::Int32(Some(pid)) = rows[0].fields[0].value else {

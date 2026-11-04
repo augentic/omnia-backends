@@ -22,14 +22,13 @@ all-features = true
 
 [dependencies]
 anyhow.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 fromenv.workspace = true
 futures.workspace = true
 mongodb = "3.9.1"
-omnia.workspace = true
-omnia-wasi-blobstore.workspace = true
+omnia-backend = { workspace = true, features = ["blobstore"] }
 serde.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
 
 # The live test (`tests/live.rs`) is a separate crate; it needs tokio's test

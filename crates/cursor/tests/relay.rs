@@ -23,7 +23,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use omnia::Backend as _;
+use omnia_backend::Connect as _;
 use omnia_cursor::{Client, ConnectOptions};
 use support::fake_bridge::{self, Config, History as _, Rpc, Spawnable};
 use support::harness::{await_gone, connect, options, run_guest};

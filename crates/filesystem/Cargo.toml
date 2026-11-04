@@ -20,15 +20,14 @@ all-features = true
 
 [dependencies]
 anyhow.workspace = true
+bytes.workspace = true
 fromenv.workspace = true
 futures.workspace = true
-omnia.workspace = true
-omnia-wasi-blobstore.workspace = true
-omnia-wasi-keyvalue.workspace = true
+omnia-backend = { workspace = true, features = ["blobstore", "keyvalue"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 
 # Container operations are futures; the test suite needs a runtime.
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

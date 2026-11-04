@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use http::Method;
-use omnia::Backend as _;
+use omnia_backend::Connect as _;
+use omnia_backend::model::{Limits, ModelClient};
 use omnia_cursor::{Client, ConnectOptions};
-use omnia_wasi_model::{Limits, WasiModelCtx};
 use serde_json::json;
 use support::fake_bridge::{
     self, Config, Event, Fault, History as _, Log, Point, Process, Rpc, Spawnable, Then,
@@ -161,7 +161,7 @@ async fn invalid_options() {
 }
 
 // The tool-call budget the host enforces on each completion is read from
-// the backend through `WasiModelCtx::limits`, so the option is what the
+// the backend through `ModelClient::limits`, so the option is what the
 // session counts against; the other bounds stay the host's.
 #[tokio::test]
 async fn option_limits() {
@@ -172,7 +172,7 @@ async fn option_limits() {
     })
     .await
     .expect("the options are accepted");
-    let limits = WasiModelCtx::limits(&client);
+    let limits = ModelClient::limits(&client);
     assert_eq!(limits.max_tool_calls, 5);
     assert_eq!(limits.max_result_bytes, Limits::default().max_result_bytes);
     assert_eq!(limits.tool_timeout, Limits::default().tool_timeout);

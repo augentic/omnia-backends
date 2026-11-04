@@ -2,13 +2,14 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
+use bytes::Bytes;
 use chrono::Utc;
 use futures::{FutureExt, StreamExt};
 use mongodb::Collection;
-use mongodb::bson::{self, Bson, Document};
-use omnia_wasi_blobstore::{
-    Bytes, Container, ContainerMetadata, FutureResult, ObjectMetadata, WasiBlobstoreCtx,
-};
+use mongodb::bson::spec::BinarySubtype;
+use mongodb::bson::{self, Binary};
+use omnia_backend::FutureResult;
+use omnia_backend::blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
 use serde::{Deserialize, Serialize};
 
 use crate::Client;
@@ -16,12 +17,12 @@ use crate::Client;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Blob {
     name: String,
-    data: Document,
+    data: Binary,
     size: u64,
     created_at: u64,
 }
 
-impl WasiBlobstoreCtx for Client {
+impl BlobStoreClient for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("creating container: {name}");
         let client = self.0.clone();
@@ -103,15 +104,7 @@ impl Container for MongoDbContainer {
             let Some(blob) = collection.find_one(bson::doc! { "name": name }).await? else {
                 return Ok(None);
             };
-
-            // HACK: blob data is a string not an object
-            let data = match blob.data.get("_string") {
-                Some(Bson::String(s)) => {
-                    serde_json::to_vec(&s).context("deserializing Document")?
-                }
-                _ => serde_json::to_vec(&blob.data).context("deserializing Document")?,
-            };
-            let sliced = slice_range(Bytes::from(data), start, end)?;
+            let sliced = slice_range(Bytes::from(blob.data.bytes), start, end)?;
             Ok(Some(sliced))
         }
         .boxed()
@@ -122,24 +115,14 @@ impl Container for MongoDbContainer {
         let collection = self.collection.clone();
 
         async move {
-            let bytes = data;
-
-            let data = match bytes.first() {
-                Some(b) if *b == b'{' => serde_json::from_slice::<Document>(&bytes)
-                    .context("deserializing into Document")?,
-                Some(_) => {
-                    // HACK: blob data is a string not an object
-                    let stringified = serde_json::from_slice::<String>(&bytes)
-                        .context("deserializing into String")?;
-                    bson::doc! {"_string": stringified}
-                }
-                None => return Err(anyhow!("OutgoingValue is empty")),
-            };
-
+            let size = data.len() as u64;
             let blob = Blob {
                 name: name.clone(),
-                data,
-                size: bytes.len() as u64,
+                data: Binary {
+                    subtype: BinarySubtype::Generic,
+                    bytes: data.to_vec(),
+                },
+                size,
                 created_at: u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default(),
             };
             collection

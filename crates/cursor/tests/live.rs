@@ -11,12 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use omnia::Backend as _;
-use omnia_cursor::{Client, ConnectOptions};
-use omnia_wasi_model::{
-    Answer, Error, Format, Function, Grants, Mcp, Message, Request, Role, Schema, Tool,
-    WasiModelCtx, WorkerGrant,
+use omnia_backend::Connect as _;
+use omnia_backend::model::{
+    Answer, Error, Format, Function, Mcp, Message, ModelClient as _, Request, Role, Schema, Tool,
+    WorkerGrant,
 };
+use omnia_cursor::{Client, ConnectOptions};
 use serde_json::{Value, json};
 use support::{
     CHECK_WORD, SENTINEL, TOOL_SENTINEL, checking_tool_host, local_path_tool_host, no_tool_host,
@@ -87,10 +87,8 @@ fn verdict_request() -> Request {
             .to_string(),
         }),
         tools: vec![],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        workspace: None,
+        worker: None,
         check: false,
     }
 }
@@ -319,10 +317,8 @@ fn tool_request() -> Request {
             description: "Return the project secret token.".to_owned(),
             parameters: json!({ "type": "object", "properties": {} }).to_string(),
         })],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        workspace: None,
+        worker: None,
         check: false,
     }
 }
@@ -390,10 +386,8 @@ fn secret_request(url: String) -> Request {
             tools: vec![],
             url,
         })],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        workspace: None,
+        worker: None,
         check: false,
     }
 }
@@ -437,10 +431,8 @@ fn check_request() -> Request {
         generation: None,
         format: Format::Json,
         tools: vec![],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        workspace: None,
+        worker: None,
         check: true,
     }
 }
@@ -548,10 +540,8 @@ fn install_request() -> Request {
             .to_string(),
         }),
         tools: vec![],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        workspace: None,
+        worker: None,
         check: false,
     }
 }
@@ -575,7 +565,7 @@ async fn confined_npm_install() -> Result<()> {
     })
     .await?;
     let mut request = install_request();
-    request.grants.worker = Some(WorkerGrant {
+    request.worker = Some(WorkerGrant {
         egress: vec!["registry.npmjs.org".to_owned()],
         read: vec![],
         env: vec![],

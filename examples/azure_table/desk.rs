@@ -1,10 +1,10 @@
 use std::env;
 
 use dotenvy::dotenv;
-use omnia::Backend;
 use omnia_azure_table::{Client, ConnectOptions, decode_id, encode_id};
-use omnia_wasi_docstore::{
-    ComparisonOp, Document, FilterTree, QueryOpts, QueryResult, ScalarValue, WasiDocStoreCtx,
+use omnia_backend::Connect;
+use omnia_backend::docstore::{
+    ComparisonOp, DocStoreClient, Document, Filter, QueryOptions, QueryResult, ScalarValue,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -56,8 +56,8 @@ fn row_keys(r: &QueryResult) -> Vec<&str> {
     r.documents.iter().map(|d| decode_id(&d.id).expect("valid composite id").1).collect()
 }
 
-fn cmp(field: &str, op: ComparisonOp, value: ScalarValue) -> FilterTree {
-    FilterTree::Compare {
+fn cmp(field: &str, op: ComparisonOp, value: ScalarValue) -> Filter {
+    Filter::Compare {
         field: field.into(),
         op,
         value,
@@ -65,14 +65,20 @@ fn cmp(field: &str, op: ComparisonOp, value: ScalarValue) -> FilterTree {
 }
 
 async fn q(
-    client: &Client, collection: &str, filter: Option<FilterTree>, opts: QueryOpts,
+    client: &Client, collection: &str, filter: Option<Filter>, opts: QueryOptions,
 ) -> QueryResult {
-    client.query(collection.into(), filter, opts).await.expect("query")
+    client.query(collection.into(), QueryOptions { filter, ..opts }).await.expect("query")
 }
 
-async fn q_err(client: &Client, filter: FilterTree) -> String {
+async fn q_err(client: &Client, filter: Filter) -> String {
     client
-        .query(SCOPE_DESK.into(), Some(filter), QueryOpts::default())
+        .query(
+            SCOPE_DESK.into(),
+            QueryOptions {
+                filter: Some(filter),
+                ..QueryOptions::default()
+            },
+        )
         .await
         .unwrap_err()
         .to_string()
@@ -166,7 +172,7 @@ pub async fn main() {
     let created = client.ensure_table(TABLE).await.expect("ensure_table");
     println!("Table '{TABLE}': {}", if created { "created" } else { "already exists" });
 
-    let existing = q(&client, TABLE, None, QueryOpts::default()).await;
+    let existing = q(&client, TABLE, None, QueryOptions::default()).await;
     for d in &existing.documents {
         client.delete(TABLE.into(), d.id.clone()).await.expect("cleanup delete");
     }
@@ -201,7 +207,7 @@ pub async fn main() {
     pass("get round-trip (all fields verified)");
 
     // ── 2. Cross-partition query returns all 5 docs ──────────────────
-    let r = q(&client, TABLE, None, QueryOpts::default()).await;
+    let r = q(&client, TABLE, None, QueryOptions::default()).await;
     assert_eq!(r.documents.len(), 5, "expected 5, got {}", r.documents.len());
     for d in &r.documents {
         assert!(d.id.contains('\0'), "composite id should contain \\0: {:?}", d.id);
@@ -209,7 +215,7 @@ pub async fn main() {
     pass("cross-partition query (5 records, all composite ids)");
 
     // ── 3. Partition-scoped query: desk ──────────────────────────────
-    let r = q(&client, SCOPE_DESK, None, QueryOpts::default()).await;
+    let r = q(&client, SCOPE_DESK, None, QueryOptions::default()).await;
     assert_eq!(r.documents.len(), 3, "desk partition should have 3");
     let rks = row_keys(&r);
     assert!(rks.contains(&"alice"));
@@ -218,7 +224,7 @@ pub async fn main() {
     pass("partition-scoped query: desk (3 records)");
 
     // ── 4. Partition-scoped query: mobile ────────────────────────────
-    let r = q(&client, SCOPE_MOBILE, None, QueryOpts::default()).await;
+    let r = q(&client, SCOPE_MOBILE, None, QueryOptions::default()).await;
     assert_eq!(r.documents.len(), 2, "mobile partition should have 2");
     let rks = row_keys(&r);
     assert!(rks.contains(&"dana"));
@@ -229,8 +235,8 @@ pub async fn main() {
     let r = q(
         &client,
         SCOPE_DESK,
-        Some(cmp("IsActive", ComparisonOp::Eq, ScalarValue::Boolean(true))),
-        QueryOpts::default(),
+        Some(cmp("IsActive", ComparisonOp::Eq, ScalarValue::Bool(true))),
+        QueryOptions::default(),
     )
     .await;
     assert_eq!(r.documents.len(), 2);
@@ -241,7 +247,7 @@ pub async fn main() {
         &client,
         SCOPE_DESK,
         Some(cmp("Points", ComparisonOp::Gt, ScalarValue::Int32(500))),
-        QueryOpts::default(),
+        QueryOptions::default(),
     )
     .await;
     assert_eq!(r.documents.len(), 2);
@@ -255,7 +261,7 @@ pub async fn main() {
         &client,
         SCOPE_DESK,
         Some(cmp("Rating", ComparisonOp::Lte, ScalarValue::Float64(3.9))),
-        QueryOpts::default(),
+        QueryOptions::default(),
     )
     .await;
     assert_eq!(r.documents.len(), 1);
@@ -266,7 +272,7 @@ pub async fn main() {
         &client,
         TABLE,
         Some(cmp("Created", ComparisonOp::Gte, ScalarValue::Str("2026-02-01T00:00:00Z".into()))),
-        QueryOpts::default(),
+        QueryOptions::default(),
     )
     .await;
     assert_eq!(r.documents.len(), 2);
@@ -279,11 +285,11 @@ pub async fn main() {
     let r = q(
         &client,
         SCOPE_DESK,
-        Some(FilterTree::InList {
+        Some(Filter::InList {
             field: "Points".into(),
             values: vec![ScalarValue::Int32(200), ScalarValue::Int32(950)],
         }),
-        QueryOpts::default(),
+        QueryOptions::default(),
     )
     .await;
     assert_eq!(r.documents.len(), 2);
@@ -296,14 +302,14 @@ pub async fn main() {
     let r = q(
         &client,
         SCOPE_DESK,
-        Some(FilterTree::NotInList {
+        Some(Filter::NotInList {
             field: "Name".into(),
             values: vec![
                 ScalarValue::Str("Alice Montgomery".into()),
                 ScalarValue::Str("Bob Burns".into()),
             ],
         }),
-        QueryOpts::default(),
+        QueryOptions::default(),
     )
     .await;
     assert_eq!(r.documents.len(), 1);
@@ -314,7 +320,7 @@ pub async fn main() {
         &client,
         SCOPE_DESK,
         Some(cmp("Region", ComparisonOp::Ne, ScalarValue::Str("US-West".into()))),
-        QueryOpts::default(),
+        QueryOptions::default(),
     )
     .await;
     assert_eq!(r.documents.len(), 1);
@@ -326,11 +332,11 @@ pub async fn main() {
     let r = q(
         &client,
         SCOPE_DESK,
-        Some(FilterTree::And(vec![
-            cmp("IsActive", ComparisonOp::Eq, ScalarValue::Boolean(true)),
+        Some(Filter::And(vec![
+            cmp("IsActive", ComparisonOp::Eq, ScalarValue::Bool(true)),
             cmp("Points", ComparisonOp::Gt, ScalarValue::Int32(500)),
         ])),
-        QueryOpts::default(),
+        QueryOptions::default(),
     )
     .await;
     assert_eq!(r.documents.len(), 2);
@@ -364,7 +370,7 @@ pub async fn main() {
     // ── 16–20. Unsupported filters are rejected ─────────────────────
     let err = q_err(
         &client,
-        FilterTree::Contains {
+        Filter::Contains {
             field: "Name".into(),
             pattern: "Delta".into(),
         },
@@ -375,7 +381,7 @@ pub async fn main() {
 
     let err = q_err(
         &client,
-        FilterTree::StartsWith {
+        Filter::StartsWith {
             field: "Name".into(),
             pattern: "Eve".into(),
         },
@@ -386,7 +392,7 @@ pub async fn main() {
 
     let err = q_err(
         &client,
-        FilterTree::EndsWith {
+        Filter::EndsWith {
             field: "Name".into(),
             pattern: "Burns".into(),
         },
@@ -395,11 +401,11 @@ pub async fn main() {
     assert!(err.contains("not supported"), "EndsWith should be rejected: {err}");
     pass("EndsWith rejected");
 
-    let err = q_err(&client, FilterTree::IsNull("Region".into())).await;
+    let err = q_err(&client, Filter::IsNull("Region".into())).await;
     assert!(err.contains("not supported"), "IsNull should be rejected: {err}");
     pass("IsNull rejected");
 
-    let err = q_err(&client, FilterTree::IsNotNull("Region".into())).await;
+    let err = q_err(&client, Filter::IsNotNull("Region".into())).await;
     assert!(err.contains("not supported"), "IsNotNull should be rejected: {err}");
     pass("IsNotNull rejected");
 
@@ -407,12 +413,8 @@ pub async fn main() {
     let r = q(
         &client,
         SCOPE_DESK,
-        Some(FilterTree::Not(Box::new(cmp(
-            "IsActive",
-            ComparisonOp::Eq,
-            ScalarValue::Boolean(true),
-        )))),
-        QueryOpts::default(),
+        Some(Filter::Not(Box::new(cmp("IsActive", ComparisonOp::Eq, ScalarValue::Bool(true))))),
+        QueryOptions::default(),
     )
     .await;
     assert_eq!(r.documents.len(), 1);
@@ -424,11 +426,11 @@ pub async fn main() {
     let r = q(
         &client,
         TABLE,
-        Some(FilterTree::Or(vec![
+        Some(Filter::Or(vec![
             cmp("Points", ComparisonOp::Eq, ScalarValue::Int32(200)),
             cmp("Points", ComparisonOp::Eq, ScalarValue::Int32(150)),
         ])),
-        QueryOpts::default(),
+        QueryOptions::default(),
     )
     .await;
     assert_eq!(r.documents.len(), 2);
@@ -442,7 +444,7 @@ pub async fn main() {
         &client,
         SCOPE_DESK,
         None,
-        QueryOpts {
+        QueryOptions {
             limit: Some(2),
             ..Default::default()
         },
@@ -455,8 +457,7 @@ pub async fn main() {
     let err = client
         .query(
             SCOPE_DESK.into(),
-            None,
-            QueryOpts {
+            QueryOptions {
                 offset: Some(1),
                 limit: Some(2),
                 ..Default::default()
@@ -534,7 +535,7 @@ pub async fn main() {
     pass("put + get (verify Points changed to 999)");
 
     // ── 27. Round-trip update from cross-partition query ─────────────
-    let all = q(&client, TABLE, None, QueryOpts::default()).await;
+    let all = q(&client, TABLE, None, QueryOptions::default()).await;
     let dana = all.documents.iter().find(|d| d.id == encode_id(PK_MOBILE, "dana")).expect("dana");
     let mut dana_body: Value = serde_json::from_slice(&dana.data).expect("parse dana");
     dana_body["Points"] = json!(777);
@@ -599,7 +600,7 @@ pub async fn main() {
     pass("table-only collection accepted for get with composite id");
 
     // ── Teardown ─────────────────────────────────────────────────────
-    let remaining = q(&client, TABLE, None, QueryOpts::default()).await;
+    let remaining = q(&client, TABLE, None, QueryOptions::default()).await;
     for d in &remaining.documents {
         client.delete(TABLE.into(), d.id.clone()).await.expect("teardown delete");
     }

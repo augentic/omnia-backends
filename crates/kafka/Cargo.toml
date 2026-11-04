@@ -24,8 +24,7 @@ fromenv.workspace = true
 futures.workspace = true
 http.workspace = true
 jsonschema.workspace = true
-omnia.workspace = true
-omnia-wasi-messaging.workspace = true
+omnia-backend = { workspace = true, features = ["messaging"] }
 rand = "0.10.3"
 rdkafka = { version = "0.39.0", features = ["cmake-build", "curl", "ssl-vendored", "tokio"] }
 reqwest.workspace = true

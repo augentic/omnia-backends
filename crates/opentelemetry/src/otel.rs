@@ -1,6 +1,6 @@
 use futures::FutureExt;
-use omnia::FutureResult;
-use omnia_wasi_otel::WasiOtelCtx;
+use omnia_backend::FutureResult;
+use omnia_backend::otel::OtelClient;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
@@ -8,7 +8,7 @@ use crate::Client;
 
 // Export failures are logged, never propagated: telemetry must not fail the
 // application logic it observes.
-impl WasiOtelCtx for Client {
+impl OtelClient for Client {
     fn export_traces(&self, request: ExportTraceServiceRequest) -> FutureResult<()> {
         let mut client = self.traces_client.clone();
 

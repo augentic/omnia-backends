@@ -65,7 +65,7 @@ impl Failure {
     pub(crate) fn into_error(self) -> anyhow::Error {
         match &self {
             Self::Timeout { .. } => {
-                let budget = omnia_wasi_model::Error::BudgetExhausted(self.to_string());
+                let budget = omnia_backend::model::Error::BudgetExhausted(self.to_string());
                 anyhow::Error::new(self).context(budget)
             }
             _ => self.into(),
@@ -101,8 +101,8 @@ impl Outcome {
         if let Some(failure) = error.downcast_ref::<Failure>() {
             return Self::of_failure(failure);
         }
-        match error.downcast_ref::<omnia_wasi_model::Error>() {
-            Some(omnia_wasi_model::Error::BudgetExhausted(_)) => Self::Exhausted,
+        match error.downcast_ref::<omnia_backend::model::Error>() {
+            Some(omnia_backend::model::Error::BudgetExhausted(_)) => Self::Exhausted,
             _ => Self::Error,
         }
     }
@@ -193,7 +193,7 @@ mod tests {
         );
 
         let rejected: anyhow::Error =
-            omnia_wasi_model::Error::BudgetExhausted("say more".to_owned()).into();
+            omnia_backend::model::Error::BudgetExhausted("say more".to_owned()).into();
         assert_eq!(Outcome::of(&rejected), Outcome::Exhausted);
 
         let failed = run_error(Some("model overloaded"));
@@ -210,8 +210,8 @@ mod tests {
     fn timeout_budget() {
         let timeout = Failure::Timeout { cap_secs: 600 }.into_error();
         assert!(matches!(
-            timeout.downcast_ref::<omnia_wasi_model::Error>(),
-            Some(omnia_wasi_model::Error::BudgetExhausted(detail))
+            timeout.downcast_ref::<omnia_backend::model::Error>(),
+            Some(omnia_backend::model::Error::BudgetExhausted(detail))
                 if detail == "cursor run timed out after 600s (absolute cap exceeded while still active)"
         ));
         assert_eq!(Outcome::of(&timeout), Outcome::Timeout);
@@ -224,7 +224,7 @@ mod tests {
             cap_secs: 600,
         }
         .into_error();
-        assert!(inactive.downcast_ref::<omnia_wasi_model::Error>().is_none());
+        assert!(inactive.downcast_ref::<omnia_backend::model::Error>().is_none());
         assert_eq!(Outcome::of(&inactive), Outcome::Inactive);
     }
 }

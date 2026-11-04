@@ -13,9 +13,8 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use omnia_sdk::model::{
-    CHECK_TOOL, Error, Format, Function, Model as _, Request, Tool, ToolCall, WasiModel,
-};
+use omnia_sdk::WasiProvider;
+use omnia_sdk::model::{CHECK_TOOL, Error, Format, Function, Model as _, Request, Tool, ToolCall};
 use test_programs::{arguments, lend, lookup, user};
 
 omnia_sdk::command!(scenario);
@@ -42,7 +41,7 @@ async fn scenario() {
     let format = if nudged { Format::Json } else { Format::Text };
 
     let mut candidates = 0_usize;
-    let error = WasiModel
+    let error = WasiProvider
         .complete_with(
             Request::builder()
                 .messages(vec![user("hi")])

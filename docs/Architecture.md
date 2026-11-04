@@ -27,10 +27,10 @@ Guests are compiled against Layer 2 interfaces only. A guest that calls `wasi:ke
 
 Every backend crate implements two things from the `omnia` runtime:
 
-1. **`omnia::Backend`** — connection management. `connect()` reads a `ConnectOptions` struct from environment variables (via `FromEnv`) and establishes the client:
+1. **`omnia_backend::Connect`** — connection management. `connect()` reads a `ConnectOptions` struct from environment variables (via `FromEnv`) and establishes the client:
 
 ```rust
-pub trait Backend: Sized + Sync + Send {
+pub trait Connect: Sized + Sync + Send {
     type ConnectOptions: FromEnv;
 
     /// Connect using options parsed from the environment.
@@ -41,7 +41,7 @@ pub trait Backend: Sized + Sync + Send {
 }
 ```
 
-2. **One or more `WasiXxxCtx` context traits** — the behavior behind a WASI interface. For example, `omnia-redis` implements `WasiKeyValueCtx`; `omnia-nats` implements `WasiMessagingCtx`, `WasiKeyValueCtx`, and `WasiBlobstoreCtx`.
+2. **One or more `XxxClient` contract traits** — the behavior behind a capability interface. For example, `omnia-redis` implements `KeyValueClient`; `omnia-nats` implements `MessagingClient`, `KeyValueClient`, and `BlobStoreClient`.
 
 A typical backend:
 
@@ -49,7 +49,7 @@ A typical backend:
 #[derive(Clone)]
 pub struct Client(ConnectionManager);
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
@@ -57,7 +57,7 @@ impl Backend for Client {
     }
 }
 
-impl WasiKeyValueCtx for Client {
+impl KeyValueClient for Client {
     fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
         // Provide keyvalue functionality via Redis...
     }
@@ -87,7 +87,7 @@ No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; thos
 
 ### Package store
 
-`azure-blob` additionally implements `omnia_plugin::PackageStore` — the store omnia's registry acquirer reads before any registry and writes a fetched release to once (the `runtime!` macro's `plugins: { store: .. }` names omnia's own local `FsStore`; this impl is the remote counterpart an embedder selects through `Deployment::registry_source`). It owns a container disjoint from guest storage, named by the impl itself (`omnia-plugins`) and refused by name to the `wasi:blobstore` view so the store is its only writer, with one blob per release under the file name `FsStore` uses (`namespace_name@version.wasm`). A blob already there is never replaced: a stored release is final until it is deleted. Verification lives in the acquirer — a fetched release is hashed against the registry's digest before the write, and a served one against the load's pin.
+`azure-blob` additionally implements `omnia_backend::plugins::PackageStore` — the store omnia's registry acquirer reads before any registry and writes a fetched release to once (the `runtime!` macro's `plugins: { store: .. }` names omnia's own local `FsStore`; this impl is the remote counterpart an embedder selects through `Deployment::registry_source`). It owns a container disjoint from guest storage, named by the impl itself (`omnia-plugins`) and refused by name to the `wasi:blobstore` view so the store is its only writer, with one blob per release under the file name `FsStore` uses (`namespace_name@version.wasm`). A blob already there is never replaced: a stored release is final until it is deleted. Verification lives in the acquirer — a fetched release is hashed against the registry's digest before the write, and a served one against the load's pin.
 
 ### Model backends
 
@@ -129,7 +129,7 @@ omnia::runtime!({
 
 At startup the generated code calls each backend's `connect()` (reading its environment variables), links every WASI interface into the shared linker, and starts the trigger servers. See the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md) for the full walk-through.
 
-This workspace consumes the `omnia` runtime as published crates.io dependencies, declared once under `[workspace.dependencies]` in the workspace `Cargo.toml` (currently the 0.36.0 line). Each release of this repository pairs with one omnia line; see [RELEASES.md](../RELEASES.md).
+This workspace consumes the `omnia` runtime as published crates.io dependencies, declared once under `[workspace.dependencies]` in the workspace `Cargo.toml` (currently the 0.38.0 line). Each release of this repository pairs with one omnia line; see [RELEASES.md](../RELEASES.md).
 
 ## Configuration
 
@@ -152,7 +152,7 @@ Each crate's README documents its variable set.
 CI cannot stand up the real services, so the testing policy (see [AGENTS.md](../AGENTS.md)) splits coverage:
 
 - **Unit tests** cover pure, service-free translation logic (OData filter building, Postgres type mapping, the Kafka partitioner, cursor prompt build/parse). These run in CI.
-- **Live tests** (`tests/live.rs`, `#[ignore]`-gated) drive the backend's `WasiXxxCtx` implementation against the real service. Run them locally:
+- **Live tests** (`tests/live.rs`, `#[ignore]`-gated) drive the backend's `XxxClient` implementation against the real service. Run them locally:
 
 ```bash
 cargo nextest run -p <crate> --run-ignored all   # with the service + credentials available
@@ -161,8 +161,8 @@ cargo nextest run -p <crate> --run-ignored all   # with the service + credential
 ## Adding a New Backend
 
 1. Create `crates/<name>/`
-2. Implement the `Backend` trait with a `FromEnv`-derived `ConnectOptions`
-3. Implement the `WasiXxxCtx` context trait(s) for the interfaces it serves
+2. Implement the `Connect` trait with a `FromEnv`-derived `ConnectOptions`
+3. Implement the `XxxClient` contract trait(s) for the interfaces it serves
 4. Add `#[ignore]`-gated live tests in `tests/live.rs` and document the run recipe in the crate README
 5. Add example(s) under `examples/` if the backend benefits from an end-to-end demo
 

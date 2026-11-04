@@ -3,16 +3,16 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use async_nats::jetstream::object_store::{Config, GetErrorKind, InfoErrorKind, ObjectStore};
+use bytes::Bytes;
 use chrono::Utc;
 use futures::{FutureExt, StreamExt};
-use omnia_wasi_blobstore::{
-    Bytes, Container, ContainerMetadata, FutureResult, ObjectMetadata, WasiBlobstoreCtx,
-};
+use omnia_backend::FutureResult;
+use omnia_backend::blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
 use tokio::io::AsyncReadExt;
 
 use crate::Client;
 
-impl WasiBlobstoreCtx for Client {
+impl BlobStoreClient for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("creating container: {name}");
         let jetstream = self.jetstream.clone();

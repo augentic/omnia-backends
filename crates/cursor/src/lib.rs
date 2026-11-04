@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 pub use failure::Failure;
-use omnia::Backend;
+use omnia_backend::Connect;
 pub use omnia_sandbox::Exit;
 pub use protocol::{RpcError, RunStatus};
 use tokio::time::Instant;
@@ -44,7 +44,7 @@ impl std::fmt::Debug for Client {
     }
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[instrument]
@@ -144,7 +144,7 @@ impl Default for ConnectOptions {
     }
 }
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env()
             .backend_url(relay::BACKEND_URL.to_owned())

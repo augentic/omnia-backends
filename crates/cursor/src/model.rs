@@ -18,10 +18,9 @@ use std::time::Duration;
 
 use agent::{Agent, Unanswered};
 use anyhow::anyhow;
+use omnia_backend::FutureResult;
+use omnia_backend::model::{Answer, Error, Format, Limits, ModelClient, Request, ToolHost};
 use omnia_sandbox::{Access, Denied, Grant, Session};
-use omnia_wasi_model::{
-    Answer, Error, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx,
-};
 use options::Turn;
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
@@ -40,7 +39,7 @@ pub struct Deadlines {
     pub cap: Duration,
 }
 
-impl WasiModelCtx for Client {
+impl ModelClient for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let client = self.clone();
         let model = request.model.as_deref().unwrap_or(&self.model);
@@ -107,7 +106,7 @@ impl Client {
     async fn prepare(
         &self, request: &Request, workspace: Option<&Path>,
     ) -> anyhow::Result<Session> {
-        let worker = request.grants.worker.as_ref();
+        let worker = request.worker.as_ref();
         let grant = worker.map_or_else(Grant::default, |worker| Grant {
             egress: worker.egress.clone(),
             read: worker.read.clone(),

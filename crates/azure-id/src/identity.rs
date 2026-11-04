@@ -5,11 +5,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use azure_core::credentials::TokenCredential;
 use azure_identity::{ManagedIdentityCredential, ManagedIdentityCredentialOptions, UserAssignedId};
 use futures::future::FutureExt;
-use omnia_wasi_identity::{AccessToken, FutureResult, Identity, WasiIdentityCtx};
+use omnia_backend::FutureResult;
+use omnia_backend::identity::{AccessToken, Identity, IdentityClient};
 
 use crate::Client;
 
-impl WasiIdentityCtx for Client {
+impl IdentityClient for Client {
     fn get_identity(&self, name: String) -> FutureResult<Arc<dyn Identity>> {
         tracing::trace!("opening identity: {name}");
 

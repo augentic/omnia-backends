@@ -27,8 +27,7 @@ chrono.workspace = true
 fromenv.workspace = true
 futures.workspace = true
 hmac.workspace = true
-omnia.workspace = true
-omnia-wasi-docstore.workspace = true
+omnia-backend = { workspace = true, features = ["docstore"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde_json.workspace = true
 sha2.workspace = true

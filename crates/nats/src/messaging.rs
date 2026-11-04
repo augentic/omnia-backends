@@ -4,17 +4,17 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use futures::future::FutureExt;
 use futures::stream::{self, StreamExt};
-use omnia_wasi_messaging::{
-    Client as MessagingClient, FutureResult, Handler, Message, Metadata, Reply, RequestOptions,
-    WasiMessagingCtx, dispatch,
+use omnia_backend::FutureResult;
+use omnia_backend::messaging::{
+    Endpoint, Handler, Message, MessagingClient, Metadata, Reply, RequestOptions, dispatch,
 };
 
 use crate::Client;
 
-impl WasiMessagingCtx for Client {
-    fn connect(&self) -> FutureResult<Arc<dyn MessagingClient>> {
+impl MessagingClient for Client {
+    fn endpoint(&self) -> FutureResult<Arc<dyn Endpoint>> {
         let client = self.clone();
-        async move { Ok(Arc::new(client) as Arc<dyn MessagingClient>) }.boxed()
+        async move { Ok(Arc::new(client) as Arc<dyn Endpoint>) }.boxed()
     }
 }
 
@@ -43,7 +43,7 @@ fn nats_headers(metadata: &Metadata) -> async_nats::HeaderMap {
     headers
 }
 
-impl MessagingClient for Client {
+impl Endpoint for Client {
     // NATS core has no acknowledgement: a message is finished with once the
     // handler returns, whatever it returned
     fn consume(&self, handler: Arc<dyn Handler>) -> FutureResult<()> {
@@ -107,7 +107,7 @@ impl MessagingClient for Client {
     }
 }
 
-// Header and message translation between `omnia_wasi_messaging` and `async_nats`;
+// Header and message translation between `omnia_backend::messaging` and `async_nats`;
 // live publish/subscribe is covered by `tests/live.rs`.
 #[cfg(test)]
 mod tests {

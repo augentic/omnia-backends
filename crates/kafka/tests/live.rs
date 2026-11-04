@@ -1,6 +1,6 @@
 //! Live tests for the Kafka backend, driven through the `omnia:messaging`
-//! host boundary: `WasiMessagingCtx` for the client, `Client::send` to
-//! produce, and `Client::consume` with the test playing the host's `Handler`.
+//! contract: `MessagingClient` for the client, `Endpoint::send` to
+//! produce, and `Endpoint::consume` with the test playing the host's `Handler`.
 //! A raw `rdkafka` consumer observes landed partitions, wire bytes, and the
 //! group's committed offsets.
 //!
@@ -15,11 +15,11 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
-use omnia::Backend;
-use omnia_kafka::{Client, ConnectOptions, ConsumerOptions, PartitionerScheme, RegistryOptions};
-use omnia_wasi_messaging::{
-    Client as MessagingClient, HandleError, Handler, Message, Metadata, WasiMessagingCtx,
+use omnia_backend::Connect;
+use omnia_backend::messaging::{
+    Endpoint, Error as MessagingError, HandleError, Handler, Message, MessagingClient, Metadata,
 };
+use omnia_kafka::{Client, ConnectOptions, ConsumerOptions, PartitionerScheme, RegistryOptions};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{Consumer, StreamConsumer};
@@ -172,7 +172,7 @@ struct Consuming {
 }
 
 impl Consuming {
-    async fn start(client: &Arc<dyn MessagingClient>) -> Self {
+    async fn start(client: &Arc<dyn Endpoint>) -> Self {
         let (recorder, deliveries) = mpsc::unbounded_channel();
         let task = tokio::spawn(client.consume(Arc::new(Recorder(recorder))));
         tokio::time::sleep(Duration::from_secs(8)).await;
@@ -222,7 +222,7 @@ async fn assert_keyed_sends(scheme: PartitionerScheme, cases: Vec<Case>) -> Resu
     create_topic(&topic, 12).await?;
 
     let backend = Client::connect_with(options(12, scheme, None, None)).await?;
-    let producer: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
+    let producer: Arc<dyn Endpoint> = MessagingClient::endpoint(&backend).await?;
 
     for (payload, metadata, _) in &cases {
         producer.send(topic.clone(), keyed_message(payload, metadata)).await?;
@@ -304,7 +304,7 @@ fn framed(schema_id: i32, payload: &[u8]) -> Vec<u8> {
 // A boundary client over a fresh single-partition topic whose value subject
 // carries a permissive JSON schema, already consuming.
 struct RegistrySubscriber {
-    client: Arc<dyn MessagingClient>,
+    client: Arc<dyn Endpoint>,
     consuming: Consuming,
     registry: SchemaRegistryClient,
     topic: String,
@@ -331,7 +331,7 @@ impl RegistrySubscriber {
             Some(registry_options),
         );
         let backend = Client::connect_with(options).await?;
-        let client: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
+        let client: Arc<dyn Endpoint> = MessagingClient::endpoint(&backend).await?;
         let consuming = Consuming::start(&client).await;
 
         Ok(Self {
@@ -474,7 +474,7 @@ async fn at_least_once() -> Result<()> {
         None,
     ))
     .await?;
-    let client: Arc<dyn MessagingClient> = WasiMessagingCtx::connect(&backend).await?;
+    let client: Arc<dyn Endpoint> = MessagingClient::endpoint(&backend).await?;
     let mut consuming = Consuming::start(&client).await;
 
     // 64 distinct keys in flight, a second record for k0 waiting behind the
@@ -565,9 +565,7 @@ async fn at_least_once() -> Result<()> {
     client.send(topic.clone(), keyed_message("f0", &[("key", "f")])).await?;
     let rejected = consuming.next().await?;
     assert_eq!(rejected.offset(), tail);
-    rejected.complete(Err(HandleError::Rejected(omnia_wasi_messaging::Error::Other(
-        "rejected f".to_owned(),
-    ))));
+    rejected.complete(Err(HandleError::Rejected(MessagingError::Other("rejected f".to_owned()))));
     let ended = (&mut consuming.task).await.context("the consume task joins")?;
     let error = ended.expect_err("a rejected record ends the consumer");
     assert!(

@@ -23,9 +23,8 @@ anyhow.workspace = true
 fromenv.workspace = true
 genai = "0.7.0"
 jsonschema.workspace = true
-omnia.workspace = true
+omnia-backend = { workspace = true, features = ["model"] }
 omnia-sandbox.workspace = true
-omnia-wasi-model.workspace = true
 reqwest = { workspace = true, default-features = false }
 schemars.workspace = true
 serde.workspace = true
@@ -47,7 +46,9 @@ http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 libc.workspace = true
+omnia.workspace = true
 omnia-test = { workspace = true, features = ["host"] }
+omnia-wasi-model.workspace = true
 test-programs.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
 tracing-subscriber.workspace = true

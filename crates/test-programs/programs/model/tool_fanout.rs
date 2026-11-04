@@ -5,7 +5,8 @@
 #![cfg(target_arch = "wasm32")]
 
 use futures::future::join_all;
-use omnia_sdk::model::{Model as _, Request, WasiModel};
+use omnia_sdk::WasiProvider;
+use omnia_sdk::model::{Model as _, Request};
 use test_programs::{fanout_width, lend, lookup, seam, user};
 
 omnia_sdk::command!(scenario);
@@ -19,7 +20,7 @@ async fn scenario() {
             .tools(vec![lookup()])
             .build();
         let mut calls = 0;
-        let reply = WasiModel
+        let reply = WasiProvider
             .complete_with(request, |call| {
                 calls += 1;
                 assert_eq!(call.name, "lookup");

@@ -1,4 +1,4 @@
-//! `WasiVcsCtx` over git: one process per operation, run in the place the
+//! `VcsClient` over git: one process per operation, run in the place the
 //! runtime opened, under the host-policy pins that keep the repository's own
 //! configuration from choosing a program git runs, and what git says read
 //! into the typed error.
@@ -12,8 +12,9 @@ use std::path::{self, PathBuf};
 
 use anyhow::{Context as _, Result};
 use futures::FutureExt as _;
-use omnia_wasi_vcs::{
-    Change, ChangeKind, CloneOptions, Entry, Error, FutureResult, Merged, Place, Rule, WasiVcsCtx,
+use omnia_backend::FutureResult;
+use omnia_backend::vcs::{
+    Change, ChangeKind, CloneOptions, Entry, Error, Merged, Place, Rule, VcsClient,
 };
 
 use self::policy::Resolution;
@@ -21,7 +22,7 @@ use self::refusal::Class;
 use crate::Client;
 use crate::command::{Output, Pins};
 
-impl WasiVcsCtx for Client {
+impl VcsClient for Client {
     fn resolve(&self, repo: Place, revision: String) -> FutureResult<String> {
         tracing::trace!("resolving {revision} in {}", repo.path().display());
         let client = self.clone();
@@ -646,7 +647,7 @@ const fn kind(index: char, tree: char) -> Option<ChangeKind> {
 // operation through a guest over real repositories, with git as the oracle.
 #[cfg(test)]
 mod tests {
-    use omnia_wasi_vcs::ChangeKind;
+    use omnia_backend::vcs::ChangeKind;
 
     use super::{entries, pending};
 

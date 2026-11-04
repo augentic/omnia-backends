@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use omnia_wasi_model::Usage;
+use omnia_backend::model::Usage;
 use tokio::time::Instant;
 
 use super::options::Turn;
@@ -259,7 +259,7 @@ fn clamp_u32(count: i64) -> u32 {
 mod tests {
     use std::time::Duration;
 
-    use omnia_wasi_model::Usage;
+    use omnia_backend::model::Usage;
 
     use super::{Bill, Completion, Phase};
     use crate::failure::Outcome;

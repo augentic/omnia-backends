@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::{fmt, mem};
 
-use omnia_wasi_model::{ToolTurn, Transcript};
+use omnia_backend::model::{ToolTurn, Transcript};
 use serde_json::Value;
 
 use crate::protocol::{RunStreamMessage, SdkMessage, lenient_i64};

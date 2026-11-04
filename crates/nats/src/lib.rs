@@ -6,10 +6,11 @@ mod messaging;
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use async_nats::{AuthError, jetstream};
-use omnia::Backend;
+use omnia_backend::Connect;
 use tracing::instrument;
 
 /// NATS backend client for messaging, key-value, and blobstore.
@@ -18,15 +19,19 @@ pub struct Client {
     inner: async_nats::Client,
     jetstream: jetstream::Context,
     topics: Option<Vec<String>>,
+    kv_max_age: Option<Duration>,
 }
 
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Client").field("topics", &self.topics).finish_non_exhaustive()
+        f.debug_struct("Client")
+            .field("topics", &self.topics)
+            .field("kv_max_age", &self.kv_max_age)
+            .finish_non_exhaustive()
     }
 }
 
-impl Backend for Client {
+impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
     #[instrument]
@@ -55,6 +60,7 @@ impl Backend for Client {
             inner: client,
             jetstream,
             topics: options.topics,
+            kv_max_age: options.kv_max_age_secs.map(Duration::from_secs),
         })
     }
 }
@@ -80,6 +86,10 @@ mod config {
         /// Optional `NKey` seed used to sign server nonce challenges.
         #[env(from = "NATS_SEED")]
         pub seed: Option<String>,
+        /// Bucket-wide max age in seconds, applied to each JetStream KV bucket
+        /// this client creates (`NATS_KV_MAX_AGE_SECS`, default none).
+        #[env(from = "NATS_KV_MAX_AGE_SECS")]
+        pub kv_max_age_secs: Option<u64>,
     }
 
     impl fmt::Debug for ConnectOptions {
@@ -87,8 +97,9 @@ mod config {
             f.debug_struct("ConnectOptions")
                 .field("address", &self.address)
                 .field("topics", &self.topics)
-                .field("jwt", &self.jwt)
+                .field("jwt", &self.jwt.as_ref().map(|_| "<redacted>"))
                 .field("seed", &self.seed.as_ref().map(|_| "<redacted>"))
+                .field("kv_max_age_secs", &self.kv_max_age_secs)
                 .finish()
         }
     }
@@ -104,7 +115,7 @@ mod config {
 }
 pub use config::ConnectOptions;
 
-impl omnia::FromEnv for ConnectOptions {
+impl omnia_backend::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }

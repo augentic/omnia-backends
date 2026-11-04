@@ -3,16 +3,16 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use azure_core::http::RequestContent;
+use azure_core::http::{RequestContent, StatusCode};
 use azure_storage_blob::BlobServiceClient;
 use azure_storage_blob::models::{
     BlobClientDownloadOptions, BlobClientGetPropertiesResultHeaders,
     BlobContainerClientCreateOptions, BlobContainerClientDeleteOptions, HttpRange,
 };
+use bytes::Bytes;
 use futures::{FutureExt, TryStreamExt};
-use omnia_wasi_blobstore::{
-    Bytes, Container, ContainerMetadata, FutureResult, ObjectMetadata, WasiBlobstoreCtx,
-};
+use omnia_backend::FutureResult;
+use omnia_backend::blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
 
 use crate::{Client, STORE_CONTAINER};
 
@@ -29,7 +29,7 @@ fn ensure_not_reserved(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-impl WasiBlobstoreCtx for Client {
+impl BlobStoreClient for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("creating container: {name}");
         let service = Arc::clone(&self.service);
@@ -131,10 +131,11 @@ impl Container for AzureBlobContainer {
         let blob_client = self.service.blob_client(&self.name, &name);
 
         async move {
-            let response = blob_client
-                .download(range_options(start, end)?)
-                .await
-                .context("downloading blob")?;
+            let response = match blob_client.download(range_options(start, end)?).await {
+                Ok(response) => response,
+                Err(err) if err.http_status() == Some(StatusCode::NotFound) => return Ok(None),
+                Err(err) => return Err(err).context("downloading blob"),
+            };
             let data = response.body.collect().await.context("reading blob body")?;
             Ok(Some(data))
         }

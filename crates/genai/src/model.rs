@@ -17,10 +17,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use omnia_backend::FutureResult;
+use omnia_backend::model::{Answer, Error, Format, Limits, ModelClient, Request, ToolHost};
 use omnia_sandbox::{Access, Denied, Grant};
-use omnia_wasi_model::{
-    Answer, Error, Format, FutureResult, Limits, Request, ToolHost, WasiModelCtx,
-};
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
 
@@ -32,7 +31,7 @@ use crate::tools::Tools;
 
 static COMPLETION_ID: AtomicU64 = AtomicU64::new(0);
 
-impl WasiModelCtx for Client {
+impl ModelClient for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let client = self.clone();
         let model = request.model.as_deref().unwrap_or(&self.model);
@@ -81,7 +80,7 @@ impl Client {
     async fn shell(
         &self, request: &Request, access: Access, workspace: Option<&Path>,
     ) -> anyhow::Result<Option<Shell>> {
-        let worker = request.grants.worker.as_ref();
+        let worker = request.worker.as_ref();
         let (Some(sandbox), Access::Shell) = (&self.sandbox, access) else {
             if worker.is_none() {
                 return Ok(None);

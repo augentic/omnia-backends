@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use anyhow::Result;
-use omnia_wasi_model::{Answer, Error, Usage};
+use omnia_backend::model::{Answer, Error, Usage};
 use tokio::sync::watch;
 use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 
@@ -391,7 +391,7 @@ mod tests {
     use genai::chat::{CompletionTokensDetails, PromptTokensDetails, Usage as ProviderUsage};
     use genai::{ModelIden, webc};
     use http::{HeaderMap, StatusCode};
-    use omnia_wasi_model::Answer;
+    use omnia_backend::model::Answer;
 
     use super::{Bill, Completion, Error, Outcome, Phase, Timeout};
 

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::{Stream, StreamExt as _};
-use omnia_wasi_messaging::{HandleError, Handler, Message, Metadata};
+use omnia_backend::messaging::{HandleError, Handler, Message, Metadata};
 use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext, Rebalance, StreamConsumer};
 use rdkafka::error::KafkaError;
 use rdkafka::message::{Headers, OwnedMessage};

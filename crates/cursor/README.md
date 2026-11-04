@@ -34,7 +34,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::Backend;
+use omnia_backend::Connect;
 use omnia_cursor::{Client, ConnectOptions};
 
 // Reads CURSOR_* from the environment, with the defaults below.
@@ -81,7 +81,7 @@ The request's `generation` controls (temperature, max tokens, …) are ignored: 
 
 **Workspace.** The guest lends a working tree through `grants.workspace`; the agent runs there with a read-only toolset (`read`, `glob`, `grep`, `ls`, plus `mcp`). A lend beneath one of `CURSOR_SHELL_ROOTS` adds `shell`, so the agent can run the tree's own build and tests; the bridge bounds each command and the inactivity window stands down while one runs. No edit or delete anywhere. Without a lent workspace the agent runs in a private empty directory with every built-in tool disabled, so function-tool-only completions still work. `read` takes absolute paths, and the toolset enforces no bound on them: the kernel holds every read to the lend, the system, and the grant's `read` roots.
 
-**Tools.** Guest-declared function tools become SDK custom tools at `CreateAgent`. When the agent calls one, the worker POSTs to this crate's loopback callback endpoint, which routes it into the session via `ToolHost::call_tool` under the host's name check, budget, size cap, and per-call timeout. The budget is this backend's: `CURSOR_MAX_TOOL_CALLS` guest tool calls a completion, answered through `WasiModelCtx::limits`, in place of the host's default of 32, since an agent that lays a tree one file a call runs past that long before its wall-clock cap. `Tool::Mcp` grants pass inline as `mcp_servers`; the grant's `tools` allowlist is advisory.
+**Tools.** Guest-declared function tools become SDK custom tools at `CreateAgent`. When the agent calls one, the worker POSTs to this crate's loopback callback endpoint, which routes it into the session via `ToolHost::call_tool` under the host's name check, budget, size cap, and per-call timeout. The budget is this backend's: `CURSOR_MAX_TOOL_CALLS` guest tool calls a completion, answered through `ModelClient::limits`, in place of the host's default of 32, since an agent that lays a tree one file a call runs past that long before its wall-clock cap. `Tool::Mcp` grants pass inline as `mcp_servers`; the grant's `tools` allowlist is advisory.
 
 **Format and check.** `format` reaches the agent as a final-answer instruction — steering only. With `check`, the answer is offered through `ToolHost::check`: `Ok` ends the completion, `Err(correction)` sends the correction as the next prompt on the same agent (its cache stays warm). Two rounds are allowed; a second rejection fails with the typed `budget-exhausted`.
 
@@ -98,7 +98,7 @@ Workers are session leaders and are shut down after their completion: a graceful
 
 A worker lost while a completion is *opening* (`CreateAgent` or the first `Send` fails with `WorkerExited` or `Rpc(RpcError::Transport)`, and no candidate has reached the guest) restarts the completion once on a fresh worker. Nothing else restarts.
 
-Match failures on types, not messages: every error `complete` returns downcasts to one `Failure` — `Run`, `Timeout`, `Inactive`, `Aborted`, `WorkerExited`, or `Rpc` carrying the `RpcError::{Connect, Transport}` it wraps — or to `omnia_wasi_model::Error::BudgetExhausted`.
+Match failures on types, not messages: every error `complete` returns downcasts to one `Failure` — `Run`, `Timeout`, `Inactive`, `Aborted`, `WorkerExited`, or `Rpc` carrying the `RpcError::{Connect, Transport}` it wraps — or to `omnia_backend::model::Error::BudgetExhausted`.
 
 ## Observability
 

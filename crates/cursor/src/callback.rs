@@ -29,7 +29,7 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use omnia_wasi_model::ToolHost;
+use omnia_backend::model::ToolHost;
 use prost::Message as _;
 use proto::{CallCustomToolRequest, CallCustomToolResponse, struct_to_value, value_to_struct};
 use serde_json::{Value, json};

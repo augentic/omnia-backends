@@ -85,7 +85,7 @@ async fn truncated_body() {
 }
 
 #[tokio::test]
-async fn dropped_connection_retried() {
+async fn drop_conn_retries() {
     let captured = Captured::install();
     let fake = FakeOpenAi::serve(Config::echo().fault(Fault::DropFirstConnection)).await;
     let client = client(&fake).await;

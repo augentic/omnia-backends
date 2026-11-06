@@ -215,7 +215,7 @@ async fn increment_encoding() {
 }
 
 #[tokio::test]
-async fn ttl_expires_and_survives_cas() {
+async fn ttl_cas_survives() {
     use std::time::Duration;
 
     let root = TempDir::new().expect("tempdir");

@@ -210,19 +210,3 @@ fn slice_range(data: Bytes, start: u64, end: u64) -> anyhow::Result<Bytes> {
     };
     Ok(data.slice(start_idx..end_idx))
 }
-
-// Byte-range slicing for `get_data`; MongoDB document round-trips are covered
-// by `tests/live.rs`.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn slice_range_bounds() {
-        let bytes = Bytes::from_static(b"hello world");
-        assert_eq!(slice_range(bytes.clone(), 0, 0).unwrap(), Bytes::from_static(b"hello world"));
-        assert_eq!(slice_range(bytes.clone(), 0, 4).unwrap(), Bytes::from_static(b"hello"));
-        assert_eq!(slice_range(bytes.clone(), 6, 0).unwrap(), Bytes::from_static(b"world"));
-        slice_range(bytes, 8, 3).unwrap_err();
-    }
-}

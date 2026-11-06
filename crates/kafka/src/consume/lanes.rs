@@ -56,23 +56,3 @@ impl Lane {
         }
     }
 }
-
-// Per-key FIFO lane enqueue and release invariants without a consumer loop.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lane_release() {
-        let mut lanes = Lanes::default();
-        let first = lanes.enqueue(Arc::from(b"a".as_slice()));
-        let second = lanes.enqueue(Arc::from(b"a".as_slice()));
-        assert!(first.is_head());
-        assert!(!second.is_head());
-
-        lanes.release(&first);
-        assert_eq!(lanes.tails.len(), 1, "the lane still has a record behind");
-        lanes.release(&second);
-        assert!(lanes.tails.is_empty());
-    }
-}

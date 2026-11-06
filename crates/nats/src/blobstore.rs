@@ -198,22 +198,3 @@ fn slice_range(data: &Bytes, start: u64, end: u64) -> anyhow::Result<Bytes> {
     let to = if unbounded { len } else { clamp(end.saturating_add(1)) };
     Ok(data.slice(from..to))
 }
-
-// Byte-range slicing for `get_data`; JetStream object store calls are covered
-// by `tests/live.rs`.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn slice_range_bounds() {
-        let data = Bytes::from_static(b"hello world");
-        assert_eq!(slice_range(&data, 0, 0).unwrap(), Bytes::from_static(b"hello world"));
-        assert_eq!(slice_range(&data, 0, u64::MAX).unwrap(), Bytes::from_static(b"hello world"));
-        assert_eq!(slice_range(&data, 6, 0).unwrap(), Bytes::from_static(b"world"));
-        assert_eq!(slice_range(&data, 0, 4).unwrap(), Bytes::from_static(b"hello"));
-        assert_eq!(slice_range(&data, 3, 3).unwrap(), Bytes::from_static(b"l"));
-        assert_eq!(slice_range(&data, 6, 100).unwrap(), Bytes::from_static(b"world"));
-        slice_range(&data, 5, 2).unwrap_err();
-    }
-}

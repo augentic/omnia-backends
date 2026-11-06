@@ -22,10 +22,17 @@ async fn operator_locale() {
 #[tokio::test]
 async fn git_version() {
     let git = Hermetic::new();
-    let error = connect(git.reporting("2.25.0")).await.expect_err("too old");
-    assert!(error.to_string().contains("older than 2.26"), "{error:#}");
+    for old in ["2.25.0", "2.5"] {
+        let error = connect(git.reporting(old)).await.expect_err("too old");
+        assert!(error.to_string().contains("older than 2.26"), "{error:#}");
+    }
 
-    connect(git.reporting("2.26.0")).await.expect("the first with config --show-scope");
+    for current in ["2.26.0", "2.50.1 (Apple Git-155)", "2.47.0.windows.1", "2.39.5-rc1"] {
+        connect(git.reporting(current)).await.expect("supported git version");
+    }
+
+    let error = connect(git.reporting("x.y")).await.expect_err("unrecognised version");
+    assert!(error.to_string().contains("unrecognised `git --version`"), "{error:#}");
 
     let error = connect(git.path("no-such-git")).await.expect_err("missing binary");
     assert!(error.to_string().contains("spawning"), "{error:#}");

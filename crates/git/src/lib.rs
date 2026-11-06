@@ -135,22 +135,3 @@ impl omnia_backend::FromEnv for ConnectOptions {
         Self::from_env().finalize().context("issue loading connection options")
     }
 }
-
-// Reading `git --version` is pure over text; `tests/connect.rs` drives the
-// startup refusal over a scripted git.
-#[cfg(test)]
-mod tests {
-    use super::version;
-
-    #[test]
-    fn versions() {
-        assert_eq!(version("git version 2.50.1 (Apple Git-155)\n"), Some((2, 50, 1)));
-        assert_eq!(version("git version 2.47.0.windows.1"), Some((2, 47, 0)));
-        assert_eq!(version("git version 2.4.0"), Some((2, 4, 0)));
-        assert_eq!(version("git version 2.5"), Some((2, 5, 0)));
-        assert_eq!(version("git version 2.39.5-rc1"), Some((2, 39, 5)));
-        assert_eq!(version("not git"), None);
-        assert_eq!(version("git version"), None);
-        assert_eq!(version("git version x.y"), None);
-    }
-}

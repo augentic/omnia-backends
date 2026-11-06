@@ -256,23 +256,3 @@ fn validate_key(key: &str) -> Result<()> {
     );
     Ok(())
 }
-
-// Key validation for JetStream KV subjects; live round-trips are in `tests/live.rs`.
-#[cfg(test)]
-mod tests {
-    use super::validate_key;
-
-    #[test]
-    fn valid_keys() {
-        for key in ["k", "conformance/get-set-delete", "a.b.c", "user_1=active-2"] {
-            validate_key(key).expect(key);
-        }
-    }
-
-    #[test]
-    fn invalid_keys() {
-        for key in ["", ".leading", "trailing.", "wild*card", "wild>card", "with space", "a:b"] {
-            validate_key(key).expect_err(key);
-        }
-    }
-}

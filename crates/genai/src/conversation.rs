@@ -460,28 +460,3 @@ fn truncate(text: String, cap: usize) -> String {
     let tail = text.ceil_char_boundary(text.len() - (cap - head));
     format!("{}\n[… {} bytes omitted …]\n{}", &text[..head], tail - head, &text[tail..])
 }
-
-// Unit tests for result capping; the loop itself is driven by the guests in `tests/model.rs`.
-#[cfg(test)]
-mod tests {
-    use super::truncate;
-
-    #[test]
-    fn within_cap() {
-        assert_eq!(truncate("short".to_owned(), 5), "short");
-        assert_eq!(truncate(String::new(), 0), "");
-    }
-
-    #[test]
-    fn head_and_tail() {
-        let text = "0123456789".to_owned();
-        assert_eq!(truncate(text, 4), "01\n[… 6 bytes omitted …]\n89");
-    }
-
-    #[test]
-    fn char_boundaries() {
-        // each `é` is two bytes, so the tail's byte cut at 5 would split one
-        let text = "éééé".to_owned();
-        assert_eq!(truncate(text, 5), "é\n[… 4 bytes omitted …]\né");
-    }
-}

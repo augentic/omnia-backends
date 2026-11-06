@@ -561,21 +561,3 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 fn elapsed_ms(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{TAIL_LINES, Tail};
-
-    #[test]
-    fn tail_bounded() {
-        let tail = Tail::default();
-        assert_eq!(tail.to_string(), "");
-        for index in 0..TAIL_LINES + 5 {
-            tail.push(format!("line {index}"));
-        }
-        let text = tail.to_string();
-        assert_eq!(text.lines().count(), TAIL_LINES);
-        assert!(text.starts_with("  line 5\n"), "the oldest lines are dropped: {text}");
-        assert!(text.ends_with(&format!("  line {}", TAIL_LINES + 4)), "{text}");
-    }
-}

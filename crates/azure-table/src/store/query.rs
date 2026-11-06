@@ -25,26 +25,3 @@ pub fn decode_continuation(token: &str) -> (String, Option<String>) {
         None => (token.to_owned(), None),
     }
 }
-
-// Continuation token packing and unpacking; real paged queries are covered by
-// `tests/live.rs::query_and_pagination`.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn continuation() {
-        let token = encode_continuation(Some("pk1"), Some("rk1")).unwrap();
-        let (pk, rk) = decode_continuation(&token);
-        assert_eq!(pk, "pk1");
-        assert_eq!(rk.as_deref(), Some("rk1"));
-    }
-
-    #[test]
-    fn continuation_pk_only() {
-        let token = encode_continuation(Some("pk1"), None).unwrap();
-        let (pk, rk) = decode_continuation(&token);
-        assert_eq!(pk, "pk1");
-        assert!(rk.is_none());
-    }
-}

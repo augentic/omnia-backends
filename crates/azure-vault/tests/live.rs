@@ -20,6 +20,10 @@ async fn set_get_delete() -> Result<()> {
     let secret = format!("omnia-live-{}", std::process::id());
     locker.set(secret.clone(), b"s3cr3t".to_vec()).await?;
     assert_eq!(locker.get(secret.clone()).await?.as_deref(), Some(b"s3cr3t".as_slice()));
+    assert!(locker.list_ids().await?.contains(&secret));
+
+    let other: std::sync::Arc<dyn Locker> = client.open_locker("omnia".to_owned()).await?;
+    assert_eq!(other.get(secret.clone()).await?, None, "prefix locker does not see secret");
 
     locker.delete(secret).await?;
     Ok(())

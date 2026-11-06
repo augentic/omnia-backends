@@ -71,35 +71,6 @@ pub struct Server {
     http: HyperClient<HttpConnector, Body>,
 }
 
-#[derive(Default)]
-struct State {
-    next_agent: usize,
-    creates: usize,
-    sends: usize,
-    agents: HashMap<String, AgentState>,
-    runs: HashMap<String, oneshot::Sender<()>>,
-}
-
-struct AgentState {
-    api_key: String,
-    rounds: usize,
-    closed: bool,
-}
-
-struct Run {
-    id: String,
-    agent: String,
-    text: String,
-    round: usize,
-    reset: bool,
-}
-
-enum Outcome {
-    Finished(String),
-    Cancelled,
-    Failed(String),
-}
-
 impl Server {
     pub fn new(
         config: Config, process: usize, callback: Option<Callback>, recorder: Recorder,
@@ -641,6 +612,35 @@ impl Server {
         self.state().agents.remove(&agent);
         empty()
     }
+}
+
+#[derive(Default)]
+struct State {
+    next_agent: usize,
+    creates: usize,
+    sends: usize,
+    agents: HashMap<String, AgentState>,
+    runs: HashMap<String, oneshot::Sender<()>>,
+}
+
+struct AgentState {
+    api_key: String,
+    rounds: usize,
+    closed: bool,
+}
+
+struct Run {
+    id: String,
+    agent: String,
+    text: String,
+    round: usize,
+    reset: bool,
+}
+
+enum Outcome {
+    Finished(String),
+    Cancelled,
+    Failed(String),
 }
 
 /// The last user turn of a rendered prompt — the block before the host's

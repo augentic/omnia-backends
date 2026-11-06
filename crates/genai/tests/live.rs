@@ -227,8 +227,6 @@ struct LiveCheck {
     seen: AtomicUsize,
 }
 
-const CHECK_WORD: &str = "quokka";
-
 impl LiveCheck {
     fn rejecting(rejections: usize) -> (Arc<Self>, Arc<std::sync::Mutex<Vec<String>>>) {
         let candidates = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -274,6 +272,8 @@ impl ToolHost for LiveCheck {
         async move { Ok(verdict) }.boxed()
     }
 }
+
+const CHECK_WORD: &str = "quokka";
 
 // A prompt whose first answer cannot contain the check's word — the model
 // only learns it from the correction turn.

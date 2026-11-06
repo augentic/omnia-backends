@@ -66,22 +66,6 @@ pub struct Conversation {
     completion: Completion,
 }
 
-struct Reply {
-    text: String,
-    usage: Option<Usage>,
-}
-
-// What an off-shape reply is told, and the fault logged for it with the
-// instance's values masked.
-struct Nudge {
-    fault: String,
-    prompt: String,
-}
-
-const REFUSED_IN_CLOSING: &str = "not run: your final answer is due now. Reply with only your \
-                                  final answer as a single JSON value in the shape the prompt \
-                                  asked for, and nothing else.";
-
 impl Conversation {
     pub fn new(
         client: genai::Client, request: PreparedRequest, tools: Tools, budgets: Budgets,
@@ -439,6 +423,22 @@ impl Conversation {
         }
     }
 }
+
+struct Reply {
+    text: String,
+    usage: Option<Usage>,
+}
+
+// What an off-shape reply is told, and the fault logged for it with the
+// instance's values masked.
+struct Nudge {
+    fault: String,
+    prompt: String,
+}
+
+const REFUSED_IN_CLOSING: &str = "not run: your final answer is due now. Reply with only your \
+                                  final answer as a single JSON value in the shape the prompt \
+                                  asked for, and nothing else.";
 
 fn at_path(path: &str, fault: impl fmt::Display) -> String {
     if path.is_empty() { fault.to_string() } else { format!("at `{path}`: {fault}") }

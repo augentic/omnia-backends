@@ -120,11 +120,6 @@ fn keyed_message(payload: &str, metadata: &[(&str, &str)]) -> Message {
 // stays with the handler, as a guest that never returns would.
 struct Recorder(mpsc::UnboundedSender<Delivery>);
 
-struct Delivery {
-    message: Message,
-    outcome: oneshot::Sender<Result<(), HandleError>>,
-}
-
 impl Handler for Recorder {
     fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), HandleError>> {
         let (outcome, decided) = oneshot::channel();
@@ -137,6 +132,11 @@ impl Handler for Recorder {
         }
         .boxed()
     }
+}
+
+struct Delivery {
+    message: Message,
+    outcome: oneshot::Sender<Result<(), HandleError>>,
 }
 
 impl Delivery {

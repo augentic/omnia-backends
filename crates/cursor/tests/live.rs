@@ -198,15 +198,6 @@ impl SpawnedPids {
     }
 }
 
-// Whether anything is left of the process group a worker led (`kill -0`
-// on the group): the worker itself, or an agent process it forked.
-fn group_alive(pgid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", "--", &format!("-{pgid}")])
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpawnedPids {
     fn on_event(
         &self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>,
@@ -219,6 +210,15 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpawnedPids {
             self.0.lock().expect("pids lock").push(pid);
         }
     }
+}
+
+// Whether anything is left of the process group a worker led (`kill -0`
+// on the group): the worker itself, or an agent process it forked.
+fn group_alive(pgid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", "--", &format!("-{pgid}")])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[derive(Default)]

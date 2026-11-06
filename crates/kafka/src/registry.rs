@@ -42,39 +42,6 @@ pub struct Registry {
     unframed: Arc<Mutex<HashSet<String>>>,
 }
 
-struct Schema {
-    id: i32,
-    validator: Validator,
-}
-
-impl Schema {
-    fn compile(id: i32, text: &str) -> Result<Self, Failure> {
-        let json: Value = serde_json::from_str(text)
-            .map_err(|e| Failure::Invalid(format!("schema {id} is not JSON: {e}")))?;
-        let validator = jsonschema::validator_for(&json)
-            .map_err(|e| Failure::Invalid(format!("schema {id} does not compile: {e}")))?;
-        Ok(Self { id, validator })
-    }
-
-    fn check(&self, payload: &[u8]) -> Result<(), Rejection> {
-        let value: Value = serde_json::from_slice(payload).map_err(|e| {
-            Rejection::new(
-                Reason::InvalidPayload,
-                format!("not JSON under schema {}: {e}", self.id),
-            )
-        })?;
-        let errors: Vec<String> =
-            self.validator.iter_errors(&value).map(|e| e.to_string()).collect();
-        if errors.is_empty() {
-            return Ok(());
-        }
-        Err(Rejection::new(
-            Reason::InvalidPayload,
-            format!("fails schema {}: {}", self.id, errors.join("; ")),
-        ))
-    }
-}
-
 impl Registry {
     pub fn new(options: RegistryOptions) -> Result<Self> {
         ensure!(
@@ -181,6 +148,39 @@ impl Registry {
     }
 }
 
+struct Schema {
+    id: i32,
+    validator: Validator,
+}
+
+impl Schema {
+    fn compile(id: i32, text: &str) -> Result<Self, Failure> {
+        let json: Value = serde_json::from_str(text)
+            .map_err(|e| Failure::Invalid(format!("schema {id} is not JSON: {e}")))?;
+        let validator = jsonschema::validator_for(&json)
+            .map_err(|e| Failure::Invalid(format!("schema {id} does not compile: {e}")))?;
+        Ok(Self { id, validator })
+    }
+
+    fn check(&self, payload: &[u8]) -> Result<(), Rejection> {
+        let value: Value = serde_json::from_slice(payload).map_err(|e| {
+            Rejection::new(
+                Reason::InvalidPayload,
+                format!("not JSON under schema {}: {e}", self.id),
+            )
+        })?;
+        let errors: Vec<String> =
+            self.validator.iter_errors(&value).map(|e| e.to_string()).collect();
+        if errors.is_empty() {
+            return Ok(());
+        }
+        Err(Rejection::new(
+            Reason::InvalidPayload,
+            format!("fails schema {}: {}", self.id, errors.join("; ")),
+        ))
+    }
+}
+
 // --- Failures ---
 
 // Why a fetch produced no schema. Shared by every waiter on the fetch, so
@@ -229,14 +229,6 @@ pub struct Rejection {
     detail: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Reason {
-    RegistryUnavailable,
-    UnknownSchema,
-    InvalidSchema,
-    InvalidPayload,
-}
-
 impl Rejection {
     const fn new(reason: Reason, detail: String) -> Self {
         Self { reason, detail }
@@ -272,6 +264,14 @@ impl fmt::Display for Rejection {
 
 impl std::error::Error for Rejection {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reason {
+    RegistryUnavailable,
+    UnknownSchema,
+    InvalidSchema,
+    InvalidPayload,
+}
+
 // --- Cache ---
 
 type Fetch<V> = Shared<BoxFuture<'static, Result<V, Failure>>>;
@@ -282,11 +282,6 @@ type Fetch<V> = Shared<BoxFuture<'static, Result<V, Failure>>>;
 // caller fetches afresh. `tokio::sync::OnceCell` would hand a failure to the
 // next waiter to retry instead.
 struct Cache<K, V>(Arc<Mutex<HashMap<K, Entry<V>>>>);
-
-enum Entry<V> {
-    Ready(V),
-    Fetching(Fetch<V>),
-}
 
 impl<K, V> Clone for Cache<K, V> {
     fn clone(&self) -> Self {
@@ -340,6 +335,11 @@ where
         }
         outcome
     }
+}
+
+enum Entry<V> {
+    Ready(V),
+    Fetching(Fetch<V>),
 }
 
 // --- Wire format ---

@@ -35,28 +35,9 @@ pub struct Client {
     inner: Arc<Inner>,
 }
 
-// Fields drop in order: the producer flushes first, so a delivery report can
-// still store an offset before the consumer's close commits what is stored.
-struct Inner {
-    producer: ThreadedProducer<DeliveryContext>,
-    partitioner: Partitioner,
-    registry: Option<Registry>,
-    shared: Arc<Shared>,
-    consumer: Option<Arc<KafkaConsumer>>,
-    consuming: AtomicBool,
-}
-
 impl Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Client").finish_non_exhaustive()
-    }
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        if let Err(error) = self.producer.flush(PRODUCER_FLUSH) {
-            tracing::warn!("producer flush on shutdown: {error}");
-        }
     }
 }
 
@@ -124,6 +105,25 @@ impl Connect for Client {
                 consuming: AtomicBool::new(false),
             }),
         })
+    }
+}
+
+// Fields drop in order: the producer flushes first, so a delivery report can
+// still store an offset before the consumer's close commits what is stored.
+struct Inner {
+    producer: ThreadedProducer<DeliveryContext>,
+    partitioner: Partitioner,
+    registry: Option<Registry>,
+    shared: Arc<Shared>,
+    consumer: Option<Arc<KafkaConsumer>>,
+    consuming: AtomicBool,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Err(error) = self.producer.flush(PRODUCER_FLUSH) {
+            tracing::warn!("producer flush on shutdown: {error}");
+        }
     }
 }
 

@@ -30,20 +30,6 @@ use crate::{Grant, Kernel, Sandbox};
 #[derive(Clone)]
 pub struct Session(Arc<Inner>);
 
-struct Inner {
-    cwd: PathBuf,
-    access: Access,
-    scratch: PathBuf,
-    // Removes the scratch as the last handle is dropped.
-    _scratch_dir: TempDir,
-    dir: File,
-    env: BTreeMap<OsString, OsString>,
-    path: OsString,
-    kernel: Arc<Kernel>,
-    read: Vec<PathBuf>,
-    proxy: Proxy,
-}
-
 impl Session {
     pub(crate) async fn prepare(
         sandbox: &Sandbox, workspace: Option<&Path>, grant: &Grant,
@@ -175,6 +161,20 @@ impl fmt::Debug for Session {
             .field("proxy", &self.0.proxy)
             .finish_non_exhaustive()
     }
+}
+
+struct Inner {
+    cwd: PathBuf,
+    access: Access,
+    scratch: PathBuf,
+    // Removes the scratch as the last handle is dropped.
+    _scratch_dir: TempDir,
+    dir: File,
+    env: BTreeMap<OsString, OsString>,
+    path: OsString,
+    kernel: Arc<Kernel>,
+    read: Vec<PathBuf>,
+    proxy: Proxy,
 }
 
 /// What a session's processes may do in their working directory.

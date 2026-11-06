@@ -8,16 +8,6 @@ pub struct Partitioner {
     scheme: PartitionerScheme,
 }
 
-/// Key-to-partition scheme for sends that do not set `metadata["partition"]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PartitionerScheme {
-    /// `KafkaJS` murmur2, matching the Node and .NET producers.
-    #[default]
-    KafkaJs,
-    /// Kafka's `Utils.murmur2`, matching the Java client.
-    Java,
-}
-
 impl Partitioner {
     #[must_use]
     pub const fn new(count: i32, scheme: PartitionerScheme) -> Self {
@@ -41,6 +31,16 @@ impl Partitioner {
     fn java(self, key: &[u8]) -> i32 {
         (java_murmur2(key) & i32::MAX) % self.count
     }
+}
+
+/// Key-to-partition scheme for sends that do not set `metadata["partition"]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PartitionerScheme {
+    /// `KafkaJS` murmur2, matching the Node and .NET producers.
+    #[default]
+    KafkaJs,
+    /// Kafka's `Utils.murmur2`, matching the Java client.
+    Java,
 }
 
 // Kafka's `Utils.murmur2`: wrapping `u32` arithmetic throughout.

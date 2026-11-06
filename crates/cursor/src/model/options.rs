@@ -23,30 +23,6 @@ pub struct Turn {
     pub prompt: Prompt,
 }
 
-pub struct Prompt {
-    pub text: String,
-    pub format: Format,
-    pub check: bool,
-}
-
-// The agent one completion creates: the `CreateAgent` options and the pin
-// every later call on the agent repeats.
-pub struct AgentSpec {
-    pub options: AgentOptions,
-    pub operation: AgentOperationOptions,
-}
-
-// The agent's tools for what it may do in its working directory: nothing of
-// a private one, read a lent workspace, and run a shell under a shell root.
-fn tools(access: Access) -> Vec<String> {
-    let names: &[&str] = match access {
-        Access::Private => &[],
-        Access::Read => &["glob", "grep", "ls", "mcp", "read"],
-        Access::Shell => &["glob", "grep", "ls", "mcp", "read", "shell"],
-    };
-    names.iter().map(ToString::to_string).collect()
-}
-
 impl Turn {
     pub fn prepare(
         request: &Request, session: &Session, default_model: &str, api_key: &str,
@@ -73,6 +49,30 @@ impl Turn {
             },
         })
     }
+}
+
+pub struct Prompt {
+    pub text: String,
+    pub format: Format,
+    pub check: bool,
+}
+
+// The agent one completion creates: the `CreateAgent` options and the pin
+// every later call on the agent repeats.
+pub struct AgentSpec {
+    pub options: AgentOptions,
+    pub operation: AgentOperationOptions,
+}
+
+// The agent's tools for what it may do in its working directory: nothing of
+// a private one, read a lent workspace, and run a shell under a shell root.
+fn tools(access: Access) -> Vec<String> {
+    let names: &[&str] = match access {
+        Access::Private => &[],
+        Access::Read => &["glob", "grep", "ls", "mcp", "read"],
+        Access::Shell => &["glob", "grep", "ls", "mcp", "read", "shell"],
+    };
+    names.iter().map(ToString::to_string).collect()
 }
 
 fn agent_options(

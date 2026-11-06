@@ -30,12 +30,6 @@ pub struct Shell {
     timeout: Duration,
 }
 
-// What the model reads of a command, and the exit the log line carries.
-pub struct Run {
-    pub result: String,
-    pub exit: String,
-}
-
 impl Shell {
     pub const fn new(session: Session, timeout: Duration) -> Self {
         Self { session, timeout }
@@ -70,6 +64,12 @@ impl Shell {
             },
         }
     }
+}
+
+// What the model reads of a command, and the exit the log line carries.
+pub struct Run {
+    pub result: String,
+    pub exit: String,
 }
 
 fn render(output: &Output) -> String {

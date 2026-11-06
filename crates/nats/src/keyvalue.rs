@@ -60,15 +60,6 @@ struct KvBucket {
     store: kv::Store,
 }
 
-// What the server holds for a key: the revision a write is conditioned on
-// (`0` when nothing was ever written), the value when that revision is a
-// live put, and the TTL still to run on it.
-struct Snapshot {
-    revision: u64,
-    value: Option<Vec<u8>>,
-    ttl: Option<Duration>,
-}
-
 impl KvBucket {
     async fn snapshot(&self, key: &str) -> Result<Snapshot> {
         validate_key(key)?;
@@ -224,6 +215,15 @@ impl Bucket for KvBucket {
         }
         .boxed()
     }
+}
+
+// What the server holds for a key: the revision a write is conditioned on
+// (`0` when nothing was ever written), the value when that revision is a
+// live put, and the TTL still to run on it.
+struct Snapshot {
+    revision: u64,
+    value: Option<Vec<u8>>,
+    ttl: Option<Duration>,
 }
 
 fn is_put(headers: &HeaderMap) -> bool {

@@ -13,15 +13,6 @@ pub struct Lanes {
     next: u64,
 }
 
-pub struct Lane {
-    key: Arc<[u8]>,
-    seq: u64,
-    // the predecessor's completion; `None` at the head of the lane
-    behind: Option<oneshot::Receiver<()>>,
-    // dropped when this record is done, waking the record behind
-    _done: oneshot::Sender<()>,
-}
-
 impl Lanes {
     pub fn enqueue(&mut self, key: Arc<[u8]>) -> Lane {
         let seq = self.next;
@@ -42,6 +33,15 @@ impl Lanes {
             self.tails.remove(&lane.key);
         }
     }
+}
+
+pub struct Lane {
+    key: Arc<[u8]>,
+    seq: u64,
+    // the predecessor's completion; `None` at the head of the lane
+    behind: Option<oneshot::Receiver<()>>,
+    // dropped when this record is done, waking the record behind
+    _done: oneshot::Sender<()>,
 }
 
 impl Lane {

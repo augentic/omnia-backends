@@ -100,6 +100,7 @@ fn options(
         partition_count,
         partitioner,
         commit_interval_ms: 200,
+        topic_prefix: None,
         consumer,
         registry,
     }

@@ -203,11 +203,12 @@ pub fn records(consumer: &KafkaConsumer) -> impl Stream<Item = Result<OwnedMessa
 // offset.
 pub async fn run(
     records: impl Stream<Item = Result<OwnedMessage>>, shared: Arc<Shared>,
-    registry: Option<Registry>, handler: Arc<dyn Handler>,
+    registry: Option<Registry>, topic_prefix: String, handler: Arc<dyn Handler>,
 ) -> Result<()> {
     let delivery = Arc::new(Delivery {
         shared,
         registry,
+        topic_prefix,
         handler,
         slots: Arc::new(Semaphore::new(IN_FLIGHT)),
         backlog: Arc::new(Semaphore::new(BACKLOG)),
@@ -250,6 +251,7 @@ async fn take(semaphore: &Arc<Semaphore>) -> OwnedSemaphorePermit {
 struct Delivery {
     shared: Arc<Shared>,
     registry: Option<Registry>,
+    topic_prefix: String,
     handler: Arc<dyn Handler>,
     slots: Arc<Semaphore>,
     backlog: Arc<Semaphore>,
@@ -315,6 +317,10 @@ impl Delivery {
         if !self.shared.holds(record, ticket) {
             return Ok(());
         }
+        let Some(topic) = record.topic().strip_prefix(&self.topic_prefix) else {
+            self.done(record, ticket);
+            return Ok(());
+        };
         let raw = record.payload().unwrap_or_default();
         let payload = match &self.registry {
             Some(registry) => match registry.decode(record.topic(), raw).await {
@@ -337,7 +343,7 @@ impl Delivery {
             },
             None => raw.to_vec(),
         };
-        self.handler.handle(message(record, payload)).await?;
+        self.handler.handle(message(record, topic, payload)).await?;
         self.done(record, ticket);
         Ok(())
     }
@@ -366,7 +372,7 @@ impl Delivery {
 // The partition the record was read from travels as `source-partition`:
 // `partition` is a send's destination, and a guest forwarding a record's
 // metadata must not pin its output to where the record came from.
-pub fn message(record: &OwnedMessage, payload: Vec<u8>) -> Message {
+pub fn message(record: &OwnedMessage, topic: &str, payload: Vec<u8>) -> Message {
     let mut metadata = Metadata::new();
     if let Some(headers) = record.headers() {
         for header in headers.iter() {
@@ -384,7 +390,7 @@ pub fn message(record: &OwnedMessage, payload: Vec<u8>) -> Message {
     }
 
     let mut message = Message::new(payload);
-    record.topic().clone_into(&mut message.topic);
+    topic.clone_into(&mut message.topic);
     message.metadata = Some(metadata);
     message
 }

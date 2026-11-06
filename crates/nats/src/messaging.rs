@@ -18,31 +18,6 @@ impl MessagingClient for Client {
     }
 }
 
-fn from_nats(msg: async_nats::Message) -> Message {
-    let metadata = msg.headers.as_ref().map(|headers| {
-        let mut md = HashMap::new();
-        for (k, v) in headers.iter() {
-            let v_str = v.iter().map(ToString::to_string).collect::<Vec<String>>().join(", ");
-            md.insert(k.to_string(), v_str);
-        }
-        Metadata { inner: md }
-    });
-
-    let mut message = Message::new(msg.payload.to_vec());
-    message.topic = msg.subject.to_string();
-    message.metadata = metadata;
-    message.reply = msg.reply.map(|r| Reply { topic: r.to_string() });
-    message
-}
-
-fn nats_headers(metadata: &Metadata) -> async_nats::HeaderMap {
-    let mut headers = async_nats::HeaderMap::new();
-    for (k, v) in metadata.iter() {
-        headers.insert(k.as_str(), v.as_str());
-    }
-    headers
-}
-
 impl Endpoint for Client {
     // NATS core has no acknowledgement: a message is finished with once the
     // handler returns, whatever it returned
@@ -56,11 +31,14 @@ impl Endpoint for Client {
 
             let mut subscribers = Vec::with_capacity(topics.len());
             for topic in &topics {
-                subscribers.push(client.inner.subscribe(topic.clone()).await?);
+                subscribers
+                    .push(client.inner.subscribe(format!("{}{topic}", client.topic_prefix)).await?);
             }
             tracing::info!("subscribed to {topics:?} topics");
 
-            let stream = stream::select_all(subscribers).map(from_nats);
+            let prefix = client.topic_prefix;
+            let stream = stream::select_all(subscribers)
+                .filter_map(move |msg| std::future::ready(from_nats(msg, &prefix)));
             dispatch(Box::pin(stream), handler).await
         }
         .boxed()
@@ -68,6 +46,7 @@ impl Endpoint for Client {
 
     fn send(&self, topic: String, message: Message) -> FutureResult<()> {
         let client = self.inner.clone();
+        let topic = format!("{}{topic}", self.topic_prefix);
         async move {
             match &message.metadata {
                 None => client
@@ -89,6 +68,7 @@ impl Endpoint for Client {
         &self, topic: String, message: Message, options: Option<RequestOptions>,
     ) -> FutureResult<Message> {
         let client = self.inner.clone();
+        let topic = format!("{}{topic}", self.topic_prefix);
 
         async move {
             let nats_headers = message.metadata.as_ref().map(nats_headers).unwrap_or_default();
@@ -101,8 +81,34 @@ impl Endpoint for Client {
 
             let nats_msg =
                 client.send_request(topic, request).await.context("failed to send request")?;
-            Ok(from_nats(nats_msg))
+            Ok(from_nats(nats_msg, "").expect("empty prefix matches every subject"))
         }
         .boxed()
     }
+}
+
+fn from_nats(msg: async_nats::Message, prefix: &str) -> Option<Message> {
+    let topic = msg.subject.strip_prefix(prefix)?.to_owned();
+    let metadata = msg.headers.as_ref().map(|headers| {
+        let mut md = HashMap::new();
+        for (k, v) in headers.iter() {
+            let v_str = v.iter().map(ToString::to_string).collect::<Vec<String>>().join(", ");
+            md.insert(k.to_string(), v_str);
+        }
+        Metadata { inner: md }
+    });
+
+    let mut message = Message::new(msg.payload.to_vec());
+    message.topic = topic;
+    message.metadata = metadata;
+    message.reply = msg.reply.map(|r| Reply { topic: r.to_string() });
+    Some(message)
+}
+
+fn nats_headers(metadata: &Metadata) -> async_nats::HeaderMap {
+    let mut headers = async_nats::HeaderMap::new();
+    for (k, v) in metadata.iter() {
+        headers.insert(k.as_str(), v.as_str());
+    }
+    headers
 }

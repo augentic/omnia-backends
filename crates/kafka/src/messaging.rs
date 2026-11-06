@@ -39,7 +39,8 @@ impl Endpoint for crate::Client {
             }
             let shared = Arc::clone(&client.inner.shared);
             let registry = client.inner.registry.clone();
-            consume::run(consume::records(consumer), shared, registry, handler).await
+            let topic_prefix = client.inner.topic_prefix.clone();
+            consume::run(consume::records(consumer), shared, registry, topic_prefix, handler).await
         }
         .boxed()
     }
@@ -48,6 +49,7 @@ impl Endpoint for crate::Client {
         let client = self.clone();
 
         async move {
+            let topic = format!("{}{topic}", client.inner.topic_prefix);
             let payload = match &client.inner.registry {
                 Some(registry) => match registry.encode(&topic, message.payload).await {
                     Ok(payload) => payload,

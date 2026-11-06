@@ -19,6 +19,7 @@ pub struct Client {
     inner: async_nats::Client,
     jetstream: jetstream::Context,
     topics: Option<Vec<String>>,
+    topic_prefix: String,
     kv_max_age: Option<Duration>,
 }
 
@@ -26,6 +27,7 @@ impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Client")
             .field("topics", &self.topics)
+            .field("topic_prefix", &self.topic_prefix)
             .field("kv_max_age", &self.kv_max_age)
             .finish_non_exhaustive()
     }
@@ -60,6 +62,7 @@ impl Connect for Client {
             inner: client,
             jetstream,
             topics: options.topics,
+            topic_prefix: options.topic_prefix.unwrap_or_default(),
             kv_max_age: options.kv_max_age_secs.map(Duration::from_secs),
         })
     }
@@ -80,6 +83,11 @@ mod config {
         /// Optional topics for subscription mode.
         #[env(from = "NATS_TOPICS", with = split)]
         pub topics: Option<Vec<String>>,
+        /// Optional prefix prepended to every published and subscribed topic,
+        /// and stripped from each delivered message's subject before it reaches
+        /// the host.
+        #[env(from = "NATS_TOPIC_PREFIX")]
+        pub topic_prefix: Option<String>,
         /// Optional JWT used for NATS authentication.
         #[env(from = "NATS_JWT")]
         pub jwt: Option<String>,
@@ -97,6 +105,7 @@ mod config {
             f.debug_struct("ConnectOptions")
                 .field("address", &self.address)
                 .field("topics", &self.topics)
+                .field("topic_prefix", &self.topic_prefix)
                 .field("jwt", &self.jwt.as_ref().map(|_| "<redacted>"))
                 .field("seed", &self.seed.as_ref().map(|_| "<redacted>"))
                 .field("kv_max_age_secs", &self.kv_max_age_secs)

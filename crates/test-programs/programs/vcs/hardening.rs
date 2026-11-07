@@ -22,7 +22,7 @@ use std::fs;
 use omnia_sdk::WasiProvider;
 use omnia_sdk::vcs::{Error, Vcs as _};
 
-omnia_sdk::command!(scenario);
+omnia_sdk::api::command::export!(scenario);
 
 const REPO: &str = "./repo";
 const WORK: &str = "./work";

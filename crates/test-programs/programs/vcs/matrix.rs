@@ -22,7 +22,7 @@ use omnia_sdk::WasiProvider;
 use omnia_sdk::vcs::{Change, ChangeKind, Entry, Error, Rule, Strategy, Vcs as _};
 use test_programs::arguments;
 
-omnia_sdk::command!(scenario);
+omnia_sdk::api::command::export!(scenario);
 
 async fn scenario() {
     let arguments = arguments();

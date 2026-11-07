@@ -13,7 +13,7 @@ use omnia_sdk::WasiProvider;
 use omnia_sdk::vcs::{CloneOptions, Vcs as _};
 use test_programs::arguments;
 
-omnia_sdk::command!(scenario);
+omnia_sdk::api::command::export!(scenario);
 
 const WHOLE: CloneOptions = CloneOptions { depth: None };
 const FIRST: &str = "./clones/first";

@@ -26,7 +26,7 @@ bytes.workspace = true
 chrono.workspace = true
 fromenv.workspace = true
 futures.workspace = true
-mongodb = "3.9.1"
+mongodb = "3.10.0"
 omnia-backend = { workspace = true, features = ["blobstore"] }
 serde.workspace = true
 tracing.workspace = true

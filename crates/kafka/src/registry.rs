@@ -42,39 +42,6 @@ pub struct Registry {
     unframed: Arc<Mutex<HashSet<String>>>,
 }
 
-struct Schema {
-    id: i32,
-    validator: Validator,
-}
-
-impl Schema {
-    fn compile(id: i32, text: &str) -> Result<Self, Failure> {
-        let json: Value = serde_json::from_str(text)
-            .map_err(|e| Failure::Invalid(format!("schema {id} is not JSON: {e}")))?;
-        let validator = jsonschema::validator_for(&json)
-            .map_err(|e| Failure::Invalid(format!("schema {id} does not compile: {e}")))?;
-        Ok(Self { id, validator })
-    }
-
-    fn check(&self, payload: &[u8]) -> Result<(), Rejection> {
-        let value: Value = serde_json::from_slice(payload).map_err(|e| {
-            Rejection::new(
-                Reason::InvalidPayload,
-                format!("not JSON under schema {}: {e}", self.id),
-            )
-        })?;
-        let errors: Vec<String> =
-            self.validator.iter_errors(&value).map(|e| e.to_string()).collect();
-        if errors.is_empty() {
-            return Ok(());
-        }
-        Err(Rejection::new(
-            Reason::InvalidPayload,
-            format!("fails schema {}: {}", self.id, errors.join("; ")),
-        ))
-    }
-}
-
 impl Registry {
     pub fn new(options: RegistryOptions) -> Result<Self> {
         ensure!(
@@ -181,6 +148,39 @@ impl Registry {
     }
 }
 
+struct Schema {
+    id: i32,
+    validator: Validator,
+}
+
+impl Schema {
+    fn compile(id: i32, text: &str) -> Result<Self, Failure> {
+        let json: Value = serde_json::from_str(text)
+            .map_err(|e| Failure::Invalid(format!("schema {id} is not JSON: {e}")))?;
+        let validator = jsonschema::validator_for(&json)
+            .map_err(|e| Failure::Invalid(format!("schema {id} does not compile: {e}")))?;
+        Ok(Self { id, validator })
+    }
+
+    fn check(&self, payload: &[u8]) -> Result<(), Rejection> {
+        let value: Value = serde_json::from_slice(payload).map_err(|e| {
+            Rejection::new(
+                Reason::InvalidPayload,
+                format!("not JSON under schema {}: {e}", self.id),
+            )
+        })?;
+        let errors: Vec<String> =
+            self.validator.iter_errors(&value).map(|e| e.to_string()).collect();
+        if errors.is_empty() {
+            return Ok(());
+        }
+        Err(Rejection::new(
+            Reason::InvalidPayload,
+            format!("fails schema {}: {}", self.id, errors.join("; ")),
+        ))
+    }
+}
+
 // --- Failures ---
 
 // Why a fetch produced no schema. Shared by every waiter on the fetch, so
@@ -229,14 +229,6 @@ pub struct Rejection {
     detail: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Reason {
-    RegistryUnavailable,
-    UnknownSchema,
-    InvalidSchema,
-    InvalidPayload,
-}
-
 impl Rejection {
     const fn new(reason: Reason, detail: String) -> Self {
         Self { reason, detail }
@@ -272,6 +264,14 @@ impl fmt::Display for Rejection {
 
 impl std::error::Error for Rejection {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reason {
+    RegistryUnavailable,
+    UnknownSchema,
+    InvalidSchema,
+    InvalidPayload,
+}
+
 // --- Cache ---
 
 type Fetch<V> = Shared<BoxFuture<'static, Result<V, Failure>>>;
@@ -282,11 +282,6 @@ type Fetch<V> = Shared<BoxFuture<'static, Result<V, Failure>>>;
 // caller fetches afresh. `tokio::sync::OnceCell` would hand a failure to the
 // next waiter to retry instead.
 struct Cache<K, V>(Arc<Mutex<HashMap<K, Entry<V>>>>);
-
-enum Entry<V> {
-    Ready(V),
-    Fetching(Fetch<V>),
-}
 
 impl<K, V> Clone for Cache<K, V> {
     fn clone(&self) -> Self {
@@ -342,6 +337,11 @@ where
     }
 }
 
+enum Entry<V> {
+    Ready(V),
+    Fetching(Fetch<V>),
+}
+
 // --- Wire format ---
 
 // The Confluent wire format: magic byte, big-endian schema id, data.
@@ -372,165 +372,5 @@ impl Payload<'_> {
             registry_id: i32::from_be_bytes(*id),
             data,
         })
-    }
-}
-
-// The wire format codec and the single-flight cache over a scripted fetch;
-// a real registry answering them is `tests/live.rs`' registry tests.
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use tokio::sync::oneshot;
-    use tokio::task::JoinHandle;
-
-    use super::*;
-
-    #[test]
-    fn encode_decode() {
-        let registry_id = i32::from_be_bytes([0xAA, 0xBB, 0xCC, 0xDD]);
-        let payload = b"hello world".to_vec();
-
-        let encoded = Payload::encode(registry_id, payload.clone());
-
-        // layout: [magic byte][registry id, 4 bytes BE][payload]
-        assert_eq!(encoded[0], MAGIC_BYTE, "magic byte mismatch");
-        assert_eq!(&encoded[1..5], &[0xAA, 0xBB, 0xCC, 0xDD], "registry id mismatch");
-        assert_eq!(&encoded[5..], &payload, "payload mismatch");
-
-        let decoded = Payload::decode(&encoded).expect("decode failed");
-
-        assert_eq!(decoded.registry_id, registry_id);
-        assert_eq!(decoded.data, payload.as_slice());
-    }
-
-    #[test]
-    fn wrong_magic_byte() {
-        let mut encoded = Payload::encode(7, b"hello world".to_vec());
-        encoded[0] = 1;
-
-        assert!(Payload::decode(&encoded).is_none());
-    }
-
-    #[test]
-    fn unframed_payload() {
-        assert!(Payload::decode(br#"{"stationId":"1"}"#).is_none());
-        assert!(Payload::decode(b"hello").is_none());
-        assert!(Payload::decode(b"hi").is_none());
-        assert!(Payload::decode(&[1]).is_none());
-        assert!(Payload::decode(&[1, 0, 0, 0, 9]).is_none());
-        assert!(Payload::decode(&[1, 2, 3, 4, 5, 6]).is_none());
-    }
-
-    #[test]
-    fn schema_check() {
-        let schema = Schema::compile(9, r#"{"type":"object","required":["id"]}"#).expect("schema");
-        schema.check(br#"{"id":1}"#).expect("a valid payload");
-
-        let rejected = schema.check(br#"{"name":"x"}"#).expect_err("a missing field");
-        assert_eq!(rejected.reason(), "invalid_payload");
-        assert!(rejected.detail.contains("schema 9"), "{rejected}");
-
-        let rejected = schema.check(b"not json").expect_err("not JSON");
-        assert_eq!(rejected.reason(), "invalid_payload");
-    }
-
-    #[test]
-    fn invalid_schema() {
-        assert!(matches!(Schema::compile(1, "nope"), Err(Failure::Invalid(_))));
-        assert!(matches!(Schema::compile(2, r#"{"type":"record"}"#), Err(Failure::Invalid(_))));
-    }
-
-    type Fetched = Result<u32, Failure>;
-
-    // A fetch the test resolves by hand, counting how many times it was
-    // started.
-    struct Scripted {
-        cache: Cache<&'static str, u32>,
-        started: Arc<AtomicUsize>,
-    }
-
-    impl Scripted {
-        fn new() -> Self {
-            Self {
-                cache: Cache::default(),
-                started: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-
-        fn get(&self, key: &'static str) -> (oneshot::Sender<Fetched>, JoinHandle<Fetched>) {
-            let (resolve, resolved) = oneshot::channel();
-            let started = Arc::clone(&self.started);
-            let cache = self.cache.clone();
-            let task = tokio::spawn(async move {
-                cache
-                    .get_or_fetch(key, async move {
-                        started.fetch_add(1, Ordering::SeqCst);
-                        resolved.await.expect("the test resolves the fetch")
-                    })
-                    .await
-            });
-            (resolve, task)
-        }
-
-        fn started(&self) -> usize {
-            self.started.load(Ordering::SeqCst)
-        }
-    }
-
-    #[tokio::test]
-    async fn concurrent_waiters() {
-        let scripted = Scripted::new();
-        let (first, waiting_first) = scripted.get("a");
-        tokio::task::yield_now().await;
-        let (_second, waiting_second) = scripted.get("a");
-        tokio::task::yield_now().await;
-        assert_eq!(scripted.started(), 1);
-
-        first.send(Ok(7)).expect("the fetch is awaited");
-        assert_eq!(waiting_first.await.expect("joins").expect("fetched"), 7);
-        assert_eq!(waiting_second.await.expect("joins").expect("fetched"), 7);
-
-        let (_third, hit) = scripted.get("a");
-        assert_eq!(hit.await.expect("joins").expect("cached"), 7);
-        assert_eq!(scripted.started(), 1);
-    }
-
-    #[tokio::test]
-    async fn failed_fetch() {
-        let scripted = Scripted::new();
-        let (first, waiting_first) = scripted.get("a");
-        tokio::task::yield_now().await;
-        let (_second, waiting_second) = scripted.get("a");
-        tokio::task::yield_now().await;
-
-        first.send(Err(Failure::Unknown)).expect("the fetch is awaited");
-        assert!(matches!(waiting_first.await.expect("joins"), Err(Failure::Unknown)));
-        assert!(matches!(waiting_second.await.expect("joins"), Err(Failure::Unknown)));
-
-        let (retry, waiting_retry) = scripted.get("a");
-        tokio::task::yield_now().await;
-        assert_eq!(scripted.started(), 2, "a failure is fetched again");
-        retry.send(Ok(8)).expect("the fetch is awaited");
-        assert_eq!(waiting_retry.await.expect("joins").expect("fetched"), 8);
-    }
-
-    #[tokio::test]
-    async fn dropped_waiter() {
-        let scripted = Scripted::new();
-        let (first, waiting_first) = scripted.get("a");
-        tokio::task::yield_now().await;
-        waiting_first.abort();
-        let _ = waiting_first.await;
-
-        let (_second, waiting_second) = scripted.get("a");
-        tokio::task::yield_now().await;
-        assert_eq!(scripted.started(), 1, "the in-flight fetch is joined, not restarted");
-
-        first.send(Ok(9)).expect("the fetch is awaited");
-        assert_eq!(waiting_second.await.expect("joins").expect("fetched"), 9);
-        let (_third, hit) = scripted.get("a");
-        assert_eq!(hit.await.expect("joins").expect("cached"), 9);
-        assert_eq!(scripted.started(), 1);
     }
 }

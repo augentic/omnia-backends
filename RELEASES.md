@@ -2,6 +2,13 @@
 
 Unreleased
 
+### Added
+
+- `omnia-kafka` (`KAFKA_TOPIC_PREFIX`) and `omnia-nats`
+  (`NATS_TOPIC_PREFIX`): optional topic prefix prepended on produce and
+  subscribe and stripped from each delivered message's topic before it
+  reaches the host, so guests speak logical topic names across environments.
+
 ---
 
 Release notes for previous releases can be found on the respective release

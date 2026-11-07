@@ -9,7 +9,7 @@ use omnia_sdk::WasiProvider;
 use omnia_sdk::model::{Model as _, Request};
 use test_programs::{fanout_width, lend, seam, user};
 
-omnia_sdk::command!(scenario);
+omnia_sdk::api::command::export!(scenario);
 
 async fn scenario() {
     let width = fanout_width();

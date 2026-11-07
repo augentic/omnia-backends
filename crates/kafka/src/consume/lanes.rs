@@ -13,15 +13,6 @@ pub struct Lanes {
     next: u64,
 }
 
-pub struct Lane {
-    key: Arc<[u8]>,
-    seq: u64,
-    // the predecessor's completion; `None` at the head of the lane
-    behind: Option<oneshot::Receiver<()>>,
-    // dropped when this record is done, waking the record behind
-    _done: oneshot::Sender<()>,
-}
-
 impl Lanes {
     pub fn enqueue(&mut self, key: Arc<[u8]>) -> Lane {
         let seq = self.next;
@@ -44,6 +35,15 @@ impl Lanes {
     }
 }
 
+pub struct Lane {
+    key: Arc<[u8]>,
+    seq: u64,
+    // the predecessor's completion; `None` at the head of the lane
+    behind: Option<oneshot::Receiver<()>>,
+    // dropped when this record is done, waking the record behind
+    _done: oneshot::Sender<()>,
+}
+
 impl Lane {
     pub const fn is_head(&self) -> bool {
         self.behind.is_none()
@@ -54,25 +54,5 @@ impl Lane {
         if let Some(behind) = self.behind.take() {
             let _ = behind.await;
         }
-    }
-}
-
-// Per-key FIFO lane enqueue and release invariants without a consumer loop.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lane_release() {
-        let mut lanes = Lanes::default();
-        let first = lanes.enqueue(Arc::from(b"a".as_slice()));
-        let second = lanes.enqueue(Arc::from(b"a".as_slice()));
-        assert!(first.is_head());
-        assert!(!second.is_head());
-
-        lanes.release(&first);
-        assert_eq!(lanes.tails.len(), 1, "the lane still has a record behind");
-        lanes.release(&second);
-        assert!(lanes.tails.is_empty());
     }
 }

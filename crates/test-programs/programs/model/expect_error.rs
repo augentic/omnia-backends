@@ -17,7 +17,7 @@ use omnia_sdk::WasiProvider;
 use omnia_sdk::model::{CHECK_TOOL, Error, Format, Function, Model as _, Request, Tool, ToolCall};
 use test_programs::{arguments, lend, lookup, user};
 
-omnia_sdk::command!(scenario);
+omnia_sdk::api::command::export!(scenario);
 
 async fn scenario() {
     let arguments = arguments();

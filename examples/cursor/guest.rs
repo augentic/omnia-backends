@@ -19,7 +19,6 @@ use serde_json::json;
 use wasip3::filesystem::preopens;
 
 struct CliGuest;
-wasip3::cli::command::export!(CliGuest);
 
 impl wasip3::exports::cli::run::Guest for CliGuest {
     async fn run() -> Result<(), ()> {
@@ -99,3 +98,4 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
         Ok(())
     }
 }
+wasip3::cli::command::export!(CliGuest);

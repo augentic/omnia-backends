@@ -24,6 +24,9 @@ async fn write_read_delete() -> Result<()> {
     store.write_data(object.clone(), b"payload".to_vec().into()).await?;
 
     assert_eq!(store.get_data(object.clone(), 0, 0).await?.as_deref(), Some(b"payload".as_slice()));
+    assert_eq!(store.get_data(object.clone(), 0, 2).await?.as_deref(), Some(b"pay".as_slice()));
+    assert_eq!(store.get_data(object.clone(), 3, 0).await?.as_deref(), Some(b"load".as_slice()));
+    assert!(store.get_data(object.clone(), 5, 2).await.is_err(), "inverted range is rejected");
     assert!(store.has_object(object.clone()).await?, "object exists after write");
 
     store.delete_object(object).await?;

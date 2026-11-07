@@ -10,7 +10,7 @@ use omnia_sdk::WasiProvider;
 use omnia_sdk::model::{Error, Model as _, Request, WorkerGrant};
 use test_programs::{arguments, lend, user};
 
-omnia_sdk::command!(scenario);
+omnia_sdk::api::command::export!(scenario);
 
 async fn scenario() {
     let mut grant = WorkerGrant::default();

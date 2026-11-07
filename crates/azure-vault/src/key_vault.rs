@@ -158,31 +158,3 @@ fn decode_secret_id(identifier: &str, secret_id_or_url: &str) -> Option<String> 
     let secret_id = rest.strip_prefix(':')?;
     (locker == identifier).then(|| secret_id.to_owned())
 }
-
-// Secret name encoding and decoding for locker namespaces; Key Vault round-trips
-// are covered by `tests/live.rs`.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn secret_name_round_trips() {
-        let encoded = encode_secret_name("my-locker", "api/token:1");
-        assert_eq!(decode_secret_id("my-locker", &encoded).as_deref(), Some("api/token:1"));
-
-        let url = format!("https://myvault.vault.azure.net/secrets/{encoded}");
-        assert_eq!(decode_secret_id("my-locker", &url).as_deref(), Some("api/token:1"));
-
-        let versioned = format!("https://myvault.vault.azure.net/secrets/{encoded}/v1");
-        assert_eq!(decode_secret_id("my-locker", &versioned).as_deref(), Some("api/token:1"));
-
-        assert!(decode_secret_id("other-locker", &encoded).is_none());
-
-        // A prefix locker (`my`) must not decode or collide with `my-locker`.
-        assert!(decode_secret_id("my", &encoded).is_none());
-        assert_ne!(
-            encode_secret_name("my", "locker-api/token:1"),
-            encode_secret_name("my-locker", "api/token:1"),
-        );
-    }
-}

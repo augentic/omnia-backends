@@ -15,6 +15,7 @@ MSRV: Rust 1.99
 |----------|----------|---------|-------------|
 | `NATS_ADDR` | no | `demo.nats.io` | NATS server address |
 | `NATS_TOPICS` | no | | Comma-separated subscription topics |
+| `NATS_TOPIC_PREFIX` | no | | Prefix prepended to every published and subscribed topic, and stripped from delivered subjects |
 | `NATS_JWT` | no | | JWT for authentication |
 | `NATS_SEED` | no | | `NKey` seed for signing |
 | `NATS_KV_MAX_AGE_SECS` | no | | Bucket-wide max age for each JetStream KV bucket this client creates; unset, keys persist until deleted |

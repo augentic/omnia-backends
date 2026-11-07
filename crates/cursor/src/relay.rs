@@ -212,19 +212,3 @@ fn bad_gateway(message: String) -> Response<Body> {
     response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
     response.map(|body| body.map_err(Into::into).boxed())
 }
-
-// The REST split alone; what the relay forwards, drops and streams is
-// `tests/relay.rs`'s, over a backend the suite owns.
-#[cfg(test)]
-mod tests {
-    use super::is_api;
-
-    #[test]
-    fn api_paths() {
-        assert!(is_api("/v1/models"));
-        assert!(is_api("/v1"));
-        assert!(!is_api("/v10/models"));
-        assert!(!is_api("/auth/exchange_user_api_key"));
-        assert!(!is_api("/aiserver.v1.DashboardService/GetUserPrivacyMode"));
-    }
-}

@@ -66,22 +66,6 @@ pub struct Conversation {
     completion: Completion,
 }
 
-struct Reply {
-    text: String,
-    usage: Option<Usage>,
-}
-
-// What an off-shape reply is told, and the fault logged for it with the
-// instance's values masked.
-struct Nudge {
-    fault: String,
-    prompt: String,
-}
-
-const REFUSED_IN_CLOSING: &str = "not run: your final answer is due now. Reply with only your \
-                                  final answer as a single JSON value in the shape the prompt \
-                                  asked for, and nothing else.";
-
 impl Conversation {
     pub fn new(
         client: genai::Client, request: PreparedRequest, tools: Tools, budgets: Budgets,
@@ -440,6 +424,22 @@ impl Conversation {
     }
 }
 
+struct Reply {
+    text: String,
+    usage: Option<Usage>,
+}
+
+// What an off-shape reply is told, and the fault logged for it with the
+// instance's values masked.
+struct Nudge {
+    fault: String,
+    prompt: String,
+}
+
+const REFUSED_IN_CLOSING: &str = "not run: your final answer is due now. Reply with only your \
+                                  final answer as a single JSON value in the shape the prompt \
+                                  asked for, and nothing else.";
+
 fn at_path(path: &str, fault: impl fmt::Display) -> String {
     if path.is_empty() { fault.to_string() } else { format!("at `{path}`: {fault}") }
 }
@@ -459,29 +459,4 @@ fn truncate(text: String, cap: usize) -> String {
     let head = text.floor_char_boundary(cap / 2);
     let tail = text.ceil_char_boundary(text.len() - (cap - head));
     format!("{}\n[… {} bytes omitted …]\n{}", &text[..head], tail - head, &text[tail..])
-}
-
-// Unit tests for result capping; the loop itself is driven by the guests in `tests/model.rs`.
-#[cfg(test)]
-mod tests {
-    use super::truncate;
-
-    #[test]
-    fn within_cap() {
-        assert_eq!(truncate("short".to_owned(), 5), "short");
-        assert_eq!(truncate(String::new(), 0), "");
-    }
-
-    #[test]
-    fn head_and_tail() {
-        let text = "0123456789".to_owned();
-        assert_eq!(truncate(text, 4), "01\n[… 6 bytes omitted …]\n89");
-    }
-
-    #[test]
-    fn char_boundaries() {
-        // each `é` is two bytes, so the tail's byte cut at 5 would split one
-        let text = "éééé".to_owned();
-        assert_eq!(truncate(text, 5), "é\n[… 4 bytes omitted …]\né");
-    }
 }

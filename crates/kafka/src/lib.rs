@@ -35,28 +35,9 @@ pub struct Client {
     inner: Arc<Inner>,
 }
 
-// Fields drop in order: the producer flushes first, so a delivery report can
-// still store an offset before the consumer's close commits what is stored.
-struct Inner {
-    producer: ThreadedProducer<DeliveryContext>,
-    partitioner: Partitioner,
-    registry: Option<Registry>,
-    shared: Arc<Shared>,
-    consumer: Option<Arc<KafkaConsumer>>,
-    consuming: AtomicBool,
-}
-
 impl Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Client").finish_non_exhaustive()
-    }
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        if let Err(error) = self.producer.flush(PRODUCER_FLUSH) {
-            tracing::warn!("producer flush on shutdown: {error}");
-        }
     }
 }
 
@@ -81,6 +62,7 @@ impl Connect for Client {
             })
             .context("issue creating producer")?;
 
+        let topic_prefix = options.topic_prefix.unwrap_or_default();
         let partitioner = Partitioner::new(options.partition_count, options.partitioner);
         let registry = options.registry.map(Registry::new).transpose()?;
 
@@ -103,7 +85,12 @@ impl Connect for Client {
                 .create_with_context(KafkaContext::new(Arc::clone(&shared)))
                 .context("issue creating consumer")?;
 
-            let topics = consumer_options.topics.iter().map(String::as_str).collect::<Vec<_>>();
+            let prefixed: Vec<String> = consumer_options
+                .topics
+                .iter()
+                .map(|topic| format!("{topic_prefix}{topic}"))
+                .collect();
+            let topics = prefixed.iter().map(String::as_str).collect::<Vec<_>>();
             consumer.subscribe(&topics).context("issue subscribing to topics")?;
             tracing::debug!("subscribed to topics: {topics:?}");
 
@@ -117,6 +104,7 @@ impl Connect for Client {
         Ok(Self {
             inner: Arc::new(Inner {
                 producer,
+                topic_prefix,
                 partitioner,
                 registry,
                 shared,
@@ -124,6 +112,26 @@ impl Connect for Client {
                 consuming: AtomicBool::new(false),
             }),
         })
+    }
+}
+
+// Fields drop in order: the producer flushes first, so a delivery report can
+// still store an offset before the consumer's close commits what is stored.
+struct Inner {
+    producer: ThreadedProducer<DeliveryContext>,
+    topic_prefix: String,
+    partitioner: Partitioner,
+    registry: Option<Registry>,
+    shared: Arc<Shared>,
+    consumer: Option<Arc<KafkaConsumer>>,
+    consuming: AtomicBool,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Err(error) = self.producer.flush(PRODUCER_FLUSH) {
+            tracing::warn!("producer flush on shutdown: {error}");
+        }
     }
 }
 
@@ -161,6 +169,10 @@ mod config {
         /// How often processed offsets are committed, in milliseconds.
         #[env(from = "KAFKA_COMMIT_INTERVAL_MS", default = "200")]
         pub commit_interval_ms: u64,
+        /// Optional prefix prepended to every produced and consumed topic, and
+        /// stripped from each delivered record's topic before it reaches the host.
+        #[env(from = "KAFKA_TOPIC_PREFIX")]
+        pub topic_prefix: Option<String>,
         /// Optional consumer configuration.
         #[env(nested)]
         pub consumer: Option<ConsumerOptions>,
@@ -179,6 +191,7 @@ mod config {
                 .field("partition_count", &self.partition_count)
                 .field("partitioner", &self.partitioner)
                 .field("commit_interval_ms", &self.commit_interval_ms)
+                .field("topic_prefix", &self.topic_prefix)
                 .field("consumer", &self.consumer)
                 .field("registry", &self.registry)
                 .finish()

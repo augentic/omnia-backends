@@ -169,6 +169,8 @@ async fn denied_literals() {
         ("fd00:ec2::254".to_owned(), "a cloud metadata address"),
         ("::ffff:100.100.100.200".to_owned(), "a cloud metadata address"),
         ("fe80::1".to_owned(), "a link-local address"),
+        ("224.0.0.1".to_owned(), "a multicast address"),
+        ("255.255.255.255".to_owned(), "the broadcast address"),
         ("0.0.0.0".to_owned(), "an unspecified address"),
     ];
     rows.extend(own_address().map(|address| (address.to_string(), "an address of the host's own")));

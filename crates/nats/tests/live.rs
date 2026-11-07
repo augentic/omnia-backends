@@ -52,6 +52,11 @@ async fn keyvalue_atomics() -> Result<()> {
     // Retrying with the observed value commits cleanly via revision-conditioned `update`.
     bucket.cas(pointer.clone(), observed, b"second".to_vec()).await?.expect("retry commits");
     assert_eq!(bucket.get(pointer).await?.as_deref(), Some(b"second".as_slice()));
+
+    // Subject wildcards and leading/trailing dots are rejected before hitting the stream.
+    for bad in ["", ".leading", "trailing.", "wild*card", "wild>card", "with space", "a:b"] {
+        assert!(bucket.get(bad.to_owned()).await.is_err(), "{bad} must be rejected");
+    }
     Ok(())
 }
 

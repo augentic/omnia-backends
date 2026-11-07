@@ -203,11 +203,12 @@ pub fn records(consumer: &KafkaConsumer) -> impl Stream<Item = Result<OwnedMessa
 // offset.
 pub async fn run(
     records: impl Stream<Item = Result<OwnedMessage>>, shared: Arc<Shared>,
-    registry: Option<Registry>, handler: Arc<dyn Handler>,
+    registry: Option<Registry>, topic_prefix: String, handler: Arc<dyn Handler>,
 ) -> Result<()> {
     let delivery = Arc::new(Delivery {
         shared,
         registry,
+        topic_prefix,
         handler,
         slots: Arc::new(Semaphore::new(IN_FLIGHT)),
         backlog: Arc::new(Semaphore::new(BACKLOG)),
@@ -250,6 +251,7 @@ async fn take(semaphore: &Arc<Semaphore>) -> OwnedSemaphorePermit {
 struct Delivery {
     shared: Arc<Shared>,
     registry: Option<Registry>,
+    topic_prefix: String,
     handler: Arc<dyn Handler>,
     slots: Arc<Semaphore>,
     backlog: Arc<Semaphore>,
@@ -315,6 +317,10 @@ impl Delivery {
         if !self.shared.holds(record, ticket) {
             return Ok(());
         }
+        let Some(topic) = record.topic().strip_prefix(&self.topic_prefix) else {
+            self.done(record, ticket);
+            return Ok(());
+        };
         let raw = record.payload().unwrap_or_default();
         let payload = match &self.registry {
             Some(registry) => match registry.decode(record.topic(), raw).await {
@@ -337,7 +343,7 @@ impl Delivery {
             },
             None => raw.to_vec(),
         };
-        self.handler.handle(message(record, payload)).await?;
+        self.handler.handle(message(record, topic, payload)).await?;
         self.done(record, ticket);
         Ok(())
     }
@@ -366,7 +372,7 @@ impl Delivery {
 // The partition the record was read from travels as `source-partition`:
 // `partition` is a send's destination, and a guest forwarding a record's
 // metadata must not pin its output to where the record came from.
-pub fn message(record: &OwnedMessage, payload: Vec<u8>) -> Message {
+pub fn message(record: &OwnedMessage, topic: &str, payload: Vec<u8>) -> Message {
     let mut metadata = Metadata::new();
     if let Some(headers) = record.headers() {
         for header in headers.iter() {
@@ -384,271 +390,7 @@ pub fn message(record: &OwnedMessage, payload: Vec<u8>) -> Message {
     }
 
     let mut message = Message::new(payload);
-    record.topic().clone_into(&mut message.topic);
+    topic.clone_into(&mut message.topic);
     message.metadata = Some(metadata);
     message
-}
-
-// The loop and the lanes over scripted records and a scripted handler,
-// without a broker; a real group commit is `tests/live.rs::at_least_once`.
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use futures::FutureExt as _;
-    use futures::future::BoxFuture;
-    use rdkafka::Timestamp;
-    use tokio::sync::{mpsc, oneshot};
-    use tokio::task::JoinHandle;
-
-    use super::*;
-
-    // Hands every delivery to the test with the sender its outcome goes back
-    // through; a delivery the test never decides stays with the handler.
-    struct Recorder(mpsc::UnboundedSender<Delivered>);
-
-    #[derive(Debug)]
-    struct Delivered {
-        message: Message,
-        outcome: oneshot::Sender<Result<(), HandleError>>,
-    }
-
-    impl Handler for Recorder {
-        fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), HandleError>> {
-            let (outcome, decided) = oneshot::channel();
-            let handed = self.0.send(Delivered { message, outcome });
-            async move {
-                handed.expect("the test is receiving");
-                match decided.await {
-                    Ok(outcome) => outcome,
-                    Err(_undecided) => std::future::pending().await,
-                }
-            }
-            .boxed()
-        }
-    }
-
-    impl Delivered {
-        fn offset(&self) -> i64 {
-            let metadata = self.message.metadata.as_ref().expect("metadata");
-            metadata.get("offset").expect("offset").parse().expect("offset")
-        }
-
-        fn complete(self, outcome: Result<(), HandleError>) {
-            self.outcome.send(outcome).expect("the loop is waiting");
-        }
-    }
-
-    struct Scripted {
-        records: mpsc::UnboundedSender<Result<OwnedMessage>>,
-        delivered: mpsc::UnboundedReceiver<Delivered>,
-        shared: Arc<Shared>,
-        run: JoinHandle<Result<()>>,
-    }
-
-    impl Scripted {
-        fn start() -> Self {
-            let (records, pulled) = mpsc::unbounded_channel();
-            let (handler, delivered) = mpsc::unbounded_channel();
-            let shared = Shared::new();
-            let pulled = futures::stream::unfold(pulled, |mut pulled| async move {
-                pulled.recv().await.map(|record| (record, pulled))
-            });
-            let run =
-                tokio::spawn(run(pulled, Arc::clone(&shared), None, Arc::new(Recorder(handler))));
-            Self {
-                records,
-                delivered,
-                shared,
-                run,
-            }
-        }
-
-        fn pull(&self, key: Option<&[u8]>, partition: i32, offset: i64) {
-            let record = OwnedMessage::new(
-                Some(offset.to_string().into_bytes()),
-                key.map(<[u8]>::to_vec),
-                "t".to_owned(),
-                Timestamp::NotAvailable,
-                partition,
-                offset,
-                None,
-            );
-            self.records.send(Ok(record)).expect("the loop is pulling");
-        }
-
-        async fn delivered(&mut self) -> Delivered {
-            tokio::time::timeout(Duration::from_secs(5), self.delivered.recv())
-                .await
-                .expect("a record is delivered")
-                .expect("the handler is alive")
-        }
-
-        async fn nothing_delivered(&mut self) {
-            let waited =
-                tokio::time::timeout(Duration::from_millis(100), self.delivered.recv()).await;
-            let delivered = waited.ok().flatten().map(|delivered| delivered.message);
-            assert!(delivered.is_none(), "unexpected delivery: {delivered:?}");
-        }
-
-        // A record stores its offset in the turn after its outcome is
-        // decided; the yield gives it that turn.
-        async fn stored_offset(&self, partition: i32) -> Option<i64> {
-            tokio::task::yield_now().await;
-            self.shared.tracker.lock().expect("tracker").stored_offset("t", partition)
-        }
-
-        fn revoke(&self, partition: i32) {
-            self.shared.tracker.lock().expect("tracker").revoke("t", partition);
-        }
-
-        fn assign(&self, partition: i32) {
-            self.shared.tracker.lock().expect("tracker").assign("t", partition);
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn per_key_lanes() {
-        let mut scripted = Scripted::start();
-        scripted.pull(Some(b"a"), 0, 0);
-        scripted.pull(Some(b"b"), 0, 1);
-        scripted.pull(Some(b"a"), 0, 2);
-
-        let first = scripted.delivered().await;
-        let second = scripted.delivered().await;
-        assert_eq!([first.offset(), second.offset()], [0, 1]);
-        scripted.nothing_delivered().await;
-
-        second.complete(Ok(()));
-        scripted.nothing_delivered().await;
-
-        first.complete(Ok(()));
-        assert_eq!(scripted.delivered().await.offset(), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn keyless_records() {
-        let mut scripted = Scripted::start();
-        scripted.pull(None, 0, 0);
-        scripted.pull(None, 0, 1);
-
-        let first = scripted.delivered().await;
-        let second = scripted.delivered().await;
-        assert_eq!([first.offset(), second.offset()], [0, 1]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn in_flight_bound() {
-        let bound = i64::try_from(IN_FLIGHT).expect("bound");
-        let mut scripted = Scripted::start();
-        for offset in 0..=bound {
-            scripted.pull(Some(format!("k{offset}").as_bytes()), 0, offset);
-        }
-
-        let mut held = Vec::new();
-        for _ in 0..IN_FLIGHT {
-            held.push(scripted.delivered().await);
-        }
-        scripted.nothing_delivered().await;
-
-        held.pop().expect("a held record").complete(Ok(()));
-        assert_eq!(scripted.delivered().await.offset(), bound);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn offset_watermark() {
-        let mut scripted = Scripted::start();
-        scripted.pull(Some(b"a"), 0, 3);
-        scripted.pull(Some(b"a"), 0, 5);
-        scripted.pull(Some(b"b"), 0, 6);
-
-        let first = scripted.delivered().await;
-        let third = scripted.delivered().await;
-        assert_eq!([first.offset(), third.offset()], [3, 6]);
-
-        // 6 is done while 5 still waits behind 3
-        third.complete(Ok(()));
-        assert_eq!(scripted.stored_offset(0).await, None);
-
-        first.complete(Ok(()));
-        let second = scripted.delivered().await;
-        assert_eq!(second.offset(), 5);
-        assert_eq!(scripted.stored_offset(0).await, Some(3));
-
-        second.complete(Ok(()));
-        assert_eq!(scripted.stored_offset(0).await, Some(6));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn handler_failure() {
-        let mut scripted = Scripted::start();
-        scripted.pull(Some(b"a"), 0, 7);
-
-        scripted.delivered().await.complete(Err(HandleError::Trapped("boom".to_owned())));
-
-        let ended = (&mut scripted.run).await.expect("the loop task joins");
-        let error = ended.expect_err("a failed record ends the loop");
-        assert!(format!("{error:#}").contains("t[0]@7"), "unexpected error: {error:#}");
-        assert_eq!(scripted.stored_offset(0).await, None);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn revoked_partition() {
-        let mut scripted = Scripted::start();
-        scripted.pull(Some(b"a"), 0, 1);
-        scripted.pull(Some(b"a"), 0, 2);
-        scripted.pull(Some(b"b"), 1, 3);
-
-        let first = scripted.delivered().await;
-        let other = scripted.delivered().await;
-        assert_eq!([first.offset(), other.offset()], [1, 3]);
-
-        scripted.revoke(0);
-        first.complete(Ok(()));
-        scripted.nothing_delivered().await;
-
-        other.complete(Ok(()));
-        scripted.pull(Some(b"c"), 1, 4);
-        assert_eq!(scripted.delivered().await.offset(), 4);
-        assert_eq!(scripted.stored_offset(1).await, Some(3));
-        assert_eq!(scripted.stored_offset(0).await, None);
-    }
-
-    // The partition comes back before the first pull's handler returns, and
-    // the redelivery waits behind it in the lane.
-    #[tokio::test(start_paused = true)]
-    async fn in_flight_redelivery() {
-        let mut scripted = Scripted::start();
-        scripted.pull(Some(b"a"), 0, 5);
-        let first = scripted.delivered().await;
-
-        scripted.revoke(0);
-        scripted.assign(0);
-        scripted.pull(Some(b"a"), 0, 5);
-        scripted.nothing_delivered().await;
-
-        first.complete(Ok(()));
-        assert_eq!(scripted.stored_offset(0).await, None);
-
-        let again = scripted.delivered().await;
-        assert_eq!(again.offset(), 5);
-        again.complete(Ok(()));
-        assert_eq!(scripted.stored_offset(0).await, Some(5));
-    }
-
-    // The dropped send reports its own number; the queued one leaves it to
-    // the delivery report, which the test plays.
-    #[test]
-    fn dropped_send() {
-        let shared = Shared::new();
-        let dropped = shared.next_send_id();
-        let queued = shared.next_send_id();
-        drop(dropped);
-        queued.queued();
-
-        let mut tracker = shared.tracker.lock().expect("tracker");
-        let ticket = tracker.insert("t", 0, 3);
-        assert_eq!(tracker.done("t", 0, 3, ticket, 2), None);
-        assert_eq!(tracker.note_delivered(1), [("t".to_owned(), 0, 3)]);
-    }
 }

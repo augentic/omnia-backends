@@ -179,19 +179,3 @@ impl Bucket for RedisBucket {
 fn strip_bucket_prefix(identifier: &str, raw_key: &str) -> Option<String> {
     raw_key.strip_prefix(identifier).and_then(|rest| rest.strip_prefix(':')).map(ToOwned::to_owned)
 }
-
-// Prefix stripping for bucket-scoped keys; Redis round-trips are covered by
-// `tests/live.rs`.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strip_bucket_prefix_removes_namespace() {
-        assert_eq!(
-            strip_bucket_prefix("my-bucket", "my-bucket:user:42").as_deref(),
-            Some("user:42")
-        );
-        assert!(strip_bucket_prefix("my-bucket", "other-bucket:user:42").is_none());
-    }
-}

@@ -332,7 +332,7 @@ async fn await_gone(scratch: &Scratch) {
 // Every command of one completion runs in one session: the second finds
 // what the first left in `$HOME`.
 #[tokio::test]
-async fn model_worker_shell_shared() {
+async fn model_worker_home_reuse() {
     let (scratch, roots) = tree();
     let fake = worker(
         Config::calls([
@@ -354,7 +354,7 @@ async fn model_worker_shell_shared() {
 // A shell call where no shell was advertised is answered as the model's
 // slip, not the completion's failure.
 #[tokio::test]
-async fn model_lend_shell_unadvertised() {
+async fn model_lend_shell_hid() {
     let fake = FakeOpenAi::serve(shell("pwd")).await;
     let client = client(&fake).await;
     let (scratch, _) = tree();
@@ -544,7 +544,7 @@ async fn model_nudge_keeps_tools() {
 // rather than put to the check as it stands; the tools are declared on
 // every round.
 #[tokio::test]
-async fn model_nudged_after_correction() {
+async fn model_nudge_post_correct() {
     let captured = Captured::install();
     let fake = FakeOpenAi::serve(Config::replies([
         "Let me look at the claims.",
@@ -883,7 +883,7 @@ async fn model_undeclared_tool() {
 // With tools declared, the refusal names them, so the model's next call is
 // one of them; the lend's tools are among the names.
 #[tokio::test]
-async fn model_undeclared_tool_named() {
+async fn model_undeclared_named() {
     let fake = FakeOpenAi::serve(Config::calls([
         ("write", json!({ "path": "a" })),
         ("lookup", json!({})),

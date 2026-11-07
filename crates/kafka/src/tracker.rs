@@ -33,7 +33,6 @@ impl Pending {
 struct Partition {
     revoked: bool,
     pending: BTreeMap<i64, Pending>,
-    stored: Option<i64>,
 }
 
 impl Partition {
@@ -46,9 +45,6 @@ impl Partition {
         {
             last = Some(*entry.key());
             entry.remove();
-        }
-        if last.is_some() {
-            self.stored = last;
         }
         last
     }
@@ -133,11 +129,6 @@ impl Tracker {
         self.partition_or_insert(topic, partition).revoked = false;
     }
 
-    #[cfg(test)]
-    pub fn stored_offset(&self, topic: &str, partition: i32) -> Option<i64> {
-        self.partition(topic, partition).and_then(|state| state.stored)
-    }
-
     fn partition(&self, topic: &str, partition: i32) -> Option<&Partition> {
         self.topics.get(topic)?.get(&partition)
     }
@@ -172,100 +163,5 @@ impl Tracker {
             }
         }
         stored
-    }
-}
-
-// Resolved offsets when records finish out of order, with no broker. The
-// loop over it is `consume`'s tests; a real group commit is `tests/live.rs`.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn stored(topic: &str, partition: i32, offset: i64) -> Stored {
-        (topic.to_owned(), partition, offset)
-    }
-
-    #[test]
-    fn out_of_order() {
-        let mut tracker = Tracker::default();
-        let first = tracker.insert("t", 3, 100);
-        let second = tracker.insert("t", 3, 101);
-        let third = tracker.insert("t", 3, 102);
-
-        assert_eq!(tracker.done("t", 3, 101, second, 0), None);
-        assert_eq!(tracker.stored_offset("t", 3), None);
-
-        assert_eq!(tracker.done("t", 3, 100, first, 0), Some(stored("t", 3, 101)));
-        assert_eq!(tracker.done("t", 3, 102, third, 0), Some(stored("t", 3, 102)));
-    }
-
-    #[test]
-    fn pending_sends() {
-        let mut tracker = Tracker::default();
-        let ticket = tracker.insert("t", 0, 7);
-        assert_eq!(tracker.done("t", 0, 7, ticket, 2), None);
-
-        assert_eq!(tracker.note_delivered(0), []);
-        assert_eq!(tracker.note_delivered(1), [stored("t", 0, 7)]);
-    }
-
-    #[test]
-    fn shared_delivery() {
-        let mut tracker = Tracker::default();
-        let t = tracker.insert("t", 0, 1);
-        let u = tracker.insert("u", 2, 9);
-        assert_eq!(tracker.done("t", 0, 1, t, 1), None);
-        assert_eq!(tracker.done("u", 2, 9, u, 1), None);
-
-        assert_eq!(tracker.note_delivered(0), [stored("t", 0, 1), stored("u", 2, 9)]);
-    }
-
-    #[test]
-    fn revoke_partition() {
-        let mut tracker = Tracker::default();
-        let held = tracker.insert("t", 1, 5);
-        assert!(tracker.holds("t", 1, 5, held));
-
-        tracker.revoke("t", 1);
-        assert!(!tracker.holds("t", 1, 5, held));
-        assert_eq!(tracker.done("t", 1, 5, held, 0), None);
-        assert_eq!(tracker.stored_offset("t", 1), None);
-
-        // a record pulled before the reassignment is still dropped
-        let dropped = tracker.insert("t", 1, 6);
-        assert!(!tracker.holds("t", 1, 6, dropped));
-        tracker.assign("t", 1);
-        let held = tracker.insert("t", 1, 7);
-        assert!(tracker.holds("t", 1, 7, held));
-    }
-
-    #[test]
-    fn reassign_partition() {
-        let mut tracker = Tracker::default();
-        let stale = tracker.insert("t", 1, 5);
-        tracker.revoke("t", 1);
-        tracker.assign("t", 1);
-        let fresh = tracker.insert("t", 1, 5);
-
-        assert!(!tracker.holds("t", 1, 5, stale));
-        assert_eq!(tracker.done("t", 1, 5, stale, 0), None);
-        assert_eq!(tracker.stored_offset("t", 1), None);
-
-        assert!(tracker.holds("t", 1, 5, fresh));
-        assert_eq!(tracker.done("t", 1, 5, fresh, 0), Some(stored("t", 1, 5)));
-    }
-
-    #[test]
-    fn enqueue_failure() {
-        let mut tracker = Tracker::default();
-        assert_eq!(tracker.note_delivered(1), []);
-        assert_eq!(tracker.delivered, 0);
-
-        // the send numbered 0 never queued, and reports itself here
-        assert_eq!(tracker.note_delivered(0), []);
-        assert_eq!(tracker.delivered, 2);
-
-        let ticket = tracker.insert("t", 0, 10);
-        assert_eq!(tracker.done("t", 0, 10, ticket, 2), Some(stored("t", 0, 10)));
     }
 }

@@ -13,7 +13,7 @@ use omnia_sdk::WasiProvider;
 use omnia_sdk::vcs::{Change, ChangeKind, Error, Rule, Strategy, Vcs as _};
 use test_programs::arguments;
 
-omnia_sdk::command!(scenario);
+omnia_sdk::api::command::export!(scenario);
 
 const PROJECT: &str = "./project";
 const WORK: &str = "./work";

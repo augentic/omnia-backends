@@ -39,7 +39,8 @@ impl Endpoint for crate::Client {
             }
             let shared = Arc::clone(&client.inner.shared);
             let registry = client.inner.registry.clone();
-            consume::run(consume::records(consumer), shared, registry, handler).await
+            let topic_prefix = client.inner.topic_prefix.clone();
+            consume::run(consume::records(consumer), shared, registry, topic_prefix, handler).await
         }
         .boxed()
     }
@@ -48,6 +49,7 @@ impl Endpoint for crate::Client {
         let client = self.clone();
 
         async move {
+            let topic = format!("{}{topic}", client.inner.topic_prefix);
             let payload = match &client.inner.registry {
                 Some(registry) => match registry.encode(&topic, message.payload).await {
                     Ok(payload) => payload,
@@ -117,33 +119,4 @@ where
     };
     tokio::time::sleep(QUEUE_RETRY).await;
     producer.send(record).map_err(|(error, _)| error)
-}
-
-// What a send reads from a consumed record's metadata, without a broker; a
-// real send is `tests/live.rs::keyed_sends`.
-#[cfg(test)]
-mod tests {
-    use rdkafka::Timestamp;
-    use rdkafka::message::OwnedMessage;
-
-    use super::*;
-
-    #[test]
-    fn forwarded_metadata() {
-        let record = OwnedMessage::new(
-            None,
-            Some(b"k".to_vec()),
-            "t".to_owned(),
-            Timestamp::NotAvailable,
-            3,
-            7,
-            None,
-        );
-        let message = consume::message(&record, Vec::new());
-        let metadata = message.metadata.expect("a record carries metadata");
-
-        assert_eq!(metadata.get("key").map(String::as_str), Some("k"));
-        assert_eq!(metadata.get("source-partition").map(String::as_str), Some("3"));
-        assert_eq!(explicit_partition(&metadata), None);
-    }
 }

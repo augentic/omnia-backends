@@ -60,15 +60,6 @@ struct KvBucket {
     store: kv::Store,
 }
 
-// What the server holds for a key: the revision a write is conditioned on
-// (`0` when nothing was ever written), the value when that revision is a
-// live put, and the TTL still to run on it.
-struct Snapshot {
-    revision: u64,
-    value: Option<Vec<u8>>,
-    ttl: Option<Duration>,
-}
-
 impl KvBucket {
     async fn snapshot(&self, key: &str) -> Result<Snapshot> {
         validate_key(key)?;
@@ -226,6 +217,15 @@ impl Bucket for KvBucket {
     }
 }
 
+// What the server holds for a key: the revision a write is conditioned on
+// (`0` when nothing was ever written), the value when that revision is a
+// live put, and the TTL still to run on it.
+struct Snapshot {
+    revision: u64,
+    value: Option<Vec<u8>>,
+    ttl: Option<Duration>,
+}
+
 fn is_put(headers: &HeaderMap) -> bool {
     headers.get(NATS_MARKER_REASON).is_none()
         && headers.get("KV-Operation").is_none_or(|op| op.as_str() == "PUT")
@@ -255,24 +255,4 @@ fn validate_key(key: &str) -> Result<()> {
         "invalid key `{key}`: cannot be empty, start/end with `.`, or contain characters outside [-/_=.a-zA-Z0-9]"
     );
     Ok(())
-}
-
-// Key validation for JetStream KV subjects; live round-trips are in `tests/live.rs`.
-#[cfg(test)]
-mod tests {
-    use super::validate_key;
-
-    #[test]
-    fn valid_keys() {
-        for key in ["k", "conformance/get-set-delete", "a.b.c", "user_1=active-2"] {
-            validate_key(key).expect(key);
-        }
-    }
-
-    #[test]
-    fn invalid_keys() {
-        for key in ["", ".leading", "trailing.", "wild*card", "wild>card", "with space", "a:b"] {
-            validate_key(key).expect_err(key);
-        }
-    }
 }

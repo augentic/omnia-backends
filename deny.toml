@@ -4,9 +4,11 @@
 all-features = true
 # The non-dev graph of the 14 backend crates must remain free of `wasmtime`
 # and `omnia-core`; `examples` and the e2e suites dev-depend on `omnia` and
-# `omnia-test`.
+# `omnia-test`. `omnia-redis-component` is a package, not a backend crate: its
+# commands compile natively over the host crate's `backend` face for their
+# unit tests, which brings `wasmtime` into its native graph.
 targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
-exclude = ["examples", "test-programs"]
+exclude = ["examples", "test-programs", "omnia-redis-component"]
 exclude-dev = true
 
 [output]

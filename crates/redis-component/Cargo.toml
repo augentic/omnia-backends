@@ -1,0 +1,43 @@
+[package]
+name = "omnia-redis-component"
+description = "Redis as an omnia:backend package: a Wasm component serving wasi-keyvalue over RESP2 through the host's transport"
+readme = "README.md"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+# `cdylib` is the package; `rlib` is its commands and codec natively, for the
+# unit tests and the e2e fake.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+# The commands are written once, over `Context`, on every target; natively
+# that brings the host's own `backend` face along, so this crate is excluded
+# from `deny.toml`'s native-graph bans.
+[dependencies]
+omnia-wasi-keyvalue = { workspace = true, features = ["backend"] }
+
+# `build.rs` compiles this crate as the `wasm32-wasip2` package the e2e
+# suites pin.
+[build-dependencies]
+omnia-test = { workspace = true, features = ["build"] }
+
+[dev-dependencies]
+omnia = { workspace = true, features = ["backends", "loader"] }
+omnia-backend = { workspace = true, features = ["keyvalue"] }
+omnia-redis = { path = "../redis" }
+omnia-test = { workspace = true, features = ["host"] }
+test-programs.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

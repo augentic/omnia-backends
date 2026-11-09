@@ -16,4 +16,4 @@ jobs:
     secrets: inherit
     with:
       targets: wasm32-wasip2
-      wasm-packages: test-programs examples
+      wasm-packages: test-programs omnia-redis-component examples

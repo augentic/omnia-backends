@@ -6,7 +6,8 @@ includes = ["git::https://github.com/augentic/toolkit.git//mise/rust.toml?ref=v0
 #
 # The backend crates link host-only libraries (tokio and service SDKs)
 # and never build for wasm32-wasip2. The guest-capable members are the
-# `test-programs` scenarios and the `examples` package, whose host-only
-# examples are cfg-gated to an empty `main` on wasm32.
+# `test-programs` scenarios, the `omnia-redis-component` package, and the
+# `examples` package, whose host-only examples are cfg-gated to an empty
+# `main` on wasm32.
 [env]
-WASM32_PACKAGES = "test-programs examples"
+WASM32_PACKAGES = "test-programs omnia-redis-component examples"

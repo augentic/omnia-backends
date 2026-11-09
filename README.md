@@ -21,6 +21,7 @@ MSRV: Rust 1.99. Each release line pairs with a specific omnia line — the curr
 | [`omnia-opentelemetry`](crates/opentelemetry) | `wasi-otel`                                         | OpenTelemetry Collector (gRPC) |
 | [`omnia-postgres`](crates/postgres)           | `wasi-sql`                                          | PostgreSQL                     |
 | [`omnia-redis`](crates/redis)                 | `wasi-keyvalue`                                     | Redis                          |
+| [`omnia-redis-component`](crates/redis-component) | `wasi-keyvalue` (as an `omnia:backend` package) | Redis                          |
 | [`omnia-sandbox`](crates/sandbox)             | —                                                   | Seatbelt, Landlock and seccomp |
 
 ## Architecture

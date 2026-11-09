@@ -30,7 +30,7 @@ jobs:
     with:
       targets: wasm32-wasip2
       # Mirrors `WASM32_PACKAGES` in mise.toml.
-      wasm-packages: test-programs examples
+      wasm-packages: test-programs omnia-redis-component examples
 
   publish:
     name: Publish

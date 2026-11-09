@@ -29,6 +29,34 @@ package reads the settings once, at `connect`:
 | `links`    | no       | `4`     | Links the package holds open to the first endpoint |
 | `password` | no       | —       | Sent with `AUTH` as each link opens              |
 
+## Wiring
+
+The package takes the `hosts:` row a native client takes, through
+`omnia::backends::ComponentKeyValue` (omnia's `backends` feature, plus `jit`
+to load the raw `.wasm`):
+
+```rust
+use omnia::backends::ComponentKeyValue;
+use omnia_wasi_keyvalue::WasiKeyValue;
+
+omnia::runtime!({
+    hosts: {
+        WasiKeyValue: ComponentKeyValue,
+    }
+});
+```
+
+The row connects from the environment:
+
+| Variable                    | Description                                              |
+|-----------------------------|----------------------------------------------------------|
+| `KEYVALUE_PACKAGE`          | The package file (required)                              |
+| `KEYVALUE_EGRESS`           | `host:port` of the Redis server (`localhost:6379`)       |
+| `KEYVALUE_SETTING_LINKS`    | The `links` setting                                      |
+| `KEYVALUE_SETTING_PASSWORD` | The `password` setting                                   |
+
+Or carries its options: `WasiKeyValue: ComponentKeyValue(PackageOptions::new("redis.wasm").egress(["localhost:6379"]).setting("links", "8"))`.
+
 ## Building
 
 ```bash

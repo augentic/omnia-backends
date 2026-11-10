@@ -59,12 +59,12 @@ http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
-jsonschema = { version = "0.60.2", default-features = false }
+jsonschema = { version = "0.61.1", default-features = false }
 libc = "0.2"
 omnia-sandbox = { version = "0.32.0", path = "crates/sandbox" }
 process-wrap = { version = "10.0.1", default-features = false }
-prost = "0.14.4"
-prost-types = "0.14.4"
+prost = "0.14.5"
+prost-types = "0.14.5"
 reqwest = "0.13.5"
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std"] }
 schemars = "1.2.3"

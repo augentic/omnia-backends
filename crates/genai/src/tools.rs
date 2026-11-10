@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use genai::chat::{Tool, ToolCall};
-use omnia_backend::model::{ToolHost, ToolOutcome};
 use omnia_sandbox::Access;
+use omnia_wasi_model::{ToolHost, ToolOutcome};
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::Value;

@@ -6,9 +6,9 @@
 //! `cargo nextest run -p omnia-azure-vault --run-ignored all`.
 
 use anyhow::Result;
+use omnia::Connect;
 use omnia_azure_vault::Client;
-use omnia_backend::Connect;
-use omnia_backend::vault::{Locker, VaultClient};
+use omnia_wasi_vault::{Locker, VaultClient};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Key Vault (AZURE_KEYVAULT_URL); run with --run-ignored"]

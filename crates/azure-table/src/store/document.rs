@@ -6,7 +6,7 @@
 //! are serialized as JSON string properties.
 
 use anyhow::{Context, anyhow};
-use omnia_backend::docstore::Document;
+use omnia_wasi_docstore::Document;
 use serde_json::{Map, Value};
 
 const SYSTEM_KEYS: &[&str] = &["PartitionKey", "RowKey", "Timestamp"];

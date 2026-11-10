@@ -1,5 +1,5 @@
-//! Live `omnia:docstore` coverage for the Azure Table Storage backend, driven
-//! through the contract boundary (`DocStoreClient`) against a real table service.
+//! Live `wasi-docstore` coverage for the Azure Table Storage backend, driven
+//! through the host boundary (`DocStoreClient`) against a real table service.
 //!
 //! These tests are the proof that the crate's document/filter mappings are
 //! accepted by the real service (Azurite or cloud); the unit tier keeps only
@@ -12,10 +12,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, ensure};
+use omnia::Connect;
 use omnia_azure_table::{Client, encode_id};
-use omnia_backend::Connect;
-use omnia_backend::docstore::{
-    ComparisonOp, DocStoreClient, Document, Filter, QueryOptions, ScalarValue,
+use omnia_wasi_docstore::{
+    ComparisonOp, DocStoreClient, Document, FilterTree, QueryOpts, ScalarValue,
 };
 use serde_json::{Value, json};
 
@@ -34,9 +34,8 @@ fn unique_partition(tag: &str) -> String {
     format!("{tag}-{}-{nanos}", std::process::id())
 }
 
-const fn opts(filter: Option<Filter>) -> QueryOptions {
-    QueryOptions {
-        filter,
+const fn opts() -> QueryOpts {
+    QueryOpts {
         order_by: Vec::new(),
         limit: None,
         offset: None,
@@ -139,36 +138,36 @@ async fn filtered_query() -> Result<()> {
     }
 
     // Comparison: Points > 3.
-    let filter = Filter::Compare {
+    let filter = FilterTree::Compare {
         field: "Points".to_owned(),
         op: ComparisonOp::Gt,
         value: ScalarValue::Int32(3),
     };
-    let result = client.query(scoped.clone(), opts(Some(filter))).await?;
+    let result = client.query(scoped.clone(), Some(filter), opts()).await?;
     assert_eq!(result.documents.len(), 2, "Points gt 3 matches rows 4 and 5");
 
     // Combinator + InList: Points >= 2 and Tier in {even}.
-    let filter = Filter::And(vec![
-        Filter::Compare {
+    let filter = FilterTree::And(vec![
+        FilterTree::Compare {
             field: "Points".to_owned(),
             op: ComparisonOp::Gte,
             value: ScalarValue::Int32(2),
         },
-        Filter::InList {
+        FilterTree::InList {
             field: "Tier".to_owned(),
             values: vec![ScalarValue::Str("even".to_owned())],
         },
     ]);
-    let result = client.query(scoped.clone(), opts(Some(filter))).await?;
+    let result = client.query(scoped.clone(), Some(filter), opts()).await?;
     assert_eq!(result.documents.len(), 2, "rows 2 and 4 are even and >= 2");
 
     // Negation: not (Tier eq odd).
-    let filter = Filter::Not(Box::new(Filter::Compare {
+    let filter = FilterTree::Not(Box::new(FilterTree::Compare {
         field: "Tier".to_owned(),
         op: ComparisonOp::Eq,
         value: ScalarValue::Str("odd".to_owned()),
     }));
-    let result = client.query(scoped.clone(), opts(Some(filter))).await?;
+    let result = client.query(scoped.clone(), Some(filter), opts()).await?;
     assert_eq!(result.documents.len(), 2, "negation excludes the three odd rows");
 
     // Pagination: a limit below the partition size yields a native
@@ -176,9 +175,10 @@ async fn filtered_query() -> Result<()> {
     let first = client
         .query(
             scoped.clone(),
-            QueryOptions {
+            None,
+            QueryOpts {
                 limit: Some(2),
-                ..opts(None)
+                ..opts()
             },
         )
         .await?;
@@ -187,9 +187,10 @@ async fn filtered_query() -> Result<()> {
     let rest = client
         .query(
             scoped.clone(),
-            QueryOptions {
+            None,
+            QueryOpts {
                 continuation: Some(token),
-                ..opts(None)
+                ..opts()
             },
         )
         .await?;
@@ -213,12 +214,12 @@ async fn filtered_query() -> Result<()> {
 async fn unsupported_query_shapes() -> Result<()> {
     let client = client().await?;
 
-    let filter = Filter::Contains {
+    let filter = FilterTree::Contains {
         field: "Name".to_owned(),
         pattern: "Ada".to_owned(),
     };
     let error = client
-        .query(TABLE.to_owned(), opts(Some(filter)))
+        .query(TABLE.to_owned(), Some(filter), opts())
         .await
         .expect_err("string functions must be rejected");
     ensure!(format!("{error:#}").contains("not supported"), "{error:#}");
@@ -226,9 +227,10 @@ async fn unsupported_query_shapes() -> Result<()> {
     let error = client
         .query(
             TABLE.to_owned(),
-            QueryOptions {
+            None,
+            QueryOpts {
                 offset: Some(1),
-                ..opts(None)
+                ..opts()
             },
         )
         .await

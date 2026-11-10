@@ -33,7 +33,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia_backend::{Connect, FromEnv};
+use omnia::{Connect, FromEnv};
 use omnia_azure_id::Client;
 
 let options = omnia_azure_id::ConnectOptions::load_env()?;

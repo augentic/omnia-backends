@@ -15,7 +15,7 @@ use std::ffi::OsStr;
 use std::io::Write as _;
 
 use anyhow::{Context as _, Result, bail};
-use omnia_backend::vcs::{Rule, Strategy};
+use omnia_wasi_vcs::{Rule, Strategy};
 use tempfile::NamedTempFile;
 
 use super::Repo;

@@ -1,20 +1,29 @@
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, bail};
 use futures::FutureExt;
-use omnia_backend::FutureResult;
-use omnia_backend::keyvalue::{Bucket, KeyValueClient};
+use omnia_wasi_keyvalue::{Bucket, Cas, FutureResult, KeyValueClient};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 
 use crate::Client;
 
+const TTL_DAY: u64 = 24 * 60 * 60;
+
+// `INCRBY` plus the same one-day expiry `set` and `swap` apply. Bare
+// `INCRBY` would leave increment-only keys permanent, and would not
+// refresh the TTL on a key that was first written with `SET EX`.
+const INCREMENT: &str = r"
+local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[2])
+return n
+";
+
 // Server-side compare-and-set: the compare and the write are one atomic
-// step, preserving any remaining TTL via `KEEPTTL`. `WATCH`/`MULTI` is
-// not an option on a multiplexed connection. Returns `{swapped, present, current}`.
-const CAS: &str = r"
+// step. `WATCH`/`MULTI` is not an option on a multiplexed connection.
+// Returns `{swapped, present, current}`.
+const SWAP: &str = r"
 local current = redis.call('GET', KEYS[1])
 local matches
 if ARGV[1] == '1' then
@@ -23,7 +32,7 @@ else
   matches = current == false
 end
 if matches then
-  redis.call('SET', KEYS[1], ARGV[3], 'KEEPTTL')
+  redis.call('SET', KEYS[1], ARGV[3], 'EX', ARGV[4])
   return {1, 0, ''}
 end
 if current == false then
@@ -73,16 +82,14 @@ impl Bucket for RedisBucket {
         .boxed()
     }
 
-    fn set(&self, key: String, value: Vec<u8>, ttl: Option<Duration>) -> FutureResult<()> {
+    fn set(&self, key: String, value: Vec<u8>) -> FutureResult<()> {
         let key = format!("{}:{key}", self.identifier);
         let mut conn = self.conn.0.clone();
 
         async move {
-            match ttl {
-                Some(ttl) => conn.set_ex(&key, value, ttl.as_secs().max(1)).await,
-                None => conn.set(&key, value).await,
-            }
-            .with_context(|| format!("failed to set value for {key}"))
+            conn.set_ex(&key, value, TTL_DAY)
+                .await
+                .with_context(|| format!("failed to set value for {key}"))
         }
         .boxed()
     }
@@ -141,34 +148,44 @@ impl Bucket for RedisBucket {
         let key = format!("{}:{key}", self.identifier);
         let mut conn = self.conn.0.clone();
         async move {
-            conn.incr(&key, delta).await.with_context(|| format!("failed to increment {key}"))
+            redis::Script::new(INCREMENT)
+                .key(&key)
+                .arg(delta)
+                .arg(TTL_DAY)
+                .invoke_async(&mut conn)
+                .await
+                .with_context(|| format!("failed to increment {key}"))
         }
         .boxed()
     }
 
-    fn cas(
-        &self, key: String, expected: Option<Vec<u8>>, value: Vec<u8>,
-    ) -> FutureResult<Result<(), Option<Vec<u8>>>> {
-        let key = format!("{}:{key}", self.identifier);
+    fn swap(&self, cas: Cas, value: Vec<u8>) -> FutureResult<Result<(), Cas>> {
+        let key = format!("{}:{}", self.identifier, cas.key);
         let mut conn = self.conn.0.clone();
 
         async move {
-            let has_expected = i64::from(expected.is_some());
-            let expected = expected.unwrap_or_default();
+            let expected = cas.current.clone().unwrap_or_default();
+            let has_expected = i64::from(cas.current.is_some());
 
-            let (swapped, present, observed): (i64, i64, Vec<u8>) = redis::Script::new(CAS)
+            let (swapped, present, observed): (i64, i64, Vec<u8>) = redis::Script::new(SWAP)
                 .key(&key)
                 .arg(has_expected)
                 .arg(expected)
                 .arg(&value)
+                .arg(TTL_DAY)
                 .invoke_async(&mut conn)
                 .await
                 .with_context(|| format!("failed to swap {key}"))?;
 
             match (swapped, present) {
                 (1, _) => Ok(Ok(())),
-                (0, 1) => Ok(Err(Some(observed))),
-                (0, 0) => Ok(Err(None)),
+                // Stale snapshot: refresh the handle at the observed value so
+                // the caller can retry, as the WIT contract requires.
+                (0, 1) => Ok(Err(Cas {
+                    current: Some(observed),
+                    ..cas
+                })),
+                (0, 0) => Ok(Err(Cas { current: None, ..cas })),
                 other => bail!("unexpected swap response for {key}: {other:?}"),
             }
         }

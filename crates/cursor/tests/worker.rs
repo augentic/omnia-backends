@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use http::Method;
-use omnia_backend::Connect as _;
-use omnia_backend::model::{Limits, ModelClient};
+use omnia::Connect as _;
 use omnia_cursor::{Client, ConnectOptions};
+use omnia_wasi_model::{Limits, ModelClient};
 use serde_json::json;
 use support::fake_bridge::{
     self, Config, Event, Fault, History as _, Log, Point, Process, Rpc, Spawnable, Then,

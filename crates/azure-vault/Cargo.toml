@@ -29,7 +29,8 @@ base64ct.workspace = true
 fromenv.workspace = true
 futures.workspace = true
 http.workspace = true
-omnia-backend = { workspace = true, features = ["vault"] }
+omnia.workspace = true
+omnia-wasi-vault.workspace = true
 tracing.workspace = true
 
 # The live test (`tests/live.rs`) is a separate crate; it needs tokio's test

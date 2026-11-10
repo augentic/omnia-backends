@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use omnia_backend::blobstore::{BlobStoreClient, Container};
+use omnia_wasi_blobstore::{BlobStoreClient, Container};
 use tempfile::TempDir;
 
 fn client(root: &TempDir) -> omnia_filesystem::Client {

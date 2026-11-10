@@ -2,12 +2,11 @@
 
 [graph]
 all-features = true
-# The non-dev graph of the 14 backend crates must remain free of `wasmtime`
-# and `omnia-core`; `examples` and the e2e suites dev-depend on `omnia` and
-# `omnia-test`.
-targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
-exclude = ["examples", "test-programs"]
-exclude-dev = true
+# The guest programs in `crates/test-programs` are compiled for wasm32-wasip2,
+# and their dependencies live behind `[target.'cfg(target_arch = "wasm32")']`.
+# Without that target in the graph those edges are pruned and the workspace
+# dependencies only they use (`omnia-sdk`) are reported as unused.
+targets = ["aarch64-apple-darwin", "wasm32-wasip2"]
 
 [output]
 feature-depth = 1
@@ -42,8 +41,6 @@ name = "ring"
 [bans]
 deny = [
   { name = "tokio", deny-multiple-versions = true },
-  { name = "wasmtime" },
-  { name = "omnia-core" },
 ]
 multiple-versions = "allow"
 skip = []
@@ -53,7 +50,7 @@ wildcards = "allow"
 [bans.workspace-dependencies]
 duplicates = "deny"
 include-path-dependencies = true
-unused = "allow"
+unused = "warn"
 
 [sources]
 unknown-git = "deny"

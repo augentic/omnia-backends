@@ -6,8 +6,8 @@ use async_nats::jetstream::object_store::{Config, GetErrorKind, InfoErrorKind, O
 use bytes::Bytes;
 use chrono::Utc;
 use futures::{FutureExt, StreamExt};
-use omnia_backend::FutureResult;
-use omnia_backend::blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
+use omnia::FutureResult;
+use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
 use tokio::io::AsyncReadExt;
 
 use crate::Client;

@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use anyhow::Result;
-use omnia_backend::model::{Answer, Error, Usage};
+use omnia_wasi_model::{Answer, Error, Usage};
 use tokio::sync::watch;
 use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 

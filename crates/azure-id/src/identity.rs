@@ -5,8 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use azure_core::credentials::TokenCredential;
 use azure_identity::{ManagedIdentityCredential, ManagedIdentityCredentialOptions, UserAssignedId};
 use futures::future::FutureExt;
-use omnia_backend::FutureResult;
-use omnia_backend::identity::{AccessToken, Identity, IdentityClient};
+use omnia::FutureResult;
+use omnia_wasi_identity::{AccessToken, Identity, IdentityClient};
 
 use crate::Client;
 

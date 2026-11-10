@@ -17,7 +17,7 @@
 //! while remote commands use Git's defaults instead of repository overrides.
 
 use anyhow::Result;
-use omnia_backend::vcs::{Error, Place};
+use omnia_wasi_vcs::{Error, Place};
 
 use crate::Client;
 

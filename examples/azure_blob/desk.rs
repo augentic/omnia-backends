@@ -1,9 +1,9 @@
 use std::env;
 
 use dotenvy::dotenv;
+use omnia::Connect;
 use omnia_azure_blob::{Client, ConnectOptions, CredentialOptions};
-use omnia_backend::Connect;
-use omnia_backend::blobstore::BlobStoreClient;
+use omnia_wasi_blobstore::BlobStoreClient;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;

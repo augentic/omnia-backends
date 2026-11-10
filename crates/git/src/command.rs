@@ -22,7 +22,7 @@ use std::path::{self, Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 
 use anyhow::{Context as _, Result};
-use omnia_backend::vcs::Place;
+use omnia_wasi_vcs::Place;
 use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessSession};
 use tokio::process::Command;
 

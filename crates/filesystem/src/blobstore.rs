@@ -9,8 +9,8 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use bytes::Bytes;
-use omnia_backend::FutureResult;
-use omnia_backend::blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
+use omnia::FutureResult;
+use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
 
 use crate::{Client, blocking, collect, segment_ok};
 

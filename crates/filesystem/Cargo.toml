@@ -23,7 +23,9 @@ anyhow.workspace = true
 bytes.workspace = true
 fromenv.workspace = true
 futures.workspace = true
-omnia-backend = { workspace = true, features = ["blobstore", "keyvalue"] }
+omnia.workspace = true
+omnia-wasi-blobstore.workspace = true
+omnia-wasi-keyvalue.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true

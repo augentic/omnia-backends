@@ -65,7 +65,7 @@ impl Failure {
     pub(crate) fn into_error(self) -> anyhow::Error {
         match &self {
             Self::Timeout { .. } => {
-                let budget = omnia_backend::model::Error::BudgetExhausted(self.to_string());
+                let budget = omnia_wasi_model::Error::BudgetExhausted(self.to_string());
                 anyhow::Error::new(self).context(budget)
             }
             _ => self.into(),
@@ -101,8 +101,8 @@ impl Outcome {
         if let Some(failure) = error.downcast_ref::<Failure>() {
             return Self::of_failure(failure);
         }
-        match error.downcast_ref::<omnia_backend::model::Error>() {
-            Some(omnia_backend::model::Error::BudgetExhausted(_)) => Self::Exhausted,
+        match error.downcast_ref::<omnia_wasi_model::Error>() {
+            Some(omnia_wasi_model::Error::BudgetExhausted(_)) => Self::Exhausted,
             _ => Self::Error,
         }
     }

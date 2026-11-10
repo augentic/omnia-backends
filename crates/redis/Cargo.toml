@@ -22,7 +22,8 @@ all-features = true
 anyhow.workspace = true
 fromenv.workspace = true
 futures.workspace = true
-omnia-backend = { workspace = true, features = ["keyvalue"] }
+omnia.workspace = true
+omnia-wasi-keyvalue.workspace = true
 redis = { version = "1.8.1", features = ["connection-manager", "tokio-rustls-comp"] }
 tracing.workspace = true
 

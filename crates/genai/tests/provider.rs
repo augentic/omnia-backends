@@ -8,7 +8,7 @@ mod support;
 
 use std::time::Duration;
 
-use omnia_backend::Connect as _;
+use omnia::Connect as _;
 use omnia_genai::{Client, ConnectOptions};
 use support::capture::Captured;
 use support::fake_openai::{self, Config, FakeOpenAi, Fault};

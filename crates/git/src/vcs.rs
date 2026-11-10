@@ -12,8 +12,8 @@ use std::path::{self, PathBuf};
 
 use anyhow::{Context as _, Result};
 use futures::FutureExt as _;
-use omnia_backend::FutureResult;
-use omnia_backend::vcs::{
+use omnia::FutureResult;
+use omnia_wasi_vcs::{
     Change, ChangeKind, CloneOptions, Entry, Error, Merged, Place, Rule, VcsClient,
 };
 

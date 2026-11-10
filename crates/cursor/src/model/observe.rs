@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use omnia_backend::model::Usage;
+use omnia_wasi_model::Usage;
 use tokio::time::Instant;
 
 use super::options::Turn;

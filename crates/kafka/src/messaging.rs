@@ -4,10 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use futures::future::FutureExt;
-use omnia_backend::FutureResult;
-use omnia_backend::messaging::{
-    Endpoint, Handler, Message, MessagingClient, Metadata, RequestOptions,
-};
+use omnia::FutureResult;
+use omnia_wasi_messaging::{Endpoint, Handler, Message, MessagingClient, Metadata, RequestOptions};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::ToBytes;
 use rdkafka::producer::{BaseRecord, ThreadedProducer};

@@ -8,8 +8,8 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use futures::TryStreamExt;
 use futures::future::FutureExt;
 use http::StatusCode;
-use omnia_backend::FutureResult;
-use omnia_backend::vault::{Locker, VaultClient};
+use omnia::FutureResult;
+use omnia_wasi_vault::{Locker, VaultClient};
 
 use crate::Client;
 

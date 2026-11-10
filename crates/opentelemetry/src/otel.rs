@@ -1,6 +1,6 @@
 use futures::FutureExt;
-use omnia_backend::FutureResult;
-use omnia_backend::otel::OtelClient;
+use omnia::FutureResult;
+use omnia_wasi_otel::OtelClient;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 

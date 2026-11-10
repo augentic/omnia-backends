@@ -34,7 +34,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia_backend::{Connect, FromEnv};
+use omnia::{Connect, FromEnv};
 use omnia_mongodb::Client;
 
 let options = omnia_mongodb::ConnectOptions::load_env()?;

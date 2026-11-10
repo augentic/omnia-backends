@@ -9,8 +9,8 @@ use std::path::{self, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context as _, Result, ensure};
-use omnia_backend::Connect;
-use omnia_backend::vcs::Place;
+use omnia::Connect;
+use omnia_wasi_vcs::Place;
 use tracing::instrument;
 
 // First git with `config --show-scope`, which host-policy pins read.
@@ -130,7 +130,7 @@ impl Default for ConnectOptions {
     }
 }
 
-impl omnia_backend::FromEnv for ConnectOptions {
+impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }

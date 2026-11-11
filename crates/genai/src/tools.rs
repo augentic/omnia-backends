@@ -20,24 +20,6 @@ pub const SHELL_TOOL: &str = "shell";
 // `Err` is a failure the model reads and repairs, never a host failure.
 type Repairable<T> = Result<T, String>;
 
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ReadArgs {
-    path: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ListArgs {
-    path: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ShellArgs {
-    command: String,
-}
-
 pub fn workspace_tools(access: Access) -> Vec<Tool> {
     let mut tools = Vec::new();
     if access.is_lent() {
@@ -68,6 +50,24 @@ pub fn workspace_tools(access: Access) -> Vec<Tool> {
         );
     }
     tools
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReadArgs {
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListArgs {
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ShellArgs {
+    command: String,
 }
 
 pub struct Tools {

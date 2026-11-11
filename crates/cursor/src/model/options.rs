@@ -64,17 +64,6 @@ pub struct AgentSpec {
     pub operation: AgentOperationOptions,
 }
 
-// The agent's tools for what it may do in its working directory: nothing of
-// a private one, read a lent workspace, and run a shell under a shell root.
-fn tools(access: Access) -> Vec<String> {
-    let names: &[&str] = match access {
-        Access::Private => &[],
-        Access::Read => &["glob", "grep", "ls", "mcp", "read"],
-        Access::Shell => &["glob", "grep", "ls", "mcp", "read", "shell"],
-    };
-    names.iter().map(ToString::to_string).collect()
-}
-
 fn agent_options(
     request: &Request, cwd: &str, access: Access, default_model: &str, api_key: &str,
 ) -> Result<AgentOptions> {
@@ -118,6 +107,17 @@ fn agent_options(
         mcp_servers,
         tools: Some(ToolList { names: tools(access) }),
     })
+}
+
+// The agent's tools for what it may do in its working directory: nothing of
+// a private one, read a lent workspace, and run a shell under a shell root.
+fn tools(access: Access) -> Vec<String> {
+    let names: &[&str] = match access {
+        Access::Private => &[],
+        Access::Read => &["glob", "grep", "ls", "mcp", "read"],
+        Access::Shell => &["glob", "grep", "ls", "mcp", "read", "shell"],
+    };
+    names.iter().map(ToString::to_string).collect()
 }
 
 // Prepend a hint naming the granted MCP servers and tool allowlist, so the

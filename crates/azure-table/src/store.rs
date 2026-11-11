@@ -21,6 +21,117 @@ use crate::Client;
 const API_VERSION: &str = "2026-02-06";
 const ACCEPT_HEADER: &str = "application/json;odata=fullmetadata";
 
+impl Client {
+    /// Create the named table when absent; `true` when this call created it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or the service answers with
+    /// an unexpected status.
+    pub async fn ensure_table(&self, table: &str) -> anyhow::Result<bool> {
+        let uri = format!("{}/Tables", self.base_url);
+
+        let response = self
+            .signed_request(Method::POST, &uri)?
+            .json(&serde_json::json!({"TableName": table}))
+            .send()
+            .await
+            .map_err(|e| anyhow!("create table request: {e}"))?;
+
+        match response.status().as_u16() {
+            201 | 204 => Ok(true),
+            409 => Ok(false),
+            _ => {
+                bail!(
+                    "create table failed ({}): {}",
+                    response.status(),
+                    response.text().await.unwrap_or_default()
+                );
+            }
+        }
+    }
+
+    fn entity_uri(&self, table: &str, pk: &str, rk: &str) -> String {
+        format!(
+            "{}/{table}(PartitionKey='{epk}',RowKey='{erk}')",
+            self.base_url,
+            epk = escape_entity_key(pk),
+            erk = escape_entity_key(rk),
+        )
+    }
+
+    fn signed_request(&self, method: Method, uri: &str) -> anyhow::Result<reqwest::RequestBuilder> {
+        let now = now_rfc1123();
+        let auth = sign_request(&self.options.name, &self.hmac_key, &now, uri)?;
+        let headers = azure_headers(&now, &auth)?;
+        Ok(self.http.request(method, uri).headers(headers))
+    }
+
+    // One page of a query: the response body and the continuation token
+    // for the next page, if any.
+    async fn fetch_page(
+        &self, table: &str, odata_filter: Option<&str>, fetch_limit: Option<usize>,
+        continuation: Option<&str>,
+    ) -> anyhow::Result<(Value, Option<String>)> {
+        let base_uri = format!("{}/{table}()", self.base_url);
+
+        let mut query_params: Vec<String> = Vec::new();
+        if let Some(f) = odata_filter {
+            query_params.push(format!("$filter={}", urlencoding::encode(f)));
+        }
+        if let Some(limit) = fetch_limit {
+            query_params.push(format!("$top={limit}"));
+        }
+        if let Some(cont) = continuation {
+            let (next_partition, next_row) = query::decode_continuation(cont);
+            query_params.push(format!("NextPartitionKey={}", urlencoding::encode(&next_partition)));
+            if let Some(row) = next_row {
+                query_params.push(format!("NextRowKey={}", urlencoding::encode(&row)));
+            }
+        }
+
+        let uri = if query_params.is_empty() {
+            base_uri
+        } else {
+            format!("{base_uri}?{}", query_params.join("&"))
+        };
+
+        let response = self
+            .signed_request(Method::GET, &uri)?
+            .send()
+            .await
+            .map_err(|e| anyhow!("HTTP request error: {e}"))?;
+
+        if !response.status().is_success() {
+            bail!(
+                "Azure Table query failed ({}): {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            );
+        }
+
+        let continuation_partition = response
+            .headers()
+            .get("x-ms-continuation-NextPartitionKey")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let continuation_row = response
+            .headers()
+            .get("x-ms-continuation-NextRowKey")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+
+        let body: Value =
+            response.json().await.map_err(|e| anyhow!("failed to parse response JSON: {e}"))?;
+
+        let token = query::encode_continuation(
+            continuation_partition.as_deref(),
+            continuation_row.as_deref(),
+        );
+        Ok((body, token))
+    }
+}
+
 impl DocStoreClient for Client {
     fn get(&self, collection: String, id: String) -> FutureResult<Option<Document>> {
         let client = self.clone();
@@ -208,169 +319,12 @@ impl DocStoreClient for Client {
     }
 }
 
-impl Client {
-    /// Create the named table when absent; `true` when this call created it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the request fails or the service answers with
-    /// an unexpected status.
-    pub async fn ensure_table(&self, table: &str) -> anyhow::Result<bool> {
-        let uri = format!("{}/Tables", self.base_url);
-
-        let response = self
-            .signed_request(Method::POST, &uri)?
-            .json(&serde_json::json!({"TableName": table}))
-            .send()
-            .await
-            .map_err(|e| anyhow!("create table request: {e}"))?;
-
-        match response.status().as_u16() {
-            201 | 204 => Ok(true),
-            409 => Ok(false),
-            _ => {
-                bail!(
-                    "create table failed ({}): {}",
-                    response.status(),
-                    response.text().await.unwrap_or_default()
-                );
-            }
-        }
-    }
-
-    fn entity_uri(&self, table: &str, pk: &str, rk: &str) -> String {
-        format!(
-            "{}/{table}(PartitionKey='{epk}',RowKey='{erk}')",
-            self.base_url,
-            epk = escape_entity_key(pk),
-            erk = escape_entity_key(rk),
-        )
-    }
-
-    fn signed_request(&self, method: Method, uri: &str) -> anyhow::Result<reqwest::RequestBuilder> {
-        let now = now_rfc1123();
-        let auth = sign_request(&self.options.name, &self.hmac_key, &now, uri)?;
-        let headers = azure_headers(&now, &auth)?;
-        Ok(self.http.request(method, uri).headers(headers))
-    }
-
-    // One page of a query: the response body and the continuation token
-    // for the next page, if any.
-    async fn fetch_page(
-        &self, table: &str, odata_filter: Option<&str>, fetch_limit: Option<usize>,
-        continuation: Option<&str>,
-    ) -> anyhow::Result<(Value, Option<String>)> {
-        let base_uri = format!("{}/{table}()", self.base_url);
-
-        let mut query_params: Vec<String> = Vec::new();
-        if let Some(f) = odata_filter {
-            query_params.push(format!("$filter={}", urlencoding::encode(f)));
-        }
-        if let Some(limit) = fetch_limit {
-            query_params.push(format!("$top={limit}"));
-        }
-        if let Some(cont) = continuation {
-            let (next_partition, next_row) = query::decode_continuation(cont);
-            query_params.push(format!("NextPartitionKey={}", urlencoding::encode(&next_partition)));
-            if let Some(row) = next_row {
-                query_params.push(format!("NextRowKey={}", urlencoding::encode(&row)));
-            }
-        }
-
-        let uri = if query_params.is_empty() {
-            base_uri
-        } else {
-            format!("{base_uri}?{}", query_params.join("&"))
-        };
-
-        let response = self
-            .signed_request(Method::GET, &uri)?
-            .send()
-            .await
-            .map_err(|e| anyhow!("HTTP request error: {e}"))?;
-
-        if !response.status().is_success() {
-            bail!(
-                "Azure Table query failed ({}): {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            );
-        }
-
-        let continuation_partition = response
-            .headers()
-            .get("x-ms-continuation-NextPartitionKey")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let continuation_row = response
-            .headers()
-            .get("x-ms-continuation-NextRowKey")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-
-        let body: Value =
-            response.json().await.map_err(|e| anyhow!("failed to parse response JSON: {e}"))?;
-
-        let token = query::encode_continuation(
-            continuation_partition.as_deref(),
-            continuation_row.as_deref(),
-        );
-        Ok((body, token))
-    }
-}
-
 // --- Helpers ---
 
 // A key lands inside an `OData` predicate (`PartitionKey='...'`): quotes
 // are doubled per `OData`, then the whole percent-encoded for the URL.
 fn escape_entity_key(value: &str) -> String {
     urlencoding::encode(&value.replace('\'', "''")).into_owned()
-}
-
-fn build_odata_filter(pk: Option<&str>, server_filter: Option<&str>) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(pk) = pk {
-        parts.push(format!("PartitionKey eq '{}'", pk.replace('\'', "''")));
-    }
-    if let Some(sf) = server_filter {
-        parts.push(sf.to_owned());
-    }
-    if parts.is_empty() { None } else { Some(parts.join(" and ")) }
-}
-
-fn validate_table_name(table: &str) -> anyhow::Result<()> {
-    let len = table.len();
-    if !(3..=63).contains(&len) {
-        bail!("invalid table name '{table}': length must be between 3 and 63 characters");
-    }
-    if !table.starts_with(|c: char| c.is_ascii_alphabetic()) {
-        bail!("invalid table name '{table}': first character must be a letter");
-    }
-    if !table.chars().all(|c| c.is_ascii_alphanumeric()) {
-        bail!("invalid table name '{table}': only ASCII letters and digits are allowed");
-    }
-    if table.eq_ignore_ascii_case("tables") {
-        bail!("invalid table name '{table}': reserved table name");
-    }
-    Ok(())
-}
-
-fn parse_collection(collection: &str) -> anyhow::Result<(String, Option<String>)> {
-    match collection.split_once('/') {
-        Some((table, pk)) if !table.is_empty() && !pk.is_empty() => {
-            validate_table_name(table)?;
-            Ok((table.to_owned(), Some(pk.to_owned())))
-        }
-        Some((table, _)) if !table.is_empty() => {
-            bail!("collection '{collection}' has an empty partition key after '/'")
-        }
-        Some(_) => bail!("collection '{collection}' has an empty table name"),
-        None if !collection.is_empty() => {
-            validate_table_name(collection)?;
-            Ok((collection.to_owned(), None))
-        }
-        _ => bail!("collection must not be empty"),
-    }
 }
 
 fn now_rfc1123() -> String {
@@ -407,4 +361,50 @@ fn azure_headers(date: &str, auth: &str) -> anyhow::Result<reqwest::header::Head
     headers.insert("Authorization", auth.parse().context("invalid Authorization header value")?);
     headers.insert("Accept", reqwest::header::HeaderValue::from_static(ACCEPT_HEADER));
     Ok(headers)
+}
+
+fn parse_collection(collection: &str) -> anyhow::Result<(String, Option<String>)> {
+    match collection.split_once('/') {
+        Some((table, pk)) if !table.is_empty() && !pk.is_empty() => {
+            validate_table_name(table)?;
+            Ok((table.to_owned(), Some(pk.to_owned())))
+        }
+        Some((table, _)) if !table.is_empty() => {
+            bail!("collection '{collection}' has an empty partition key after '/'")
+        }
+        Some(_) => bail!("collection '{collection}' has an empty table name"),
+        None if !collection.is_empty() => {
+            validate_table_name(collection)?;
+            Ok((collection.to_owned(), None))
+        }
+        _ => bail!("collection must not be empty"),
+    }
+}
+
+fn validate_table_name(table: &str) -> anyhow::Result<()> {
+    let len = table.len();
+    if !(3..=63).contains(&len) {
+        bail!("invalid table name '{table}': length must be between 3 and 63 characters");
+    }
+    if !table.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        bail!("invalid table name '{table}': first character must be a letter");
+    }
+    if !table.chars().all(|c| c.is_ascii_alphanumeric()) {
+        bail!("invalid table name '{table}': only ASCII letters and digits are allowed");
+    }
+    if table.eq_ignore_ascii_case("tables") {
+        bail!("invalid table name '{table}': reserved table name");
+    }
+    Ok(())
+}
+
+fn build_odata_filter(pk: Option<&str>, server_filter: Option<&str>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(pk) = pk {
+        parts.push(format!("PartitionKey eq '{}'", pk.replace('\'', "''")));
+    }
+    if let Some(sf) = server_filter {
+        parts.push(sf.to_owned());
+    }
+    if parts.is_empty() { None } else { Some(parts.join(" and ")) }
 }

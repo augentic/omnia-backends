@@ -411,38 +411,6 @@ impl Handle {
     }
 }
 
-impl Deadlines {
-    // Resolve on inactivity or cap; `activity` rearms inactivity, and a
-    // phase the window does not bound leaves the cap alone
-    async fn watch(self, activity: &watch::Sender<Activity>) -> Failure {
-        let mut activity = activity.subscribe();
-        let cap = sleep_until(Instant::now() + self.cap);
-        tokio::pin!(cap);
-
-        loop {
-            let Activity { at, phase } = activity.borrow_and_update().clone();
-            tokio::select! {
-                () = &mut cap => {
-                    return Failure::Timeout {
-                        cap_secs: self.cap.as_secs(),
-                    };
-                }
-                () = sleep_until(at + self.inactivity), if phase.bounded() => {
-                    let idle = Instant::now().saturating_duration_since(at).as_secs();
-                    return Failure::Inactive {
-                        waiting: phase.to_string(),
-                        idle_secs: idle,
-                        inactivity_secs: self.inactivity.as_secs(),
-                        cap_secs: self.cap.as_secs(),
-                    };
-                }
-                // sender borrowed while polled, so channel never closes
-                _ = activity.changed() => {}
-            }
-        }
-    }
-}
-
 // The stream's last frame: when it arrived and what the run has waited on since
 #[derive(Clone, Debug)]
 struct Activity {
@@ -479,6 +447,20 @@ impl Response {
             usage: self.usage.map(Usage::from),
             transcript: self.transcript,
         }
+    }
+}
+
+// Guest dropped completion: reaches no one, `completion` reads `abort`
+fn abandoned() -> anyhow::Error {
+    Failure::Aborted("the guest dropped the completion".to_owned()).into()
+}
+
+// Best-effort teardown: failures logged, silence bounded
+async fn call(method: &'static str, rpc: impl Future<Output = Result<()>>) {
+    match timeout(TEARDOWN, rpc).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::debug!(%error, method, "agent teardown call failed"),
+        Err(_elapsed) => tracing::warn!(method, "agent teardown call unanswered"),
     }
 }
 
@@ -523,16 +505,34 @@ impl Unanswered {
     }
 }
 
-// Guest dropped completion: reaches no one, `completion` reads `abort`
-fn abandoned() -> anyhow::Error {
-    Failure::Aborted("the guest dropped the completion".to_owned()).into()
-}
+impl Deadlines {
+    // Resolve on inactivity or cap; `activity` rearms inactivity, and a
+    // phase the window does not bound leaves the cap alone
+    async fn watch(self, activity: &watch::Sender<Activity>) -> Failure {
+        let mut activity = activity.subscribe();
+        let cap = sleep_until(Instant::now() + self.cap);
+        tokio::pin!(cap);
 
-// Best-effort teardown: failures logged, silence bounded
-async fn call(method: &'static str, rpc: impl Future<Output = Result<()>>) {
-    match timeout(TEARDOWN, rpc).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::debug!(%error, method, "agent teardown call failed"),
-        Err(_elapsed) => tracing::warn!(method, "agent teardown call unanswered"),
+        loop {
+            let Activity { at, phase } = activity.borrow_and_update().clone();
+            tokio::select! {
+                () = &mut cap => {
+                    return Failure::Timeout {
+                        cap_secs: self.cap.as_secs(),
+                    };
+                }
+                () = sleep_until(at + self.inactivity), if phase.bounded() => {
+                    let idle = Instant::now().saturating_duration_since(at).as_secs();
+                    return Failure::Inactive {
+                        waiting: phase.to_string(),
+                        idle_secs: idle,
+                        inactivity_secs: self.inactivity.as_secs(),
+                        cap_secs: self.cap.as_secs(),
+                    };
+                }
+                // sender borrowed while polled, so channel never closes
+                _ = activity.changed() => {}
+            }
+        }
     }
 }

@@ -9,6 +9,31 @@ use redis::aio::ConnectionManager;
 
 use crate::Client;
 
+impl KeyValueClient for Client {
+    fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
+        tracing::trace!("opening redis bucket: {}", identifier);
+        let conn = self.0.clone();
+
+        async move {
+            let bucket = RedisBucket {
+                identifier,
+                conn: Conn(conn.clone()),
+            };
+            Ok(Arc::new(bucket) as Arc<dyn Bucket>)
+        }
+        .boxed()
+    }
+}
+
+// `ConnectionManager` has no `Debug`, and the bucket derives it.
+struct Conn(ConnectionManager);
+
+impl Debug for Conn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionManager").finish_non_exhaustive()
+    }
+}
+
 const TTL_DAY: u64 = 24 * 60 * 60;
 
 // `INCRBY` plus the same one-day expiry `set` and `swap` apply. Bare
@@ -40,31 +65,6 @@ if current == false then
 end
 return {0, 1, current}
 ";
-
-impl KeyValueClient for Client {
-    fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
-        tracing::trace!("opening redis bucket: {}", identifier);
-        let conn = self.0.clone();
-
-        async move {
-            let bucket = RedisBucket {
-                identifier,
-                conn: Conn(conn.clone()),
-            };
-            Ok(Arc::new(bucket) as Arc<dyn Bucket>)
-        }
-        .boxed()
-    }
-}
-
-// `ConnectionManager` has no `Debug`, and the bucket derives it.
-struct Conn(ConnectionManager);
-
-impl Debug for Conn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConnectionManager").finish_non_exhaustive()
-    }
-}
 
 #[derive(Debug)]
 struct RedisBucket {

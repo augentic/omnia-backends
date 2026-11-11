@@ -101,6 +101,14 @@ pub struct Timeout {
     pub waiting: Phase,
 }
 
+impl Timeout {
+    // Surface `BudgetExhausted` to the guest while keeping `Timeout` in the chain for `Outcome::of`.
+    pub fn into_error(self) -> anyhow::Error {
+        let budget = Error::BudgetExhausted(self.to_string());
+        anyhow::Error::new(self).context(budget)
+    }
+}
+
 impl fmt::Display for Timeout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -113,22 +121,6 @@ impl fmt::Display for Timeout {
 }
 
 impl std::error::Error for Timeout {}
-
-impl Timeout {
-    // Surface `BudgetExhausted` to the guest while keeping `Timeout` in the chain for `Outcome::of`.
-    pub fn into_error(self) -> anyhow::Error {
-        let budget = Error::BudgetExhausted(self.to_string());
-        anyhow::Error::new(self).context(budget)
-    }
-}
-
-#[derive(Debug)]
-struct Activity {
-    at: Instant,
-    phase: Phase,
-    rounds: u32,
-    tool_calls: u32,
-}
 
 // Emits `Outcome::Abort` on drop if `finish` was not called.
 pub struct Completion {
@@ -329,6 +321,14 @@ impl Heartbeat {
     }
 }
 
+#[derive(Debug)]
+struct Activity {
+    at: Instant,
+    phase: Phase,
+    rounds: u32,
+    tool_calls: u32,
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Bill {
     input: u64,
@@ -337,21 +337,6 @@ struct Bill {
     output: u64,
     reasoning: u64,
     total: Option<u64>,
-}
-
-impl From<&genai::chat::Usage> for Bill {
-    fn from(usage: &genai::chat::Usage) -> Self {
-        let prompt = usage.prompt_tokens_details.as_ref();
-        let completion = usage.completion_tokens_details.as_ref();
-        Self {
-            input: count(usage.prompt_tokens),
-            cache_read: count(prompt.and_then(|details| details.cached_tokens)),
-            cache_write: count(prompt.and_then(|details| details.cache_creation_tokens)),
-            output: count(usage.completion_tokens),
-            reasoning: count(completion.and_then(|details| details.reasoning_tokens)),
-            total: usage.total_tokens.and_then(|total| u64::try_from(total).ok()),
-        }
-    }
 }
 
 impl Bill {
@@ -366,6 +351,21 @@ impl Bill {
             (Some(total), None) | (None, Some(total)) => Some(total),
             (Some(booked), Some(total)) => Some(booked.saturating_add(total)),
         };
+    }
+}
+
+impl From<&genai::chat::Usage> for Bill {
+    fn from(usage: &genai::chat::Usage) -> Self {
+        let prompt = usage.prompt_tokens_details.as_ref();
+        let completion = usage.completion_tokens_details.as_ref();
+        Self {
+            input: count(usage.prompt_tokens),
+            cache_read: count(prompt.and_then(|details| details.cached_tokens)),
+            cache_write: count(prompt.and_then(|details| details.cache_creation_tokens)),
+            output: count(usage.completion_tokens),
+            reasoning: count(completion.and_then(|details| details.reasoning_tokens)),
+            total: usage.total_tokens.and_then(|total| u64::try_from(total).ok()),
+        }
     }
 }
 

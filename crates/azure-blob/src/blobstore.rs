@@ -16,19 +16,6 @@ use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, Object
 
 use crate::{Client, STORE_CONTAINER};
 
-// SECURITY: the store's container holds the releases the host loads, and the
-// acquirer serves a stored one before any registry; a guest handle on it
-// could plant, replace, or delete a release, so the blobstore view never
-// opens it. `copy_object` and `move_object` reach containers through
-// `get_container`, so the four entry points cover every guest path.
-fn ensure_not_reserved(name: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        name != STORE_CONTAINER,
-        "container `{name}` is reserved for the package store"
-    );
-    Ok(())
-}
-
 impl BlobStoreClient for Client {
     fn create_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("creating container: {name}");
@@ -98,6 +85,23 @@ impl BlobStoreClient for Client {
         }
         .boxed()
     }
+}
+
+// SECURITY: the store's container holds the releases the host loads, and the
+// acquirer serves a stored one before any registry; a guest handle on it
+// could plant, replace, or delete a release, so the blobstore view never
+// opens it. `copy_object` and `move_object` reach containers through
+// `get_container`, so the four entry points cover every guest path.
+fn ensure_not_reserved(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        name != STORE_CONTAINER,
+        "container `{name}` is reserved for the package store"
+    );
+    Ok(())
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 struct AzureBlobContainer {
@@ -214,10 +218,6 @@ impl Container for AzureBlobContainer {
         }
         .boxed()
     }
-}
-
-fn now_unix_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 // Download options with an HTTP `Range` header for partial reads.

@@ -27,9 +27,6 @@ const RETRIES: u32 = 2;
 const RETRY_WAIT_MS: u32 = 100;
 const RETRY_MAX_WAIT_MS: u32 = 1000;
 
-// The Confluent wire format's magic byte.
-const MAGIC_BYTE: u8 = 0;
-
 // Decode looks a schema up by the id in the record's header, encode by the
 // topic's subject. Both are kept for the life of the process: an id always
 // names the same schema, and a subject's latest is read once, as Node does.
@@ -343,6 +340,9 @@ enum Entry<V> {
 }
 
 // --- Wire format ---
+
+// The Confluent wire format's magic byte.
+const MAGIC_BYTE: u8 = 0;
 
 // The Confluent wire format: magic byte, big-endian schema id, data.
 struct Payload<'a> {

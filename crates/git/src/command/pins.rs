@@ -64,18 +64,6 @@ const ALLOWED_HTTP_KEYS: [&str; 7] = [
     "version",
 ];
 
-// What the far side of a local transport is held to, since a repository
-// beneath the mount is as much the guest's as the place: no hooks, no
-// alternate-refs command, no file-system monitor, and no update of a branch
-// a working copy has checked out, which `receive.denyCurrentBranch=
-// updateInstead` would write through the copy's own filters.
-const LOCAL_PACK_PINS: [&str; 4] = [
-    "core.hooksPath=/dev/null",
-    "core.alternateRefsCommand=",
-    "core.fsmonitor=false",
-    "receive.denyCurrentBranch=refuse",
-];
-
 // The `-c` overrides that hold one repository's operations to host policy,
 // and the first setting the repository made of how a transport runs, if
 // any, which no pin can undo.
@@ -164,54 +152,6 @@ impl Pins {
     pub fn blocked_transport_key(&self) -> Option<&str> {
         self.blocked_transport_key.as_deref()
     }
-}
-
-impl Client {
-    // The protocol allow-list and the pack command for a transport over
-    // `address`, the command named so the repository's own
-    // `remote.<name>.uploadPack` or `receivePack` — which no `-c` outranks —
-    // is never the program the operator's ssh carries to a host: for a
-    // local transport, this git wrapped to hold the far side to
-    // `LOCAL_PACK_PINS`; for a remote one, git's own default.
-    pub(crate) fn transport_args(&self, address: &str, push: bool) -> (&'static str, String) {
-        let operation = if push { "receive-pack" } else { "upload-pack" };
-        if is_local(address) {
-            ("file", self.pack_arg(operation))
-        } else {
-            ("http:https:ssh", format!("--{operation}=git-{operation}"))
-        }
-    }
-
-    // `git -c … <operation>` as one `--upload-pack` or `--receive-pack`
-    // argument: the near side's `-c` pins reach no process the far side
-    // starts, so its own ride the command. git splits the value with shell
-    // quoting for a local transport, so the binary is single-quoted.
-    fn pack_arg(&self, operation: &str) -> String {
-        let binary = shell_quote(&self.binary);
-        let mut pins = String::new();
-        for pin in LOCAL_PACK_PINS {
-            pins.push_str(" -c ");
-            pins.push_str(pin);
-        }
-        format!("--{operation}={binary}{pins} {operation}")
-    }
-}
-
-// git's own rule: a `file://` URL, or an address with no scheme and no
-// scp-like `host:path`, is a local path; everything else crosses a network.
-fn is_local(address: &str) -> bool {
-    if let Some(scheme) = address.split_once("://") {
-        return scheme.0.eq_ignore_ascii_case("file");
-    }
-    match (address.find(':'), address.find('/')) {
-        (Some(colon), Some(slash)) => colon > slash,
-        (Some(_), None) => false,
-        (None, _) => true,
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 // Where a setting came from, cut to the one distinction that matters: the
@@ -318,4 +258,64 @@ fn repo_credential_keys(settings: &[Setting]) -> Vec<&str> {
         }
     }
     keys
+}
+
+// What the far side of a local transport is held to, since a repository
+// beneath the mount is as much the guest's as the place: no hooks, no
+// alternate-refs command, no file-system monitor, and no update of a branch
+// a working copy has checked out, which `receive.denyCurrentBranch=
+// updateInstead` would write through the copy's own filters.
+const LOCAL_PACK_PINS: [&str; 4] = [
+    "core.hooksPath=/dev/null",
+    "core.alternateRefsCommand=",
+    "core.fsmonitor=false",
+    "receive.denyCurrentBranch=refuse",
+];
+
+impl Client {
+    // The protocol allow-list and the pack command for a transport over
+    // `address`, the command named so the repository's own
+    // `remote.<name>.uploadPack` or `receivePack` — which no `-c` outranks —
+    // is never the program the operator's ssh carries to a host: for a
+    // local transport, this git wrapped to hold the far side to
+    // `LOCAL_PACK_PINS`; for a remote one, git's own default.
+    pub(crate) fn transport_args(&self, address: &str, push: bool) -> (&'static str, String) {
+        let operation = if push { "receive-pack" } else { "upload-pack" };
+        if is_local(address) {
+            ("file", self.pack_arg(operation))
+        } else {
+            ("http:https:ssh", format!("--{operation}=git-{operation}"))
+        }
+    }
+
+    // `git -c … <operation>` as one `--upload-pack` or `--receive-pack`
+    // argument: the near side's `-c` pins reach no process the far side
+    // starts, so its own ride the command. git splits the value with shell
+    // quoting for a local transport, so the binary is single-quoted.
+    fn pack_arg(&self, operation: &str) -> String {
+        let binary = shell_quote(&self.binary);
+        let mut pins = String::new();
+        for pin in LOCAL_PACK_PINS {
+            pins.push_str(" -c ");
+            pins.push_str(pin);
+        }
+        format!("--{operation}={binary}{pins} {operation}")
+    }
+}
+
+// git's own rule: a `file://` URL, or an address with no scheme and no
+// scp-like `host:path`, is a local path; everything else crosses a network.
+fn is_local(address: &str) -> bool {
+    if let Some(scheme) = address.split_once("://") {
+        return scheme.0.eq_ignore_ascii_case("file");
+    }
+    match (address.find(':'), address.find('/')) {
+        (Some(colon), Some(slash)) => colon > slash,
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }

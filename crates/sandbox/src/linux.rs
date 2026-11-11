@@ -154,6 +154,53 @@ impl std::fmt::Debug for Linux {
     }
 }
 
+async fn kernel() -> String {
+    tokio::fs::read_to_string(OSRELEASE)
+        .await
+        .map_or_else(|_| "[unknown]".to_owned(), |release| release.trim().to_owned())
+}
+
+// The host's `/proc/<pid>` turned root-owned, as ssh-agent does, so a
+// process inside reads nothing of the process that holds its token.
+#[expect(unsafe_code, reason = "`prctl` over two integers has no safe wrapper")]
+fn undumpable() -> Result<()> {
+    // SAFETY: `PR_SET_DUMPABLE` reads its one integer argument and touches
+    // no memory.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } == 0 {
+        Ok(())
+    } else {
+        Err(anyhow!(io::Error::last_os_error()).context("setting the host non-dumpable"))
+    }
+}
+
+// A system path the distribution may lack, which is then no rule at all.
+fn optional(ruleset: &mut RulesetCreated, path: &Path, access: BitFlags<AccessFs>) -> Result<()> {
+    match PathFd::new(path) {
+        Ok(fd) => grant(ruleset, path, fd, access),
+        Err(_absent) => Ok(()),
+    }
+}
+
+// A path the boundary stands on: absent, the rule would match nothing and
+// the process would run with less than it was promised.
+fn required(ruleset: &mut RulesetCreated, path: &Path, access: BitFlags<AccessFs>) -> Result<()> {
+    let fd = PathFd::new(path).with_context(|| format!("opening {}", path.display()))?;
+    grant(ruleset, path, fd, access)
+}
+
+// Landlock refuses a directory right on a file, so a rule over a file keeps
+// the file rights alone.
+fn grant(
+    ruleset: &mut RulesetCreated, path: &Path, fd: PathFd, access: BitFlags<AccessFs>,
+) -> Result<()> {
+    let access = if path.is_dir() { access } else { access & AccessFs::from_file(REQUIRED) };
+    ensure!(!access.is_empty(), "{} is a file and takes no directory right", path.display());
+    ruleset
+        .add_rule(PathBeneath::new(fd, access))
+        .map(|_ruleset| ())
+        .with_context(|| format!("Landlock refused the rule over {}", path.display()))
+}
+
 const ARCH: Option<TargetArch> = cfg_select! {
     target_arch = "x86_64" => Some(TargetArch::x86_64),
     target_arch = "aarch64" => Some(TargetArch::aarch64),
@@ -192,42 +239,8 @@ impl Filters {
     }
 }
 
-// A system path the distribution may lack, which is then no rule at all.
-fn optional(ruleset: &mut RulesetCreated, path: &Path, access: BitFlags<AccessFs>) -> Result<()> {
-    match PathFd::new(path) {
-        Ok(fd) => grant(ruleset, path, fd, access),
-        Err(_absent) => Ok(()),
-    }
-}
-
-// A path the boundary stands on: absent, the rule would match nothing and
-// the process would run with less than it was promised.
-fn required(ruleset: &mut RulesetCreated, path: &Path, access: BitFlags<AccessFs>) -> Result<()> {
-    let fd = PathFd::new(path).with_context(|| format!("opening {}", path.display()))?;
-    grant(ruleset, path, fd, access)
-}
-
-// Landlock refuses a directory right on a file, so a rule over a file keeps
-// the file rights alone.
-fn grant(
-    ruleset: &mut RulesetCreated, path: &Path, fd: PathFd, access: BitFlags<AccessFs>,
-) -> Result<()> {
-    let access = if path.is_dir() { access } else { access & AccessFs::from_file(REQUIRED) };
-    ensure!(!access.is_empty(), "{} is a file and takes no directory right", path.display());
-    ruleset
-        .add_rule(PathBeneath::new(fd, access))
-        .map(|_ruleset| ())
-        .with_context(|| format!("Landlock refused the rule over {}", path.display()))
-}
-
 const fn errno(code: i32) -> u32 {
     code.unsigned_abs()
-}
-
-async fn kernel() -> String {
-    tokio::fs::read_to_string(OSRELEASE)
-        .await
-        .map_or_else(|_| "[unknown]".to_owned(), |release| release.trim().to_owned())
 }
 
 fn compile(
@@ -378,17 +391,4 @@ fn not_dword(argument: u8, value: libc::c_int) -> Result<SeccompCondition> {
 fn masked(argument: u8, mask: u64) -> Result<SeccompCondition> {
     SeccompCondition::new(argument, SeccompCmpArgLen::Qword, SeccompCmpOp::MaskedEq(mask), mask)
         .context("a seccomp condition")
-}
-
-// The host's `/proc/<pid>` turned root-owned, as ssh-agent does, so a
-// process inside reads nothing of the process that holds its token.
-#[expect(unsafe_code, reason = "`prctl` over two integers has no safe wrapper")]
-fn undumpable() -> Result<()> {
-    // SAFETY: `PR_SET_DUMPABLE` reads its one integer argument and touches
-    // no memory.
-    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } == 0 {
-        Ok(())
-    } else {
-        Err(anyhow!(io::Error::last_os_error()).context("setting the host non-dumpable"))
-    }
 }

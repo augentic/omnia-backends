@@ -97,34 +97,6 @@ pub fn unflatten(entity: &Value) -> anyhow::Result<Document> {
     Ok(Document { id, data })
 }
 
-fn restore_typed_value(obj: &Map<String, Value>, key: &str, value: &Value) -> Value {
-    let type_key = format!("{key}@odata.type");
-    let Some(edm_type) = obj.get(&type_key).and_then(Value::as_str) else {
-        return value.clone();
-    };
-
-    match edm_type {
-        "Edm.Int64" => value
-            .as_str()
-            .and_then(|s| s.parse::<i64>().ok())
-            .map_or_else(|| value.clone(), |n| Value::Number(n.into())),
-        "Edm.Double" => match value {
-            Value::Number(n) => n
-                .as_f64()
-                .map_or_else(|| value.clone(), |f| json_f64(f).unwrap_or_else(|| value.clone())),
-            Value::String(s) => {
-                s.parse::<f64>().ok().and_then(json_f64).unwrap_or_else(|| value.clone())
-            }
-            _ => value.clone(),
-        },
-        _ => value.clone(),
-    }
-}
-
-fn json_f64(f: f64) -> Option<Value> {
-    serde_json::Number::from_f64(f).map(Value::Number)
-}
-
 fn is_metadata_key(key: &str) -> bool {
     SYSTEM_KEYS.contains(&key) || key.starts_with("odata.") || key.ends_with("@odata.type")
 }
@@ -163,4 +135,32 @@ fn typed_property(key: &str, value: &Value) -> anyhow::Result<Vec<(String, Value
             plain(Value::String(serialized))
         }
     })
+}
+
+fn restore_typed_value(obj: &Map<String, Value>, key: &str, value: &Value) -> Value {
+    let type_key = format!("{key}@odata.type");
+    let Some(edm_type) = obj.get(&type_key).and_then(Value::as_str) else {
+        return value.clone();
+    };
+
+    match edm_type {
+        "Edm.Int64" => value
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
+            .map_or_else(|| value.clone(), |n| Value::Number(n.into())),
+        "Edm.Double" => match value {
+            Value::Number(n) => n
+                .as_f64()
+                .map_or_else(|| value.clone(), |f| json_f64(f).unwrap_or_else(|| value.clone())),
+            Value::String(s) => {
+                s.parse::<f64>().ok().and_then(json_f64).unwrap_or_else(|| value.clone())
+            }
+            _ => value.clone(),
+        },
+        _ => value.clone(),
+    }
+}
+
+fn json_f64(f: f64) -> Option<Value> {
+    serde_json::Number::from_f64(f).map(Value::Number)
 }

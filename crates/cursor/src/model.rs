@@ -28,8 +28,6 @@ use tracing::{Instrument, info_span};
 use crate::Client;
 use crate::pool::Lease;
 
-static COMPLETION_ID: AtomicU64 = AtomicU64::new(0);
-
 // The two bounds on one run, from the connect options: the inactivity
 // window, which stream progress rearms while the run waits on the bridge,
 // and the absolute cap, which nothing rearms.
@@ -38,6 +36,8 @@ pub struct Deadlines {
     pub inactivity: Duration,
     pub cap: Duration,
 }
+
+static COMPLETION_ID: AtomicU64 = AtomicU64::new(0);
 
 impl ModelClient for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {

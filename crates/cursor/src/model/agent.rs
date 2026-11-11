@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
-use omnia_backend::model::{Answer, Error, Format, ToolHost, Transcript, Usage};
+use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
 use tokio::sync::watch;
 use tokio::time::{Instant, interval_at, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;

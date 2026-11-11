@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result};
 use deadpool_postgres::{
     Manager, ManagerConfig, Pool, PoolConfig, QueueMode, RecyclingMethod, Runtime, Timeouts,
 };
-use omnia_backend::Connect;
+use omnia::Connect;
 use rustls::crypto::{CryptoProvider, ring};
 use rustls::{ClientConfig, RootCertStore};
 use tokio_postgres::config::SslMode;
@@ -153,7 +153,7 @@ pub struct ConnectOptions {
     pub additional_pools: Vec<PoolEntry>,
 }
 
-impl omnia_backend::FromEnv for ConnectOptions {
+impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         // default pool (required)
         let default_uri = std::env::var("POSTGRES_URL").context("POSTGRES_URL must be set");

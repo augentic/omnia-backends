@@ -27,7 +27,8 @@ chrono.workspace = true
 fromenv.workspace = true
 futures.workspace = true
 mongodb = "3.10.0"
-omnia-backend = { workspace = true, features = ["blobstore"] }
+omnia.workspace = true
+omnia-wasi-blobstore.workspace = true
 serde.workspace = true
 tracing.workspace = true
 

@@ -6,9 +6,9 @@
 //! `cargo nextest run -p omnia-azure-id --run-ignored all`.
 
 use anyhow::Result;
+use omnia::Connect;
 use omnia_azure_id::Client;
-use omnia_backend::Connect;
-use omnia_backend::identity::{Identity, IdentityClient};
+use omnia_wasi_identity::{Identity, IdentityClient};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an ambient Azure credential; run with --run-ignored"]

@@ -7,9 +7,9 @@
 //! `cargo nextest run -p omnia-opentelemetry --run-ignored all`.
 
 use anyhow::Result;
-use omnia_backend::Connect;
-use omnia_backend::otel::OtelClient;
+use omnia::Connect;
 use omnia_opentelemetry::Client;
+use omnia_wasi_otel::OtelClient;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 

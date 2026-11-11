@@ -6,8 +6,8 @@ use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use deadpool_postgres::Object;
 use futures::future::FutureExt;
-use omnia_backend::FutureResult;
-use omnia_backend::sql::{Connection, DataType, Field, Row, SqlClient};
+use omnia::FutureResult;
+use omnia_wasi_sql::{Connection, DataType, Field, Row, SqlClient};
 use tokio_postgres::row::Row as PgRow;
 
 use crate::Client;

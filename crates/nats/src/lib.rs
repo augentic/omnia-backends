@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use async_nats::{AuthError, jetstream};
-use omnia_backend::Connect;
+use omnia::Connect;
 use tracing::instrument;
 
 /// NATS backend client for messaging, key-value, and blobstore.
@@ -124,7 +124,7 @@ mod config {
 }
 pub use config::ConnectOptions;
 
-impl omnia_backend::FromEnv for ConnectOptions {
+impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }

@@ -35,8 +35,9 @@ dotenvy = "0.15.7"
 omnia.workspace = true
 omnia-azure-blob = { path = "../crates/azure-blob" }
 omnia-azure-table = { path = "../crates/azure-table" }
-omnia-backend = { workspace = true, features = ["blobstore", "docstore"] }
 omnia-cursor = { path = "../crates/cursor" }
+omnia-wasi-blobstore.workspace = true
+omnia-wasi-docstore.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing.workspace = true

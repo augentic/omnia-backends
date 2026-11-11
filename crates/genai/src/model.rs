@@ -17,9 +17,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use omnia_backend::FutureResult;
-use omnia_backend::model::{Answer, Error, Format, Limits, ModelClient, Request, ToolHost};
+use omnia::FutureResult;
 use omnia_sandbox::{Access, Denied, Grant};
+use omnia_wasi_model::{Answer, Error, Format, Limits, ModelClient, Request, ToolHost};
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
 
@@ -80,7 +80,7 @@ impl Client {
     async fn shell(
         &self, request: &Request, access: Access, workspace: Option<&Path>,
     ) -> anyhow::Result<Option<Shell>> {
-        let worker = request.worker.as_ref();
+        let worker = request.grants.worker.as_ref();
         let (Some(sandbox), Access::Shell) = (&self.sandbox, access) else {
             if worker.is_none() {
                 return Ok(None);

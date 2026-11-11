@@ -5,9 +5,9 @@
 //! service must answer live in `tests/live.rs`.
 
 use anyhow::Result;
+use omnia::Connect;
 use omnia_azure_blob::{Client, ConnectOptions, CredentialOptions};
-use omnia_backend::Connect;
-use omnia_backend::blobstore::BlobStoreClient;
+use omnia_wasi_blobstore::BlobStoreClient;
 
 async fn connect() -> Result<Client> {
     Client::connect_with(ConnectOptions {

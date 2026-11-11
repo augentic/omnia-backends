@@ -15,7 +15,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use omnia_backend::Connect as _;
+use omnia::Connect as _;
 use omnia_git::{Client, ConnectOptions};
 use tempfile::TempDir;
 

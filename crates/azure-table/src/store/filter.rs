@@ -1,4 +1,4 @@
-//! Translation of [`Filter`] into Azure Table `OData` `$filter` strings.
+//! Translation of [`FilterTree`] into Azure Table `OData` `$filter` strings.
 //!
 //! Azure Table's `OData` query layer supports comparison operators, logical
 //! combinators (`and`, `or`, `not`), and set membership (`InList` / `NotInList`
@@ -13,7 +13,7 @@
 use std::fmt::Write;
 
 use anyhow::bail;
-use omnia_backend::docstore::{ComparisonOp, Filter, ScalarValue};
+use omnia_wasi_docstore::{ComparisonOp, FilterTree, ScalarValue};
 
 // A property name is emitted unquoted, so it must be a bare identifier.
 fn validate_field(field: &str) -> anyhow::Result<()> {
@@ -26,7 +26,7 @@ fn validate_field(field: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Translate a [`Filter`] to an `OData` `$filter` string.
+/// Translate a [`FilterTree`] to an `OData` `$filter` string.
 ///
 /// # Errors
 ///
@@ -34,13 +34,13 @@ fn validate_field(field: &str) -> anyhow::Result<()> {
 /// evaluate server-side: `IsNull`, `IsNotNull`, `Contains`, `StartsWith`,
 /// `EndsWith`, or any logical combinator (`And`, `Or`, `Not`) whose children
 /// include such nodes.
-pub fn to_odata(filter: &Filter) -> anyhow::Result<String> {
+pub fn to_odata(filter: &FilterTree) -> anyhow::Result<String> {
     match filter {
-        Filter::Compare { field, op, value } => {
+        FilterTree::Compare { field, op, value } => {
             validate_field(field)?;
             Ok(format!("{field} {} {}", odata_op(*op), odata_value(value)?))
         }
-        Filter::InList { field, values } => {
+        FilterTree::InList { field, values } => {
             validate_field(field)?;
             if values.is_empty() {
                 bail!("InList('{field}') requires at least one value");
@@ -51,7 +51,7 @@ pub fn to_odata(filter: &Filter) -> anyhow::Result<String> {
                 .collect::<anyhow::Result<_>>()?;
             Ok(format!("({})", parts.join(" or ")))
         }
-        Filter::NotInList { field, values } => {
+        FilterTree::NotInList { field, values } => {
             validate_field(field)?;
             if values.is_empty() {
                 bail!("NotInList('{field}') requires at least one value");
@@ -62,7 +62,7 @@ pub fn to_odata(filter: &Filter) -> anyhow::Result<String> {
                 .collect::<anyhow::Result<_>>()?;
             Ok(format!("not ({})", parts.join(" or ")))
         }
-        Filter::And(children) => {
+        FilterTree::And(children) => {
             if children.is_empty() {
                 bail!("And requires at least one child filter");
             }
@@ -70,7 +70,7 @@ pub fn to_odata(filter: &Filter) -> anyhow::Result<String> {
                 children.iter().map(to_odata).collect::<anyhow::Result<_>>()?;
             Ok(parts.join(" and "))
         }
-        Filter::Or(children) => {
+        FilterTree::Or(children) => {
             if children.is_empty() {
                 bail!("Or requires at least one child filter");
             }
@@ -78,28 +78,28 @@ pub fn to_odata(filter: &Filter) -> anyhow::Result<String> {
                 children.iter().map(to_odata).collect::<anyhow::Result<_>>()?;
             Ok(format!("({})", parts.join(" or ")))
         }
-        Filter::Not(inner) => Ok(format!("not ({})", to_odata(inner)?)),
-        Filter::IsNull(field) => {
+        FilterTree::Not(inner) => Ok(format!("not ({})", to_odata(inner)?)),
+        FilterTree::IsNull(field) => {
             bail!(
                 "IsNull('{field}') is not supported by Azure Table — properties that are null are omitted from entities entirely"
             )
         }
-        Filter::IsNotNull(field) => {
+        FilterTree::IsNotNull(field) => {
             bail!(
                 "IsNotNull('{field}') is not supported by Azure Table — properties that are null are omitted from entities entirely"
             )
         }
-        Filter::Contains { field, .. } => {
+        FilterTree::Contains { field, .. } => {
             bail!(
                 "Contains('{field}') is not supported by Azure Table — OData $filter does not support string functions"
             )
         }
-        Filter::StartsWith { field, .. } => {
+        FilterTree::StartsWith { field, .. } => {
             bail!(
                 "StartsWith('{field}') is not supported by Azure Table — OData $filter does not support string functions"
             )
         }
-        Filter::EndsWith { field, .. } => {
+        FilterTree::EndsWith { field, .. } => {
             bail!(
                 "EndsWith('{field}') is not supported by Azure Table — OData $filter does not support string functions"
             )
@@ -127,7 +127,7 @@ fn odata_value(v: &ScalarValue) -> anyhow::Result<String> {
                  or omit the filter for absent properties"
             )
         }
-        ScalarValue::Bool(b) => b.to_string(),
+        ScalarValue::Boolean(b) => b.to_string(),
         ScalarValue::Int32(i) => i.to_string(),
         ScalarValue::Int64(i) => format!("{i}L"),
         ScalarValue::Float64(f) => {

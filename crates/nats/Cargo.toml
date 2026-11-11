@@ -27,7 +27,10 @@ chrono.workspace = true
 fromenv.workspace = true
 futures.workspace = true
 nkeys = "0.4.5"
-omnia-backend = { workspace = true, features = ["blobstore", "keyvalue", "messaging"] }
+omnia.workspace = true
+omnia-wasi-blobstore.workspace = true
+omnia-wasi-keyvalue.workspace = true
+omnia-wasi-messaging.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

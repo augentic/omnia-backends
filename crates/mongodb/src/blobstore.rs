@@ -8,8 +8,8 @@ use futures::{FutureExt, StreamExt};
 use mongodb::Collection;
 use mongodb::bson::spec::BinarySubtype;
 use mongodb::bson::{self, Binary};
-use omnia_backend::FutureResult;
-use omnia_backend::blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
+use omnia::FutureResult;
+use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
 use serde::{Deserialize, Serialize};
 
 use crate::Client;

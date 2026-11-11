@@ -2,8 +2,7 @@
 //! client pointed at the fake through `ConnectOptions::endpoint`, and a
 //! guest run through `omnia_test::host`.
 
-use omnia::{ExitStatus, Mount};
-use omnia_backend::Connect as _;
+use omnia::{Connect as _, ExitStatus, Mount};
 use omnia_genai::{Client, ConnectOptions};
 use omnia_test::host::{Backends, Deployment};
 use omnia_wasi_model::WasiModel;

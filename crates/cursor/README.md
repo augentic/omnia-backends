@@ -34,7 +34,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia_backend::Connect;
+use omnia::Connect;
 use omnia_cursor::{Client, ConnectOptions};
 
 // Reads CURSOR_* from the environment, with the defaults below.
@@ -98,7 +98,7 @@ Workers are session leaders and are shut down after their completion: a graceful
 
 A worker lost while a completion is *opening* (`CreateAgent` or the first `Send` fails with `WorkerExited` or `Rpc(RpcError::Transport)`, and no candidate has reached the guest) restarts the completion once on a fresh worker. Nothing else restarts.
 
-Match failures on types, not messages: every error `complete` returns downcasts to one `Failure` — `Run`, `Timeout`, `Inactive`, `Aborted`, `WorkerExited`, or `Rpc` carrying the `RpcError::{Connect, Transport}` it wraps — or to `omnia_backend::model::Error::BudgetExhausted`.
+Match failures on types, not messages: every error `complete` returns downcasts to one `Failure` — `Run`, `Timeout`, `Inactive`, `Aborted`, `WorkerExited`, or `Rpc` carrying the `RpcError::{Connect, Transport}` it wraps — or to `omnia_wasi_model::Error::BudgetExhausted`.
 
 ## Observability
 

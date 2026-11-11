@@ -11,8 +11,8 @@ use azure_storage_blob::models::{
 };
 use bytes::Bytes;
 use futures::{FutureExt, TryStreamExt};
-use omnia_backend::FutureResult;
-use omnia_backend::blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
+use omnia::FutureResult;
+use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
 
 use crate::{Client, STORE_CONTAINER};
 

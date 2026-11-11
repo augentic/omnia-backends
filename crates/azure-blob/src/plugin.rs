@@ -11,7 +11,7 @@ use azure_core::http::{RequestContent, StatusCode};
 use azure_storage_blob::models::BlobClientUploadOptions;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
-use omnia_backend::plugins::{PackageStore, Reference};
+use omnia_plugin::{PackageStore, Reference};
 
 use crate::{Client, STORE_CONTAINER};
 

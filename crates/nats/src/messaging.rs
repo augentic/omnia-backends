@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use futures::future::FutureExt;
 use futures::stream::{self, StreamExt};
-use omnia_backend::FutureResult;
-use omnia_backend::messaging::{
+use omnia::FutureResult;
+use omnia_wasi_messaging::{
     Endpoint, Handler, Message, MessagingClient, Metadata, Reply, RequestOptions, dispatch,
 };
 

@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result};
-use omnia_backend::model::{Format, Mcp, Request, Tool};
 use omnia_sandbox::{Access, Session};
+use omnia_wasi_model::{Format, Mcp, Request, Tool};
 use serde_json::Value;
 
 use crate::protocol::{

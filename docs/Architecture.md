@@ -27,7 +27,7 @@ Guests are compiled against Layer 2 interfaces only. A guest that calls `wasi:ke
 
 Every backend crate implements two things from the `omnia` runtime:
 
-1. **`omnia_backend::Connect`** — connection management. `connect()` reads a `ConnectOptions` struct from environment variables (via `FromEnv`) and establishes the client:
+1. **`omnia::Connect`** — connection management. `connect()` reads a `ConnectOptions` struct from environment variables (via `FromEnv`) and establishes the client:
 
 ```rust
 pub trait Connect: Sized + Sync + Send {
@@ -87,7 +87,7 @@ No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; thos
 
 ### Package store
 
-`azure-blob` additionally implements `omnia_backend::plugins::PackageStore` — the store omnia's registry acquirer reads before any registry and writes a fetched release to once (the `runtime!` macro's `plugins: { store: .. }` names omnia's own local `FsStore`; this impl is the remote counterpart an embedder selects through `Deployment::registry_source`). It owns a container disjoint from guest storage, named by the impl itself (`omnia-plugins`) and refused by name to the `wasi:blobstore` view so the store is its only writer, with one blob per release under the file name `FsStore` uses (`namespace_name@version.wasm`). A blob already there is never replaced: a stored release is final until it is deleted. Verification lives in the acquirer — a fetched release is hashed against the registry's digest before the write, and a served one against the load's pin.
+`azure-blob` additionally implements `omnia_plugin::PackageStore` — the store omnia's registry acquirer reads before any registry and writes a fetched release to once (the `runtime!` macro's `plugins: { store: .. }` names omnia's own local `FsStore`; this impl is the remote counterpart an embedder selects through `Deployment::registry_source`). It owns a container disjoint from guest storage, named by the impl itself (`omnia-plugins`) and refused by name to the `wasi:blobstore` view so the store is its only writer, with one blob per release under the file name `FsStore` uses (`namespace_name@version.wasm`). A blob already there is never replaced: a stored release is final until it is deleted. Verification lives in the acquirer — a fetched release is hashed against the registry's digest before the write, and a served one against the load's pin.
 
 ### Model backends
 

@@ -9,8 +9,9 @@ use anyhow::{Context, anyhow, bail};
 use base64ct::{Base64, Encoding};
 use futures::future::FutureExt;
 use hmac::{Hmac, KeyInit, Mac};
-use omnia_backend::FutureResult;
-use omnia_backend::docstore::{DocStoreClient, Document, QueryOptions, QueryResult};
+use omnia_wasi_docstore::{
+    DocStoreClient, Document, FilterTree, FutureResult, QueryOpts, QueryResult,
+};
 use reqwest::Method;
 use serde_json::Value;
 use sha2::Sha256;
@@ -138,7 +139,9 @@ impl DocStoreClient for Client {
         .boxed()
     }
 
-    fn query(&self, collection: String, options: QueryOptions) -> FutureResult<QueryResult> {
+    fn query(
+        &self, collection: String, filter: Option<FilterTree>, options: QueryOpts,
+    ) -> FutureResult<QueryResult> {
         let client = self.clone();
         async move {
             // Azure Table has no `$skip`: an offset is rejected, like an
@@ -162,7 +165,7 @@ impl DocStoreClient for Client {
             }
 
             let (table, pk) = parse_collection(&collection)?;
-            let user_filter = options.filter.as_ref().map(filter::to_odata).transpose()?;
+            let user_filter = filter.as_ref().map(filter::to_odata).transpose()?;
             let odata_filter = build_odata_filter(pk.as_deref(), user_filter.as_deref());
 
             let mut all_documents: Vec<Document> = Vec::new();

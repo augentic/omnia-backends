@@ -1,29 +1,15 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, bail, ensure};
-use async_nats::header::{
-    HeaderMap, HeaderValue, NATS_EXPECTED_LAST_SUBJECT_SEQUENCE, NATS_MARKER_REASON,
-    NATS_MESSAGE_TTL,
-};
-use async_nats::jetstream;
-use async_nats::jetstream::context::{KeyValueErrorKind, PublishError, PublishErrorKind};
+use anyhow::{Context, Result, anyhow, bail};
+use async_nats::jetstream::context::KeyValueErrorKind;
 use async_nats::jetstream::kv::{self, Config};
-use async_nats::jetstream::message::StreamMessage;
-use async_nats::jetstream::stream::{DirectGetErrorKind, LastRawMessageErrorKind};
 use futures::TryStreamExt;
 use futures::future::FutureExt;
-use omnia_backend::FutureResult;
-use omnia_backend::keyvalue::{Bucket, KeyValueClient, add_i64};
+use omnia_wasi_keyvalue::{Bucket, Cas, FutureResult, KeyValueClient};
 
 use crate::Client;
 
 const MAX_INCREMENT_RETRIES: usize = 64;
-
-// How long the marker left where an entry expired stays visible to watchers.
-// Setting it is what turns per-message TTL on for the bucket; a read treats
-// the marker, and its absence, alike as the key being gone.
-const MARKER_TTL: Duration = Duration::from_secs(60);
 
 impl KeyValueClient for Client {
     fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
@@ -36,11 +22,10 @@ impl KeyValueClient for Client {
                 Ok(store) => store,
                 Err(err) if err.kind() == KeyValueErrorKind::GetBucket => jetstream
                     .create_key_value(Config {
-                        bucket: identifier.clone(),
+                        bucket: identifier,
                         history: 1,
                         max_age,
                         max_bytes: 100 * 1024 * 1024,
-                        limit_markers: Some(MARKER_TTL),
                         ..Config::default()
                     })
                     .await
@@ -48,114 +33,44 @@ impl KeyValueClient for Client {
                 Err(err) => return Err(err).context("failed to open bucket"),
             };
 
-            Ok(Arc::new(KvBucket { jetstream, store }) as Arc<dyn Bucket>)
+            Ok(Arc::new(KvBucket(store)) as Arc<dyn Bucket>)
         }
         .boxed()
     }
 }
 
-#[derive(Clone, Debug)]
-struct KvBucket {
-    jetstream: jetstream::Context,
-    store: kv::Store,
-}
-
-impl KvBucket {
-    async fn snapshot(&self, key: &str) -> Result<Snapshot> {
-        validate_key(key)?;
-        let subject = format!("{}{key}", self.store.prefix);
-        let Some(message) =
-            self.last_message(&subject).await.with_context(|| format!("reading `{key}`"))?
-        else {
-            return Ok(Snapshot {
-                revision: 0,
-                value: None,
-                ttl: None,
-            });
-        };
-
-        // a marker, or a put past its TTL the server has not swept yet, reads as absent
-        let ttl = remaining_ttl(&message);
-        let live = is_put(&message.headers) && !ttl.is_some_and(|ttl| ttl.is_zero());
-        Ok(Snapshot {
-            revision: message.sequence,
-            value: live.then(|| message.payload.to_vec()),
-            ttl: ttl.filter(|_| live),
-        })
-    }
-
-    async fn last_message(&self, subject: &str) -> Result<Option<StreamMessage>> {
-        if self.store.stream.cached_info().config.allow_direct {
-            match self.store.stream.direct_get_last_for_subject(subject).await {
-                Ok(message) => Ok(Some(message)),
-                Err(err) if err.kind() == DirectGetErrorKind::NotFound => Ok(None),
-                Err(err) => Err(anyhow::Error::new(err)),
-            }
-        } else {
-            match self.store.stream.get_last_raw_message_by_subject(subject).await {
-                Ok(message) => Ok(Some(message)),
-                Err(err) if err.kind() == LastRawMessageErrorKind::NoMessageFound => Ok(None),
-                Err(err) => Err(anyhow::Error::new(err)),
-            }
-        }
-    }
-
-    // Every write is the one publish `Store::put` makes, plus the headers the
-    // store's own API cannot send together: the revision the write expects
-    // and the TTL the server expires the entry by.
-    async fn publish(
-        &self, key: &str, value: Vec<u8>, revision: Option<u64>, ttl: Option<Duration>,
-    ) -> Result<(), PublishError> {
-        let mut headers = HeaderMap::new();
-        if let Some(revision) = revision {
-            headers.insert(NATS_EXPECTED_LAST_SUBJECT_SEQUENCE, HeaderValue::from(revision));
-        }
-        if let Some(ttl) = ttl {
-            headers.insert(NATS_MESSAGE_TTL, HeaderValue::from(ttl.as_secs().max(1)));
-        }
-        let prefix = self.store.put_prefix.as_deref().unwrap_or(&self.store.prefix);
-        self.jetstream
-            .publish_with_headers(format!("{prefix}{key}"), headers, value.into())
-            .await?
-            .await?;
-        Ok(())
-    }
-
-    // A write conditioned on `revision`; `false` when the key moved on first.
-    async fn update(
-        &self, key: &str, value: Vec<u8>, revision: u64, ttl: Option<Duration>,
-    ) -> Result<bool> {
-        validate_key(key)?;
-        match self.publish(key, value, Some(revision), ttl).await {
-            Ok(()) => Ok(true),
-            Err(err) if err.kind() == PublishErrorKind::WrongLastSequence => Ok(false),
-            Err(err) => Err(anyhow::Error::new(err).context(format!("writing `{key}`"))),
-        }
-    }
-}
+#[derive(Debug)]
+struct KvBucket(kv::Store);
 
 impl Bucket for KvBucket {
     fn get(&self, key: String) -> FutureResult<Option<Vec<u8>>> {
         tracing::trace!("getting key: {key}");
-        let bucket = self.clone();
-        async move { Ok(bucket.snapshot(&key).await?.value) }.boxed()
+        let store = self.0.clone();
+
+        async move {
+            let entry = store.get(key).await.context("getting key")?;
+            Ok(entry.map(Into::into))
+        }
+        .boxed()
     }
 
-    fn set(&self, key: String, value: Vec<u8>, ttl: Option<Duration>) -> FutureResult<()> {
+    fn set(&self, key: String, value: Vec<u8>) -> FutureResult<()> {
         tracing::trace!("setting key: {key}");
-        let bucket = self.clone();
+        let store = self.0.clone();
+
         async move {
-            validate_key(&key)?;
-            bucket.publish(&key, value, None, ttl).await.with_context(|| format!("writing `{key}`"))
+            store.put(key, value.into()).await.context("setting key")?;
+            Ok(())
         }
         .boxed()
     }
 
     fn delete(&self, key: String) -> FutureResult<()> {
         tracing::trace!("deleting key: {key}");
-        let store = self.store.clone();
+        let store = self.0.clone();
+
         async move {
-            store.delete(&key).await.with_context(|| format!("deleting `{key}`"))?;
+            store.delete(key).await.context("deleting key")?;
             Ok(())
         }
         .boxed()
@@ -163,33 +78,59 @@ impl Bucket for KvBucket {
 
     fn exists(&self, key: String) -> FutureResult<bool> {
         tracing::trace!("checking existence of key: {key}");
-        let bucket = self.clone();
-        async move { Ok(bucket.snapshot(&key).await?.value.is_some()) }.boxed()
+        let store = self.0.clone();
+
+        async move {
+            let entry = store.get(key).await.context("checking key")?;
+            Ok(entry.is_some())
+        }
+        .boxed()
     }
 
     fn keys(&self) -> FutureResult<Vec<String>> {
-        tracing::trace!("listing keys");
-        let store = self.store.clone();
+        let store = self.0.clone();
+
         async move {
-            let keys = store.keys().await.context("listing keys")?;
-            keys.try_collect().await.context("listing keys")
+            tracing::trace!("listing keys");
+
+            let key_results = store.keys().await.context("listing keys")?;
+            let keys =
+                key_results.try_filter_map(|k| async move { Ok(Some(k)) }).try_collect().await?;
+
+            Ok(keys)
         }
         .boxed()
     }
 
     fn increment(&self, key: String, delta: i64) -> FutureResult<i64> {
         tracing::trace!("incrementing key: {key}");
-        let bucket = self.clone();
+        let store = self.0.clone();
+
         async move {
             // JetStream KV has no native increment; loop a revision-conditioned
             // read-modify-write, retrying only on lost races.
             for _ in 0..MAX_INCREMENT_RETRIES {
-                let snapshot = bucket.snapshot(&key).await?;
-                let incremented = add_i64(snapshot.value.as_deref(), delta)
-                    .with_context(|| format!("incrementing `{key}`"))?;
-                let payload = incremented.to_be_bytes().to_vec();
-                if bucket.update(&key, payload, snapshot.revision, snapshot.ttl).await? {
-                    return Ok(incremented);
+                let live = live_entry(&store, &key).await?;
+                let base = match &live {
+                    None => 0,
+                    Some(entry) => decode_counter(&key, entry.value.as_ref())?,
+                };
+                let incremented = base
+                    .checked_add(delta)
+                    .with_context(|| format!("incrementing `{key}` by {delta} overflows i64"))?;
+                let payload = incremented.to_be_bytes().to_vec().into();
+
+                match &live {
+                    Some(entry) => match store.update(&key, payload, entry.revision).await {
+                        Ok(_revision) => return Ok(incremented),
+                        Err(err) if err.kind() == kv::UpdateErrorKind::WrongLastRevision => {}
+                        Err(err) => return Err(err).context("updating counter"),
+                    },
+                    None => match store.create(&key, payload).await {
+                        Ok(_revision) => return Ok(incremented),
+                        Err(err) if err.kind() == kv::CreateErrorKind::AlreadyExists => {}
+                        Err(err) => return Err(err).context("creating counter"),
+                    },
                 }
             }
             bail!("incrementing `{key}` exceeded {MAX_INCREMENT_RETRIES} CAS retries")
@@ -197,62 +138,67 @@ impl Bucket for KvBucket {
         .boxed()
     }
 
-    fn cas(
-        &self, key: String, expected: Option<Vec<u8>>, value: Vec<u8>,
-    ) -> FutureResult<std::result::Result<(), Option<Vec<u8>>>> {
-        tracing::trace!("swapping key: {key}");
-        let bucket = self.clone();
+    fn swap(&self, cas: Cas, value: Vec<u8>) -> FutureResult<std::result::Result<(), Cas>> {
+        tracing::trace!("swapping key: {}", cas.key);
+        let store = self.0.clone();
+
         async move {
-            let snapshot = bucket.snapshot(&key).await?;
-            if snapshot.value != expected {
-                return Ok(Err(snapshot.value));
+            // Snapshot the live entry: value for the compare, revision for
+            // the conditioned write.
+            let live = live_entry(&store, &cas.key).await?;
+            let observed = live.as_ref().map(|entry| entry.value.to_vec());
+            if observed != cas.current {
+                return Ok(Err(Cas {
+                    current: observed,
+                    ..cas
+                }));
             }
-            if bucket.update(&key, value, snapshot.revision, snapshot.ttl).await? {
-                return Ok(Ok(()));
+
+            let outcome = match &live {
+                Some(entry) => store
+                    .update(&cas.key, value.into(), entry.revision)
+                    .await
+                    .map(|_rev| ())
+                    .map_err(|err| {
+                        let raced = err.kind() == kv::UpdateErrorKind::WrongLastRevision;
+                        (raced, anyhow::Error::new(err))
+                    }),
+                // Absent-expected: `create` refuses if the key appeared meanwhile.
+                None => store.create(&cas.key, value.into()).await.map(|_rev| ()).map_err(|err| {
+                    let raced = err.kind() == kv::CreateErrorKind::AlreadyExists;
+                    (raced, anyhow::Error::new(err))
+                }),
+            };
+
+            match outcome {
+                Ok(()) => Ok(Ok(())),
+                // Lost the race between snapshot and write: refresh the
+                // handle at the observed value so the caller can retry.
+                Err((true, _raced)) => {
+                    let observed =
+                        live_entry(&store, &cas.key).await?.map(|entry| entry.value.to_vec());
+                    Ok(Err(Cas {
+                        current: observed,
+                        ..cas
+                    }))
+                }
+                Err((false, err)) => Err(err.context(format!("swapping `{}`", cas.key))),
             }
-            // lost the race between snapshot and write: the conflict carries what won
-            Ok(Err(bucket.snapshot(&key).await?.value))
         }
         .boxed()
     }
 }
 
-// What the server holds for a key: the revision a write is conditioned on
-// (`0` when nothing was ever written), the value when that revision is a
-// live put, and the TTL still to run on it.
-struct Snapshot {
-    revision: u64,
-    value: Option<Vec<u8>>,
-    ttl: Option<Duration>,
+// The live entry for `key`: delete and purge tombstones read as absent.
+async fn live_entry(store: &kv::Store, key: &str) -> Result<Option<kv::Entry>> {
+    let entry = store.entry(key).await.with_context(|| format!("reading `{key}`"))?;
+    Ok(entry.filter(|entry| entry.operation == kv::Operation::Put))
 }
 
-fn is_put(headers: &HeaderMap) -> bool {
-    headers.get(NATS_MARKER_REASON).is_none()
-        && headers.get("KV-Operation").is_none_or(|op| op.as_str() == "PUT")
-}
-
-// The TTL a put was stored with, less the time it has already run; `None`
-// for an entry stored without one.
-fn remaining_ttl(message: &StreamMessage) -> Option<Duration> {
-    let ttl: u64 = message.headers.get(NATS_MESSAGE_TTL)?.as_str().parse().ok()?;
-    let stored = SystemTime::from(message.time);
-    let elapsed = SystemTime::now().duration_since(stored).unwrap_or_default();
-    Some(Duration::from_secs(ttl).saturating_sub(elapsed))
-}
-
-// JetStream KV keys: non-empty, no leading or trailing `.`, and only
-// `[-/_=.a-zA-Z0-9]` so subject wildcards (`*`, `>`, whitespace) cannot
-// reach the stream.
-fn validate_key(key: &str) -> Result<()> {
-    let valid = !key.is_empty()
-        && !key.starts_with('.')
-        && !key.ends_with('.')
-        && key
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'/' | b'_' | b'=' | b'.'));
-    ensure!(
-        valid,
-        "invalid key `{key}`: cannot be empty, start/end with `.`, or contain characters outside [-/_=.a-zA-Z0-9]"
-    );
-    Ok(())
+// Counter values are 8-byte big-endian `i64`, matching the other backends.
+fn decode_counter(key: &str, value: &[u8]) -> Result<i64> {
+    let bytes: [u8; 8] = value.try_into().map_err(|_len_mismatch| {
+        anyhow!("value at `{key}` is {} bytes, not an 8-byte big-endian integer", value.len())
+    })?;
+    Ok(i64::from_be_bytes(bytes))
 }

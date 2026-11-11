@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use omnia_backend::model::ToolHost;
 use omnia_sandbox::{Grant, Options, Sandbox, Session};
+use omnia_wasi_model::ToolHost;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 

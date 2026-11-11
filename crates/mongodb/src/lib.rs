@@ -5,7 +5,7 @@ mod blobstore;
 use std::fmt::Debug;
 
 use anyhow::{Context, Result};
-use omnia_backend::Connect;
+use omnia::Connect;
 use tracing::instrument;
 
 /// MongoDB blobstore backend client.
@@ -54,7 +54,7 @@ mod config {
 }
 pub use config::ConnectOptions;
 
-impl omnia_backend::FromEnv for ConnectOptions {
+impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }

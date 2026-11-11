@@ -15,11 +15,11 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
-use omnia_backend::Connect;
-use omnia_backend::messaging::{
+use omnia::Connect;
+use omnia_kafka::{Client, ConnectOptions, ConsumerOptions, PartitionerScheme, RegistryOptions};
+use omnia_wasi_messaging::{
     Endpoint, Error as MessagingError, HandleError, Handler, Message, MessagingClient, Metadata,
 };
-use omnia_kafka::{Client, ConnectOptions, ConsumerOptions, PartitionerScheme, RegistryOptions};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{Consumer, StreamConsumer};

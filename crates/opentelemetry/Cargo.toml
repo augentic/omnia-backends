@@ -22,7 +22,8 @@ all-features = true
 anyhow.workspace = true
 fromenv.workspace = true
 futures.workspace = true
-omnia-backend = { workspace = true, features = ["otel"] }
+omnia.workspace = true
+omnia-wasi-otel.workspace = true
 opentelemetry-proto = { version = "0.33.1", features = ["gen-tonic"] }
 tonic = "0.14.9"
 tracing.workspace = true

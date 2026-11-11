@@ -26,7 +26,8 @@ anyhow.workspace = true
 azure_core.workspace = true
 azure_identity.workspace = true
 futures.workspace = true
-omnia-backend = { workspace = true, features = ["identity"] }
+omnia.workspace = true
+omnia-wasi-identity.workspace = true
 tracing.workspace = true
 
 # The live test (`tests/live.rs`) is a separate crate; it needs tokio's test

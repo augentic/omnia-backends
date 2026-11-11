@@ -6,9 +6,9 @@
 //! `cargo nextest run -p omnia-azure-blob --run-ignored all`.
 
 use anyhow::Result;
+use omnia::Connect;
 use omnia_azure_blob::Client;
-use omnia_backend::Connect;
-use omnia_backend::blobstore::{BlobStoreClient, Container};
+use omnia_wasi_blobstore::{BlobStoreClient, Container};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
@@ -92,7 +92,7 @@ async fn ranged_reads() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
 async fn package_store() -> Result<()> {
-    use omnia_backend::plugins::{PackageStore, Reference};
+    use omnia_plugin::{PackageStore, Reference};
 
     let client = <Client as Connect>::connect().await?;
 
@@ -126,14 +126,14 @@ async fn package_store() -> Result<()> {
 // The blobstore view refuses the store's container (`tests/blobstore.rs`),
 // so cleanup reaches the blob through the SDK under the same connection
 // options the client connected with.
-async fn delete_stored(reference: &omnia_backend::plugins::Reference) -> Result<()> {
+async fn delete_stored(reference: &omnia_plugin::Reference) -> Result<()> {
     use std::sync::Arc;
 
     use azure_core::credentials::{Secret, TokenCredential};
     use azure_identity::{ClientSecretCredential, DeveloperToolsCredential};
     use azure_storage_blob::BlobServiceClient;
+    use omnia::FromEnv as _;
     use omnia_azure_blob::ConnectOptions;
-    use omnia_backend::FromEnv as _;
 
     let options = ConnectOptions::load_env()?;
     let credential: Arc<dyn TokenCredential> = match &options.credential {

@@ -7,9 +7,9 @@
 //! `cargo nextest run -p omnia-mongodb --run-ignored all`.
 
 use anyhow::Result;
-use omnia_backend::Connect;
-use omnia_backend::blobstore::{BlobStoreClient, Container};
+use omnia::Connect;
 use omnia_mongodb::Client;
+use omnia_wasi_blobstore::{BlobStoreClient, Container};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable MongoDB (MONGODB_URL); run with --run-ignored"]

@@ -5,8 +5,8 @@ use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, JsonSpec, ReasoningEffort, Tool,
 };
 use jsonschema::Validator;
-use omnia_backend::model::{Effort, Error, Format, Function, Request, Role, Tool as ModelTool};
 use omnia_sandbox::Access;
+use omnia_wasi_model::{Effort, Error, Format, Function, Request, Role, Tool as ModelTool};
 use serde_json::Value;
 
 use crate::tools::{SHELL_TOOL, workspace_tools};

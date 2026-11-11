@@ -20,12 +20,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use futures::FutureExt as _;
-use omnia_backend::model::{
-    Answer, DirEntry, Error, Format, Function, Message, ModelClient as _, Request, Role, Tool,
-    ToolHost, WorkerGrant,
-};
-use omnia_backend::{Connect as _, FromEnv as _, FutureResult};
+use omnia::{Connect as _, FromEnv as _, FutureResult};
 use omnia_genai::{Client, ConnectOptions};
+use omnia_wasi_model::{
+    Answer, DirEntry, Error, Format, Function, Grants, Message, ModelClient as _, Request, Role,
+    Tool, ToolHost, WorkerGrant,
+};
 use serde_json::Value;
 
 // Deterministic stand-in for the host session: `call_tool("lookup", …)`
@@ -97,8 +97,10 @@ fn lookup_request() -> Request {
             }"#
             .to_owned(),
         })],
-        workspace: None,
-        worker: None,
+        grants: Grants {
+            workspace: None,
+            worker: None,
+        },
         check: false,
     }
 }
@@ -206,12 +208,14 @@ fn shell_request() -> Request {
         generation: None,
         format: Format::Json,
         tools: vec![],
-        workspace: None,
-        worker: Some(WorkerGrant {
-            egress: vec![],
-            read: vec!["~/.rustup".to_owned(), "~/.cargo/bin".to_owned()],
-            env: vec![("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned())],
-        }),
+        grants: Grants {
+            workspace: None,
+            worker: Some(WorkerGrant {
+                egress: vec![],
+                read: vec!["~/.rustup".to_owned(), "~/.cargo/bin".to_owned()],
+                env: vec![("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned())],
+            }),
+        },
         check: false,
     }
 }
@@ -292,8 +296,10 @@ fn check_request() -> Request {
         generation: None,
         format: Format::Json,
         tools: vec![],
-        workspace: None,
-        worker: None,
+        grants: Grants {
+            workspace: None,
+            worker: None,
+        },
         check: true,
     }
 }
@@ -317,8 +323,10 @@ fn workspace_request() -> Request {
         generation: None,
         format: Format::Json,
         tools: vec![],
-        workspace: None,
-        worker: None,
+        grants: Grants {
+            workspace: None,
+            worker: None,
+        },
         check: false,
     }
 }

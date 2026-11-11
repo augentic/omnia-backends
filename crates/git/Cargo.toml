@@ -23,15 +23,14 @@ anyhow.workspace = true
 fromenv.workspace = true
 futures.workspace = true
 libc.workspace = true
-omnia-backend = { workspace = true, features = ["vcs"] }
+omnia.workspace = true
+omnia-wasi-vcs.workspace = true
 process-wrap = { workspace = true, features = ["kill-on-drop", "process-session", "tokio1"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["process", "rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
-omnia.workspace = true
 omnia-test = { workspace = true, features = ["host"] }
-omnia-wasi-vcs.workspace = true
 test-programs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

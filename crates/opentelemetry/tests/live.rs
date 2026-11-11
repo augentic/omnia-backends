@@ -15,7 +15,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an OTLP/gRPC collector (OTEL_EXPORTER_OTLP_ENDPOINT); run with --run-ignored"]
-async fn exports_metrics() -> Result<()> {
+async fn empty_batch() -> Result<()> {
     let client = <Client as Connect>::connect().await?;
 
     // An empty batch is a valid no-op export: it proves the request crosses the

@@ -218,7 +218,7 @@ async fn model_worker_unrooted() {
 // The sandbox's own rules hold the grant: a `~/` root over a credential
 // store is denied as `invalid-request`, in the sandbox's words.
 #[tokio::test]
-async fn model_worker_denied() {
+async fn model_worker_ssh_read() {
     let (scratch, roots) = tree();
     let fake = worker(
         Config::echo(),
@@ -354,7 +354,7 @@ async fn model_worker_home_reuse() {
 // A shell call where no shell was advertised is answered as the model's
 // slip, not the completion's failure.
 #[tokio::test]
-async fn model_lend_shell_hid() {
+async fn model_unadvertised_shell() {
     let fake = FakeOpenAi::serve(shell("pwd")).await;
     let client = client(&fake).await;
     let (scratch, _) = tree();
@@ -505,7 +505,7 @@ async fn model_nudged_off_schema() {
 // tools declared, so a provider whose JSON mode does not silence the tools
 // still ends; the text that follows is the candidate.
 #[tokio::test]
-async fn model_nudge_keeps_tools() {
+async fn model_nudge_tool_call() {
     let captured = Captured::install();
     let fake = FakeOpenAi::serve(Config::rounds([
         Round::Text("Let me check the tree first.".to_owned()),

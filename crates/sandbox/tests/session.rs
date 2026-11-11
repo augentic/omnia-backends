@@ -212,7 +212,7 @@ async fn command_env() {
 // --- Connect ---
 
 #[tokio::test]
-async fn inherit_refused() {
+async fn reserved_inherit() {
     const HELD: &[(&str, &str)] = &[
         ("HOME", "is set by the sandbox"),
         ("TMPDIR", "is set by the sandbox"),
@@ -439,7 +439,7 @@ async fn proxy_per_session() {
 // One session runs any number of commands in turn, every one in the same
 // scratch and behind the same proxy; the scratch goes with the last handle.
 #[tokio::test]
-async fn session_shared() {
+async fn successive_commands() {
     let sandbox = connect(Options::default()).await;
     let session = session(&sandbox, None).await;
     let scratch = session.scratch().to_owned();
@@ -708,7 +708,7 @@ mod landlock {
     // ai-jail's escape matrix, one syscall a row, each answered `EPERM` by
     // the filter where the kernel alone would answer otherwise.
     #[tokio::test]
-    async fn syscalls_refused() {
+    async fn escape_syscalls() {
         let (_workspace, tree) = tree();
         let sandbox = support::connect(Options::default()).await;
 
@@ -738,7 +738,7 @@ mod landlock {
     }
 
     #[tokio::test]
-    async fn sockets_admitted() {
+    async fn tcp_and_route_sockets() {
         let (_workspace, tree) = tree();
         let sandbox = support::connect(Options::default()).await;
         for row in [

@@ -114,7 +114,7 @@ async fn list_and_delete() {
 }
 
 #[tokio::test]
-async fn names_sanitized() {
+async fn invalid_names() {
     let root = TempDir::new().expect("tempdir");
     let client = client(&root);
     let container = snapshots(&client).await;

@@ -99,15 +99,15 @@ so the policy splits into three tiers:
     honest in-process fake of those services exists. The setters shipped in
     `omnia-test` 0.36.0; the redis/postgres/nats suites themselves are not
     built yet.
-- **Unit tests for deterministic, service-free logic, wherever it lives**:
-  OData filter building (`azure-table/store/filter.rs`), Postgres type
-  mapping, the Kafka partitioner, cursor's ready-line and Connect-frame
-  parsing (`cursor/src/worker/discovery.rs`, `protocol.rs`), genai's
-  request translation (`genai/src/request.rs`). A behaviour a guest
-  boundary reaches is an e2e row, not a unit test: the scripted-server unit
-  tests the model backends once carried inside `src/` were retired for
-  exactly that reason, and a new in-crate loopback server is the signal to
-  extend the fake instead.
+- **Unit tests are the exception, and none exist today.** No file under
+  `crates/*/src` carries a `#[cfg(test)]` module. Cursor's ready-line and
+  Connect-frame parsing and genai's request translation are asserted by
+  the e2e rows over the fakes. OData filter building, Postgres type
+  mapping and the Kafka partitioner are asserted by the live tests alone.
+  A unit test earns a place only for a deterministic, service-free branch
+  that no guest boundary or public API reaches. A behaviour a guest
+  boundary reaches is an e2e row, and a new in-crate loopback server is the
+  signal to extend the fake instead.
 - **Real-service tests are `#[ignore]`-gated live tests** in `tests/live.rs`,
   env/credential-gated, driving the backend's `XxxClient` against a real
   service. They never run (or spawn a process) in CI. Exemplar:

@@ -107,7 +107,7 @@ async fn connect() -> Sandbox {
 // The install prefix of each tool under the host's `$HOME`, spelled
 // `~/`-relative. The scratch `HOME` hides it, and `<prefix>/bin/<tool>` is
 // how nvm, volta, and fnm lay a tool.
-fn toolchain_roots() -> Vec<String> {
+fn prefixes() -> Vec<String> {
     let home = home();
     let mut roots = Vec::new();
     for tool in ["node", "npm"] {
@@ -128,7 +128,7 @@ fn toolchain_roots() -> Vec<String> {
 fn toolchain(egress: Vec<String>) -> Grant {
     Grant {
         egress,
-        read: toolchain_roots(),
+        read: prefixes(),
         ..Grant::default()
     }
 }

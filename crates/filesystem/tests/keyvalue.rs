@@ -57,7 +57,7 @@ async fn round_trip() {
 }
 
 #[tokio::test]
-async fn same_named_disjoint() {
+async fn shared_name() {
     let root = TempDir::new().expect("tempdir");
     let store = client(&root);
     let bucket = state(&store).await;
@@ -79,7 +79,7 @@ async fn same_named_disjoint() {
 }
 
 #[tokio::test]
-async fn names_sanitized() {
+async fn invalid_names() {
     let root = TempDir::new().expect("tempdir");
     let store = client(&root);
     let bucket = state(&store).await;

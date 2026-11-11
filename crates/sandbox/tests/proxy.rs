@@ -199,7 +199,7 @@ async fn plain_http() {
 }
 
 #[tokio::test]
-async fn proxy_env() {
+async fn environment() {
     let sandbox = connect(Options::default()).await;
     let output = support::run(&support::session(&sandbox, None).await, "env").await;
     let env = String::from_utf8_lossy(&output.stdout).into_owned();

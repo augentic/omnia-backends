@@ -12,7 +12,7 @@ use omnia_wasi_identity::{Identity, IdentityClient};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an ambient Azure credential; run with --run-ignored"]
-async fn acquires_token() -> Result<()> {
+async fn get_token() -> Result<()> {
     let client = <Client as Connect>::connect().await?;
     let identity: std::sync::Arc<dyn Identity> =
         client.get_identity("omnia-live".to_owned()).await?;

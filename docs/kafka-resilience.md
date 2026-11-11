@@ -204,7 +204,7 @@ consequences:
 
 Tests: `Payload::decode` unit tests (`encode_decode`, `wrong_magic_byte`,
 `unframed_payload_is_not_decoded`), and the live test
-`registry_unframed_payload`.
+`registry_unframed`.
 
 ### 2. Schema registry — cache by id, fail loudly
 

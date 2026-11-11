@@ -91,23 +91,6 @@ fn into_params(params: &[DataType]) -> anyhow::Result<Vec<Param>> {
     params.iter().map(into_param).collect()
 }
 
-fn parse_date(source: Option<&str>) -> anyhow::Result<Option<NaiveDate>> {
-    source.map(|s| NaiveDate::from_str(s).context("invalid date format")).transpose()
-}
-
-fn parse_time(source: Option<&str>) -> anyhow::Result<Option<NaiveTime>> {
-    source.map(|s| NaiveTime::from_str(s).context("invalid time format")).transpose()
-}
-
-fn parse_timestamp_naive(source: Option<&str>) -> anyhow::Result<Option<NaiveDateTime>> {
-    source
-        .map(|s| {
-            NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-                .context("invalid naive timestamp format")
-        })
-        .transpose()
-}
-
 fn into_param(value: &DataType) -> anyhow::Result<Param> {
     let pg_value = match value {
         DataType::Int32(v) => PgType::Int32(*v),
@@ -148,6 +131,23 @@ fn into_param(value: &DataType) -> anyhow::Result<Param> {
     };
 
     Ok(Box::new(pg_value) as Param)
+}
+
+fn parse_date(source: Option<&str>) -> anyhow::Result<Option<NaiveDate>> {
+    source.map(|s| NaiveDate::from_str(s).context("invalid date format")).transpose()
+}
+
+fn parse_time(source: Option<&str>) -> anyhow::Result<Option<NaiveTime>> {
+    source.map(|s| NaiveTime::from_str(s).context("invalid time format")).transpose()
+}
+
+fn parse_timestamp_naive(source: Option<&str>) -> anyhow::Result<Option<NaiveDateTime>> {
+    source
+        .map(|s| {
+            NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                .context("invalid naive timestamp format")
+        })
+        .transpose()
 }
 
 fn into_wasi_row(pg_row: &PgRow, idx: usize) -> anyhow::Result<Row> {

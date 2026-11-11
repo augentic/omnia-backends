@@ -15,17 +15,6 @@ use std::fmt::Write;
 use anyhow::bail;
 use omnia_wasi_docstore::{ComparisonOp, FilterTree, ScalarValue};
 
-// A property name is emitted unquoted, so it must be a bare identifier.
-fn validate_field(field: &str) -> anyhow::Result<()> {
-    if field.is_empty()
-        || !field.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        || !field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        bail!("invalid OData property name: '{field}' — must match [A-Za-z_][A-Za-z0-9_]*");
-    }
-    Ok(())
-}
-
 /// Translate a [`FilterTree`] to an `OData` `$filter` string.
 ///
 /// # Errors
@@ -105,6 +94,17 @@ pub fn to_odata(filter: &FilterTree) -> anyhow::Result<String> {
             )
         }
     }
+}
+
+// A property name is emitted unquoted, so it must be a bare identifier.
+fn validate_field(field: &str) -> anyhow::Result<()> {
+    if field.is_empty()
+        || !field.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        || !field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        bail!("invalid OData property name: '{field}' — must match [A-Za-z_][A-Za-z0-9_]*");
+    }
+    Ok(())
 }
 
 const fn odata_op(op: ComparisonOp) -> &'static str {

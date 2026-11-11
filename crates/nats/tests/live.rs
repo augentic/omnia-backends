@@ -17,7 +17,7 @@ use omnia_wasi_messaging::{Endpoint, Message, MessagingClient};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable NATS server (NATS_ADDR); run with --run-ignored"]
-async fn publishes_message() -> Result<()> {
+async fn publish() -> Result<()> {
     let backend = <Client as Connect>::connect().await?;
     let producer: Arc<dyn Endpoint> = MessagingClient::endpoint(&backend).await?;
 

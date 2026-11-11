@@ -10,46 +10,6 @@ pub type Stored = (String, i32, i64);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Ticket(u64);
 
-// One record the host has been given, or that is waiting on an earlier
-// record in its partition. `sends_before` is meaningful once `done` is set:
-// every produce numbered below it has to be delivered before the record is
-// resolved.
-struct Pending {
-    ticket: Ticket,
-    done: bool,
-    sends_before: usize,
-}
-
-impl Pending {
-    const fn resolved(&self, delivered: usize) -> bool {
-        self.done && self.sends_before <= delivered
-    }
-}
-
-// A partition's state, kept from its first record or assignment for the
-// life of the tracker. A revoke empties it rather than removing it, so a
-// record pulled before the revoke is still dropped when it comes.
-#[derive(Default)]
-struct Partition {
-    revoked: bool,
-    pending: BTreeMap<i64, Pending>,
-}
-
-impl Partition {
-    // The leading records that are done with their sends delivered leave;
-    // the last of them is the new resolved offset.
-    fn resolve(&mut self, delivered: usize) -> Option<i64> {
-        let mut last = None;
-        while let Some(entry) = self.pending.first_entry()
-            && entry.get().resolved(delivered)
-        {
-            last = Some(*entry.key());
-            entry.remove();
-        }
-        last
-    }
-}
-
 // The highest offset with every record before it done. Records finish out
 // of order (up to the in-flight bound), and librdkafka only commits a higher
 // offset than the last one, so a finished-but-gapped offset is remembered
@@ -163,5 +123,45 @@ impl Tracker {
             }
         }
         stored
+    }
+}
+
+// A partition's state, kept from its first record or assignment for the
+// life of the tracker. A revoke empties it rather than removing it, so a
+// record pulled before the revoke is still dropped when it comes.
+#[derive(Default)]
+struct Partition {
+    revoked: bool,
+    pending: BTreeMap<i64, Pending>,
+}
+
+impl Partition {
+    // The leading records that are done with their sends delivered leave;
+    // the last of them is the new resolved offset.
+    fn resolve(&mut self, delivered: usize) -> Option<i64> {
+        let mut last = None;
+        while let Some(entry) = self.pending.first_entry()
+            && entry.get().resolved(delivered)
+        {
+            last = Some(*entry.key());
+            entry.remove();
+        }
+        last
+    }
+}
+
+// One record the host has been given, or that is waiting on an earlier
+// record in its partition. `sends_before` is meaningful once `done` is set:
+// every produce numbered below it has to be delivered before the record is
+// resolved.
+struct Pending {
+    ticket: Ticket,
+    done: bool,
+    sends_before: usize,
+}
+
+impl Pending {
+    const fn resolved(&self, delivered: usize) -> bool {
+        self.done && self.sends_before <= delivered
     }
 }

@@ -38,17 +38,6 @@ pub struct Completion {
     emitted: bool,
 }
 
-impl From<&Turn> for Completion {
-    fn from(turn: &Turn) -> Self {
-        tracing::debug!(
-            prompt_bytes = turn.prompt.text.len(),
-            mcp = turn.agent.options.mcp_servers.len(),
-            "completion started"
-        );
-        Self::new()
-    }
-}
-
 impl Completion {
     fn new() -> Self {
         Self {
@@ -174,10 +163,25 @@ impl Completion {
     }
 }
 
+impl From<&Turn> for Completion {
+    fn from(turn: &Turn) -> Self {
+        tracing::debug!(
+            prompt_bytes = turn.prompt.text.len(),
+            mcp = turn.agent.options.mcp_servers.len(),
+            "completion started"
+        );
+        Self::new()
+    }
+}
+
 impl Drop for Completion {
     fn drop(&mut self) {
         self.finish(Outcome::Abort);
     }
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 // The tokens a completion has been billed so far, every send together. The
@@ -190,19 +194,6 @@ struct Bill {
     output: u64,
     reasoning: u64,
     total: Option<u64>,
-}
-
-impl From<&TokenUsage> for Bill {
-    fn from(usage: &TokenUsage) -> Self {
-        Self {
-            input: count(usage.input_tokens),
-            cache_read: count(usage.cache_read_tokens.unwrap_or(0)),
-            cache_write: count(usage.cache_write_tokens.unwrap_or(0)),
-            output: count(usage.output_tokens),
-            reasoning: count(usage.reasoning_tokens.unwrap_or(0)),
-            total: usage.total_tokens.map(count),
-        }
-    }
 }
 
 impl Bill {
@@ -229,13 +220,22 @@ impl Bill {
     }
 }
 
+impl From<&TokenUsage> for Bill {
+    fn from(usage: &TokenUsage) -> Self {
+        Self {
+            input: count(usage.input_tokens),
+            cache_read: count(usage.cache_read_tokens.unwrap_or(0)),
+            cache_write: count(usage.cache_write_tokens.unwrap_or(0)),
+            output: count(usage.output_tokens),
+            reasoning: count(usage.reasoning_tokens.unwrap_or(0)),
+            total: usage.total_tokens.map(count),
+        }
+    }
+}
+
 // A wire count booked on the bill: negatives become 0.
 fn count(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
-}
-
-fn millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl From<TokenUsage> for Usage {

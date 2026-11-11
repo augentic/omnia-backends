@@ -9,8 +9,6 @@ use omnia_wasi_keyvalue::{Bucket, Cas, FutureResult, KeyValueClient};
 
 use crate::Client;
 
-const MAX_INCREMENT_RETRIES: usize = 64;
-
 impl KeyValueClient for Client {
     fn open_bucket(&self, identifier: String) -> FutureResult<Arc<dyn Bucket>> {
         tracing::trace!("opening bucket: {identifier}");
@@ -38,6 +36,8 @@ impl KeyValueClient for Client {
         .boxed()
     }
 }
+
+const MAX_INCREMENT_RETRIES: usize = 64;
 
 #[derive(Debug)]
 struct KvBucket(kv::Store);

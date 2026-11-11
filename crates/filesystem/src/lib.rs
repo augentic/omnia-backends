@@ -20,15 +20,6 @@ pub struct Client {
     locks: keyvalue::LockRegistry,
 }
 
-impl Connect for Client {
-    type ConnectOptions = ConnectOptions;
-
-    #[instrument(name = "Filesystem::connect")]
-    async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        Self::open(options.root)
-    }
-}
-
 impl Client {
     /// Opens a store, creating its root directory when absent.
     ///
@@ -44,6 +35,15 @@ impl Client {
             root,
             locks: Arc::default(),
         })
+    }
+}
+
+impl Connect for Client {
+    type ConnectOptions = ConnectOptions;
+
+    #[instrument(name = "Filesystem::connect")]
+    async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
+        Self::open(options.root)
     }
 }
 

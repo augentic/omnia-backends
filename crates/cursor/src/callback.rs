@@ -126,6 +126,17 @@ async fn serve(listener: TcpListener, handler: Arc<Handler>) {
     }
 }
 
+fn gen_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| anyhow::anyhow!("gathering entropy: {error}"))?;
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // writing to a `String` cannot fail
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(hex)
+}
+
 // One worker's callback identity: the URL and bearer token it is
 // started with, and the agents routed under that token.
 #[must_use]
@@ -270,6 +281,20 @@ impl Handler {
 impl fmt::Debug for Handler {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Handler").field("workers", &lock(&self.workers).len()).finish()
+    }
+}
+
+// Read and discard up to `limit` body bytes; an oversize or failing body is
+// abandoned where it stands.
+async fn drain(mut body: Incoming, limit: usize) {
+    let mut seen = 0;
+    while let Some(Ok(frame)) = body.frame().await {
+        if let Ok(data) = frame.into_data() {
+            seen += data.len();
+            if seen > limit {
+                break;
+            }
+        }
     }
 }
 
@@ -420,31 +445,6 @@ impl ToolCall {
         }
         Ok(call)
     }
-}
-
-// Read and discard up to `limit` body bytes; an oversize or failing body is
-// abandoned where it stands.
-async fn drain(mut body: Incoming, limit: usize) {
-    let mut seen = 0;
-    while let Some(Ok(frame)) = body.frame().await {
-        if let Ok(data) = frame.into_data() {
-            seen += data.len();
-            if seen > limit {
-                break;
-            }
-        }
-    }
-}
-
-fn gen_token() -> Result<String> {
-    let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).map_err(|error| anyhow::anyhow!("gathering entropy: {error}"))?;
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        // writing to a `String` cannot fail
-        let _ = write!(hex, "{byte:02x}");
-    }
-    Ok(hex)
 }
 
 // The SDK wants a JSON object for a tool result; anything else the tool

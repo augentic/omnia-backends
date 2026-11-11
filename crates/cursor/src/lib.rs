@@ -71,14 +71,6 @@ impl Connect for Client {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn elapsed_ms(since: Instant) -> u64 {
-    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
     use std::path::PathBuf;
@@ -151,4 +143,12 @@ impl omnia::FromEnv for ConnectOptions {
             .finalize()
             .context("issue loading connection options")
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }

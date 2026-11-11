@@ -24,6 +24,33 @@ pub struct Client {
     worktrees: Arc<Mutex<BTreeMap<PathBuf, PathBuf>>>,
 }
 
+impl Client {
+    // Record the gitdir a working copy at `at` was laid with.
+    fn register(&self, at: &Place, gitdir: PathBuf) {
+        if let Some(worktree) = worktree_key(at) {
+            self.worktrees().insert(worktree, gitdir);
+        }
+    }
+
+    // Drop a working copy's gitdir once the copy is gone, or once the place
+    // is laid afresh as a repository of its own.
+    fn forget(&self, at: &Place) {
+        if let Some(worktree) = worktree_key(at) {
+            self.worktrees().remove(&worktree);
+        }
+    }
+
+    // The gitdir a working copy at `at` is addressed through, none for a
+    // place this client did not lay.
+    fn gitdir(&self, at: &Place) -> Option<PathBuf> {
+        worktree_key(at).and_then(|worktree| self.worktrees().get(&worktree).cloned())
+    }
+
+    fn worktrees(&self) -> MutexGuard<'_, BTreeMap<PathBuf, PathBuf>> {
+        self.worktrees.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
@@ -49,33 +76,6 @@ impl Connect for Client {
         );
 
         Ok(client)
-    }
-}
-
-impl Client {
-    // Record the gitdir a working copy at `at` was laid with.
-    fn register(&self, at: &Place, gitdir: PathBuf) {
-        if let Some(worktree) = worktree_key(at) {
-            self.worktrees().insert(worktree, gitdir);
-        }
-    }
-
-    // Drop a working copy's gitdir once the copy is gone, or once the place
-    // is laid afresh as a repository of its own.
-    fn forget(&self, at: &Place) {
-        if let Some(worktree) = worktree_key(at) {
-            self.worktrees().remove(&worktree);
-        }
-    }
-
-    // The gitdir a working copy at `at` is addressed through, none for a
-    // place this client did not lay.
-    fn gitdir(&self, at: &Place) -> Option<PathBuf> {
-        worktree_key(at).and_then(|worktree| self.worktrees().get(&worktree).cloned())
-    }
-
-    fn worktrees(&self) -> MutexGuard<'_, BTreeMap<PathBuf, PathBuf>> {
-        self.worktrees.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

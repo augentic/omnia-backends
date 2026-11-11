@@ -199,7 +199,7 @@ async fn keyless_complete() {
 // there follows where the lend sits: a lend under a shell root runs with a
 // shell, the same lend under a client naming no shell root reads alone.
 #[tokio::test]
-async fn shell_on_shell_root() {
+async fn shell_root() {
     let fake = Spawnable::new(&Config::echo());
     let under = connect(ConnectOptions {
         shell_roots: vec![fake.home().to_path_buf()],
@@ -245,7 +245,7 @@ async fn grant_without_shell() {
 // deployment set — ends the completion as the request's fault, nothing
 // spawned for it.
 #[test]
-fn worker_grant_laid() {
+fn grant_under_home() {
     under_home(async |home| {
         std::fs::create_dir(home.join("tools")).expect("a read root");
         std::fs::write(home.join("tools/marker.txt"), "granted\n").expect("a file to read");
@@ -580,7 +580,7 @@ async fn hang_on_create() {
 }
 
 #[tokio::test]
-async fn create_returns_empty_id() {
+async fn empty_agent_id() {
     let fake = Spawnable::new(&Config::echo().fault(Fault::EmptyId));
     let client = spawning(&fake, 1).await;
     expect_error("returned an empty agent id", &[], &client).await;
@@ -998,7 +998,7 @@ async fn stream_reset_twice() {
 // A run that streams for a few seconds keeps its agent live while the test
 // knocks on the endpoint the way a misbehaving worker would.
 #[tokio::test]
-async fn callback_rejections() {
+async fn stray_callbacks() {
     let fake = Spawnable::new(&Config::paced(200, 20, Then::Finish));
     let client = spawning(&fake, 1).await;
     let guest = echo_guest(&client);

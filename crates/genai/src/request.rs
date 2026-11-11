@@ -50,10 +50,25 @@ impl PreparedRequest {
     }
 }
 
-fn prompt_bytes(request: &Request) -> u64 {
-    let bytes = request.system.as_deref().map_or(0, str::len)
-        + request.messages.iter().map(|message| message.content.len()).sum::<usize>();
-    u64::try_from(bytes).unwrap_or(u64::MAX)
+// The provider's response format and the validator the same schema builds,
+// parsed once.
+fn translate_format(format: &Format) -> Result<(Option<ChatResponseFormat>, Option<Validator>)> {
+    let spec = match format {
+        Format::Text => return Ok((None, None)),
+        Format::Json => return Ok((Some(ChatResponseFormat::JsonMode), None)),
+        Format::Schema(spec) => spec,
+    };
+    let schema: Value = serde_json::from_str(&spec.schema).map_err(|error| {
+        Error::InvalidRequest(format!("format schema is not valid JSON: {error}"))
+    })?;
+    let validator = jsonschema::validator_for(&schema).map_err(|error| {
+        Error::InvalidRequest(format!(
+            "format schema `{}` is not a valid JSON Schema: {error}",
+            spec.name
+        ))
+    })?;
+    let json_spec = JsonSpec::new(spec.name.clone(), schema);
+    Ok((Some(ChatResponseFormat::JsonSpec(json_spec)), Some(validator)))
 }
 
 fn chat_request(request: &Request, access: Access) -> Result<ChatRequest> {
@@ -109,27 +124,6 @@ fn function_tool(function: &Function) -> Result<Tool> {
         .with_schema(schema))
 }
 
-// The provider's response format and the validator the same schema builds,
-// parsed once.
-fn translate_format(format: &Format) -> Result<(Option<ChatResponseFormat>, Option<Validator>)> {
-    let spec = match format {
-        Format::Text => return Ok((None, None)),
-        Format::Json => return Ok((Some(ChatResponseFormat::JsonMode), None)),
-        Format::Schema(spec) => spec,
-    };
-    let schema: Value = serde_json::from_str(&spec.schema).map_err(|error| {
-        Error::InvalidRequest(format!("format schema is not valid JSON: {error}"))
-    })?;
-    let validator = jsonschema::validator_for(&schema).map_err(|error| {
-        Error::InvalidRequest(format!(
-            "format schema `{}` is not a valid JSON Schema: {error}",
-            spec.name
-        ))
-    })?;
-    let json_spec = JsonSpec::new(spec.name.clone(), schema);
-    Ok((Some(ChatResponseFormat::JsonSpec(json_spec)), Some(validator)))
-}
-
 fn chat_options(
     request: &Request, max_tokens: u32, response_format: Option<ChatResponseFormat>,
 ) -> ChatOptions {
@@ -172,4 +166,10 @@ const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
         Effort::Medium => ReasoningEffort::Medium,
         Effort::High => ReasoningEffort::High,
     }
+}
+
+fn prompt_bytes(request: &Request) -> u64 {
+    let bytes = request.system.as_deref().map_or(0, str::len)
+        + request.messages.iter().map(|message| message.content.len()).sum::<usize>();
+    u64::try_from(bytes).unwrap_or(u64::MAX)
 }

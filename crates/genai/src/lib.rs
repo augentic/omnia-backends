@@ -88,10 +88,6 @@ impl Connect for Client {
     }
 }
 
-fn elapsed_ms(since: Instant) -> u64 {
-    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
     use std::path::PathBuf;
@@ -157,23 +153,6 @@ mod config {
 }
 pub use config::ConnectOptions;
 
-impl Default for ConnectOptions {
-    fn default() -> Self {
-        Self {
-            model: "gpt-5.5".to_owned(),
-            endpoint: None,
-            shell_roots: Vec::new(),
-            max_rounds: 128,
-            max_tool_calls: 128,
-            max_candidates: 2,
-            max_repeats: 5,
-            max_tokens: 32_768,
-            timeout_secs: 600,
-            shell_timeout_secs: 600,
-        }
-    }
-}
-
 // Stay under uvicorn's 5s keep-alive timeout to avoid racing server-side close.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -212,8 +191,29 @@ impl ConnectOptions {
     }
 }
 
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            model: "gpt-5.5".to_owned(),
+            endpoint: None,
+            shell_roots: Vec::new(),
+            max_rounds: 128,
+            max_tool_calls: 128,
+            max_candidates: 2,
+            max_repeats: 5,
+            max_tokens: 32_768,
+            timeout_secs: 600,
+            shell_timeout_secs: 600,
+        }
+    }
+}
+
 impl omnia::FromEnv for ConnectOptions {
     fn load_env() -> Result<Self> {
         Self::from_env().finalize().context("issue loading connection options")
     }
+}
+
+fn elapsed_ms(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }

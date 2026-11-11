@@ -179,49 +179,6 @@ fn rule_for(path: &str, rules: &[Rule]) -> Option<Strategy> {
     rules.iter().find(|rule| matches(&rule.paths, path)).map(|rule| rule.strategy)
 }
 
-// One side's changes since the merge base: every path it changed, a rename
-// as both of its paths, and the renames themselves.
-#[derive(Default)]
-struct TreeDiff {
-    paths: BTreeSet<String>,
-    renames: Vec<(String, String)>,
-}
-
-impl TreeDiff {
-    // The paths both sides changed, the renames followed: where one side
-    // renamed a path the other changed, the new path is theirs both too,
-    // since the merge carries that change to it.
-    fn shared(&self, other: &Self) -> BTreeSet<String> {
-        let mut shared: BTreeSet<String> = self.paths.intersection(&other.paths).cloned().collect();
-        let followed = self
-            .renames
-            .iter()
-            .filter(|(old, _)| other.paths.contains(old))
-            .chain(other.renames.iter().filter(|(old, _)| self.paths.contains(old)))
-            .map(|(_, new)| new.clone());
-        shared.extend(followed);
-        shared
-    }
-}
-
-// The `-z` records of `diff --name-status --find-renames`: a status and its
-// path, or for a rename the old path and the new.
-fn parse_tree_diff(output: &str) -> TreeDiff {
-    let mut diff = TreeDiff::default();
-    let mut fields = output.split('\0');
-    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
-        if status.starts_with('R') {
-            let Some(new) = fields.next() else {
-                break;
-            };
-            diff.paths.insert(new.to_owned());
-            diff.renames.push((path.to_owned(), new.to_owned()));
-        }
-        diff.paths.insert(path.to_owned());
-    }
-    diff
-}
-
 // A glob over root-relative paths, in gitignore's reading: a pattern with no
 // slash matches the path's final component at any depth, one with a slash is
 // anchored to the root; `?` and `*` stay within a component, `**/` crosses
@@ -336,4 +293,47 @@ fn glob(pattern: &[u8], text: &[u8]) -> bool {
         std::mem::swap(&mut row, &mut next);
     }
     row[text.len()]
+}
+
+// One side's changes since the merge base: every path it changed, a rename
+// as both of its paths, and the renames themselves.
+#[derive(Default)]
+struct TreeDiff {
+    paths: BTreeSet<String>,
+    renames: Vec<(String, String)>,
+}
+
+impl TreeDiff {
+    // The paths both sides changed, the renames followed: where one side
+    // renamed a path the other changed, the new path is theirs both too,
+    // since the merge carries that change to it.
+    fn shared(&self, other: &Self) -> BTreeSet<String> {
+        let mut shared: BTreeSet<String> = self.paths.intersection(&other.paths).cloned().collect();
+        let followed = self
+            .renames
+            .iter()
+            .filter(|(old, _)| other.paths.contains(old))
+            .chain(other.renames.iter().filter(|(old, _)| self.paths.contains(old)))
+            .map(|(_, new)| new.clone());
+        shared.extend(followed);
+        shared
+    }
+}
+
+// The `-z` records of `diff --name-status --find-renames`: a status and its
+// path, or for a rename the old path and the new.
+fn parse_tree_diff(output: &str) -> TreeDiff {
+    let mut diff = TreeDiff::default();
+    let mut fields = output.split('\0');
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        if status.starts_with('R') {
+            let Some(new) = fields.next() else {
+                break;
+            };
+            diff.paths.insert(new.to_owned());
+            diff.renames.push((path.to_owned(), new.to_owned()));
+        }
+        diff.paths.insert(path.to_owned());
+    }
+    diff
 }

@@ -24,14 +24,6 @@ pub struct Discovery {
     protocol: Protocol,
 }
 
-impl FromStr for Discovery {
-    type Err = anyhow::Error;
-
-    fn from_str(payload: &str) -> Result<Self> {
-        serde_json::from_str(payload).context("parsing discovery payload")
-    }
-}
-
 impl Discovery {
     pub fn base_url(&self) -> Result<String> {
         if let Some(url) = &self.url {
@@ -65,6 +57,14 @@ impl Discovery {
             .with_context(|| format!("reading token file {path}"))?;
 
         Ok(token.trim().to_owned())
+    }
+}
+
+impl FromStr for Discovery {
+    type Err = anyhow::Error;
+
+    fn from_str(payload: &str) -> Result<Self> {
+        serde_json::from_str(payload).context("parsing discovery payload")
     }
 }
 

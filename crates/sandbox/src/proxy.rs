@@ -147,45 +147,6 @@ impl fmt::Display for DeniedAddress {
     }
 }
 
-// The addresses the host's own interfaces hold right now.
-#[expect(unsafe_code, reason = "`getifaddrs` has no safe wrapper")]
-fn own_addresses() -> Result<Vec<IpAddr>> {
-    let mut head = MaybeUninit::<*mut libc::ifaddrs>::uninit();
-    // SAFETY: `getifaddrs` writes `head` as it succeeds, a list `freeifaddrs`
-    // releases; the list is walked before it is released and never after.
-    unsafe {
-        if libc::getifaddrs(head.as_mut_ptr()) != 0 {
-            return Err(std::io::Error::last_os_error()).context("enumerating the interfaces");
-        }
-
-        let head = head.assume_init();
-        let mut addresses = Vec::new();
-        let mut entry = head;
-
-        while !entry.is_null() {
-            let current = &*entry;
-            if !current.ifa_addr.is_null() {
-                match i32::from((*current.ifa_addr).sa_family) {
-                    libc::AF_INET => {
-                        let socket = &*current.ifa_addr.cast::<libc::sockaddr_in>();
-                        let octets = socket.sin_addr.s_addr.to_ne_bytes();
-                        addresses.push(IpAddr::V4(Ipv4Addr::from(octets)));
-                    }
-                    libc::AF_INET6 => {
-                        let socket = &*current.ifa_addr.cast::<libc::sockaddr_in6>();
-                        addresses.push(IpAddr::V6(Ipv6Addr::from(socket.sin6_addr.s6_addr)));
-                    }
-                    _ => {}
-                }
-            }
-            entry = current.ifa_next;
-        }
-
-        libc::freeifaddrs(head);
-        Ok(addresses)
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 struct Allowlist(Vec<Entry>);
 
@@ -391,6 +352,45 @@ fn own() -> Vec<IpAddr> {
         tracing::warn!(error = format!("{error:#}"), "egress cannot read the host's addresses");
         Vec::new()
     })
+}
+
+// The addresses the host's own interfaces hold right now.
+#[expect(unsafe_code, reason = "`getifaddrs` has no safe wrapper")]
+fn own_addresses() -> Result<Vec<IpAddr>> {
+    let mut head = MaybeUninit::<*mut libc::ifaddrs>::uninit();
+    // SAFETY: `getifaddrs` writes `head` as it succeeds, a list `freeifaddrs`
+    // releases; the list is walked before it is released and never after.
+    unsafe {
+        if libc::getifaddrs(head.as_mut_ptr()) != 0 {
+            return Err(std::io::Error::last_os_error()).context("enumerating the interfaces");
+        }
+
+        let head = head.assume_init();
+        let mut addresses = Vec::new();
+        let mut entry = head;
+
+        while !entry.is_null() {
+            let current = &*entry;
+            if !current.ifa_addr.is_null() {
+                match i32::from((*current.ifa_addr).sa_family) {
+                    libc::AF_INET => {
+                        let socket = &*current.ifa_addr.cast::<libc::sockaddr_in>();
+                        let octets = socket.sin_addr.s_addr.to_ne_bytes();
+                        addresses.push(IpAddr::V4(Ipv4Addr::from(octets)));
+                    }
+                    libc::AF_INET6 => {
+                        let socket = &*current.ifa_addr.cast::<libc::sockaddr_in6>();
+                        addresses.push(IpAddr::V6(Ipv6Addr::from(socket.sin6_addr.s6_addr)));
+                    }
+                    _ => {}
+                }
+            }
+            entry = current.ifa_next;
+        }
+
+        libc::freeifaddrs(head);
+        Ok(addresses)
+    }
 }
 
 async fn connect(addresses: Vec<SocketAddr>) -> Result<TcpStream> {

@@ -144,13 +144,13 @@ async fn fanout(client: &Client, agents: usize, pids: &SpawnedPids) -> Result<()
 // four, so nothing here queues.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn live_fanout() -> Result<()> {
+async fn single_fanout() -> Result<()> {
     let pids = SpawnedPids::install();
     let client = connect().await?;
     fanout(&client, 4, &pids).await
 }
 
-// `live_fanout` twenty times over on one client: a worker exiting under the
+// `single_fanout` twenty times over on one client: a worker exiting under the
 // fan-out fails its completion, and a lease that does not release leaves its
 // process up, and a slot closed, for the next round.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -400,7 +400,7 @@ fn secret_request(url: String) -> Request {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn uses_mcp() -> Result<()> {
+async fn mcp_tool() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     tokio::spawn(serve(listener));

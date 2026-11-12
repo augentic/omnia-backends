@@ -94,11 +94,17 @@ so the policy splits into three tiers:
     flag.
   - **Other backends join this tier through `omnia_test::host::Backends`'
     per-host setters** (`Backends::defaults().await.keyvalue(client)`,
-    `.blobstore(..)`, `.sql(..)`, …): a redis/postgres/nats suite runs the
-    same shape over the real client behind a service-up env gate, since no
-    honest in-process fake of those services exists. The setters shipped in
-    `omnia-test` 0.36.0; the redis/postgres/nats suites themselves are not
-    built yet.
+    `.blobstore(..)`, `.sql(..)`, …). Every key-value backend runs the
+    `omnia_sdk::contract::state` rows from
+    `programs/keyvalue/state_store.rs`, through
+    `test_programs::foreach_keyvalue!()`:
+    - filesystem over a temporary root in `tests/keyvalue.rs`, so in CI;
+    - redis and nats over the real client, as the `#[ignore]`d
+      `keyvalue_state_store` in `tests/live.rs`, since no honest in-process
+      fake of those services exists. The row empties the `default` and
+      `second` buckets, so it runs against a local server only.
+
+    A postgres suite is not built yet.
 - **Unit tests are the exception, and none exist today.** No file under
   `crates/*/src` carries a `#[cfg(test)]` module. Cursor's ready-line and
   Connect-frame parsing and genai's request translation are asserted by

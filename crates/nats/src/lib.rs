@@ -21,6 +21,7 @@ pub struct Client {
     topics: Option<Vec<String>>,
     topic_prefix: String,
     kv_max_age: Option<Duration>,
+    kv_buckets: keyvalue::Buckets,
 }
 
 impl fmt::Debug for Client {
@@ -29,6 +30,7 @@ impl fmt::Debug for Client {
             .field("topics", &self.topics)
             .field("topic_prefix", &self.topic_prefix)
             .field("kv_max_age", &self.kv_max_age)
+            .field("kv_buckets", &self.kv_buckets)
             .finish_non_exhaustive()
     }
 }
@@ -42,6 +44,7 @@ impl Connect for Client {
             options.jwt.is_some() == options.seed.is_some(),
             "NATS_JWT and NATS_SEED must be set together"
         );
+        let kv_buckets = keyvalue::Buckets::declare(options.buckets)?;
         let mut nats_opts = async_nats::ConnectOptions::new();
 
         if let Some(jwt) = &options.jwt
@@ -64,6 +67,7 @@ impl Connect for Client {
             topics: options.topics,
             topic_prefix: options.topic_prefix.unwrap_or_default(),
             kv_max_age: options.kv_max_age_secs.map(Duration::from_secs),
+            kv_buckets,
         })
     }
 }
@@ -98,6 +102,9 @@ mod config {
         /// this client creates (`NATS_KV_MAX_AGE_SECS`, default none).
         #[env(from = "NATS_KV_MAX_AGE_SECS")]
         pub kv_max_age_secs: Option<u64>,
+        /// Key-value buckets a guest may open, comma-separated.
+        #[env(from = "KEYVALUE_BUCKETS", default = "default", with = split)]
+        pub buckets: Vec<String>,
     }
 
     impl fmt::Debug for ConnectOptions {
@@ -109,6 +116,7 @@ mod config {
                 .field("jwt", &self.jwt.as_ref().map(|_| "<redacted>"))
                 .field("seed", &self.seed.as_ref().map(|_| "<redacted>"))
                 .field("kv_max_age_secs", &self.kv_max_age_secs)
+                .field("buckets", &self.buckets)
                 .finish()
         }
     }
@@ -117,7 +125,7 @@ mod config {
     fn split(s: &str) -> ParseResult<Vec<String>> {
         Ok(s.split(',')
             .map(str::trim)
-            .filter(|topic| !topic.is_empty())
+            .filter(|entry| !entry.is_empty())
             .map(ToOwned::to_owned)
             .collect())
     }

@@ -37,4 +37,6 @@ tracing.workspace = true
 # The live test (`tests/live.rs`) is a separate crate; it needs tokio's test
 # runtime features, which the library dependency does not enable.
 [dev-dependencies]
+omnia-test = { workspace = true, features = ["host"] }
+test-programs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

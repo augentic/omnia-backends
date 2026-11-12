@@ -28,4 +28,6 @@ redis = { version = "1.8.1", features = ["connection-manager", "tokio-rustls-com
 tracing.workspace = true
 
 [dev-dependencies]
+omnia-test = { workspace = true, features = ["host"] }
+test-programs.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

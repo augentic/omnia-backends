@@ -9,6 +9,36 @@ Uses `async-nats` with JetStream for key-value and object store capabilities. Su
 
 MSRV: Rust 1.99
 
+## Key-value
+
+- **Buckets.** A guest opens only the buckets `KEYVALUE_BUCKETS` declares, and any
+  other name fails with `not-found`. A bucket name holds only ASCII letters, digits,
+  `_`, and `-`. A declared bucket that does not exist yet is created when first
+  opened, with a history of one and a size limit of 100 mebibytes.
+- **Per-message TTL.** It needs NATS server 2.11 or later.
+  - A bucket the backend creates has it from the start.
+  - An existing bucket without it has it turned on when opened, which the server
+    cannot undo.
+  - If the server refuses, the bucket still opens, and a write with a TTL fails with
+    `unsupported`.
+- **Keys.** A key is not empty, neither starts nor ends with `.`, and holds only
+  `[-/_=.a-zA-Z0-9]`, so every portable key qualifies. Any other key fails with
+  `invalid`.
+- **TTLs.** An entry set without a TTL never expires, unless `NATS_KV_MAX_AGE_SECS`
+  caps it. A read checks the entry's deadline to the millisecond, rounded up, so it
+  never sees an entry past it. The server removes the entry up to a second later,
+  and `keys()` may list it until then.
+  - `set` replaces an entry's lifetime.
+  - `compare-and-swap` and `increment` apply their TTL only to an entry they create.
+    An update keeps the time the entry has left.
+- **Atomics.** `compare-and-swap` and `increment` are writes conditioned on the
+  key's revision, retried while another writer gets in first. Counters are 8-byte
+  big-endian `i64`s, and incrementing any other value, or past the `i64` range, fails
+  with `invalid`.
+- **Errors.** A timed-out or broken connection is `unavailable`. The server reports a
+  permissions violation out of band, so it too surfaces as a timeout. Anything else is
+  `other`.
+
 ## Configuration
 
 | Variable | Required | Default | Description |
@@ -18,7 +48,8 @@ MSRV: Rust 1.99
 | `NATS_TOPIC_PREFIX` | no | | Prefix prepended to every published and subscribed topic, and stripped from delivered subjects |
 | `NATS_JWT` | no | | JWT for authentication |
 | `NATS_SEED` | no | | `NKey` seed for signing |
-| `NATS_KV_MAX_AGE_SECS` | no | | Bucket-wide max age for each JetStream KV bucket this client creates; unset, keys persist until deleted |
+| `NATS_KV_MAX_AGE_SECS` | no | | Max age for each JetStream KV bucket this client creates, capping every entry's lifetime, even one set without a TTL; unset, an entry lives until deleted or its TTL passes |
+| `KEYVALUE_BUCKETS` | no | `default` | Comma-separated KV buckets a guest may open |
 
 ## Usage
 
@@ -52,16 +83,21 @@ let client = Client::connect_with(options).await?;
 
 ## Live tests
 
-[`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging` and `wasi-keyvalue`
-boundaries against a real server. It is `#[ignore]`d so it never runs in CI; run it
-explicitly (the default `NATS_ADDR` is the public `demo.nats.io`):
+[`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging` and `omnia:keyvalue`
+boundaries against a real server. `keyvalue_state_store` runs the shared `StateStore`
+rows from a real guest. The other key-value tests cover the atomics under contention
+and a bucket gaining per-message TTL when opened. Every test is `#[ignore]`d so it
+never runs in CI.
+
+The rows first empty the `default` and `second` buckets, so run a local server with
+JetStream. The destructive tests refuse the default `demo.nats.io`:
 
 ```bash
-# or run a local server with JetStream instead of the public demo instance:
-# docker run -d --name nats -p 4222:4222 nats:latest -js
+nats-server -js -sd "$(mktemp -d)" &
+# or: docker run -d --name nats -p 4222:4222 nats:latest -js
 
-NATS_ADDR=demo.nats.io \
-  cargo nextest run -p omnia-nats --run-ignored all
+NATS_ADDR=localhost:4222 \
+  cargo nextest run -p omnia-nats --all-features --run-ignored all
 ```
 
 ## License

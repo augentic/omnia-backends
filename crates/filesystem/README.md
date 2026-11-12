@@ -4,8 +4,8 @@ Filesystem provider for `wasi:blobstore` and `wasi:keyvalue`: durable,
 local, network-free storage over one shared root directory — the
 local-first counterpart to the network-service backends (Azure Blob, Redis,
 MongoDB, NATS). One `Client` serves both surfaces from disjoint subtrees of
-the root (`blobstore/` and `keyvalue/`), so same-named containers and
-buckets never collide. A local package store for the plugin loader is
+the root (`blobstore/`, and `keyvalue/` with its `keyvalue-ttl/` deadlines),
+so same-named containers and buckets never collide. A local package store for the plugin loader is
 omnia's own `FsStore`, named by the deployment's `plugins.store`, not a
 backend.
 
@@ -26,22 +26,35 @@ backend.
 
 ## Keyvalue
 
-- Buckets map to subdirectories of the `keyvalue/` subtree; keys may contain
-  `/` and map to nested paths beneath their bucket directory, sanitized as
-  above.
-- Writes are temp-file + atomic-rename, so a value is never observed torn.
-- Writers (`set`, `delete`, `swap`, `increment`) serialize on a per-key lock
-  shared by every bucket handle opened from one client. A stale swap never
-  overwrites and returns a handle refreshed at the observed value. Counter
-  values are 8-byte big-endian `i64`.
+- Buckets map to subdirectories of the `keyvalue/` subtree. A guest opens
+  only the buckets `KEYVALUE_BUCKETS` declares, and any other name fails with
+  `not-found`. A bucket name holds only ASCII letters, digits, `_`, and `-`.
+- Keys may contain `/` and map to nested paths beneath their bucket
+  directory, sanitized as above, so every portable key qualifies. Any other
+  key fails with `invalid`. Keys that differ only in case collide on a
+  case-insensitive filesystem, such as macOS's default.
+- Writes are temp-file + atomic-rename, so a value is never observed torn. A
+  value file holds only the caller's bytes.
+- An entry's deadline lives at the same path under `keyvalue-ttl/`, as unix
+  milliseconds rounded up, so it outlives the client that set it. An entry
+  past its deadline reads as absent, and the next call on its key removes it.
+  - `set` replaces an entry's lifetime.
+  - `compare-and-swap` and `increment` apply their TTL only to an entry they
+    create. An update keeps the time the entry has left.
+- Every call on a key serializes on a per-key lock shared by every bucket
+  handle opened from one client. Counter values are 8-byte big-endian `i64`,
+  and incrementing any other value, or past the `i64` range, fails with
+  `invalid`.
+- A permission-denied I/O error is `denied`. Anything else is `other`.
 - Scope: the lock serializes writers within one host process; a single
   process owns the root (the same assumption the blobstore makes).
 
 ## Configuration
 
-| Variable          | Required | Default          | Description                                       |
-| ----------------- | -------- | ---------------- | ------------------------------------------------- |
-| `FILESYSTEM_ROOT` | no       | `.omnia/storage` | Root directory of the store; created when absent. |
+| Variable           | Required | Default          | Description                                         |
+| ------------------ | -------- | ---------------- | --------------------------------------------------- |
+| `FILESYSTEM_ROOT`  | no       | `.omnia/storage` | Root directory of the store; created when absent.   |
+| `KEYVALUE_BUCKETS` | no       | `default`        | Comma-separated key-value buckets a guest may open. |
 
 ## Usage
 
@@ -62,4 +75,6 @@ omnia::runtime!({
 ```
 
 Deployments that anchor the root themselves (rather than through the
-environment) construct the backend with `Client::open(root)`.
+environment) construct the backend with `Client::open(root)`, which declares
+the `default` bucket alone. One that needs more buckets passes them with the
+root, through `Client::connect_with(ConnectOptions { root, buckets })`.

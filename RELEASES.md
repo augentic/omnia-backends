@@ -43,6 +43,21 @@ Unreleased
   cannot hold is `invalid`, a refused credential or permission is `denied`,
   and a lost or timed-out connection is `unavailable`. Anything else stays
   `other`.
+- **Breaking:** identities are declared. `omnia-azure-id` serves only the
+  names `IDENTITY_NAMES` lists (comma-separated, default `default`), and
+  fails any other. `default` is the host's system-assigned identity, or the
+  user-assigned one whose client id `IDENTITY_CLIENT_ID` gives. Each other
+  name takes its client id from `IDENTITY_CLIENT_ID__<NAME>`, and connecting
+  fails without it. To migrate:
+  - A guest that named an identity by its client id uses its unnamed handle,
+    with `IDENTITY_CLIENT_ID` set to that id. Or the deployment declares the
+    name it uses and maps it to the id.
+  - `ConnectOptions` gains an `identities` map, so the unit literal no longer
+    builds. Use `ConnectOptions::default()` or `load_env`.
+- `omnia-azure-id` creates one credential per identity at connect, so a
+  repeated request for a scope is answered from the credential's token
+  cache. A managed-identity source `azure_identity` does not support now
+  fails at connect, not at the first token request.
 
 ---
 

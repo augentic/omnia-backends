@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use azure_core::credentials::TokenCredential;
-use azure_identity::{ManagedIdentityCredential, ManagedIdentityCredentialOptions, UserAssignedId};
+use azure_identity::ManagedIdentityCredential;
 use futures::future::FutureExt;
 use omnia::FutureResult;
 use omnia_wasi_identity::{AccessToken, Identity, IdentityClient};
@@ -13,13 +13,12 @@ use crate::Client;
 impl IdentityClient for Client {
     fn get_identity(&self, name: String) -> FutureResult<Arc<dyn Identity>> {
         tracing::trace!("opening identity: {name}");
+        let credential = self.credentials.get(&name).map(Arc::clone);
 
         async move {
-            let options = ManagedIdentityCredentialOptions {
-                user_assigned_id: Some(UserAssignedId::ClientId(name.clone())),
-                ..Default::default()
+            let Some(credential) = credential else {
+                anyhow::bail!("identity `{name}` is not declared");
             };
-            let credential = ManagedIdentityCredential::new(Some(options))?;
             let identity = AzIdentity { name, credential };
             Ok(Arc::new(identity) as Arc<dyn Identity>)
         }
@@ -27,7 +26,6 @@ impl IdentityClient for Client {
     }
 }
 
-// A user-assigned managed identity, named by its client id.
 struct AzIdentity {
     name: String,
     credential: Arc<ManagedIdentityCredential>,

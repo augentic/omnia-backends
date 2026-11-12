@@ -45,8 +45,7 @@ impl PreparedRequest {
         self.chat
             .tools
             .as_ref()
-            .map(|tools| tools.iter().map(|tool| tool.name.to_string()).collect())
-            .unwrap_or_default()
+            .map_or_default(|tools| tools.iter().map(|tool| tool.name.to_string()).collect())
     }
 }
 

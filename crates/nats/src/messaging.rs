@@ -71,7 +71,7 @@ impl Endpoint for Client {
         let topic = format!("{}{topic}", self.topic_prefix);
 
         async move {
-            let nats_headers = message.metadata.as_ref().map(nats_headers).unwrap_or_default();
+            let nats_headers = message.metadata.as_ref().map_or_default(nats_headers);
             let timeout = options.and_then(|options| options.timeout);
 
             let request = async_nats::Request::new()

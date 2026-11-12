@@ -54,19 +54,20 @@ so the policy splits into three tiers:
 
 - **Guest-driven e2e over a protocol-faithful fake is the primary tier**
   wherever the service's protocol is small enough to fake honestly — today
-  the `cursor` and `genai` model backends. A real guest component from
-  [crates/test-programs](crates/test-programs) (compiled for `wasm32-wasip2`
-  by that crate's own build script) runs through
+  the `cursor` and `genai` model backends and `azure-id`. A real guest
+  component from [crates/test-programs](crates/test-programs) (compiled for
+  `wasm32-wasip2` by that crate's own build script) runs through
   `omnia_test::host::Deployment` over the backend's `Client`, whose service
   is a fake the test owns: `fake-cursor-sdk-bridge` for cursor (a binary
   linked onto the test process's `PATH` as `cursor-sdk-bridge`, which the
   client spawns as one process per lease exactly as it spawns the real
   one), an `OpenAI`-compatible chat-completions endpoint behind
-  `GENAI_ENDPOINT` for genai. The guest asserts what it observes across
-  the boundary and traps on failure; the test asserts what reached the
-  fake (per-agent RPC sequences, recorded request bodies) and that the
-  backend is whole again afterwards (every spawned process gone, on
-  cursor). Nothing public exists for the tests' sake — no `#[doc(hidden)]`
+  `GENAI_ENDPOINT` for genai, and an App Service managed-identity endpoint
+  behind `IDENTITY_ENDPOINT` for azure-id. The guest asserts what it
+  observes across the boundary and traps on failure; the test asserts what
+  reached the fake (per-agent RPC sequences, recorded request bodies) and
+  that the backend is whole again afterwards (every spawned process gone,
+  on cursor). Nothing public exists for the tests' sake — no `#[doc(hidden)]`
   probes, no options the fake alone needs; the fake is reached the way the
   real service is. One
   flat file per boundary in the crate's `tests/`: `tests/model.rs` is the
@@ -160,10 +161,12 @@ so the policy splits into three tiers:
   the crate's `[dependencies]` alone — never a dev-dependency. The suites'
   side of its module (`Spawnable`, the liveness probe and its `libc`) is
   `cfg(test)`, which the binary never is (`test = false`, `bench = false`).
-- The omnia crates come from crates.io, pinned by the single
-  `[workspace.dependencies]` declarations (`omnia = "0.38.0"` and friends);
-  every `omnia-*` must stay on the same line, so bump them all together and
-  never add a `[patch.crates-io]` git or path override to chase an
+- The omnia crates are pinned by the single `[workspace.dependencies]`
+  declarations (`omnia = "0.38.0"` and friends); every `omnia-*` must stay
+  on the same line, so bump them all together. Until the capability
+  contract's omnia release is published, `[patch.crates-io]` points every
+  `omnia-*` at omnia's `capablities` branch, and `cargo update -p omnia-sdk`
+  re-locks them as one. Never add another git or path override to chase an
   unreleased change. `.cargo/config.toml` sets
   `registry.global-min-publish-age = "7 days"`; stable cargo ignores it
   (it is enforced only under nightly `-Zmin-publish-age`), but where it is

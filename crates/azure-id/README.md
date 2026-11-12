@@ -11,8 +11,33 @@ MSRV: Rust 1.99
 
 ## Configuration
 
-No environment variables are required; the backend always authenticates via
-Managed Identity.
+A guest asks for an identity by name, and its unnamed handle asks for
+`default`. The backend serves the names a deployment declares and refuses
+every other.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `IDENTITY_NAMES` | no | `default` | Comma-separated identity names |
+| `IDENTITY_CLIENT_ID` | no | | Client id of the user-assigned identity behind `default`; unset, `default` is the system-assigned identity |
+| `IDENTITY_CLIENT_ID__<NAME>` | per name | | Client id of the user-assigned identity behind a name other than `default`, the name in ASCII uppercase |
+
+A host whose guests use only its system-assigned identity needs none of them.
+A guest that also asks for `reports` needs `IDENTITY_NAMES=default,reports`
+and `IDENTITY_CLIENT_ID__REPORTS`.
+
+Each identity's credential is created at connect and caches the tokens it
+issues. Hosts that set `IDENTITY_ENDPOINT` and `IDENTITY_HEADER`, such as App
+Service, Azure Functions, and Container Apps, are served through that
+endpoint, and VMs through the instance metadata service. Connecting fails on
+the managed-identity sources `azure_identity` does not support: Azure Arc,
+Azure ML, Cloud Shell, and Service Fabric.
+
+### Scopes
+
+Azure managed identity issues a token for exactly one scope. A guest calls
+`Identity::token` with one, such as `https://storage.azure.com/.default`.
+`IdentityExt::access_token` asks for none, so it fails on this backend, as
+does a request for two.
 
 ## Usage
 
@@ -40,12 +65,21 @@ let options = omnia_azure_id::ConnectOptions::load_env()?;
 let client = Client::connect_with(options).await?;
 ```
 
-## Live tests
+## Tests
 
-[`tests/live.rs`](tests/live.rs) exercises the `wasi-identity` boundary against
-real Azure AD. It is `#[ignore]`d so it never runs in CI; run it explicitly in an
-environment with an ambient managed-identity credential (e.g. an Azure VM,
-App Service, or AKS workload identity):
+**Guests through the runtime.** [`tests/identity.rs`](tests/identity.rs) runs a
+guest from [`crates/test-programs`](../test-programs) through
+`omnia_test::host::Deployment` over a fake App Service managed-identity
+endpoint, [`tests/support`](tests/support), which the backend reaches through
+`IDENTITY_ENDPOINT` as it reaches the real one. The guest asks for the unnamed,
+a declared, and an undeclared identity, and the test asserts the client id
+each token request carried. It needs no Azure, so it runs on every
+`cargo nextest run -p omnia-azure-id --all-features`.
+
+**The real service.** [`tests/live.rs`](tests/live.rs) asks real Azure AD for a
+`default` token. It is `#[ignore]`d so it never runs in CI; run it by hand on
+an Azure host with a managed identity (e.g. an Azure VM or App Service),
+setting `IDENTITY_CLIENT_ID` when the identity is user-assigned:
 
 ```bash
 cargo nextest run -p omnia-azure-id --run-ignored all

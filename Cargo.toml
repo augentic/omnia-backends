@@ -74,6 +74,9 @@ serde_repr = "0.1.21"
 sha2 = "0.11.1"
 tempfile = "3.27.0"
 test-programs = { path = "crates/test-programs" }
+omnia-azure-blob = { path = "crates/azure-blob", version = "0.32.0" }
+omnia-azure-table = { path = "crates/azure-table", version = "0.32.0" }
+omnia-cursor = { path = "crates/cursor", version = "0.32.0" }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false }
 tokio-util = "0.7.20"

@@ -33,9 +33,9 @@ serde_json.workspace = true
 anyhow.workspace = true
 dotenvy = "0.15.7"
 omnia.workspace = true
-omnia-azure-blob = { path = "../crates/azure-blob" }
-omnia-azure-table = { path = "../crates/azure-table" }
-omnia-cursor = { path = "../crates/cursor" }
+omnia-azure-blob.workspace = true
+omnia-azure-table.workspace = true
+omnia-cursor.workspace = true
 omnia-wasi-blobstore.workspace = true
 omnia-wasi-docstore.workspace = true
 serde.workspace = true

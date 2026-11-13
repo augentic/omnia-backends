@@ -1,23 +1,31 @@
-//! Live `wasi-docstore` coverage for the Azure Table Storage backend, driven
-//! through the host boundary (`DocStoreClient`) against a real table service.
+//! Live `omnia:docstore` for the Azure Table Storage backend: the
+//! `omnia_sdk::contract::document` rows from a real guest, and the entity,
+//! filter, and paging mappings no guest row reaches.
 //!
-//! These tests are the proof that the crate's document/filter mappings are
-//! accepted by the real service (Azurite or cloud); the unit tier keeps only
-//! pure codec and rejection logic. `#[ignore]`d so they never touch the
-//! network in CI. Run against a real storage account (`AZURE_STORAGE_ACCOUNT`
-//! + `AZURE_STORAGE_KEY`, plus `AZURE_TABLE_ENDPOINT` for Azurite):
-//!
-//! `cargo nextest run -p omnia-azure-table --run-ignored all`.
+//! Only the real service (Azurite or cloud) proves it accepts what the
+//! document and filter mappings send. `#[ignore]`d so it never touches the
+//! network in CI. The guest row empties its tables first, so run against a
+//! storage account of your own (`AZURE_STORAGE_ACCOUNT` and
+//! `AZURE_STORAGE_KEY`, plus `AZURE_TABLE_ENDPOINT` for Azurite):
+//! `cargo nextest run -p omnia-azure-table --all-features --run-ignored all`.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, ensure};
-use omnia::Connect;
+use anyhow::Result;
+use omnia::{Connect, ExitStatus};
 use omnia_azure_table::{Client, encode_id};
+use omnia_test::host::{Backends, Deployment};
 use omnia_wasi_docstore::{
-    ComparisonOp, DocStoreClient, Document, FilterTree, QueryOpts, ScalarValue,
+    ComparisonOp, DocStoreClient, Document, Error, FilterTree, QueryOpts, ScalarValue, SortField,
+    WasiDocStore,
 };
 use serde_json::{Value, json};
+
+// Every docstore program in `crates/test-programs` must have a matching test
+// here; a new program without one fails to compile.
+test_programs::foreach_docstore!();
 
 const TABLE: &str = "omnialive";
 
@@ -43,6 +51,28 @@ const fn opts() -> QueryOpts {
     }
 }
 
+// The rows need their collections empty. A deleted table stays unusable
+// until Azure finishes the delete, so the entities go one at a time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: empties the rows' tables in Azure Table Storage (AZURE_STORAGE_ACCOUNT/KEY); run with --run-ignored"]
+async fn docstore_document_db() -> Result<()> {
+    let client = <Client as Connect>::connect().await?;
+    for collection in ["insertexists", "portablequery", "optionalquery"] {
+        let stored = client.query(collection.to_owned(), None, opts()).await?;
+        for document in stored.documents {
+            client.delete(collection.to_owned(), document.id).await?;
+        }
+    }
+    let backends = Backends::defaults().await.docstore(client);
+
+    let status = Deployment::new()
+        .guest("guest", test_programs::DOCSTORE_DOCUMENT_DB)
+        .run_host::<WasiDocStore, _>(backends)
+        .await?;
+    assert_eq!(status, ExitStatus::SUCCESS, "guest failed");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs Azure Table Storage (AZURE_STORAGE_ACCOUNT/KEY); run with --run-ignored"]
 async fn insert_get_delete() -> Result<()> {
@@ -54,7 +84,8 @@ async fn insert_get_delete() -> Result<()> {
         data: br#"{"hello":"world"}"#.to_vec(),
     };
 
-    client.insert(TABLE.to_owned(), doc).await?;
+    assert!(client.insert(TABLE.to_owned(), doc.clone()).await?, "a fresh id inserts");
+    assert!(!client.insert(TABLE.to_owned(), doc).await?, "a stored id inserts again");
     let got = client.get(TABLE.to_owned(), id.clone()).await?.expect("document present");
     assert_eq!(got.id, id, "id round-trips through the boundary");
 
@@ -207,35 +238,53 @@ async fn filtered_query() -> Result<()> {
     Ok(())
 }
 
-// Filters the OData layer cannot evaluate server-side are rejected before any
-// data is pulled — never silently evaluated client-side.
+// What the OData layer cannot serve is refused as `unsupported` before any
+// data is pulled, never evaluated client-side or ignored.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs Azure Table Storage (AZURE_STORAGE_ACCOUNT/KEY); run with --run-ignored"]
 async fn unsupported_query_shapes() -> Result<()> {
     let client = client().await?;
-
-    let filter = FilterTree::Contains {
-        field: "Name".to_owned(),
-        pattern: "Ada".to_owned(),
+    let compare = |field: &str, value| FilterTree::Compare {
+        field: field.to_owned(),
+        op: ComparisonOp::Eq,
+        value,
     };
-    let error = client
-        .query(TABLE.to_owned(), Some(filter), opts())
-        .await
-        .expect_err("string functions must be rejected");
-    ensure!(format!("{error:#}").contains("not supported"), "{error:#}");
 
-    let error = client
-        .query(
-            TABLE.to_owned(),
-            None,
-            QueryOpts {
-                offset: Some(1),
-                ..opts()
-            },
-        )
-        .await
-        .expect_err("offset must be rejected");
-    ensure!(format!("{error:#}").contains("offset is not supported"), "{error:#}");
+    for filter in [
+        FilterTree::Contains {
+            field: "Name".to_owned(),
+            pattern: "Ada".to_owned(),
+        },
+        compare("Name", ScalarValue::Null),
+        compare("Meta.x", ScalarValue::Int32(1)),
+    ] {
+        let shown = format!("{filter:?}");
+        let err = client.query(TABLE.to_owned(), Some(filter), opts()).await.expect_err(&shown);
+        assert!(matches!(err.downcast_ref::<Error>(), Some(Error::Unsupported(_))), "{err:#}");
+    }
 
+    let sorted = QueryOpts {
+        order_by: vec![SortField {
+            field: "Name".to_owned(),
+            descending: false,
+        }],
+        ..opts()
+    };
+    let skipped = QueryOpts {
+        offset: Some(1),
+        ..opts()
+    };
+    for options in [sorted, skipped] {
+        let shown = format!("{options:?}");
+        let err = client.query(TABLE.to_owned(), None, options).await.expect_err(&shown);
+        assert!(matches!(err.downcast_ref::<Error>(), Some(Error::Unsupported(_))), "{err:#}");
+    }
+
+    let zero = QueryOpts {
+        limit: Some(0),
+        ..opts()
+    };
+    let err = client.query(TABLE.to_owned(), None, zero).await.expect_err("a zero limit ran");
+    assert!(matches!(err.downcast_ref::<Error>(), Some(Error::Invalid(_))), "{err:#}");
     Ok(())
 }

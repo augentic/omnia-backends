@@ -10,9 +10,9 @@ use base64ct::{Base64, Encoding};
 use futures::future::FutureExt;
 use hmac::{Hmac, KeyInit, Mac};
 use omnia_wasi_docstore::{
-    DocStoreClient, Document, FilterTree, FutureResult, QueryOpts, QueryResult,
+    DocStoreClient, Document, Error, FilterTree, FutureResult, QueryOpts, QueryResult,
 };
-use reqwest::Method;
+use reqwest::{Method, Response, StatusCode};
 use serde_json::Value;
 use sha2::Sha256;
 
@@ -24,10 +24,14 @@ const ACCEPT_HEADER: &str = "application/json;odata=fullmetadata";
 impl Client {
     /// Create the named table when absent; `true` when this call created it.
     ///
+    /// A write creates its table when the table does not exist yet, so this
+    /// is needed only to create a table ahead of any write.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the request fails or the service answers with
-    /// an unexpected status.
+    /// - [`Error::Unavailable`] when the table is being deleted, or the
+    ///   service does not answer.
+    /// - [`Error::Invalid`] when the service refuses the name.
     pub async fn ensure_table(&self, table: &str) -> anyhow::Result<bool> {
         let uri = format!("{}/Tables", self.base_url);
 
@@ -36,19 +40,39 @@ impl Client {
             .json(&serde_json::json!({"TableName": table}))
             .send()
             .await
-            .map_err(|e| anyhow!("create table request: {e}"))?;
+            .map_err(|err| transport_failed(err, "create table"))?;
 
-        match response.status().as_u16() {
-            201 | 204 => Ok(true),
-            409 => Ok(false),
-            _ => {
-                bail!(
-                    "create table failed ({}): {}",
-                    response.status(),
-                    response.text().await.unwrap_or_default()
-                );
-            }
+        if response.status().is_success() {
+            return Ok(true);
         }
+        let refusal = Refusal::read(response).await;
+        if refusal.status == StatusCode::CONFLICT && !refusal.has_code(TABLE_BEING_DELETED) {
+            return Ok(false);
+        }
+        Err(refusal.into_error("create table"))
+    }
+
+    // A collection is created by its first write, so a write whose table
+    // does not exist yet creates the table and is sent once more.
+    async fn write(
+        &self, table: &str, method: Method, uri: &str, body: &Value,
+    ) -> anyhow::Result<Response> {
+        let response = self
+            .signed_request(method.clone(), uri)?
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| transport_failed(err, "write"))?;
+        if response.status() != StatusCode::NOT_FOUND {
+            return Ok(response);
+        }
+
+        self.ensure_table(table).await?;
+        self.signed_request(method, uri)?
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| transport_failed(err, "write"))
     }
 
     fn entity_uri(&self, table: &str, pk: &str, rk: &str) -> String {
@@ -68,7 +92,8 @@ impl Client {
     }
 
     // One page of a query: the response body and the continuation token
-    // for the next page, if any.
+    // for the next page, if any. A table that does not exist yet answers
+    // with an empty last page.
     async fn fetch_page(
         &self, table: &str, odata_filter: Option<&str>, fetch_limit: Option<usize>,
         continuation: Option<&str>,
@@ -100,14 +125,13 @@ impl Client {
             .signed_request(Method::GET, &uri)?
             .send()
             .await
-            .map_err(|e| anyhow!("HTTP request error: {e}"))?;
+            .map_err(|err| transport_failed(err, "query"))?;
 
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok((Value::Null, None));
+        }
         if !response.status().is_success() {
-            bail!(
-                "Azure Table query failed ({}): {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            );
+            return Err(Refusal::read(response).await.into_error("query"));
         }
 
         let continuation_partition = response
@@ -121,8 +145,7 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
 
-        let body: Value =
-            response.json().await.map_err(|e| anyhow!("failed to parse response JSON: {e}"))?;
+        let body: Value = response.json().await.map_err(|err| transport_failed(err, "query"))?;
 
         let token = query::encode_continuation(
             continuation_partition.as_deref(),
@@ -144,52 +167,39 @@ impl DocStoreClient for Client {
                 .signed_request(Method::GET, &uri)?
                 .send()
                 .await
-                .map_err(|e| anyhow!("HTTP request error: {e}"))?;
+                .map_err(|err| transport_failed(err, "get"))?;
 
-            if response.status().as_u16() == 404 {
+            if response.status() == StatusCode::NOT_FOUND {
                 return Ok(None);
             }
             if !response.status().is_success() {
-                bail!(
-                    "Azure Table get failed ({}): {}",
-                    response.status(),
-                    response.text().await.unwrap_or_default()
-                );
+                return Err(Refusal::read(response).await.into_error("get"));
             }
 
             let entity: Value =
-                response.json().await.map_err(|e| anyhow!("failed to parse response JSON: {e}"))?;
+                response.json().await.map_err(|err| transport_failed(err, "get"))?;
 
             Ok(Some(document::unflatten(&entity)?))
         }
         .boxed()
     }
 
-    fn insert(&self, collection: String, doc: Document) -> FutureResult<()> {
+    fn insert(&self, collection: String, doc: Document) -> FutureResult<bool> {
         let client = self.clone();
         async move {
             let (table, _scope_pk) = parse_collection(&collection)?;
             let uri = format!("{}/{table}", client.base_url);
             let body = document::flatten(&doc)?;
 
-            let response = client
-                .signed_request(Method::POST, &uri)?
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| anyhow!("HTTP request error: {e}"))?;
-
-            if response.status().as_u16() == 409 {
-                bail!("entity already exists in '{collection}' with id '{}'", doc.id);
+            let response = client.write(&table, Method::POST, &uri, &body).await?;
+            if response.status().is_success() {
+                return Ok(true);
             }
-            if !response.status().is_success() {
-                bail!(
-                    "Azure Table insert failed ({}): {}",
-                    response.status(),
-                    response.text().await.unwrap_or_default()
-                );
+            let refusal = Refusal::read(response).await;
+            if refusal.status == StatusCode::CONFLICT && refusal.has_code(ENTITY_ALREADY_EXISTS) {
+                return Ok(false);
             }
-            Ok(())
+            Err(refusal.into_error("insert"))
         }
         .boxed()
     }
@@ -202,19 +212,9 @@ impl DocStoreClient for Client {
             let uri = client.entity_uri(&table, pk, rk);
             let body = document::flatten(&doc)?;
 
-            let response = client
-                .signed_request(Method::PUT, &uri)?
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| anyhow!("HTTP request error: {e}"))?;
-
+            let response = client.write(&table, Method::PUT, &uri, &body).await?;
             if !response.status().is_success() {
-                bail!(
-                    "Azure Table put failed ({}): {}",
-                    response.status(),
-                    response.text().await.unwrap_or_default()
-                );
+                return Err(Refusal::read(response).await.into_error("put"));
             }
             Ok(())
         }
@@ -233,17 +233,13 @@ impl DocStoreClient for Client {
                 .header("If-Match", "*")
                 .send()
                 .await
-                .map_err(|e| anyhow!("HTTP request error: {e}"))?;
+                .map_err(|err| transport_failed(err, "delete"))?;
 
-            if response.status().as_u16() == 404 {
+            if response.status() == StatusCode::NOT_FOUND {
                 return Ok(false);
             }
             if !response.status().is_success() {
-                bail!(
-                    "Azure Table delete failed ({}): {}",
-                    response.status(),
-                    response.text().await.unwrap_or_default()
-                );
+                return Err(Refusal::read(response).await.into_error("delete"));
             }
             Ok(true)
         }
@@ -255,25 +251,8 @@ impl DocStoreClient for Client {
     ) -> FutureResult<QueryResult> {
         let client = self.clone();
         async move {
-            // Azure Table has no `$skip`: an offset is rejected, like an
-            // unsupported filter node, rather than paged past client-side.
-            if options.offset.is_some_and(|o| o > 0) {
-                bail!(
-                    "offset is not supported by Azure Table — \
-                     use continuation tokens for pagination instead"
-                );
-            }
-            if !options.order_by.is_empty() {
-                tracing::warn!("order_by is not supported by Azure Table and will be ignored");
-            }
-
+            check_options(&options)?;
             let fetch_limit = options.limit.map(|l| l as usize);
-            if fetch_limit == Some(0) {
-                return Ok(QueryResult {
-                    documents: Vec::new(),
-                    continuation: options.continuation,
-                });
-            }
 
             let (table, pk) = parse_collection(&collection)?;
             let user_filter = filter.as_ref().map(filter::to_odata).transpose()?;
@@ -317,6 +296,59 @@ impl DocStoreClient for Client {
         }
         .boxed()
     }
+}
+
+// --- Failures ---
+
+const ENTITY_ALREADY_EXISTS: &str = "EntityAlreadyExists";
+const TABLE_BEING_DELETED: &str = "TableBeingDeleted";
+
+// A response the service refused, read once so its `odata.error.code` can
+// both pick an outcome and name the failure.
+struct Refusal {
+    status: StatusCode,
+    code: Option<String>,
+    body: String,
+}
+
+impl Refusal {
+    async fn read(response: Response) -> Self {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let code = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|error| Some(error.pointer("/odata.error/code")?.as_str()?.to_owned()));
+        Self { status, code, body }
+    }
+
+    fn has_code(&self, code: &str) -> bool {
+        self.code.as_deref() == Some(code)
+    }
+
+    // A table being deleted is transient whatever the status. Otherwise the
+    // status decides, and an unrecognised one stays `other`.
+    fn into_error(self, action: &str) -> anyhow::Error {
+        let message = format!("Azure Table {action} failed ({}): {}", self.status, self.body);
+        let kind: Option<fn(String) -> Error> = match self.status.as_u16() {
+            _ if self.has_code(TABLE_BEING_DELETED) => Some(Error::Unavailable),
+            400 | 413 => Some(Error::Invalid),
+            401 | 403 => Some(Error::Denied),
+            408 | 429 | 500..=599 => Some(Error::Unavailable),
+            _ => None,
+        };
+        match kind {
+            Some(kind) => kind(message).into(),
+            None => anyhow!(message),
+        }
+    }
+}
+
+// A request that got no answer is `unavailable` when it could not connect or
+// ran out of time.
+fn transport_failed(err: reqwest::Error, action: &str) -> anyhow::Error {
+    let unavailable = err.is_connect() || err.is_timeout();
+    let err = anyhow::Error::new(err).context(format!("Azure Table {action} request failed"));
+    if unavailable { Error::Unavailable(format!("{err:#}")).into() } else { err }
 }
 
 // --- Helpers ---
@@ -363,6 +395,30 @@ fn azure_headers(date: &str, auth: &str) -> anyhow::Result<reqwest::header::Head
     Ok(headers)
 }
 
+// A zero limit is `invalid`. The service returns entities in key order and
+// has no `$skip`, so `order_by` and an offset are `unsupported`, never
+// ignored or served client-side.
+fn check_options(options: &QueryOpts) -> anyhow::Result<()> {
+    if options.limit == Some(0) {
+        bail!(Error::Invalid("query limit must be at least 1".to_owned()));
+    }
+    if !options.order_by.is_empty() {
+        bail!(Error::Unsupported(
+            "order_by is not supported by Azure Table — \
+             entities come back in PartitionKey and RowKey order"
+                .to_owned()
+        ));
+    }
+    if options.offset.is_some_and(|offset| offset > 0) {
+        bail!(Error::Unsupported(
+            "offset is not supported by Azure Table — \
+             use continuation tokens for pagination instead"
+                .to_owned()
+        ));
+    }
+    Ok(())
+}
+
 fn parse_collection(collection: &str) -> anyhow::Result<(String, Option<String>)> {
     match collection.split_once('/') {
         Some((table, pk)) if !table.is_empty() && !pk.is_empty() => {
@@ -370,32 +426,35 @@ fn parse_collection(collection: &str) -> anyhow::Result<(String, Option<String>)
             Ok((table.to_owned(), Some(pk.to_owned())))
         }
         Some((table, _)) if !table.is_empty() => {
-            bail!("collection '{collection}' has an empty partition key after '/'")
+            bail!(Error::Invalid(format!(
+                "collection '{collection}' has an empty partition key after '/'"
+            )))
         }
-        Some(_) => bail!("collection '{collection}' has an empty table name"),
+        Some(_) => {
+            bail!(Error::Invalid(format!("collection '{collection}' has an empty table name")))
+        }
         None if !collection.is_empty() => {
             validate_table_name(collection)?;
             Ok((collection.to_owned(), None))
         }
-        _ => bail!("collection must not be empty"),
+        _ => bail!(Error::Invalid("collection must not be empty".to_owned())),
     }
 }
 
 fn validate_table_name(table: &str) -> anyhow::Result<()> {
     let len = table.len();
-    if !(3..=63).contains(&len) {
-        bail!("invalid table name '{table}': length must be between 3 and 63 characters");
-    }
-    if !table.starts_with(|c: char| c.is_ascii_alphabetic()) {
-        bail!("invalid table name '{table}': first character must be a letter");
-    }
-    if !table.chars().all(|c| c.is_ascii_alphanumeric()) {
-        bail!("invalid table name '{table}': only ASCII letters and digits are allowed");
-    }
-    if table.eq_ignore_ascii_case("tables") {
-        bail!("invalid table name '{table}': reserved table name");
-    }
-    Ok(())
+    let problem = if !(3..=63).contains(&len) {
+        "length must be between 3 and 63 characters"
+    } else if !table.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        "first character must be a letter"
+    } else if !table.chars().all(|c| c.is_ascii_alphanumeric()) {
+        "only ASCII letters and digits are allowed"
+    } else if table.eq_ignore_ascii_case("tables") {
+        "reserved table name"
+    } else {
+        return Ok(());
+    };
+    bail!(Error::Invalid(format!("invalid table name '{table}': {problem}")))
 }
 
 fn build_odata_filter(pk: Option<&str>, server_filter: Option<&str>) -> Option<String> {

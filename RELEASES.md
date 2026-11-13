@@ -58,6 +58,25 @@ Unreleased
   repeated request for a scope is answered from the credential's token
   cache. A managed-identity source `azure_identity` does not support now
   fails at connect, not at the first token request.
+- **Breaking:** `omnia-postgres` implements `omnia:sql`. `execute` returns
+  the affected row count, and `batch` runs its statements in one
+  transaction. A failing statement, or a batch dropped before it commits,
+  rolls the whole batch back. A database name the deployment does not
+  declare fails with `not-found`.
+- **Breaking:** `omnia-azure-table` accepts a plain document id, stored as
+  the `PartitionKey` with an empty `RowKey`, and composite ids keep
+  working. Other changes:
+  - A missing table is created on the first write to it, and reads as
+    empty until then.
+  - A duplicate `insert` returns `already-exists` and leaves the stored
+    entity untouched.
+  - `order_by` fails with `unsupported` instead of being ignored.
+  - A zero `limit` fails with `invalid`.
+- Postgres and Azure Table failures carry typed error kinds. A malformed
+  statement, value, or id is `invalid`, and a refused credential or
+  permission is `denied`. A feature the service cannot serve is
+  `unsupported`, and a lost or timed-out connection is `unavailable`.
+  Anything else, including a Postgres constraint violation, stays `other`.
 
 ---
 

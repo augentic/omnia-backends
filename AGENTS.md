@@ -104,8 +104,14 @@ so the policy splits into three tiers:
       `keyvalue_state_store` in `tests/live.rs`, since no honest in-process
       fake of those services exists. The row empties the `default` and
       `second` buckets, so it runs against a local server only.
-
-    A postgres suite is not built yet.
+  - **Postgres and Azure Table run the `omnia_sdk::contract::sql` and
+    `omnia_sdk::contract::document` rows** the same way, from
+    `programs/sql/sql_db.rs` and `programs/docstore/document_db.rs`
+    through `test_programs::foreach_sql!()` and
+    `test_programs::foreach_docstore!()`. Each is the `#[ignore]`d
+    `sql_sql_db` or `docstore_document_db` in the crate's `tests/live.rs`.
+    Each row clears its tables before it runs, so it runs against a local
+    server or an account of your own only.
 - **Unit tests are the exception, and none exist today.** No file under
   `crates/*/src` carries a `#[cfg(test)]` module. Cursor's ready-line and
   Connect-frame parsing and genai's request translation are asserted by

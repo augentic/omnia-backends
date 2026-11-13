@@ -39,6 +39,15 @@ MSRV: Rust 1.99
   permissions violation out of band, so it too surfaces as a timeout. Anything else is
   `other`.
 
+## Blobstore
+
+- A container is a JetStream object store, which only `create-container` makes.
+  Creating one that exists opens it, whatever configuration made it.
+- Opening a store that does not exist fails with
+  `omnia_wasi_blobstore::Error::missing_container`, which a guest's `BlobStore`
+  reports as `ErrorKind::NotFound`.
+- Deleting an absent object or store succeeds.
+
 ## Configuration
 
 | Variable | Required | Default | Description |
@@ -83,11 +92,12 @@ let client = Client::connect_with(options).await?;
 
 ## Live tests
 
-[`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging` and `omnia:keyvalue`
-boundaries against a real server. `keyvalue_state_store` runs the shared `StateStore`
-rows from a real guest. The other key-value tests cover the atomics under contention
-and a bucket gaining per-message TTL when opened. Every test is `#[ignore]`d so it
-never runs in CI.
+[`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging`, `omnia:keyvalue`,
+and `wasi-blobstore` boundaries against a real server. `keyvalue_state_store` runs
+the shared `StateStore` rows from a real guest. The other key-value tests cover the
+atomics under contention and a bucket gaining per-message TTL when opened.
+`blobstore_container_rules` covers the container rules above. Every test is
+`#[ignore]`d so it never runs in CI.
 
 The rows first empty the `default` and `second` buckets, so run a local server with
 JetStream. The destructive tests refuse the default `demo.nats.io`:

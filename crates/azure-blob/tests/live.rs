@@ -8,7 +8,7 @@
 use anyhow::Result;
 use omnia::Connect;
 use omnia_azure_blob::Client;
-use omnia_wasi_blobstore::{BlobStoreClient, Container};
+use omnia_wasi_blobstore::{BlobStoreClient, Container, Error};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
@@ -38,6 +38,41 @@ async fn write_read_delete() -> Result<()> {
 
     store.delete_object(object).await?;
     client.delete_container(container).await?;
+    Ok(())
+}
+
+// Each call on an object in a container nothing created fails `NotFound`, read
+// from the `ContainerNotFound` code the service answers, while an absent blob
+// reads as absent. A container that was never created deletes as a no-op.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
+async fn container_rules() -> Result<()> {
+    let client = <Client as Connect>::connect().await?;
+    let container = format!("omnia-live-rules-{}", std::process::id());
+    let object = "object".to_owned();
+
+    let uncreated = client.get_container(container.clone()).await?;
+    let refused = [
+        uncreated.get_data(object.clone(), 0, 0).await.expect_err("get"),
+        uncreated.write_data(object.clone(), b"x".to_vec().into()).await.expect_err("write"),
+        uncreated.has_object(object.clone()).await.expect_err("has"),
+        uncreated.object_info(object.clone()).await.expect_err("info"),
+        uncreated.list_objects().await.expect_err("list"),
+        uncreated.delete_object(object.clone()).await.expect_err("delete"),
+    ];
+    for err in refused {
+        assert!(matches!(err.downcast_ref::<Error>(), Some(Error::NotFound(_))), "{err:#}");
+    }
+
+    let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
+    client.create_container(container.clone()).await?;
+    assert!(!store.has_object(object.clone()).await?, "an absent blob");
+    store.delete_object(object).await?;
+    client.delete_container(container).await?;
+
+    // the service removes a deleted container in the background, so the
+    // absent one is a name nothing created
+    client.delete_container(format!("omnia-live-never-{}", std::process::id())).await?;
     Ok(())
 }
 

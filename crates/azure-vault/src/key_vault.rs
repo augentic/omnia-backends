@@ -54,14 +54,8 @@ impl Locker for AzLocker {
             let result = vault.get_secret(&secret_id, None).await;
             let response = match result {
                 Ok(resp) => resp,
-                Err(e) => {
-                    if let Some(code) = e.http_status()
-                        && code == StatusCode::NOT_FOUND.as_u16()
-                    {
-                        return Ok(None);
-                    }
-                    return Err(anyhow!("issue getting secret: {e}"));
-                }
+                Err(e) if not_found(&e) => return Ok(None),
+                Err(e) => return Err(anyhow!("issue getting secret: {e}")),
             };
 
             let secret: Secret = response.into_model().context("issue deserializing secret")?;
@@ -102,9 +96,10 @@ impl Locker for AzLocker {
 
         async move {
             let secret_id = encode_secret_name(&identifier, &secret_id);
-            vault.delete_secret(&secret_id, None).await.context("issue deleting secret")?;
-
-            Ok(())
+            match vault.delete_secret(&secret_id, None).await {
+                Err(e) if !not_found(&e) => Err(e).context("issue deleting secret"),
+                _ => Ok(()),
+            }
         }
         .boxed()
     }
@@ -144,6 +139,10 @@ impl Locker for AzLocker {
 fn encode_secret_name(identifier: &str, secret_id: &str) -> String {
     let secret_name = format!("{}:{identifier}:{secret_id}", identifier.len());
     Base64UrlUnpadded::encode_string(secret_name.as_bytes())
+}
+
+fn not_found(err: &azure_core::Error) -> bool {
+    err.http_status().is_some_and(|code| code == StatusCode::NOT_FOUND.as_u16())
 }
 
 fn decode_secret_id(identifier: &str, secret_id_or_url: &str) -> Option<String> {

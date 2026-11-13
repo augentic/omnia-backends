@@ -15,6 +15,7 @@ async fn scenario() {
     futures::join!(
         document::insert_exists(&db),
         document::portable_query(&db),
+        document::filter_limits(&db),
         document::optional_query(&db),
     );
 }

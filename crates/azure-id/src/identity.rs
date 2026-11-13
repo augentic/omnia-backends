@@ -6,7 +6,7 @@ use azure_core::credentials::TokenCredential;
 use azure_identity::ManagedIdentityCredential;
 use futures::future::FutureExt;
 use omnia::FutureResult;
-use omnia_wasi_identity::{AccessToken, Identity, IdentityClient};
+use omnia_wasi_identity::{AccessToken, Error, Identity, IdentityClient};
 
 use crate::Client;
 
@@ -17,7 +17,7 @@ impl IdentityClient for Client {
 
         async move {
             let Some(credential) = credential else {
-                anyhow::bail!("identity `{name}` is not declared");
+                anyhow::bail!(Error::NoSuchIdentity);
             };
             let identity = AzIdentity { name, credential };
             Ok(Arc::new(identity) as Arc<dyn Identity>)

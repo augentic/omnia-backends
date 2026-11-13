@@ -7,6 +7,14 @@ Azure Blob Storage blobstore backend for the Omnia WASI runtime, implementing th
 
 Maps blobstore containers to Azure Blob containers and blobs to block blobs using the official `azure_storage_blob` SDK.
 
+- A call on an object in a container that does not exist fails with
+  `omnia_wasi_blobstore::Error::missing_container`, which a guest's `BlobStore`
+  reports as `ErrorKind::NotFound`. The backend reads it from the
+  `ContainerNotFound` code the service answers, so opening a container costs
+  no request.
+- An absent blob reads as absent, and deleting one succeeds.
+- Creating a container that exists opens it, and deleting an absent one succeeds.
+
 ## Package store
 
 `Client` also implements `omnia_plugin::PackageStore`, the store omnia's
@@ -68,8 +76,8 @@ let client = Client::connect_with(options).await?;
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-blobstore` boundary against
 a real storage account (or Azurite): write/read/list/metadata round-trips, the
-ranged-read cases mirroring the `range_options` unit vectors, and the package
-store round-trip. The tests are `#[ignore]`d so they never run in CI; run them
+container rules above, the ranged-read cases mirroring the `range_options` unit
+vectors, and the package store round-trip. The tests are `#[ignore]`d so they never run in CI; run them
 explicitly (authentication is Entra ID only — service principal or developer
 tools). [`tests/blobstore.rs`](tests/blobstore.rs) holds what the view refuses
 before any request, such as the reserved `omnia-plugins` name, and runs in CI.

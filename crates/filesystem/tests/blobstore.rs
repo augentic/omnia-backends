@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use omnia_wasi_blobstore::{BlobStoreClient, Container};
+use omnia_wasi_blobstore::{BlobStoreClient, Container, Error};
 use tempfile::TempDir;
 
 fn client(root: &TempDir) -> omnia_filesystem::Client {
@@ -37,10 +37,17 @@ async fn container_lifecycle() {
     client.delete_container("snapshots".to_string()).await.expect("delete again");
     assert!(!client.container_exists("snapshots".to_string()).await.expect("exists"));
 
-    // Lookup creates a missing container.
-    let ensured = client.get_container("snapshots".to_string()).await.expect("get ensures");
-    assert!(client.container_exists("snapshots".to_string()).await.expect("exists"));
-    assert!(!ensured.has_object("obj".to_string()).await.expect("has"), "ensured empty");
+    let err = client.get_container("snapshots".to_string()).await.expect_err("lookup");
+    assert!(matches!(err.downcast_ref::<Error>(), Some(Error::NotFound(_))), "{err}");
+    let write = again.write_data("obj".to_string(), Bytes::from_static(b"x")).await;
+    let err = write.expect_err("a write through a stale handle");
+    assert!(matches!(err.downcast_ref::<Error>(), Some(Error::NotFound(_))), "{err}");
+    assert!(!client.container_exists("snapshots".to_string()).await.expect("exists"));
+
+    let created = snapshots(&client).await;
+    let again = snapshots(&client).await;
+    created.write_data("obj".to_string(), Bytes::from_static(b"x")).await.expect("write");
+    assert!(again.has_object("obj".to_string()).await.expect("has"), "create opens");
 }
 
 #[tokio::test]

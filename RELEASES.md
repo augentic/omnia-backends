@@ -45,10 +45,11 @@ Unreleased
   `other`.
 - **Breaking:** identities are declared. `omnia-azure-id` serves only the
   names `IDENTITY_NAMES` lists (comma-separated, default `default`), and
-  fails any other. `default` is the host's system-assigned identity, or the
-  user-assigned one whose client id `IDENTITY_CLIENT_ID` gives. Each other
-  name takes its client id from `IDENTITY_CLIENT_ID__<NAME>`, and connecting
-  fails without it. To migrate:
+  fails any other with `no-such-identity`, which a guest's `Identity`
+  reports as `ErrorKind::NotFound`. `default` is the host's system-assigned
+  identity, or the user-assigned one whose client id `IDENTITY_CLIENT_ID`
+  gives. Each other name takes its client id from
+  `IDENTITY_CLIENT_ID__<NAME>`, and connecting fails without it. To migrate:
   - A guest that named an identity by its client id uses its unnamed handle,
     with `IDENTITY_CLIENT_ID` set to that id. Or the deployment declares the
     name it uses and maps it to the id.
@@ -77,6 +78,20 @@ Unreleased
   permission is `denied`. A feature the service cannot serve is
   `unsupported`, and a lost or timed-out connection is `unavailable`.
   Anything else, including a Postgres constraint violation, stays `other`.
+- **Breaking:** only `create-container` makes a blob container. The
+  filesystem, MongoDB, Azure Blob, and NATS backends fail a call on an
+  object in a container that does not exist with
+  `omnia_wasi_blobstore::Error::missing_container`, which a guest's
+  `BlobStore` reports as `ErrorKind::NotFound`. Creating a container that
+  exists opens it, and deleting an absent object or container succeeds. To
+  migrate:
+  - filesystem and MongoDB: create each container a guest uses before it
+    runs. Opening one no longer creates it, so a guest's first write to an
+    uncreated container fails.
+  - Azure Blob: a read in a container that does not exist fails, where it
+    answered the object as absent.
+- `omnia-azure-vault` deletes an absent secret as a no-op, where it
+  failed.
 
 ---
 

@@ -8,8 +8,9 @@ use futures::{FutureExt, StreamExt};
 use mongodb::Collection;
 use mongodb::bson::spec::BinarySubtype;
 use mongodb::bson::{self, Binary};
+use mongodb::error::ErrorKind;
 use omnia::FutureResult;
-use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
+use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata};
 use serde::{Deserialize, Serialize};
 
 use crate::Client;
@@ -29,7 +30,11 @@ impl BlobStoreClient for Client {
 
         async move {
             let db = client.default_database().ok_or_else(|| anyhow!("No default database"))?;
-            db.create_collection(&name).await.context("creating container")?;
+            if let Err(err) = db.create_collection(&name).await
+                && !already_exists(&err)
+            {
+                return Err(err).context("creating container");
+            }
             let collection = db.collection::<Blob>(&name);
             Ok(Arc::new(MongoDbContainer { name, collection }) as Arc<dyn Container>)
         }
@@ -39,8 +44,12 @@ impl BlobStoreClient for Client {
     fn get_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("getting container: {name}");
         let client = self.0.clone();
+        let exists = self.container_exists(name.clone());
 
         async move {
+            if !exists.await? {
+                anyhow::bail!(Error::missing_container(&name));
+            }
             let db = client.default_database().ok_or_else(|| anyhow!("No default database"))?;
             let collection = db.collection::<Blob>(&name);
             Ok(Arc::new(MongoDbContainer { name, collection }) as Arc<dyn Container>)
@@ -74,6 +83,11 @@ impl BlobStoreClient for Client {
         }
         .boxed()
     }
+}
+
+// `NamespaceExists`: the collection is already there
+fn already_exists(err: &mongodb::error::Error) -> bool {
+    matches!(err.kind.as_ref(), ErrorKind::Command(command) if command.code == 48)
 }
 
 #[derive(Debug)]

@@ -9,7 +9,7 @@
 use anyhow::Result;
 use omnia::Connect;
 use omnia_mongodb::Client;
-use omnia_wasi_blobstore::{BlobStoreClient, Container};
+use omnia_wasi_blobstore::{BlobStoreClient, Container, Error};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable MongoDB (MONGODB_URL); run with --run-ignored"]
@@ -32,5 +32,25 @@ async fn write_read_delete() -> Result<()> {
     store.delete_object(object).await?;
     client.delete_container(container.clone()).await?;
     assert!(!client.container_exists(container).await?, "container gone after delete");
+    Ok(())
+}
+
+// A collection nothing created is no container: opening one fails `NotFound`,
+// rather than reading as empty and creating it at the first write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs a reachable MongoDB (MONGODB_URL); run with --run-ignored"]
+async fn container_rules() -> Result<()> {
+    let client = <Client as Connect>::connect().await?;
+    let container = format!("omnia-live-rules-{}", std::process::id());
+
+    let err = client.get_container(container.clone()).await.expect_err("an uncreated container");
+    assert!(matches!(err.downcast_ref::<Error>(), Some(Error::NotFound(_))), "{err:#}");
+
+    let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
+    client.create_container(container.clone()).await?;
+    client.get_container(container.clone()).await?;
+    store.delete_object("absent".to_owned()).await?;
+    client.delete_container(container.clone()).await?;
+    client.delete_container(container).await?;
     Ok(())
 }

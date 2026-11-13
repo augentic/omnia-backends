@@ -1,6 +1,6 @@
 //! `wasi-blobstore` backed by a local directory tree.
 //!
-//! Container lookup creates missing directories; writes replace files atomically.
+//! A container is a directory only `create_container` makes; writes replace files atomically.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::time::UNIX_EPOCH;
 use anyhow::{Context as _, Result, anyhow, bail};
 use bytes::Bytes;
 use omnia::FutureResult;
-use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
+use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata};
 
 use crate::{Client, blocking, collect, segment_ok};
 
@@ -29,7 +29,15 @@ impl BlobStoreClient for Client {
 
     fn get_container(&self, name: String) -> FutureResult<Arc<dyn Container>> {
         tracing::trace!("getting container: {name}");
-        self.create_container(name)
+        let root = self.root.join("blobstore");
+
+        blocking(move || {
+            let dir = container_dir(&root, &name)?;
+            if !dir.is_dir() {
+                bail!(Error::missing_container(&name));
+            }
+            Ok(Arc::new(FsContainer { name, dir }) as Arc<dyn Container>)
+        })
     }
 
     fn delete_container(&self, name: String) -> FutureResult<()> {
@@ -100,9 +108,13 @@ impl Container for FsContainer {
 
     fn write_data(&self, name: String, data: Bytes) -> FutureResult<()> {
         tracing::trace!("writing object: {name} to container: {}", self.name);
+        let container = self.name.clone();
         let dir = self.dir.clone();
 
         blocking(move || {
+            if !dir.is_dir() {
+                bail!(Error::missing_container(&container));
+            }
             let path = object_path(&dir, &name)?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)

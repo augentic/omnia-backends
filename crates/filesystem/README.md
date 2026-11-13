@@ -15,10 +15,13 @@ backend.
   and map to nested paths beneath their container directory (sanitized:
   `..`, absolute paths, and empty segments are rejected), so clients encode
   their own sharding in names.
-- Opening a container is an ensure: `get-container` creates the directory
-  when absent, exactly as `create-container` does (and as keyvalue bucket
-  opens do), so read paths never fail on a container nothing has written
-  yet.
+- A container is a directory only `create-container` makes, and creating
+  one that exists opens it. `get-container` on a missing directory fails
+  with `omnia_wasi_blobstore::Error::missing_container`, which a guest's
+  `BlobStore` reports as `ErrorKind::NotFound`. So does a write through a
+  handle on a container deleted since, so nothing recreates it.
+- `delete-container` and `delete-object` succeed when their target is
+  already absent.
 - Writes are temp-file + atomic-rename: an object is either fully visible or
   absent, never torn, and concurrent same-name writes are benign (last
   rename wins).

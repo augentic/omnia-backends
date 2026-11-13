@@ -1,7 +1,6 @@
-//! Live publish and key-value for the NATS backend, driven through the
-//! `omnia:messaging` and `omnia:keyvalue` host boundaries. NATS also serves
-//! `wasi:blobstore` from the same client; its ignored test can be added here
-//! as that live env is set up.
+//! Live publish, key-value, and blob containers for the NATS backend, driven
+//! through the `omnia:messaging`, `omnia:keyvalue`, and `wasi:blobstore`
+//! host boundaries.
 //!
 //! Beside the `omnia_sdk::contract::state` rows from a real guest, the
 //! key-value tests cover what no guest row reaches:
@@ -24,6 +23,7 @@ use async_nats::jetstream::{self, kv};
 use omnia::{Connect, ExitStatus, FromEnv as _};
 use omnia_nats::{Client, ConnectOptions};
 use omnia_test::host::{Backends, Deployment};
+use omnia_wasi_blobstore::{BlobStoreClient, Error as BlobError};
 use omnia_wasi_keyvalue::{Bucket, Error, KeyValueClient, WasiKeyValue};
 use omnia_wasi_messaging::{Endpoint, Message, MessagingClient};
 use tokio::task::JoinSet;
@@ -166,6 +166,32 @@ async fn keyvalue_upgrade() -> Result<()> {
 
     let stream = jetstream.get_stream(format!("KV_{LEGACY}")).await?;
     assert!(stream.cached_info().config.allow_message_ttl, "the bucket kept no per-message TTL");
+    Ok(())
+}
+
+// An object store nothing created is no container. Creating one, deleting
+// an absent object, and deleting an absent store each succeed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs a reachable NATS server (NATS_ADDR); run with --run-ignored"]
+async fn blobstore_container_rules() -> Result<()> {
+    let client = <Client as Connect>::connect().await?;
+    let container = unique("omnia-live-rules");
+    let object = "object".to_owned();
+
+    let err = client.get_container(container.clone()).await.expect_err("an uncreated store");
+    assert!(matches!(err.downcast_ref::<BlobError>(), Some(BlobError::NotFound(_))), "{err:#}");
+    assert!(!client.container_exists(container.clone()).await?, "an uncreated store");
+
+    let store = client.create_container(container.clone()).await?;
+    client.create_container(container.clone()).await?;
+    store.write_data(object.clone(), b"payload".to_vec().into()).await?;
+    assert_eq!(store.get_data(object.clone(), 0, 0).await?.as_deref(), Some(b"payload".as_slice()));
+    store.delete_object(object.clone()).await?;
+    store.delete_object(object.clone()).await?;
+    assert_eq!(store.get_data(object, 0, 0).await?, None);
+
+    client.delete_container(container.clone()).await?;
+    client.delete_container(container).await?;
     Ok(())
 }
 

@@ -1,13 +1,17 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow};
-use async_nats::jetstream::object_store::{Config, GetErrorKind, InfoErrorKind, ObjectStore};
+use anyhow::{Context, anyhow, bail};
+use async_nats::jetstream::ErrorCode;
+use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind, ObjectStoreError};
+use async_nats::jetstream::object_store::{
+    Config, DeleteErrorKind, GetErrorKind, InfoErrorKind, ObjectStore,
+};
 use bytes::Bytes;
 use chrono::Utc;
 use futures::{FutureExt, StreamExt};
 use omnia::FutureResult;
-use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, ObjectMetadata};
+use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata};
 use tokio::io::AsyncReadExt;
 
 use crate::Client;
@@ -18,13 +22,19 @@ impl BlobStoreClient for Client {
         let jetstream = self.jetstream.clone();
 
         async move {
-            let store = jetstream
+            let created = jetstream
                 .create_object_store(Config {
                     bucket: name.clone(),
                     ..Default::default()
                 })
-                .await
-                .context("creating object store")?;
+                .await;
+            let store = match created {
+                Ok(store) => store,
+                Err(err) => match jetstream.get_object_store(&name).await {
+                    Ok(store) => store,
+                    Err(_) => return Err(err).context("creating object store"),
+                },
+            };
             let metadata = container_metadata(name);
 
             Ok(Arc::new(NatsContainer { metadata, store }) as Arc<dyn Container>)
@@ -37,7 +47,11 @@ impl BlobStoreClient for Client {
         let jetstream = self.jetstream.clone();
 
         async move {
-            let store = jetstream.get_object_store(&name).await.context("getting object store")?;
+            let store = match jetstream.get_object_store(&name).await {
+                Ok(store) => store,
+                Err(err) if stream_missing(&err) => bail!(Error::missing_container(&name)),
+                Err(err) => return Err(err).context("getting object store"),
+            };
             let metadata = container_metadata(name);
 
             Ok(Arc::new(NatsContainer { metadata, store }) as Arc<dyn Container>)
@@ -50,8 +64,12 @@ impl BlobStoreClient for Client {
         let jetstream = self.jetstream.clone();
 
         async move {
-            jetstream.delete_object_store(&name).await.context("issue deleting object store")?;
-            Ok(())
+            match jetstream.delete_object_store(&name).await {
+                Err(err) if !stream_missing(&err) => {
+                    Err(err).context("issue deleting object store")
+                }
+                _ => Ok(()),
+            }
         }
         .boxed()
     }
@@ -61,11 +79,25 @@ impl BlobStoreClient for Client {
         let jetstream = self.jetstream.clone();
 
         async move {
-            let exists = jetstream.get_object_store(&name).await.is_ok();
-            Ok(exists)
+            match jetstream.get_object_store(&name).await {
+                Ok(_) => Ok(true),
+                Err(err) if stream_missing(&err) => Ok(false),
+                Err(err) => Err(err).context("checking object store"),
+            }
         }
         .boxed()
     }
+}
+
+// an object store is the stream `OBJ_<name>`, so a missing store is a
+// stream the server does not find
+fn stream_missing(err: &ObjectStoreError) -> bool {
+    std::error::Error::source(err)
+        .and_then(|source| source.downcast_ref::<GetStreamError>())
+        .is_some_and(|err| {
+            matches!(err.kind(), GetStreamErrorKind::JetStream(err)
+                if err.error_code() == ErrorCode::STREAM_NOT_FOUND)
+        })
 }
 
 fn container_metadata(name: String) -> ContainerMetadata {
@@ -147,7 +179,16 @@ impl Container for NatsContainer {
 
     fn delete_object(&self, name: String) -> FutureResult<()> {
         let store = self.store.clone();
-        async move { store.delete(name).await.context("deleting object") }.boxed()
+
+        async move {
+            match store.delete(name).await {
+                Err(err) if err.kind() != DeleteErrorKind::NotFound => {
+                    Err(err).context("deleting object")
+                }
+                _ => Ok(()),
+            }
+        }
+        .boxed()
     }
 
     fn has_object(&self, name: String) -> FutureResult<bool> {

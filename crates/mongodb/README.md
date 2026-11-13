@@ -7,6 +7,12 @@ MongoDB blobstore backend for the Omnia WASI runtime, implementing the `wasi-blo
 
 Maps blobstore containers to MongoDB collections using the official `mongodb` driver.
 
+- Only `create-container` makes a collection, and creating one that exists opens it.
+- Opening a collection that does not exist fails with
+  `omnia_wasi_blobstore::Error::missing_container`, which a guest's `BlobStore`
+  reports as `ErrorKind::NotFound`. Each open costs one `listCollections`.
+- Deleting an absent object or collection succeeds.
+
 MSRV: Rust 1.99
 
 ## Configuration
@@ -44,8 +50,9 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-blobstore` boundary against a
-real MongoDB (containers map to collections). It is `#[ignore]`d so it never runs
-in CI; run it explicitly:
+real MongoDB (containers map to collections): a write/read/delete round-trip and
+the container rules above. The tests are `#[ignore]`d so they never run in CI; run
+them explicitly:
 
 ```bash
 docker run -d --name mongodb -p 27017:27017 mongo:latest

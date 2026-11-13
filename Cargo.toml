@@ -118,10 +118,10 @@ omnia-wasi-vault = { git = "https://github.com/augentic/omnia", branch = "capabl
 omnia-wasi-vcs = { git = "https://github.com/augentic/omnia", branch = "capablities" }
 
 # omnia = { path = "../omnia/crates/omnia" }
-# omnia-core = { path = "../omnia/crates/omnia-core" }
-# omnia-plugin = { path = "../omnia/crates/omnia-plugin" }
-# omnia-sdk = { path = "../omnia/crates/omnia-sdk" }
-# omnia-test = { path = "../omnia/crates/omnia-test" }
+# omnia-core = { path = "../omnia/crates/core" }
+# omnia-plugin = { path = "../omnia/crates/plugin" }
+# omnia-sdk = { path = "../omnia/crates/sdk" }
+# omnia-test = { path = "../omnia/crates/test" }
 # omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
 # omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
 # omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }

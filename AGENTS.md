@@ -104,6 +104,16 @@ so the policy splits into three tiers:
       `keyvalue_state_store` in `tests/live.rs`, since no honest in-process
       fake of those services exists. The row empties the `default` and
       `second` buckets, so it runs against a local server only.
+  - **Every blob backend runs the `omnia_test::contract::blob` rows** from
+    `programs/blobstore/blob_store.rs`, through
+    `test_programs::foreach_blobstore!()`:
+    - filesystem over a temporary root in `tests/blobstore.rs`, so in CI;
+    - Azure Blob, MongoDB, and NATS over the real client, as the
+      `#[ignore]`d `blobstore_blob_store` in `tests/live.rs`. The guest's
+      first argument prefixes every container the rows make, and a live
+      run passes `omnia-live-<pid>`, because Azure holds a deleted
+      container's name for a while and a failed run leaves its containers
+      behind.
   - **Postgres and Azure Table run the `omnia_test::contract::sql` and
     `omnia_test::contract::document` rows** the same way, from
     `programs/sql/sql_db.rs` and `programs/docstore/document_db.rs`

@@ -1,13 +1,26 @@
-//! The filesystem backend at the `omnia:blobstore` contract boundary
-//! (`BlobStoreClient`): container lifecycle, ranged reads, listing and
-//! name sanitising, against a temporary directory. No service, so it runs
-//! in CI.
+//! The filesystem backend at the `wasi:blobstore` host boundary, against a
+//! temporary directory. The `omnia_test::contract::blob` rows run from a
+//! real guest. The rest is what no guest reaches:
+//!
+//! - a write through a handle whose container was deleted since;
+//! - inclusive range ends, and the inverted range the backend refuses;
+//! - the names the backend refuses.
+//!
+//! No service, so it runs in CI.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::Arc;
 
 use bytes::Bytes;
-use omnia_wasi_blobstore::{BlobStoreClient, Container, Error};
+use omnia::ExitStatus;
+use omnia_test::host::{Backends, Deployment};
+use omnia_wasi_blobstore::{BlobStoreClient, Container, Error, WasiBlobStore};
 use tempfile::TempDir;
+
+// Every blobstore program in `crates/test-programs` must have a matching
+// test here; a new program without one fails to compile.
+test_programs::foreach_blobstore!();
 
 fn client(root: &TempDir) -> omnia_filesystem::Client {
     omnia_filesystem::Client::open(root.path()).expect("open")
@@ -18,64 +31,33 @@ async fn snapshots(client: &omnia_filesystem::Client) -> Arc<dyn Container> {
 }
 
 #[tokio::test]
-async fn container_lifecycle() {
+async fn blobstore_blob_store() {
     let root = TempDir::new().expect("tempdir");
-    let client = client(&root);
+    let backends = Backends::defaults().await.blobstore(client(&root));
 
-    assert!(!client.container_exists("snapshots".to_string()).await.expect("exists"));
-    let container = snapshots(&client).await;
-    assert_eq!(container.name().expect("name"), "snapshots");
-    assert!(client.container_exists("snapshots".to_string()).await.expect("exists"));
+    let status = Deployment::new()
+        .guest("guest", test_programs::BLOBSTORE_BLOB_STORE)
+        .run_host::<WasiBlobStore, _>(backends.clone())
+        .await
+        .expect("guest runs");
+    assert_eq!(status, ExitStatus::SUCCESS, "guest failed");
 
-    container.write_data("obj".to_string(), Bytes::from_static(b"x")).await.expect("write");
-    let again = snapshots(&client).await;
-    assert!(again.has_object("obj".to_string()).await.expect("has"));
-    let got = client.get_container("snapshots".to_string()).await.expect("get");
-    assert!(got.has_object("obj".to_string()).await.expect("has"));
-
-    client.delete_container("snapshots".to_string()).await.expect("delete");
-    client.delete_container("snapshots".to_string()).await.expect("delete again");
-    assert!(!client.container_exists("snapshots".to_string()).await.expect("exists"));
-
-    let err = client.get_container("snapshots".to_string()).await.expect_err("lookup");
-    assert!(matches!(err.downcast_ref::<Error>(), Some(Error::NotFound(_))), "{err}");
-    let write = again.write_data("obj".to_string(), Bytes::from_static(b"x")).await;
-    let err = write.expect_err("a write through a stale handle");
-    assert!(matches!(err.downcast_ref::<Error>(), Some(Error::NotFound(_))), "{err}");
-    assert!(!client.container_exists("snapshots".to_string()).await.expect("exists"));
-
-    let created = snapshots(&client).await;
-    let again = snapshots(&client).await;
-    created.write_data("obj".to_string(), Bytes::from_static(b"x")).await.expect("write");
-    assert!(again.has_object("obj".to_string()).await.expect("has"), "create opens");
+    // the guest's bytes are stored as they are
+    assert_eq!(backends.object("contract-host", "raw").await, Some(b"raw".to_vec()));
 }
 
 #[tokio::test]
-async fn write_read() {
+async fn stale_handle() {
     let root = TempDir::new().expect("tempdir");
     let client = client(&root);
     let container = snapshots(&client).await;
 
-    let payload = Bytes::from_static(&[0_u8, 159, 146, 150, 255]);
-    container.write_data("ab/cdef".to_string(), payload.clone()).await.expect("write");
+    client.delete_container("snapshots".to_string()).await.expect("delete");
 
-    let data = container.get_data("ab/cdef".to_string(), 0, u64::MAX).await.expect("get");
-    assert_eq!(data, Some(payload.clone()));
-
-    container
-        .write_data("ab/cdef".to_string(), Bytes::from_static(b"second"))
-        .await
-        .expect("rewrite");
-    let data = container.get_data("ab/cdef".to_string(), 0, u64::MAX).await.expect("get");
-    assert_eq!(data, Some(Bytes::from_static(b"second")));
-
-    let info = container.object_info("ab/cdef".to_string()).await.expect("info");
-    assert_eq!(info.size, 6);
-    assert_eq!(info.container, "snapshots");
-
-    assert_eq!(container.get_data("missing".to_string(), 0, 0).await.expect("get"), None);
-    let err = container.object_info("missing".to_string()).await.expect_err("must refuse");
-    assert!(err.to_string().contains("not found"), "unexpected error: {err}");
+    let write = container.write_data("obj".to_string(), Bytes::from_static(b"x")).await;
+    let err = write.expect_err("a write through a stale handle");
+    assert!(matches!(err.downcast_ref::<Error>(), Some(Error::NotFound(_))), "{err}");
+    assert!(!client.container_exists("snapshots".to_string()).await.expect("exists"));
 }
 
 #[tokio::test]
@@ -99,25 +81,6 @@ async fn range_reads() {
     assert_eq!(clamped, Some(Bytes::from_static(b"456789")));
     let err = container.get_data("obj".to_string(), 4, 2).await.expect_err("must refuse");
     assert!(err.to_string().contains("invalid byte range"), "unexpected error: {err}");
-}
-
-#[tokio::test]
-async fn list_and_delete() {
-    let root = TempDir::new().expect("tempdir");
-    let client = client(&root);
-    let container = snapshots(&client).await;
-
-    for name in ["a", "b/c", "b/d/e"] {
-        container.write_data(name.to_string(), Bytes::from_static(b"x")).await.expect("write");
-    }
-    let mut names = container.list_objects().await.expect("list");
-    names.sort();
-    assert_eq!(names, ["a", "b/c", "b/d/e"]);
-
-    container.delete_object("b/c".to_string()).await.expect("delete");
-    container.delete_object("b/c".to_string()).await.expect("delete again");
-    assert!(!container.has_object("b/c".to_string()).await.expect("has"));
-    assert!(container.has_object("b/d/e".to_string()).await.expect("has"));
 }
 
 #[tokio::test]

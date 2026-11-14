@@ -81,3 +81,13 @@ Deployments that anchor the root themselves (rather than through the
 environment) construct the backend with `Client::open(root)`, which declares
 the `default` bucket alone. One that needs more buckets passes them with the
 root, through `Client::connect_with(ConnectOptions { root, buckets })`.
+
+## Tests
+
+[`tests/blobstore.rs`](tests/blobstore.rs) and
+[`tests/keyvalue.rs`](tests/keyvalue.rs) run the shared
+`omnia_test::contract::blob` and `omnia_test::contract::state` rows from a real
+guest, over a temporary root. The other tests cover what no guest reaches, such
+as a write through a stale container handle and the names the backend refuses.
+Nothing needs a service, so every test runs on
+`cargo nextest run -p omnia-filesystem --all-features`, and in CI.

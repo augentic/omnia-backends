@@ -2,14 +2,15 @@
 //! through the `omnia:messaging`, `omnia:keyvalue`, and `wasi:blobstore`
 //! host boundaries.
 //!
-//! Beside the `omnia_test::contract::state` rows from a real guest, the
-//! key-value tests cover what no guest row reaches:
+//! Beside the `omnia_test::contract::state` and `omnia_test::contract::blob`
+//! rows from a real guest, the key-value tests cover what no guest row
+//! reaches:
 //!
 //! - the atomics, and their revision retry loop under contention;
 //! - a bucket made without per-message TTL taking one when opened.
 //!
-//! `#[ignore]`d so it never touches the network in CI. The rows empty the
-//! `default` and `second` buckets first, so run against a local server
+//! `#[ignore]`d so it never touches the network in CI. The state rows empty
+//! the `default` and `second` buckets first, so run against a local server
 //! (`nats-server -js`, then `NATS_ADDR=localhost:4222`):
 //! `cargo nextest run -p omnia-nats --all-features --run-ignored all`.
 
@@ -23,19 +24,21 @@ use async_nats::jetstream::{self, kv};
 use omnia::{Connect, ExitStatus, FromEnv as _};
 use omnia_nats::{Client, ConnectOptions};
 use omnia_test::host::{Backends, Deployment};
-use omnia_wasi_blobstore::{BlobStoreClient, Error as BlobError};
+use omnia_wasi_blobstore::{BlobStoreClient, WasiBlobStore};
 use omnia_wasi_keyvalue::{Bucket, Error, KeyValueClient, WasiKeyValue};
 use omnia_wasi_messaging::{Endpoint, Message, MessagingClient};
 use tokio::task::JoinSet;
 
-// Every keyvalue program in `crates/test-programs` must have a matching
-// test here; a new program without one fails to compile.
+// Every keyvalue and blobstore program in `crates/test-programs` must have a
+// matching test here; a new program without one fails to compile.
 test_programs::foreach_keyvalue!();
+test_programs::foreach_blobstore!();
 
 const LEGACY: &str = "omnia-legacy";
 
-// The rows empty two buckets and the upgrade replaces one, so neither runs
-// against the public server `NATS_ADDR` defaults to.
+// The state rows empty two buckets, the blob rows create a dozen object
+// stores, and the upgrade replaces a bucket, so none runs against the public
+// server `NATS_ADDR` defaults to.
 fn local() -> Result<ConnectOptions> {
     let options = ConnectOptions::load_env()?;
     ensure!(options.address != "demo.nats.io", "set NATS_ADDR to a local server");
@@ -169,30 +172,26 @@ async fn keyvalue_upgrade() -> Result<()> {
     Ok(())
 }
 
-// An object store nothing created is no container. Creating one, deleting
-// an absent object, and deleting an absent store each succeed.
+// A failed run leaves its object stores behind, so each run scopes the rows'
+// containers by its process id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs a reachable NATS server (NATS_ADDR); run with --run-ignored"]
-async fn blobstore_container_rules() -> Result<()> {
-    let client = <Client as Connect>::connect().await?;
-    let container = unique("omnia-live-rules");
-    let object = "object".to_owned();
+#[ignore = "live: creates object stores on a local NATS server (NATS_ADDR); run with --run-ignored"]
+async fn blobstore_blob_store() -> Result<()> {
+    let client = Client::connect_with(local()?).await?;
+    let scope = format!("omnia-live-{}", std::process::id());
+    let backends = Backends::defaults().await.blobstore(client.clone());
 
-    let err = client.get_container(container.clone()).await.expect_err("an uncreated store");
-    assert!(matches!(err.downcast_ref::<BlobError>(), Some(BlobError::NotFound(_))), "{err:#}");
-    assert!(!client.container_exists(container.clone()).await?, "an uncreated store");
+    let status = Deployment::new()
+        .guest("guest", test_programs::BLOBSTORE_BLOB_STORE)
+        .args([scope.as_str()])
+        .run_host::<WasiBlobStore, _>(backends.clone())
+        .await?;
+    assert_eq!(status, ExitStatus::SUCCESS, "guest failed");
 
-    let store = client.create_container(container.clone()).await?;
-    client.create_container(container.clone()).await?;
-    store.write_data(object.clone(), b"payload".to_vec().into()).await?;
-    assert_eq!(store.get_data(object.clone(), 0, 0).await?.as_deref(), Some(b"payload".as_slice()));
-    store.delete_object(object.clone()).await?;
-    store.delete_object(object.clone()).await?;
-    assert_eq!(store.get_data(object, 0, 0).await?, None);
-
-    client.delete_container(container.clone()).await?;
-    client.delete_container(container).await?;
-    Ok(())
+    // the guest's bytes are stored as they are
+    let host = format!("{scope}-host");
+    assert_eq!(backends.object(&host, "raw").await, Some(b"raw".to_vec()));
+    client.delete_container(host).await
 }
 
 // A collision-resistant suffix so parallel runs never share a live key.

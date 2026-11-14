@@ -13,6 +13,8 @@ Maps blobstore containers to Azure Blob containers and blobs to block blobs usin
   `ContainerNotFound` code the service answers, so opening a container costs
   no request.
 - An absent blob reads as absent, and deleting one succeeds.
+- A range that starts past the end of a blob reads as empty, which the service
+  answers with `InvalidRange`.
 - Creating a container that exists opens it, and deleting an absent one succeeds.
 
 ## Package store
@@ -74,10 +76,17 @@ let client = Client::connect_with(options).await?;
 
 ## Live tests
 
-[`tests/live.rs`](tests/live.rs) exercises the `wasi-blobstore` boundary against
-a real storage account (or Azurite): write/read/list/metadata round-trips, the
-container rules above, the ranged-read cases mirroring the `range_options` unit
-vectors, and the package store round-trip. The tests are `#[ignore]`d so they never run in CI; run them
+[`tests/live.rs`](tests/live.rs) runs against a real storage account (or
+Azurite).
+
+- `blobstore_blob_store` runs the shared `omnia_test::contract::blob` rows from
+  a real guest, which cover the container rules above.
+- `ranged_reads` checks the HTTP `Range` each inclusive wire range becomes.
+- `package_store` round-trips a release through the package store.
+
+Each run prefixes the rows' containers with `omnia-live-<pid>`, because Azure
+holds a deleted container's name for a while, and a passing run deletes every
+container it made. The tests are `#[ignore]`d so they never run in CI; run them
 explicitly (authentication is Entra ID only — service principal or developer
 tools). [`tests/blobstore.rs`](tests/blobstore.rs) holds what the view refuses
 before any request, such as the reserved `omnia-plugins` name, and runs in CI.
@@ -85,7 +94,7 @@ before any request, such as the reserved `omnia-plugins` name, and runs in CI.
 ```bash
 AZURE_BLOB_ENDPOINT=https://<account>.blob.core.windows.net \
 AZURE_TENANT_ID=... AZURE_CLIENT_ID=... AZURE_CLIENT_SECRET=... \
-  cargo nextest run -p omnia-azure-blob --run-ignored all
+  cargo nextest run -p omnia-azure-blob --all-features --run-ignored all
 ```
 
 ## License

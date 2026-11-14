@@ -1,79 +1,43 @@
-//! Live blob round-trip for the Azure Blob Storage backend, driven through the
-//! `omnia:blobstore` contract (`BlobStoreClient`).
+//! Live `wasi:blobstore` for the Azure Blob Storage backend: the
+//! `omnia_test::contract::blob` rows from a real guest, and the ranged reads
+//! and package store no guest row reaches.
 //!
 //! `#[ignore]`d so it never touches the network in CI. Run against a real
 //! storage account (`AZURE_BLOB_ENDPOINT` plus credentials, or Azurite):
-//! `cargo nextest run -p omnia-azure-blob --run-ignored all`.
+//! `cargo nextest run -p omnia-azure-blob --all-features --run-ignored all`.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use anyhow::Result;
-use omnia::Connect;
+use omnia::{Connect, ExitStatus};
 use omnia_azure_blob::Client;
-use omnia_wasi_blobstore::{BlobStoreClient, Container, Error};
+use omnia_test::host::{Backends, Deployment};
+use omnia_wasi_blobstore::{BlobStoreClient, Container, WasiBlobStore};
 
+// Every blobstore program in `crates/test-programs` must have a matching
+// test here; a new program without one fails to compile.
+test_programs::foreach_blobstore!();
+
+// Azure holds a deleted container's name for a while, so each run scopes the
+// rows' containers by its process id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
-async fn write_read_delete() -> Result<()> {
+async fn blobstore_blob_store() -> Result<()> {
     let client = <Client as Connect>::connect().await?;
+    let scope = format!("omnia-live-{}", std::process::id());
+    let backends = Backends::defaults().await.blobstore(client.clone());
 
-    // Container names are lowercase alphanumeric + dashes, 3-63 chars.
-    let container = format!("omnia-live-{}", std::process::id());
-    let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
+    let status = Deployment::new()
+        .guest("guest", test_programs::BLOBSTORE_BLOB_STORE)
+        .args([scope.as_str()])
+        .run_host::<WasiBlobStore, _>(backends.clone())
+        .await?;
+    assert_eq!(status, ExitStatus::SUCCESS, "guest failed");
 
-    assert_eq!(store.get_data("missing".to_owned(), 0, 0).await?, None);
-
-    let object = "greeting".to_owned();
-    store.write_data(object.clone(), b"payload".to_vec().into()).await?;
-
-    // (0, 0) is a full read (see `range_full_zero_zero`).
-    assert_eq!(store.get_data(object.clone(), 0, 0).await?.as_deref(), Some(b"payload".as_slice()));
-    assert!(store.has_object(object.clone()).await?, "object exists after write");
-
-    // Exercise the real list/metadata mappings against the service (these
-    // replace the deleted unit tests that asserted against reimplemented helpers).
-    let names = store.list_objects().await?;
-    assert!(names.contains(&object), "written object appears in listing: {names:?}");
-    let info = store.object_info(object.clone()).await?;
-    assert_eq!(info.name, object, "object name maps through get-properties");
-    assert_eq!(info.size, b"payload".len() as u64, "content length maps through get-properties");
-
-    store.delete_object(object).await?;
-    client.delete_container(container).await?;
-    Ok(())
-}
-
-// Each call on an object in a container nothing created fails `NotFound`, read
-// from the `ContainerNotFound` code the service answers, while an absent blob
-// reads as absent. A container that was never created deletes as a no-op.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
-async fn container_rules() -> Result<()> {
-    let client = <Client as Connect>::connect().await?;
-    let container = format!("omnia-live-rules-{}", std::process::id());
-    let object = "object".to_owned();
-
-    let uncreated = client.get_container(container.clone()).await?;
-    let refused = [
-        uncreated.get_data(object.clone(), 0, 0).await.expect_err("get"),
-        uncreated.write_data(object.clone(), b"x".to_vec().into()).await.expect_err("write"),
-        uncreated.has_object(object.clone()).await.expect_err("has"),
-        uncreated.object_info(object.clone()).await.expect_err("info"),
-        uncreated.list_objects().await.expect_err("list"),
-        uncreated.delete_object(object.clone()).await.expect_err("delete"),
-    ];
-    for err in refused {
-        assert!(matches!(err.downcast_ref::<Error>(), Some(Error::NotFound(_))), "{err:#}");
-    }
-
-    let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
-    client.create_container(container.clone()).await?;
-    assert!(!store.has_object(object.clone()).await?, "an absent blob");
-    store.delete_object(object).await?;
-    client.delete_container(container).await?;
-
-    // the service removes a deleted container in the background, so the
-    // absent one is a name nothing created
-    client.delete_container(format!("omnia-live-never-{}", std::process::id())).await?;
-    Ok(())
+    // the guest's bytes are stored as they are
+    let host = format!("{scope}-host");
+    assert_eq!(backends.object(&host, "raw").await, Some(b"raw".to_vec()));
+    client.delete_container(host).await
 }
 
 // Live counterpart of the `range_options` unit cases: the service must honor

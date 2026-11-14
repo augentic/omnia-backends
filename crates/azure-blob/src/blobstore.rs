@@ -163,6 +163,11 @@ impl Container for AzureBlobContainer {
                 Err(err) if storage_code(&err) == Some(StorageErrorCode::BlobNotFound) => {
                     return Ok(None);
                 }
+                // the service refuses a range that starts past the end, which
+                // the contract reads as empty
+                Err(err) if storage_code(&err) == Some(StorageErrorCode::InvalidRange) => {
+                    return Ok(Some(Bytes::new()));
+                }
                 Err(err) => return Err(fault(err, &container, "downloading blob")),
             };
             let data = response.body.collect().await.context("reading blob body")?;

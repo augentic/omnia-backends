@@ -3663,7 +3663,9 @@ dependencies = [
  "futures",
  "omnia",
  "omnia-plugin",
+ "omnia-test",
  "omnia-wasi-blobstore",
+ "test-programs",
  "tokio",
  "tracing",
 ]
@@ -3936,8 +3938,10 @@ dependencies = [
  "futures",
  "mongodb",
  "omnia",
+ "omnia-test",
  "omnia-wasi-blobstore",
  "serde",
+ "test-programs",
  "tokio",
  "tracing",
 ]

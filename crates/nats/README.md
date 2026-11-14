@@ -93,14 +93,15 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging`, `omnia:keyvalue`,
-and `wasi-blobstore` boundaries against a real server. `keyvalue_state_store` runs
-the shared `StateStore` rows from a real guest. The other key-value tests cover the
-atomics under contention and a bucket gaining per-message TTL when opened.
-`blobstore_container_rules` covers the container rules above. Every test is
-`#[ignore]`d so it never runs in CI.
+and `wasi-blobstore` boundaries against a real server. `keyvalue_state_store` and
+`blobstore_blob_store` run the shared `StateStore` and `BlobStore` rows from a real
+guest, the latter covering the container rules above. The other key-value tests
+cover the atomics under contention and a bucket gaining per-message TTL when
+opened. Every test is `#[ignore]`d so it never runs in CI.
 
-The rows first empty the `default` and `second` buckets, so run a local server with
-JetStream. The destructive tests refuse the default `demo.nats.io`:
+The state rows first empty the `default` and `second` buckets, and the blob rows
+create object stores prefixed `omnia-live-<pid>`, so run a local server with
+JetStream. The rows and `keyvalue_upgrade` refuse the default `demo.nats.io`:
 
 ```bash
 nats-server -js -sd "$(mktemp -d)" &

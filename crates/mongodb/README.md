@@ -49,16 +49,19 @@ let client = Client::connect_with(options).await?;
 
 ## Live tests
 
-[`tests/live.rs`](tests/live.rs) exercises the `wasi-blobstore` boundary against a
-real MongoDB (containers map to collections): a write/read/delete round-trip and
-the container rules above. The tests are `#[ignore]`d so they never run in CI; run
-them explicitly:
+[`tests/live.rs`](tests/live.rs) runs against a real MongoDB, where containers
+map to collections. `blobstore_blob_store` runs the shared
+`omnia_test::contract::blob` rows from a real guest, which cover the container
+rules above, and `ranged_reads` covers the wire ranges no guest row sends. Each
+run prefixes the rows' collections with `omnia-live-<pid>`, so what a failed run
+leaves behind never meets the next. The tests are `#[ignore]`d so they never run
+in CI; run them explicitly:
 
 ```bash
 docker run -d --name mongodb -p 27017:27017 mongo:latest
 
 MONGODB_URL=mongodb://localhost:27017/omnia \
-  cargo nextest run -p omnia-mongodb --run-ignored all
+  cargo nextest run -p omnia-mongodb --all-features --run-ignored all
 ```
 
 ## License

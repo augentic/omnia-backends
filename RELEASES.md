@@ -92,6 +92,8 @@ Unreleased
     answered the object as absent.
 - `omnia-azure-vault` deletes an absent secret as a no-op, where it
   failed.
+- `omnia-azure-blob` reads a range that starts past the end of a blob as
+  empty, as the other blob backends do, where it failed.
 
 ---
 

@@ -1,5 +1,5 @@
 //! Live key-value for the Redis backend at the `omnia:keyvalue` host
-//! boundary: the `omnia_sdk::contract::state` rows from a real guest, and
+//! boundary: the `omnia_test::contract::state` rows from a real guest, and
 //! the round trip and atomics no guest row reaches.
 //!
 //! `#[ignore]`d so it never touches the network in CI. The rows empty the

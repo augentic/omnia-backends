@@ -96,7 +96,7 @@ so the policy splits into three tiers:
   - **Other backends join this tier through `omnia_test::host::Backends`'
     per-host setters** (`Backends::defaults().await.keyvalue(client)`,
     `.blobstore(..)`, `.sql(..)`, …). Every key-value backend runs the
-    `omnia_sdk::contract::state` rows from
+    `omnia_test::contract::state` rows from
     `programs/keyvalue/state_store.rs`, through
     `test_programs::foreach_keyvalue!()`:
     - filesystem over a temporary root in `tests/keyvalue.rs`, so in CI;
@@ -104,8 +104,8 @@ so the policy splits into three tiers:
       `keyvalue_state_store` in `tests/live.rs`, since no honest in-process
       fake of those services exists. The row empties the `default` and
       `second` buckets, so it runs against a local server only.
-  - **Postgres and Azure Table run the `omnia_sdk::contract::sql` and
-    `omnia_sdk::contract::document` rows** the same way, from
+  - **Postgres and Azure Table run the `omnia_test::contract::sql` and
+    `omnia_test::contract::document` rows** the same way, from
     `programs/sql/sql_db.rs` and `programs/docstore/document_db.rs`
     through `test_programs::foreach_sql!()` and
     `test_programs::foreach_docstore!()`. Each is the `#[ignore]`d

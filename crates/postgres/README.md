@@ -83,7 +83,7 @@ let client = Client::connect_with(options).await?;
 
 [`tests/live.rs`](tests/live.rs) runs against a real database.
 
-- `sql_sql_db` runs the `omnia_sdk::contract::sql` rows from a real guest.
+- `sql_sql_db` runs the `omnia_test::contract::sql` rows from a real guest.
 - The round trips are the acceptance gate for the `into_param` /
   `into_wasi_row` mapping pair: scalar, temporal, JSON, binary, and null
   values, uint64 overflow, and `execute` affected counts.

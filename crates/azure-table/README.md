@@ -188,7 +188,7 @@ client.ensure_table("my_table").await?;
 
 [`tests/live.rs`](tests/live.rs) runs against a real storage account or Azurite.
 
-- `docstore_document_db` runs the `omnia_sdk::contract::document` rows from a
+- `docstore_document_db` runs the `omnia_test::contract::document` rows from a
   real guest.
 - The other tests cover what no guest row reaches: composite ids, `Edm` type
   fidelity, server-side filters with continuation paging, insert outcomes,

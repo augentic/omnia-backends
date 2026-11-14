@@ -1,4 +1,4 @@
-//! Live `omnia:sql` for the Postgres backend: the `omnia_sdk::contract::sql`
+//! Live `omnia:sql` for the Postgres backend: the `omnia_test::contract::sql`
 //! rows from a real guest, and the mappings, transactions, and pool
 //! behaviour no guest row reaches.
 //!

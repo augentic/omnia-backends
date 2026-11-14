@@ -2,7 +2,7 @@
 //! through the `omnia:messaging`, `omnia:keyvalue`, and `wasi:blobstore`
 //! host boundaries.
 //!
-//! Beside the `omnia_sdk::contract::state` rows from a real guest, the
+//! Beside the `omnia_test::contract::state` rows from a real guest, the
 //! key-value tests cover what no guest row reaches:
 //!
 //! - the atomics, and their revision retry loop under contention;

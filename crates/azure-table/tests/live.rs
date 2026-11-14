@@ -1,5 +1,5 @@
 //! Live `omnia:docstore` for the Azure Table Storage backend: the
-//! `omnia_sdk::contract::document` rows from a real guest, and the entity,
+//! `omnia_test::contract::document` rows from a real guest, and the entity,
 //! filter, and paging mappings no guest row reaches.
 //!
 //! Only the real service (Azurite or cloud) proves it accepts what the

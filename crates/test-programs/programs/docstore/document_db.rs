@@ -1,11 +1,11 @@
-//! The `omnia_sdk::contract::document` rows over `WasiProvider`, all at
+//! The `omnia_test::contract::document` rows over `WasiProvider`, all at
 //! once, so a backend's `omnia:docstore` meets the `DocumentDb` contract the
 //! native doubles do.
 
 #![cfg(target_arch = "wasm32")]
 
 use omnia_sdk::WasiProvider;
-use omnia_sdk::contract::document;
+use omnia_test::contract::document;
 
 omnia_sdk::api::command::export!(scenario);
 

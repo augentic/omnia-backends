@@ -1,5 +1,5 @@
 //! The filesystem backend at the `omnia:keyvalue` host boundary, against a
-//! temporary directory. The `omnia_sdk::contract::state` rows run from a
+//! temporary directory. The `omnia_test::contract::state` rows run from a
 //! real guest. The rest is what no guest reaches:
 //!
 //! - deadlines surviving a reopen;

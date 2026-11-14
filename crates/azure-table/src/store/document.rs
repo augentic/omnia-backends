@@ -6,7 +6,7 @@
 //! are serialized as JSON string properties.
 
 use anyhow::{Context, anyhow};
-use omnia_wasi_docstore::Document;
+use omnia_wasi_docstore::{Document, Error};
 use serde_json::{Map, Value};
 
 const SYSTEM_KEYS: &[&str] = &["PartitionKey", "RowKey", "Timestamp"];
@@ -15,21 +15,39 @@ const SYSTEM_KEYS: &[&str] = &["PartitionKey", "RowKey", "Timestamp"];
 // disallowed), so it never collides with either.
 const ID_SEP: char = '\0';
 
-/// Encode a partition key and row key into a composite document id.
+/// Encode a partition key and row key into a document id.
+///
+/// An empty row key leaves the partition key as the id, so a plain id
+/// round-trips unchanged. Any other pair is joined by a `\0` separator.
 #[must_use]
 pub fn encode_id(partition_key: &str, row_key: &str) -> String {
-    format!("{partition_key}{ID_SEP}{row_key}")
+    if row_key.is_empty() {
+        partition_key.to_owned()
+    } else {
+        format!("{partition_key}{ID_SEP}{row_key}")
+    }
 }
 
-/// Decode a composite document id into `(partition_key, row_key)`.
+/// Decode a document id into `(partition_key, row_key)`.
+///
+/// A composite id splits at its `\0` separator. A plain id is the partition
+/// key with an empty row key, so `pk` and `pk\0` name the same entity.
 ///
 /// # Errors
 ///
-/// Returns an error when `id` carries no separator.
+/// Returns [`Error::Invalid`] when either key holds a character Azure Table
+/// forbids in a key: `/`, `\`, `#`, `?`, or a control character.
 pub fn decode_id(id: &str) -> anyhow::Result<(&str, &str)> {
-    id.split_once(ID_SEP).ok_or_else(|| {
-        anyhow!("invalid document id {id:?}: expected '{{PartitionKey}}\\0{{RowKey}}'")
-    })
+    let (pk, rk) = id.split_once(ID_SEP).unwrap_or((id, ""));
+    if let Some(c) = pk.chars().chain(rk.chars()).find(|&c| is_forbidden_in_key(c)) {
+        let message = format!("document id {id:?} holds {c:?}, which Azure Table forbids in a key");
+        return Err(Error::Invalid(message).into());
+    }
+    Ok((pk, rk))
+}
+
+const fn is_forbidden_in_key(c: char) -> bool {
+    matches!(c, '/' | '\\' | '#' | '?') || c.is_control()
 }
 
 /// Build the entity JSON body for `doc`, its top-level fields as typed
@@ -37,13 +55,16 @@ pub fn decode_id(id: &str) -> anyhow::Result<(&str, &str)> {
 ///
 /// # Errors
 ///
-/// Returns an error when the id is not composite or the body is not a JSON
-/// object.
+/// - [`Error::Invalid`] when the id holds a character Azure Table forbids
+///   in a key, or the body is not a JSON object.
+/// - [`Error::Unsupported`] for an integer past the `i64` range.
 pub fn flatten(doc: &Document) -> anyhow::Result<Value> {
     let (pk, rk) = decode_id(&doc.id)?;
-    let body: Value =
-        serde_json::from_slice(&doc.data).context("document body is not valid JSON")?;
-    let src = body.as_object().ok_or_else(|| anyhow!("document body must be a JSON object"))?;
+    let body: Value = serde_json::from_slice(&doc.data)
+        .map_err(|err| Error::Invalid(format!("document {:?} is not JSON: {err}", doc.id)))?;
+    let src = body
+        .as_object()
+        .ok_or_else(|| Error::Invalid(format!("document {:?} is not a JSON object", doc.id)))?;
 
     let properties = src
         .iter()
@@ -61,7 +82,8 @@ pub fn flatten(doc: &Document) -> anyhow::Result<Value> {
     Ok(Value::Object(entity))
 }
 
-/// Convert an entity JSON body into a [`Document`] with a composite id.
+/// Convert an entity JSON body into a [`Document`], its id as
+/// [`encode_id`] makes it.
 ///
 /// Metadata properties are stripped; `Edm.Int64` and `Edm.Double` are
 /// restored from their annotations, and nested values stay the JSON strings
@@ -122,7 +144,9 @@ fn typed_property(key: &str, value: &Value) -> anyhow::Result<Vec<(String, Value
                 }
             } else if let Some(u) = n.as_u64() {
                 let v = i64::try_from(u).map_err(|_overflow| {
-                    anyhow!("numeric value for key `{key}` exceeds Azure Table integer range")
+                    Error::Unsupported(format!(
+                        "numeric value for key `{key}` exceeds Azure Table integer range"
+                    ))
                 })?;
                 annotated(Value::String(v.to_string()), "Edm.Int64")
             } else {

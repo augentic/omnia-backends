@@ -171,17 +171,14 @@ pub struct Recorded {
 impl Recorded {
     /// The `messages` as `(role, content)` pairs, content flattened to text.
     pub fn messages(&self) -> Vec<(String, String)> {
-        self.body["messages"]
-            .as_array()
-            .map(|messages| {
-                messages
-                    .iter()
-                    .map(|m| {
-                        (m["role"].as_str().unwrap_or_default().to_owned(), text_of(&m["content"]))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.body["messages"].as_array().map_or_default(|messages| {
+            messages
+                .iter()
+                .map(|m| {
+                    (m["role"].as_str().unwrap_or_default().to_owned(), text_of(&m["content"]))
+                })
+                .collect()
+        })
     }
 
     /// The content of the last message with `role`.
@@ -191,15 +188,12 @@ impl Recorded {
 
     /// The names of the tools the request advertises.
     pub fn tools(&self) -> Vec<String> {
-        self.body["tools"]
-            .as_array()
-            .map(|tools| {
-                tools
-                    .iter()
-                    .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.body["tools"].as_array().map_or_default(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+                .collect()
+        })
     }
 }
 

@@ -148,7 +148,7 @@ mod syscall {
     use std::ptr;
 
     pub fn row(name: &str, args: &[String]) -> Result<String, String> {
-        let arg = |n: usize| args.get(n).map(String::as_str).unwrap_or_default();
+        let arg = |n: usize| args.get(n).map_or_default(String::as_str);
         match name {
             "socket" => socket(arg(0), arg(1)),
             "ptrace" => ptrace(),

@@ -3,6 +3,7 @@
 mod blobstore;
 mod keyvalue;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,22 +19,30 @@ use tracing::instrument;
 pub struct Client {
     root: PathBuf,
     locks: keyvalue::LockRegistry,
+    buckets: Arc<HashSet<String>>,
 }
 
 impl Client {
-    /// Opens a store, creating its root directory when absent.
+    /// Opens a store whose one key-value bucket is `default`, creating its root
+    /// directory when absent.
+    ///
+    /// A store with more buckets connects with [`ConnectOptions::buckets`].
     ///
     /// # Errors
     ///
     /// Returns an error when the root cannot be created or resolved.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
-        let root = root.into();
-        fs::create_dir_all(&root).context("creating root directory")?;
+        Self::with_buckets(&root.into(), HashSet::from(["default".to_owned()]))
+    }
+
+    fn with_buckets(root: &Path, buckets: HashSet<String>) -> Result<Self> {
+        fs::create_dir_all(root).context("creating root directory")?;
         let root = root.canonicalize().context("canonicalizing root directory")?;
 
         Ok(Self {
             root,
             locks: Arc::default(),
+            buckets: Arc::new(buckets),
         })
     }
 }
@@ -43,13 +52,14 @@ impl Connect for Client {
 
     #[instrument(name = "Filesystem::connect")]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        Self::open(options.root)
+        let buckets = keyvalue::declare(options.buckets)?;
+        Self::with_buckets(Path::new(&options.root), buckets)
     }
 }
 
 #[expect(missing_docs, reason = "`FromEnv` has no docs")]
 mod config {
-    use fromenv::FromEnv;
+    use fromenv::{FromEnv, ParseResult};
 
     /// Connection options for the filesystem backend.
     #[derive(Clone, Debug, FromEnv)]
@@ -57,6 +67,19 @@ mod config {
         /// Root directory of the store; created when absent.
         #[env(from = "FILESYSTEM_ROOT", default = ".omnia/storage")]
         pub root: String,
+        /// Key-value buckets a guest may open, comma-separated.
+        #[env(from = "KEYVALUE_BUCKETS", default = "default", with = comma_separated)]
+        pub buckets: Vec<String>,
+    }
+
+    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
+    fn comma_separated(value: &str) -> ParseResult<Vec<String>> {
+        Ok(value
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
     }
 }
 pub use config::ConnectOptions;

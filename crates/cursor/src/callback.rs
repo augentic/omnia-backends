@@ -464,7 +464,7 @@ fn respond(codec: Codec, result: &Value) -> Response<Full<Bytes>> {
         }
         Codec::Proto => {
             let response = CallCustomToolResponse {
-                result: Some(result.as_object().map(value_to_struct).unwrap_or_default()),
+                result: Some(result.as_object().map_or_default(value_to_struct)),
             };
             reply(StatusCode::OK, "application/proto", response.encode_to_vec())
         }

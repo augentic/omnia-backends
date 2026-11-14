@@ -43,7 +43,6 @@ multiple_crate_versions = "allow"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-axum = { version = "0.8.9", default-features = false, features = ["json"] }
 azure_core = "1.1.0"
 azure_identity = "1.0.0"
 azure_security_keyvault_secrets = "1.0.1"
@@ -59,12 +58,12 @@ http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
-jsonschema = { version = "0.61.1", default-features = false }
+jsonschema = { version = "0.61.2", default-features = false }
 libc = "0.2"
 omnia-sandbox = { version = "0.32.0", path = "crates/sandbox" }
 process-wrap = { version = "10.0.1", default-features = false }
-prost = "0.14.5"
-prost-types = "0.14.5"
+prost = "0.14.6"
+prost-types = "0.14.6"
 reqwest = "0.13.5"
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std"] }
 schemars = "1.2.3"
@@ -74,11 +73,15 @@ serde_repr = "0.1.21"
 sha2 = "0.11.1"
 tempfile = "3.27.0"
 test-programs = { path = "crates/test-programs" }
+omnia-azure-blob = { path = "crates/azure-blob", version = "0.32.0" }
+omnia-azure-table = { path = "crates/azure-table", version = "0.32.0" }
+omnia-cursor = { path = "crates/cursor", version = "0.32.0" }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false }
 tokio-util = "0.7.20"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+url = "2.5.8"
 urlencoding = "2.1.3"
 
 omnia = "0.38.0"
@@ -114,10 +117,10 @@ omnia-wasi-vault = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-vcs = { git = "https://github.com/augentic/omnia" }
 
 # omnia = { path = "../omnia/crates/omnia" }
-# omnia-core = { path = "../omnia/crates/omnia-core" }
-# omnia-plugin = { path = "../omnia/crates/omnia-plugin" }
-# omnia-sdk = { path = "../omnia/crates/omnia-sdk" }
-# omnia-test = { path = "../omnia/crates/omnia-test" }
+# omnia-core = { path = "../omnia/crates/core" }
+# omnia-plugin = { path = "../omnia/crates/plugin" }
+# omnia-sdk = { path = "../omnia/crates/sdk" }
+# omnia-test = { path = "../omnia/crates/test" }
 # omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
 # omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
 # omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }

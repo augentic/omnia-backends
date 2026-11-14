@@ -1,88 +1,43 @@
-//! Live blob round-trip for the Azure Blob Storage backend, driven through the
-//! `omnia:blobstore` contract (`BlobStoreClient`).
+//! Live `omnia:blobstore` for the Azure Blob Storage backend: the
+//! `omnia_test::contract::blob` rows from a real guest, and the package store
+//! no guest row reaches.
 //!
 //! `#[ignore]`d so it never touches the network in CI. Run against a real
 //! storage account (`AZURE_BLOB_ENDPOINT` plus credentials, or Azurite):
-//! `cargo nextest run -p omnia-azure-blob --run-ignored all`.
+//! `cargo nextest run -p omnia-azure-blob --all-features --run-ignored all`.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use anyhow::Result;
-use omnia::Connect;
+use omnia::{Connect, ExitStatus};
 use omnia_azure_blob::Client;
-use omnia_wasi_blobstore::{BlobStoreClient, Container};
+use omnia_test::host::{Backends, Deployment};
+use omnia_wasi_blobstore::{BlobStoreClient, Container, WasiBlobStore};
 
+// Every blobstore program in `crates/test-programs` must have a matching
+// test here; a new program without one fails to compile.
+test_programs::foreach_blobstore!();
+
+// Azure holds a deleted container's name for a while, so each run scopes the
+// rows' containers by its process id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
-async fn write_read_delete() -> Result<()> {
+async fn blobstore_blob_store() -> Result<()> {
     let client = <Client as Connect>::connect().await?;
+    let scope = format!("omnia-live-{}", std::process::id());
+    let backends = Backends::defaults().await.blobstore(client.clone());
 
-    // Container names are lowercase alphanumeric + dashes, 3-63 chars.
-    let container = format!("omnia-live-{}", std::process::id());
-    let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
+    let status = Deployment::new()
+        .guest("guest", test_programs::BLOBSTORE_BLOB_STORE)
+        .args([scope.as_str()])
+        .run_host::<WasiBlobStore, _>(backends.clone())
+        .await?;
+    assert_eq!(status, ExitStatus::SUCCESS, "guest failed");
 
-    assert_eq!(store.get_data("missing".to_owned(), 0, 0).await?, None);
-
-    let object = "greeting".to_owned();
-    store.write_data(object.clone(), b"payload".to_vec().into()).await?;
-
-    // (0, 0) is a full read (see `range_full_zero_zero`).
-    assert_eq!(store.get_data(object.clone(), 0, 0).await?.as_deref(), Some(b"payload".as_slice()));
-    assert!(store.has_object(object.clone()).await?, "object exists after write");
-
-    // Exercise the real list/metadata mappings against the service (these
-    // replace the deleted unit tests that asserted against reimplemented helpers).
-    let names = store.list_objects().await?;
-    assert!(names.contains(&object), "written object appears in listing: {names:?}");
-    let info = store.object_info(object.clone()).await?;
-    assert_eq!(info.name, object, "object name maps through get-properties");
-    assert_eq!(info.size, b"payload".len() as u64, "content length maps through get-properties");
-
-    store.delete_object(object).await?;
-    client.delete_container(container).await?;
-    Ok(())
-}
-
-// Live counterpart of the `range_options` unit cases: the service must honor
-// the HTTP `Range` each (start, end) pair translates to.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
-async fn ranged_reads() -> Result<()> {
-    let client = <Client as Connect>::connect().await?;
-
-    let container = format!("omnia-live-range-{}", std::process::id());
-    let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
-
-    let object = "ranged".to_owned();
-    let payload = b"0123456789abcdefghij"; // 20 bytes
-    store.write_data(object.clone(), payload.to_vec().into()).await?;
-
-    // (start, end, expected slice); end is inclusive, 0/u64::MAX mean unbounded.
-    let cases: &[(u64, u64, &[u8])] = &[
-        (0, 0, payload),               // full read
-        (0, u64::MAX, payload),        // full read
-        (10, 14, b"abcde"),            // bounded, inclusive end
-        (5, 5, b"5"),                  // single byte
-        (10, 0, b"abcdefghij"),        // offset with unbounded end
-        (10, u64::MAX, b"abcdefghij"), // offset with unbounded end
-        (15, 1_000, b"fghij"),         // end past EOF clamps to object size
-    ];
-    for (start, end, expected) in cases {
-        let data = store.get_data(object.clone(), *start, *end).await?;
-        assert_eq!(
-            data.as_deref(),
-            Some(*expected),
-            "get_data({start}, {end}) returns the ranged slice"
-        );
-    }
-
-    let err = store
-        .get_data(object.clone(), 10, 5)
-        .await
-        .expect_err("inverted range is rejected before hitting the service");
-    assert!(err.to_string().contains("end (5) < start (10)"), "rejection surfaces: {err}");
-
-    store.delete_object(object).await?;
-    client.delete_container(container).await?;
-    Ok(())
+    // the guest's bytes are stored as they are
+    let host = format!("{scope}-host");
+    assert_eq!(backends.object(&host, "raw").await, Some(b"raw".to_vec()));
+    client.delete_container(host).await
 }
 
 // Package-store round-trip over the dedicated `omnia-plugins` container: a
@@ -113,7 +68,8 @@ async fn package_store() -> Result<()> {
     // own `omnia-plugins` container.
     let guest: std::sync::Arc<dyn Container> =
         client.create_container("plugins".to_string()).await?;
-    let names = guest.list_objects().await?;
+    let page = guest.list_objects(String::new(), None).await?;
+    let names: Vec<_> = page.objects.into_iter().map(|object| object.name).collect();
     assert!(
         !names.iter().any(|name| name == &reference.file_name()),
         "guest container must not see stored packages: {names:?}"

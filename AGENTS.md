@@ -54,19 +54,20 @@ so the policy splits into three tiers:
 
 - **Guest-driven e2e over a protocol-faithful fake is the primary tier**
   wherever the service's protocol is small enough to fake honestly — today
-  the `cursor` and `genai` model backends. A real guest component from
-  [crates/test-programs](crates/test-programs) (compiled for `wasm32-wasip2`
-  by that crate's own build script) runs through
+  the `cursor` and `genai` model backends and `azure-id`. A real guest
+  component from [crates/test-programs](crates/test-programs) (compiled for
+  `wasm32-wasip2` by that crate's own build script) runs through
   `omnia_test::host::Deployment` over the backend's `Client`, whose service
   is a fake the test owns: `fake-cursor-sdk-bridge` for cursor (a binary
   linked onto the test process's `PATH` as `cursor-sdk-bridge`, which the
   client spawns as one process per lease exactly as it spawns the real
   one), an `OpenAI`-compatible chat-completions endpoint behind
-  `GENAI_ENDPOINT` for genai. The guest asserts what it observes across
-  the boundary and traps on failure; the test asserts what reached the
-  fake (per-agent RPC sequences, recorded request bodies) and that the
-  backend is whole again afterwards (every spawned process gone, on
-  cursor). Nothing public exists for the tests' sake — no `#[doc(hidden)]`
+  `GENAI_ENDPOINT` for genai, and an App Service managed-identity endpoint
+  behind `IDENTITY_ENDPOINT` for azure-id. The guest asserts what it
+  observes across the boundary and traps on failure; the test asserts what
+  reached the fake (per-agent RPC sequences, recorded request bodies) and
+  that the backend is whole again afterwards (every spawned process gone,
+  on cursor). Nothing public exists for the tests' sake — no `#[doc(hidden)]`
   probes, no options the fake alone needs; the fake is reached the way the
   real service is. One
   flat file per boundary in the crate's `tests/`: `tests/model.rs` is the
@@ -94,11 +95,33 @@ so the policy splits into three tiers:
     flag.
   - **Other backends join this tier through `omnia_test::host::Backends`'
     per-host setters** (`Backends::defaults().await.keyvalue(client)`,
-    `.blobstore(..)`, `.sql(..)`, …): a redis/postgres/nats suite runs the
-    same shape over the real client behind a service-up env gate, since no
-    honest in-process fake of those services exists. The setters shipped in
-    `omnia-test` 0.36.0; the redis/postgres/nats suites themselves are not
-    built yet.
+    `.blobstore(..)`, `.sql(..)`, …). Every key-value backend runs the
+    `omnia_test::contract::state` rows from
+    `programs/keyvalue/state_store.rs`, through
+    `test_programs::foreach_keyvalue!()`:
+    - filesystem over a temporary root in `tests/keyvalue.rs`, so in CI;
+    - redis and nats over the real client, as the `#[ignore]`d
+      `keyvalue_state_store` in `tests/live.rs`, since no honest in-process
+      fake of those services exists. The row empties the `default` and
+      `second` buckets, so it runs against a local server only.
+  - **Every blob backend runs the `omnia_test::contract::blob` rows** from
+    `programs/blobstore/blob_store.rs`, through
+    `test_programs::foreach_blobstore!()`:
+    - filesystem over a temporary root in `tests/blobstore.rs`, so in CI;
+    - Azure Blob, MongoDB, and NATS over the real client, as the
+      `#[ignore]`d `blobstore_blob_store` in `tests/live.rs`. The guest's
+      first argument prefixes every container the rows make, and a live
+      run passes `omnia-live-<pid>`, because Azure holds a deleted
+      container's name for a while and a failed run leaves its containers
+      behind.
+  - **Postgres and Azure Table run the `omnia_test::contract::sql` and
+    `omnia_test::contract::document` rows** the same way, from
+    `programs/sql/sql_db.rs` and `programs/docstore/document_db.rs`
+    through `test_programs::foreach_sql!()` and
+    `test_programs::foreach_docstore!()`. Each is the `#[ignore]`d
+    `sql_sql_db` or `docstore_document_db` in the crate's `tests/live.rs`.
+    Each row clears its tables before it runs, so it runs against a local
+    server or an account of your own only.
 - **Unit tests are the exception, and none exist today.** No file under
   `crates/*/src` carries a `#[cfg(test)]` module. Cursor's ready-line and
   Connect-frame parsing and genai's request translation are asserted by
@@ -154,10 +177,12 @@ so the policy splits into three tiers:
   the crate's `[dependencies]` alone — never a dev-dependency. The suites'
   side of its module (`Spawnable`, the liveness probe and its `libc`) is
   `cfg(test)`, which the binary never is (`test = false`, `bench = false`).
-- The omnia crates come from crates.io, pinned by the single
-  `[workspace.dependencies]` declarations (`omnia = "0.38.0"` and friends);
-  every `omnia-*` must stay on the same line, so bump them all together and
-  never add a `[patch.crates-io]` git or path override to chase an
+- The omnia crates are pinned by the single `[workspace.dependencies]`
+  declarations (`omnia = "0.38.0"` and friends); every `omnia-*` must stay
+  on the same line, so bump them all together. Until the capability
+  contract's omnia release is published, `[patch.crates-io]` points every
+  `omnia-*` at omnia's `capablities` branch, and `cargo update -p omnia-sdk`
+  re-locks them as one. Never add another git or path override to chase an
   unreleased change. `.cargo/config.toml` sets
   `registry.global-min-publish-age = "7 days"`; stable cargo ignores it
   (it is enforced only under nightly `-Zmin-publish-age`), but where it is

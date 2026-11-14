@@ -6,14 +6,14 @@ No manual data pre-seeding is required.
 
 ## Covered scenarios
 
-- **CRUD**: insert, get round-trip, put (upsert), delete, double-delete, duplicate insert rejected, get non-existent returns None
+- **CRUD**: insert, get round-trip, put (upsert), delete, double-delete, duplicate insert is already-exists, get non-existent returns None
 - **Multi-partition identity**: same RowKey in different partitions coexists with distinct composite IDs; partition-scoped vs cross-partition queries return correct subsets
 - **Cross-partition round-trip**: query all → put/delete using only the document's composite id (no partition key in the collection string)
 - **Filters**: `Compare` (Eq/Ne/Gt/Gte/Lte across Boolean, Int32, Float64, String), `InList`, `NotInList`, `And`, `Or`, `Not`
-- **Unsupported filter rejection**: `Contains`, `StartsWith`, `EndsWith`, `IsNull`, `IsNotNull` are rejected with an error (Azure Table `OData` does not support string functions or null checks)
+- **Unsupported filter rejection**: `Contains`, `StartsWith`, `EndsWith`, `IsNull`, `IsNotNull` fail with `unsupported` (Azure Table `OData` does not support string functions or null checks)
 - **Query options**: `offset`, `limit`, continuation tokens
 - **OData type annotations**: `Edm.Int64` round-trip, `Edm.Guid` and `Edm.DateTime` via serde `#[serde(rename = "Field@odata.type")]` pattern
-- **Error paths**: bare RowKey (missing partition separator) rejected for point operations; table-only collection accepted with composite id
+- **Plain ids**: an id without a partition separator round-trips as a partition of its own (empty RowKey); table-only collection accepted with composite id
 
 ## Running with Azurite
 
@@ -74,7 +74,7 @@ Seeded 5 records (2 partitions)
   PASS  cross-partition round-trip update (put from query result)
   PASS  cross-partition round-trip delete (delete from query result)
   PASS  same RowKey in different partitions (distinct composite ids)
-  PASS  bare RowKey rejected for get
+  PASS  plain id round-trips (PartitionKey = id, empty RowKey)
   PASS  table-only collection accepted for get with composite id
 
 Cleaned up N rows. All tests passed!

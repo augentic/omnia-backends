@@ -514,8 +514,7 @@ impl Server {
             .into_body()
             .collect()
             .await
-            .map(http_body_util::Collected::to_bytes)
-            .unwrap_or_default();
+            .map_or_default(http_body_util::Collected::to_bytes);
         self.recorder.record(
             Kind::Callback,
             Some(&run.agent),
@@ -689,7 +688,7 @@ fn kill_self() -> ! {
 }
 
 fn keys(object: &Value) -> Vec<String> {
-    object.as_object().map(|map| map.keys().cloned().collect()).unwrap_or_default()
+    object.as_object().map_or_default(|map| map.keys().cloned().collect())
 }
 
 // The names in our environment, never the values: what the client let

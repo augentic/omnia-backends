@@ -25,6 +25,7 @@ async fn set_get_delete() -> Result<()> {
     let other: std::sync::Arc<dyn Locker> = client.open_locker("omnia".to_owned()).await?;
     assert_eq!(other.get(secret.clone()).await?, None, "prefix locker does not see secret");
 
+    locker.delete(secret.clone()).await?;
     locker.delete(secret).await?;
     Ok(())
 }

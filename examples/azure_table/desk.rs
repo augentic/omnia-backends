@@ -347,11 +347,13 @@ pub async fn main() {
     assert_eq!(cb["LargeId"], 9_007_199_254_740_993_i64, "Edm.Int64 should round-trip as number");
     pass("Edm.Int64 round-trip (LargeId)");
 
-    // ── 14. Duplicate insert fails ──────────────────────────────────
-    let dup =
-        client.insert(TABLE.into(), doc(PK_DESK, "alice", json!({"Name": "Duplicate"}))).await;
-    assert!(dup.is_err(), "inserting duplicate id should fail");
-    pass("duplicate insert rejected");
+    // ── 14. Duplicate insert is already-exists ──────────────────────
+    let inserted = client
+        .insert(TABLE.into(), doc(PK_DESK, "alice", json!({"Name": "Duplicate"})))
+        .await
+        .expect("insert duplicate");
+    assert!(!inserted, "inserting a duplicate id should leave the stored document");
+    pass("duplicate insert is already-exists");
 
     // ── 15. Get non-existent returns None ────────────────────────────
     let missing = client
@@ -588,10 +590,18 @@ pub async fn main() {
     client.delete(TABLE.into(), encode_id(PK_MOBILE, "alice")).await.expect("cleanup mobile/alice");
     pass("same RowKey in different partitions (distinct composite ids)");
 
-    // ── 31. Bare RowKey (no separator) rejected for get ──────────────
-    let err = client.get(TABLE.into(), "alice".into()).await;
-    assert!(err.is_err(), "bare RowKey without partition separator should fail");
-    pass("bare RowKey rejected for get");
+    // ── 31. Plain id (no separator) is a partition of its own ────────
+    let plain = Document {
+        id: "plain".into(),
+        data: serde_json::to_vec(&json!({"Name": "Plain"})).expect("serialize"),
+    };
+    client.put(TABLE.into(), plain).await.expect("put plain");
+    let plain =
+        client.get(TABLE.into(), "plain".into()).await.expect("get plain").expect("plain missing");
+    assert_eq!(plain.id, "plain", "a plain id should round-trip unchanged");
+    assert_eq!(decode_id(&plain.id).expect("valid id"), ("plain", ""));
+    assert!(client.delete(TABLE.into(), plain.id).await.expect("delete plain"));
+    pass("plain id round-trips (PartitionKey = id, empty RowKey)");
 
     // ── 32. Table-only collection works with composite id ────────────
     let ok = client.get(TABLE.into(), encode_id(PK_DESK, "alice")).await;

@@ -3,26 +3,28 @@
 //! Azure Table's `OData` query layer supports comparison operators, logical
 //! combinators (`and`, `or`, `not`), and set membership (`InList` / `NotInList`
 //! expanded to OR chains). It does **not** support string functions
-//! (`contains`, `startswith`, `endswith`) or null-checks — see
+//! (`contains`, `startswith`, `endswith`), null-checks, or nested fields — see
 //! <https://learn.microsoft.com/en-us/rest/api/storageservices/querying-tables-and-entities#supported-query-options>.
 //!
-//! Filters that cannot be evaluated server-side are rejected with an error
-//! rather than silently falling back to client-side evaluation, which could
-//! pull unbounded data from the table service.
+//! Filters that cannot be evaluated server-side fail with
+//! [`Error::Unsupported`] rather than silently falling back to client-side
+//! evaluation, which could pull unbounded data from the table service.
 
 use std::fmt::Write;
 
 use anyhow::bail;
-use omnia_wasi_docstore::{ComparisonOp, FilterTree, ScalarValue};
+use omnia_wasi_docstore::{ComparisonOp, Error, FilterTree, ScalarValue};
 
 /// Translate a [`FilterTree`] to an `OData` `$filter` string.
 ///
 /// # Errors
 ///
-/// Returns an error if the filter contains nodes that Azure Table cannot
-/// evaluate server-side: `IsNull`, `IsNotNull`, `Contains`, `StartsWith`,
-/// `EndsWith`, or any logical combinator (`And`, `Or`, `Not`) whose children
-/// include such nodes.
+/// - [`Error::Unsupported`] for a node Azure Table cannot evaluate
+///   server-side, anywhere in the tree: `IsNull`, `IsNotNull`, `Contains`,
+///   `StartsWith`, `EndsWith`, a comparison with `Null`, or a dotted field
+///   path.
+/// - [`Error::Invalid`] for any other field that is not an identifier.
+/// - An untyped error for an empty `InList`, `NotInList`, `And`, or `Or`.
 pub fn to_odata(filter: &FilterTree) -> anyhow::Result<String> {
     match filter {
         FilterTree::Compare { field, op, value } => {
@@ -69,42 +71,53 @@ pub fn to_odata(filter: &FilterTree) -> anyhow::Result<String> {
         }
         FilterTree::Not(inner) => Ok(format!("not ({})", to_odata(inner)?)),
         FilterTree::IsNull(field) => {
-            bail!(
+            bail!(Error::Unsupported(format!(
                 "IsNull('{field}') is not supported by Azure Table — properties that are null are omitted from entities entirely"
-            )
+            )))
         }
         FilterTree::IsNotNull(field) => {
-            bail!(
+            bail!(Error::Unsupported(format!(
                 "IsNotNull('{field}') is not supported by Azure Table — properties that are null are omitted from entities entirely"
-            )
+            )))
         }
         FilterTree::Contains { field, .. } => {
-            bail!(
+            bail!(Error::Unsupported(format!(
                 "Contains('{field}') is not supported by Azure Table — OData $filter does not support string functions"
-            )
+            )))
         }
         FilterTree::StartsWith { field, .. } => {
-            bail!(
+            bail!(Error::Unsupported(format!(
                 "StartsWith('{field}') is not supported by Azure Table — OData $filter does not support string functions"
-            )
+            )))
         }
         FilterTree::EndsWith { field, .. } => {
-            bail!(
+            bail!(Error::Unsupported(format!(
                 "EndsWith('{field}') is not supported by Azure Table — OData $filter does not support string functions"
-            )
+            )))
         }
     }
 }
 
-// A property name is emitted unquoted, so it must be a bare identifier.
+// A property name is emitted unquoted, so it must be a bare identifier. A
+// dotted path of identifiers names a nested field, which the table holds as
+// a JSON string it cannot filter into.
 fn validate_field(field: &str) -> anyhow::Result<()> {
-    if field.is_empty()
-        || !field.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        || !field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        bail!("invalid OData property name: '{field}' — must match [A-Za-z_][A-Za-z0-9_]*");
+    if is_identifier(field) {
+        return Ok(());
     }
-    Ok(())
+    if field.split('.').all(is_identifier) {
+        bail!(Error::Unsupported(format!(
+            "dotted path '{field}' is not supported by Azure Table — nested values are stored as JSON strings"
+        )));
+    }
+    bail!(Error::Invalid(format!(
+        "invalid OData property name: '{field}' — must match [A-Za-z_][A-Za-z0-9_]*"
+    )))
+}
+
+fn is_identifier(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 const fn odata_op(op: ComparisonOp) -> &'static str {
@@ -121,11 +134,11 @@ const fn odata_op(op: ComparisonOp) -> &'static str {
 fn odata_value(v: &ScalarValue) -> anyhow::Result<String> {
     Ok(match v {
         ScalarValue::Null => {
-            bail!(
+            bail!(Error::Unsupported(
                 "null comparison is not supported by Azure Table — \
-                 use IsNull/IsNotNull filter nodes (which are also unsupported) \
-                 or omit the filter for absent properties"
-            )
+                 properties that are null are omitted from entities entirely"
+                    .to_owned()
+            ))
         }
         ScalarValue::Boolean(b) => b.to_string(),
         ScalarValue::Int32(i) => i.to_string(),

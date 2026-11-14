@@ -7,7 +7,7 @@ use tokio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
 pub type Param = Box<dyn ToSql + Send + Sync>;
 pub type ParamRef<'a> = &'a (dyn ToSql + Sync);
 
-// A wasi-sql `DataType` as a `ToSql` parameter.
+// An `omnia:sql` `Value` as a `ToSql` parameter.
 #[derive(Debug)]
 pub enum PgType {
     Int32(Option<i32>),

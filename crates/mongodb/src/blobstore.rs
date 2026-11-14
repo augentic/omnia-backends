@@ -39,10 +39,16 @@ impl BlobInfo {
         ObjectMetadata {
             name: self.name,
             container,
-            created_at: self.created_at,
+            created_at: seconds(self.created_at),
             size: self.size,
         }
     }
+}
+
+// blobs written before 0.32.0 hold milliseconds, and a time in seconds stays
+// below 10^11 until the year 5138
+const fn seconds(created_at: u64) -> u64 {
+    if created_at < 100_000_000_000 { created_at } else { created_at / 1000 }
 }
 
 impl BlobStoreClient for Client {
@@ -162,7 +168,7 @@ impl Container for MongoDbContainer {
                     bytes: data.to_vec(),
                 },
                 size,
-                created_at: u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default(),
+                created_at: u64::try_from(Utc::now().timestamp()).unwrap_or_default(),
             };
             collection
                 .replace_one(bson::doc! { "name": name }, blob)

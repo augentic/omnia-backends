@@ -103,6 +103,9 @@ Unreleased
   - the metadata of an absent blob is `None`, where it failed.
 
   `omnia-mongodb` lists blobs without reading their data.
+- `omnia-mongodb` dates a blob in seconds since the Unix epoch, as
+  `omnia:blobstore` documents, where it wrote milliseconds. A blob written
+  by an earlier release reads back in seconds too.
 
 ---
 

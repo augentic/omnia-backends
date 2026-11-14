@@ -1,6 +1,5 @@
-//! Live `wasi:blobstore` for the MongoDB backend, where containers map to
-//! collections: the `omnia_test::contract::blob` rows from a real guest, and
-//! the wire ranges no guest row reaches.
+//! Live `omnia:blobstore` for the MongoDB backend, where containers map to
+//! collections: the `omnia_test::contract::blob` rows from a real guest.
 //!
 //! `#[ignore]`d so it never touches the network in CI. Run against a reachable
 //! MongoDB (`MONGODB_URL`, including a default database):
@@ -12,7 +11,7 @@ use anyhow::Result;
 use omnia::{Connect, ExitStatus};
 use omnia_mongodb::Client;
 use omnia_test::host::{Backends, Deployment};
-use omnia_wasi_blobstore::{BlobStoreClient, Container, WasiBlobStore};
+use omnia_wasi_blobstore::{BlobStoreClient, WasiBlobStore};
 
 // Every blobstore program in `crates/test-programs` must have a matching
 // test here; a new program without one fails to compile.
@@ -38,25 +37,4 @@ async fn blobstore_blob_store() -> Result<()> {
     let host = format!("{scope}-host");
     assert_eq!(backends.object(&host, "raw").await, Some(b"raw".to_vec()));
     client.delete_container(host).await
-}
-
-// The wire range a guest's `BlobStore` never sends: an end of 0 for
-// unbounded, and an inverted range.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs a reachable MongoDB (MONGODB_URL); run with --run-ignored"]
-async fn ranged_reads() -> Result<()> {
-    let client = <Client as Connect>::connect().await?;
-
-    let container = format!("omnia-live-range-{}", std::process::id());
-    let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
-
-    let object = "greeting".to_owned();
-    store.write_data(object.clone(), b"payload".to_vec().into()).await?;
-
-    assert_eq!(store.get_data(object.clone(), 0, 0).await?.as_deref(), Some(b"payload".as_slice()));
-    assert_eq!(store.get_data(object.clone(), 0, 2).await?.as_deref(), Some(b"pay".as_slice()));
-    assert_eq!(store.get_data(object.clone(), 3, 0).await?.as_deref(), Some(b"load".as_slice()));
-    assert!(store.get_data(object, 5, 2).await.is_err(), "inverted range is rejected");
-
-    client.delete_container(container).await
 }

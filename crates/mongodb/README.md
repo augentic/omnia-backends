@@ -10,7 +10,7 @@ Maps blobstore containers to MongoDB collections using the official `mongodb` dr
 - Only `create-container` makes a collection, and creating one that exists opens it.
 - Opening a collection that does not exist fails with
   `omnia_wasi_blobstore::Error::missing_container`, which a guest's `BlobStore`
-  reports as `ErrorKind::NotFound`. Each open costs one `listCollections`.
+  reports with the code `not-found`. Each open costs one `listCollections`.
 - Deleting an absent object or collection succeeds.
 
 MSRV: Rust 1.99
@@ -52,10 +52,9 @@ let client = Client::connect_with(options).await?;
 [`tests/live.rs`](tests/live.rs) runs against a real MongoDB, where containers
 map to collections. `blobstore_blob_store` runs the shared
 `omnia_test::contract::blob` rows from a real guest, which cover the container
-rules above, and `ranged_reads` covers the wire ranges no guest row sends. Each
-run prefixes the rows' collections with `omnia-live-<pid>`, so what a failed run
-leaves behind never meets the next. The tests are `#[ignore]`d so they never run
-in CI; run them explicitly:
+rules above. Each run prefixes the rows' collections with `omnia-live-<pid>`,
+so what a failed run leaves behind never meets the next. The tests are
+`#[ignore]`d so they never run in CI; run them explicitly:
 
 ```bash
 docker run -d --name mongodb -p 27017:27017 mongo:latest

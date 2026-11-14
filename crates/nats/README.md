@@ -45,7 +45,7 @@ MSRV: Rust 1.99
   Creating one that exists opens it, whatever configuration made it.
 - Opening a store that does not exist fails with
   `omnia_wasi_blobstore::Error::missing_container`, which a guest's `BlobStore`
-  reports as `ErrorKind::NotFound`.
+  reports with the code `not-found`.
 - Deleting an absent object or store succeeds.
 
 ## Configuration

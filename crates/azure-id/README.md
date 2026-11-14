@@ -13,8 +13,8 @@ MSRV: Rust 1.99
 
 A guest asks for an identity by name, and its unnamed handle asks for
 `default`. The backend serves the names a deployment declares and refuses
-every other with `no-such-identity`, which the guest's `Identity` reports as
-`ErrorKind::NotFound`.
+every other with `no-such-identity`, which the guest's `Identity` reports with
+the code `not-found`.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|

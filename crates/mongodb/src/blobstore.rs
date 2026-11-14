@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
@@ -10,7 +11,9 @@ use mongodb::bson::spec::BinarySubtype;
 use mongodb::bson::{self, Binary};
 use mongodb::error::ErrorKind;
 use omnia::FutureResult;
-use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata};
+use omnia_wasi_blobstore::{
+    BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata, Page,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::Client;
@@ -21,6 +24,25 @@ struct Blob {
     data: Binary,
     size: u64,
     created_at: u64,
+}
+
+// a `Blob` read without its data
+#[derive(Debug, Deserialize)]
+struct BlobInfo {
+    name: String,
+    size: u64,
+    created_at: u64,
+}
+
+impl BlobInfo {
+    fn metadata(self, container: String) -> ObjectMetadata {
+        ObjectMetadata {
+            name: self.name,
+            container,
+            created_at: self.created_at,
+            size: self.size,
+        }
+    }
 }
 
 impl BlobStoreClient for Client {
@@ -110,7 +132,7 @@ impl Container for MongoDbContainer {
         })
     }
 
-    fn get_data(&self, name: String, start: u64, end: u64) -> FutureResult<Option<Bytes>> {
+    fn get_data(&self, name: String, range: Range<u64>) -> FutureResult<Option<Bytes>> {
         tracing::trace!("getting object data: {name}");
         let collection = self.collection.clone();
 
@@ -118,8 +140,11 @@ impl Container for MongoDbContainer {
             let Some(blob) = collection.find_one(bson::doc! { "name": name }).await? else {
                 return Ok(None);
             };
-            let sliced = slice_range(Bytes::from(blob.data.bytes), start, end)?;
-            Ok(Some(sliced))
+            let data = Bytes::from(blob.data.bytes);
+            let len = data.len();
+            let clamp = |bound: u64| usize::try_from(bound).map_or(len, |bound| bound.min(len));
+            let end = clamp(range.end);
+            Ok(Some(data.slice(clamp(range.start).min(end)..end)))
         }
         .boxed()
     }
@@ -150,22 +175,36 @@ impl Container for MongoDbContainer {
         .boxed()
     }
 
-    fn list_objects(&self) -> FutureResult<Vec<String>> {
+    fn list_objects(&self, prefix: String, after: Option<String>) -> FutureResult<Page> {
         tracing::trace!("listing objects");
-        let collection = self.collection.clone();
+        let collection = self.collection.clone_with_type::<BlobInfo>();
+        let container = self.name.clone();
 
         async move {
-            let mut list = collection.find(bson::doc! {}).await?;
-            let mut names = vec![];
+            let mut list = collection
+                .find(bson::doc! {})
+                .projection(bson::doc! { "data": 0 })
+                .await
+                .context("listing objects")?;
+            let mut objects = vec![];
 
             while let Some(n) = list.next().await {
-                match n {
-                    Ok(blob) => names.push(blob.name),
-                    Err(e) => tracing::warn!("issue listing object: {e}"),
+                let info = match n {
+                    Ok(info) => info,
+                    Err(e) => {
+                        tracing::warn!("issue listing object: {e}");
+                        continue;
+                    }
+                };
+                if info.name.starts_with(&prefix)
+                    && after.as_ref().is_none_or(|after| &info.name > after)
+                {
+                    objects.push(info.metadata(container.clone()));
                 }
             }
 
-            Ok(names)
+            objects.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+            Ok(Page { objects, next: None })
         }
         .boxed()
     }
@@ -187,40 +226,19 @@ impl Container for MongoDbContainer {
         async move { Ok(collection.find_one(bson::doc! { "name": name }).await?.is_some()) }.boxed()
     }
 
-    fn object_info(&self, name: String) -> FutureResult<ObjectMetadata> {
+    fn object_info(&self, name: String) -> FutureResult<Option<ObjectMetadata>> {
         tracing::trace!("getting object info: {name}");
-        let collection = self.collection.clone();
+        let collection = self.collection.clone_with_type::<BlobInfo>();
+        let container = self.name.clone();
 
         async move {
-            let Some(blob) = collection.find_one(bson::doc! { "name": name }).await? else {
-                return Err(anyhow!("Object not found"));
-            };
-
-            Ok(ObjectMetadata {
-                name: blob.name,
-                container: collection.name().to_string(),
-                size: blob.size,
-                created_at: blob.created_at,
-            })
+            let info = collection
+                .find_one(bson::doc! { "name": name })
+                .projection(bson::doc! { "data": 0 })
+                .await
+                .context("getting object info")?;
+            Ok(info.map(|info| info.metadata(container)))
         }
         .boxed()
     }
-}
-
-fn slice_range(data: Bytes, start: u64, end: u64) -> anyhow::Result<Bytes> {
-    if start == 0 && (end == 0 || end == u64::MAX) {
-        return Ok(data);
-    }
-    let unbounded = end == 0 || end == u64::MAX;
-    if !unbounded && end < start {
-        anyhow::bail!("invalid byte range: end ({end}) < start ({start})");
-    }
-    let len = data.len();
-    let start_idx = usize::try_from(start).unwrap_or(len).min(len);
-    let end_idx = if unbounded {
-        len
-    } else {
-        usize::try_from(end).map_or(len, |e| e.saturating_add(1).min(len))
-    };
-    Ok(data.slice(start_idx..end_idx))
 }

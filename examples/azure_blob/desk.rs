@@ -66,7 +66,7 @@ pub async fn main() {
 
     // --- get_data ---
     let data = container
-        .get_data("greeting.txt".to_string(), 0, u64::MAX)
+        .get_data("greeting.txt".to_string(), 0..u64::MAX)
         .await
         .expect("Failed to get greeting.txt");
     tracing::info!(
@@ -75,7 +75,8 @@ pub async fn main() {
     );
 
     // --- list_objects ---
-    let names = container.list_objects().await.expect("Failed to list objects");
+    let page = container.list_objects(String::new(), None).await.expect("Failed to list objects");
+    let names: Vec<_> = page.objects.iter().map(|object| &object.name).collect();
     tracing::info!("blobs in container: {names:?}");
 
     // --- has_object ---
@@ -86,8 +87,11 @@ pub async fn main() {
     tracing::info!("has greeting.txt: {has}");
 
     // --- object_info ---
-    let info =
-        container.object_info("greeting.txt".to_string()).await.expect("Failed to get object info");
+    let info = container
+        .object_info("greeting.txt".to_string())
+        .await
+        .expect("Failed to get object info")
+        .expect("greeting.txt should exist");
     tracing::info!(
         "greeting.txt info: name={}, size={}, created_at={}",
         info.name,
@@ -111,7 +115,7 @@ pub async fn main() {
         .expect("Failed to write chunk-test blob");
 
     let read_back = container
-        .get_data(CHUNK_TEST_BLOB.to_string(), 0, u64::MAX)
+        .get_data(CHUNK_TEST_BLOB.to_string(), 0..u64::MAX)
         .await
         .expect("Failed to read chunk-test blob")
         .expect("chunk-test blob should exist");
@@ -126,7 +130,8 @@ pub async fn main() {
     let info = container
         .object_info(CHUNK_TEST_BLOB.to_string())
         .await
-        .expect("Failed to get chunk-test blob info");
+        .expect("Failed to get chunk-test blob info")
+        .expect("chunk-test blob should exist");
     assert_eq!(info.size, CHUNK_TEST_SIZE as u64, "object_info size mismatch");
     tracing::info!("chunk-test blob size from object_info: {}", info.size);
 
@@ -144,10 +149,13 @@ pub async fn main() {
     tracing::info!("has greeting.txt after delete: {has}");
 
     // --- cleanup: delete all blobs then container ---
-    let remaining = container.list_objects().await.expect("Failed to list objects for cleanup");
-    for blob in &remaining {
-        tracing::info!("cleaning up {blob}");
-        container.delete_object(blob.clone()).await.expect("Failed to delete blob");
+    let remaining = container
+        .list_objects(String::new(), None)
+        .await
+        .expect("Failed to list objects for cleanup");
+    for blob in remaining.objects {
+        tracing::info!("cleaning up {}", blob.name);
+        container.delete_object(blob.name).await.expect("Failed to delete blob");
     }
 
     tracing::info!("deleting container: {CONTAINER}");

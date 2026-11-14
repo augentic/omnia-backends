@@ -46,7 +46,7 @@ Unreleased
 - **Breaking:** identities are declared. `omnia-azure-id` serves only the
   names `IDENTITY_NAMES` lists (comma-separated, default `default`), and
   fails any other with `no-such-identity`, which a guest's `Identity`
-  reports as `ErrorKind::NotFound`. `default` is the host's system-assigned
+  reports with the code `not-found`. `default` is the host's system-assigned
   identity, or the user-assigned one whose client id `IDENTITY_CLIENT_ID`
   gives. Each other name takes its client id from
   `IDENTITY_CLIENT_ID__<NAME>`, and connecting fails without it. To migrate:
@@ -82,7 +82,7 @@ Unreleased
   filesystem, MongoDB, Azure Blob, and NATS backends fail a call on an
   object in a container that does not exist with
   `omnia_wasi_blobstore::Error::missing_container`, which a guest's
-  `BlobStore` reports as `ErrorKind::NotFound`. Creating a container that
+  `BlobStore` reports with the code `not-found`. Creating a container that
   exists opens it, and deleting an absent object or container succeeds. To
   migrate:
   - filesystem and MongoDB: create each container a guest uses before it
@@ -94,6 +94,15 @@ Unreleased
   failed.
 - `omnia-azure-blob` reads a range that starts past the end of a blob as
   empty, as the other blob backends do, where it failed.
+- The filesystem, MongoDB, Azure Blob, and NATS backends implement the
+  `Container` of `omnia:blobstore`:
+  - a read takes a half-open range clamped to the blob, so an inverted
+    range reads as empty, where it failed;
+  - a listing answers the blobs under a prefix, with their metadata, in
+    name order;
+  - the metadata of an absent blob is `None`, where it failed.
+
+  `omnia-mongodb` lists blobs without reading their data.
 
 ---
 

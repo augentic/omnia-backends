@@ -1,17 +1,20 @@
 use std::fmt::Debug;
+use std::ops::Range;
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, bail};
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::{GetStreamError, GetStreamErrorKind, ObjectStoreError};
 use async_nats::jetstream::object_store::{
-    Config, DeleteErrorKind, GetErrorKind, InfoErrorKind, ObjectStore,
+    Config, DeleteErrorKind, GetErrorKind, InfoErrorKind, ObjectInfo, ObjectStore,
 };
 use bytes::Bytes;
 use chrono::Utc;
 use futures::{FutureExt, StreamExt};
 use omnia::FutureResult;
-use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata};
+use omnia_wasi_blobstore::{
+    BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata, Page,
+};
 use tokio::io::AsyncReadExt;
 
 use crate::Client;
@@ -128,7 +131,7 @@ impl Container for NatsContainer {
         Ok(self.metadata.clone())
     }
 
-    fn get_data(&self, name: String, start: u64, end: u64) -> FutureResult<Option<Bytes>> {
+    fn get_data(&self, name: String, range: Range<u64>) -> FutureResult<Option<Bytes>> {
         tracing::trace!("getting object data: {name}");
         let store = self.store.clone();
 
@@ -140,7 +143,12 @@ impl Container for NatsContainer {
             };
             let mut bytes = Vec::new();
             object.read_to_end(&mut bytes).await?;
-            slice_range(&Bytes::from(bytes), start, end).map(Some)
+
+            let data = Bytes::from(bytes);
+            let len = data.len();
+            let clamp = |bound: u64| usize::try_from(bound).map_or(len, |bound| bound.min(len));
+            let end = clamp(range.end);
+            Ok(Some(data.slice(clamp(range.start).min(end)..end)))
         }
         .boxed()
     }
@@ -156,23 +164,29 @@ impl Container for NatsContainer {
         .boxed()
     }
 
-    fn list_objects(&self) -> FutureResult<Vec<String>> {
+    fn list_objects(&self, prefix: String, after: Option<String>) -> FutureResult<Page> {
         tracing::trace!("listing objects");
         let store = self.store.clone();
+        let metadata = self.metadata.clone();
 
         async move {
-            let mut objects = store.list().await.context("listing objects")?;
+            let mut list = store.list().await.context("listing objects")?;
 
-            let mut names = vec![];
-            while let Some(n) = objects.next().await {
-                let Ok(obj_info) = n else {
+            let mut objects = vec![];
+            while let Some(n) = list.next().await {
+                let Ok(info) = n else {
                     tracing::warn!("issue listing object");
                     continue;
                 };
-                names.push(obj_info.name);
+                if info.name.starts_with(&prefix)
+                    && after.as_ref().is_none_or(|after| &info.name > after)
+                {
+                    objects.push(object_metadata(&metadata, info));
+                }
             }
 
-            Ok(names)
+            objects.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+            Ok(Page { objects, next: None })
         }
         .boxed()
     }
@@ -205,37 +219,32 @@ impl Container for NatsContainer {
         .boxed()
     }
 
-    fn object_info(&self, name: String) -> FutureResult<ObjectMetadata> {
+    fn object_info(&self, name: String) -> FutureResult<Option<ObjectMetadata>> {
         tracing::trace!("getting object info: {name}");
         let store = self.store.clone();
         let metadata = self.metadata.clone();
 
         async move {
-            let info = store.info(&name).await.context("getting object info")?;
-            let created_at = info
-                .modified
-                .and_then(|t| u64::try_from(t.unix_timestamp()).ok())
-                .unwrap_or(metadata.created_at);
-
-            Ok(ObjectMetadata {
-                container: metadata.name.clone(),
-                name: info.name,
-                size: info.size as u64,
-                created_at,
-            })
+            match store.info(&name).await {
+                Ok(info) if !info.deleted => Ok(Some(object_metadata(&metadata, info))),
+                Ok(_) => Ok(None),
+                Err(err) if err.kind() == InfoErrorKind::NotFound => Ok(None),
+                Err(err) => Err(err).context("getting object info"),
+            }
         }
         .boxed()
     }
 }
 
-fn slice_range(data: &Bytes, start: u64, end: u64) -> anyhow::Result<Bytes> {
-    let unbounded = end == 0 || end == u64::MAX;
-    if !unbounded && end < start {
-        return Err(anyhow!("invalid byte range: end ({end}) < start ({start})"));
+// an object without a modification time takes its container's
+fn object_metadata(container: &ContainerMetadata, info: ObjectInfo) -> ObjectMetadata {
+    ObjectMetadata {
+        name: info.name,
+        container: container.name.clone(),
+        created_at: info
+            .modified
+            .and_then(|time| u64::try_from(time.unix_timestamp()).ok())
+            .unwrap_or(container.created_at),
+        size: info.size as u64,
     }
-    let len = data.len();
-    let clamp = |bound: u64| usize::try_from(bound).map_or(len, |bound| bound.min(len));
-    let from = clamp(start);
-    let to = if unbounded { len } else { clamp(end.saturating_add(1)) };
-    Ok(data.slice(from..to))
 }

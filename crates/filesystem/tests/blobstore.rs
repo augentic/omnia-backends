@@ -1,10 +1,7 @@
-//! The filesystem backend at the `wasi:blobstore` host boundary, against a
+//! The filesystem backend at the `omnia:blobstore` host boundary, against a
 //! temporary directory. The `omnia_test::contract::blob` rows run from a
-//! real guest. The rest is what no guest reaches:
-//!
-//! - a write through a handle whose container was deleted since;
-//! - inclusive range ends, and the inverted range the backend refuses;
-//! - the names the backend refuses.
+//! real guest. The rest is what no guest reaches: a write through a handle
+//! whose container was deleted since, and the names the backend refuses.
 //!
 //! No service, so it runs in CI.
 
@@ -58,29 +55,6 @@ async fn stale_handle() {
     let err = write.expect_err("a write through a stale handle");
     assert!(matches!(err.downcast_ref::<Error>(), Some(Error::NotFound(_))), "{err}");
     assert!(!client.container_exists("snapshots".to_string()).await.expect("exists"));
-}
-
-#[tokio::test]
-async fn range_reads() {
-    let root = TempDir::new().expect("tempdir");
-    let client = client(&root);
-    let container = snapshots(&client).await;
-    container
-        .write_data("obj".to_string(), Bytes::from_static(b"0123456789"))
-        .await
-        .expect("write");
-
-    // End offsets are inclusive; 0 and u64::MAX are unbounded.
-    let slice = container.get_data("obj".to_string(), 2, 4).await.expect("get");
-    assert_eq!(slice, Some(Bytes::from_static(b"234")));
-    let tail = container.get_data("obj".to_string(), 8, u64::MAX).await.expect("get");
-    assert_eq!(tail, Some(Bytes::from_static(b"89")));
-    let all = container.get_data("obj".to_string(), 0, 0).await.expect("get");
-    assert_eq!(all, Some(Bytes::from_static(b"0123456789")));
-    let clamped = container.get_data("obj".to_string(), 4, 400).await.expect("get");
-    assert_eq!(clamped, Some(Bytes::from_static(b"456789")));
-    let err = container.get_data("obj".to_string(), 4, 2).await.expect_err("must refuse");
-    assert!(err.to_string().contains("invalid byte range"), "unexpected error: {err}");
 }
 
 #[tokio::test]

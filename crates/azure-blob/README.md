@@ -9,7 +9,7 @@ Maps blobstore containers to Azure Blob containers and blobs to block blobs usin
 
 - A call on an object in a container that does not exist fails with
   `omnia_wasi_blobstore::Error::missing_container`, which a guest's `BlobStore`
-  reports as `ErrorKind::NotFound`. The backend reads it from the
+  reports with the code `not-found`. The backend reads it from the
   `ContainerNotFound` code the service answers, so opening a container costs
   no request.
 - An absent blob reads as absent, and deleting one succeeds.
@@ -80,8 +80,7 @@ let client = Client::connect_with(options).await?;
 Azurite).
 
 - `blobstore_blob_store` runs the shared `omnia_test::contract::blob` rows from
-  a real guest, which cover the container rules above.
-- `ranged_reads` checks the HTTP `Range` each inclusive wire range becomes.
+  a real guest, which cover the container rules and ranged reads above.
 - `package_store` round-trips a release through the package store.
 
 Each run prefixes the rows' containers with `omnia-live-<pid>`, because Azure

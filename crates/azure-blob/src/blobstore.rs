@@ -1,20 +1,24 @@
 use std::fmt::Debug;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use azure_core::error::ErrorKind;
 use azure_core::http::RequestContent;
+use azure_core::time::OffsetDateTime;
 use azure_storage_blob::BlobServiceClient;
 use azure_storage_blob::models::{
     BlobClientDownloadOptions, BlobClientGetPropertiesResultHeaders,
-    BlobContainerClientCreateOptions, BlobContainerClientDeleteOptions, HttpRange,
-    StorageErrorCode,
+    BlobContainerClientCreateOptions, BlobContainerClientDeleteOptions,
+    BlobContainerClientListBlobsOptions, HttpRange, StorageErrorCode,
 };
 use bytes::Bytes;
 use futures::{FutureExt, TryStreamExt};
 use omnia::FutureResult;
-use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata};
+use omnia_wasi_blobstore::{
+    BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata, Page,
+};
 
 use crate::{Client, STORE_CONTAINER};
 
@@ -152,13 +156,24 @@ impl Container for AzureBlobContainer {
         })
     }
 
-    fn get_data(&self, name: String, start: u64, end: u64) -> FutureResult<Option<Bytes>> {
+    fn get_data(&self, name: String, range: Range<u64>) -> FutureResult<Option<Bytes>> {
         tracing::trace!("getting object data: {name}");
+
+        // an HTTP range cannot be empty, so an empty read only asks whether the blob exists
+        if range.is_empty() {
+            let exists = self.has_object(name);
+            return async move { Ok(exists.await?.then(Bytes::new)) }.boxed();
+        }
+
         let blob_client = self.service.blob_client(&self.name, &name);
         let container = self.name.clone();
 
         async move {
-            let response = match blob_client.download(range_options(start, end)?).await {
+            let options = BlobClientDownloadOptions {
+                range: http_range(range),
+                ..Default::default()
+            };
+            let response = match blob_client.download(Some(options)).await {
                 Ok(response) => response,
                 Err(err) if storage_code(&err) == Some(StorageErrorCode::BlobNotFound) => {
                     return Ok(None);
@@ -193,21 +208,37 @@ impl Container for AzureBlobContainer {
         .boxed()
     }
 
-    fn list_objects(&self) -> FutureResult<Vec<String>> {
+    fn list_objects(&self, prefix: String, after: Option<String>) -> FutureResult<Page> {
         tracing::trace!("listing objects");
         let container_client = self.service.blob_container_client(&self.name);
         let container = self.name.clone();
 
         async move {
-            let pager = container_client.list_blobs(None).context("listing blobs")?;
-
+            let options = BlobContainerClientListBlobsOptions {
+                prefix: Some(prefix),
+                ..Default::default()
+            };
+            let pager = container_client.list_blobs(Some(options)).context("listing blobs")?;
             let items: Vec<_> = pager
                 .try_collect()
                 .await
                 .map_err(|err| fault(err, &container, "paginating blob list"))?;
-            let names = items.into_iter().filter_map(|item| item.name).collect();
 
-            Ok(names)
+            let mut objects: Vec<_> = items
+                .into_iter()
+                .filter_map(|item| {
+                    let properties = item.properties.unwrap_or_default();
+                    Some(ObjectMetadata {
+                        name: item.name?,
+                        container: container.clone(),
+                        created_at: properties.creation_time.map_or(0, unix_secs),
+                        size: properties.content_length.unwrap_or(0),
+                    })
+                })
+                .filter(|object| after.as_ref().is_none_or(|after| &object.name > after))
+                .collect();
+            objects.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+            Ok(Page { objects, next: None })
         }
         .boxed()
     }
@@ -243,60 +274,40 @@ impl Container for AzureBlobContainer {
         .boxed()
     }
 
-    fn object_info(&self, name: String) -> FutureResult<ObjectMetadata> {
+    fn object_info(&self, name: String) -> FutureResult<Option<ObjectMetadata>> {
         tracing::trace!("getting object info: {name}");
         let blob_client = self.service.blob_client(&self.name, &name);
         let container_name = self.name.clone();
 
         async move {
-            let response = blob_client
-                .get_properties(None)
-                .await
-                .map_err(|err| fault(err, &container_name, "getting blob properties"))?;
-
-            let size = response.content_length().ok().flatten().unwrap_or(0);
-
-            let created_at = response
-                .creation_time()
-                .ok()
-                .flatten()
-                .map_or(0, |t| u64::try_from(t.unix_timestamp()).unwrap_or(0));
-
-            Ok(ObjectMetadata {
+            let response = match blob_client.get_properties(None).await {
+                Ok(response) => response,
+                Err(err) if storage_code(&err) == Some(StorageErrorCode::BlobNotFound) => {
+                    return Ok(None);
+                }
+                Err(err) => return Err(fault(err, &container_name, "getting blob properties")),
+            };
+            Ok(Some(ObjectMetadata {
                 name,
                 container: container_name,
-                size,
-                created_at,
-            })
+                size: response.content_length().ok().flatten().unwrap_or(0),
+                created_at: response.creation_time().ok().flatten().map_or(0, unix_secs),
+            }))
         }
         .boxed()
     }
 }
 
-// Download options with an HTTP `Range` header for partial reads.
-fn range_options(
-    start: u64, end: u64,
-) -> anyhow::Result<Option<BlobClientDownloadOptions<'static>>> {
-    if start == 0 && (end == 0 || end == u64::MAX) {
-        return Ok(None);
+// the whole blob takes no `Range` header, and a read to the end no last byte
+fn http_range(range: Range<u64>) -> Option<HttpRange> {
+    match range {
+        Range {
+            start: 0,
+            end: u64::MAX,
+        } => None,
+        Range { start, end: u64::MAX } => Some(HttpRange::from_offset(start)),
+        range => Some(range.into()),
     }
-
-    let unbounded = end == 0 || end == u64::MAX;
-
-    if !unbounded && end < start {
-        anyhow::bail!("invalid byte range: end ({end}) < start ({start})");
-    }
-
-    let range = if unbounded {
-        HttpRange::from_offset(start)
-    } else {
-        HttpRange::new(start, end - start + 1)
-    };
-
-    Ok(Some(BlobClientDownloadOptions {
-        range: Some(range),
-        ..Default::default()
-    }))
 }
 
 // a request in a container that does not exist fails as the container's
@@ -306,4 +317,8 @@ fn fault(err: azure_core::Error, container: &str, action: &'static str) -> anyho
         return Error::missing_container(container).into();
     }
     anyhow::Error::new(err).context(action)
+}
+
+fn unix_secs(time: OffsetDateTime) -> u64 {
+    u64::try_from(time.unix_timestamp()).unwrap_or(0)
 }

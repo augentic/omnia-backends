@@ -1,6 +1,6 @@
-//! Live `wasi:blobstore` for the Azure Blob Storage backend: the
-//! `omnia_test::contract::blob` rows from a real guest, and the ranged reads
-//! and package store no guest row reaches.
+//! Live `omnia:blobstore` for the Azure Blob Storage backend: the
+//! `omnia_test::contract::blob` rows from a real guest, and the package store
+//! no guest row reaches.
 //!
 //! `#[ignore]`d so it never touches the network in CI. Run against a real
 //! storage account (`AZURE_BLOB_ENDPOINT` plus credentials, or Azurite):
@@ -40,50 +40,6 @@ async fn blobstore_blob_store() -> Result<()> {
     client.delete_container(host).await
 }
 
-// Live counterpart of the `range_options` unit cases: the service must honor
-// the HTTP `Range` each (start, end) pair translates to.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs an Azure Blob endpoint (AZURE_BLOB_ENDPOINT); run with --run-ignored"]
-async fn ranged_reads() -> Result<()> {
-    let client = <Client as Connect>::connect().await?;
-
-    let container = format!("omnia-live-range-{}", std::process::id());
-    let store: std::sync::Arc<dyn Container> = client.create_container(container.clone()).await?;
-
-    let object = "ranged".to_owned();
-    let payload = b"0123456789abcdefghij"; // 20 bytes
-    store.write_data(object.clone(), payload.to_vec().into()).await?;
-
-    // (start, end, expected slice); end is inclusive, 0/u64::MAX mean unbounded.
-    let cases: &[(u64, u64, &[u8])] = &[
-        (0, 0, payload),               // full read
-        (0, u64::MAX, payload),        // full read
-        (10, 14, b"abcde"),            // bounded, inclusive end
-        (5, 5, b"5"),                  // single byte
-        (10, 0, b"abcdefghij"),        // offset with unbounded end
-        (10, u64::MAX, b"abcdefghij"), // offset with unbounded end
-        (15, 1_000, b"fghij"),         // end past EOF clamps to object size
-    ];
-    for (start, end, expected) in cases {
-        let data = store.get_data(object.clone(), *start, *end).await?;
-        assert_eq!(
-            data.as_deref(),
-            Some(*expected),
-            "get_data({start}, {end}) returns the ranged slice"
-        );
-    }
-
-    let err = store
-        .get_data(object.clone(), 10, 5)
-        .await
-        .expect_err("inverted range is rejected before hitting the service");
-    assert!(err.to_string().contains("end (5) < start (10)"), "rejection surfaces: {err}");
-
-    store.delete_object(object).await?;
-    client.delete_container(container).await?;
-    Ok(())
-}
-
 // Package-store round-trip over the dedicated `omnia-plugins` container: a
 // release by reference, a second write leaving the first in place, an absent
 // reference answering none, and disjointness from a guest container named
@@ -112,7 +68,8 @@ async fn package_store() -> Result<()> {
     // own `omnia-plugins` container.
     let guest: std::sync::Arc<dyn Container> =
         client.create_container("plugins".to_string()).await?;
-    let names = guest.list_objects().await?;
+    let page = guest.list_objects(String::new(), None).await?;
+    let names: Vec<_> = page.objects.into_iter().map(|object| object.name).collect();
     assert!(
         !names.iter().any(|name| name == &reference.file_name()),
         "guest container must not see stored packages: {names:?}"

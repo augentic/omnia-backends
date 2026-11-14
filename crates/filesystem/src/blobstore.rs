@@ -3,14 +3,17 @@
 //! A container is a directory only `create_container` makes; writes replace files atomically.
 
 use std::io::Write as _;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use bytes::Bytes;
 use omnia::FutureResult;
-use omnia_wasi_blobstore::{BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata};
+use omnia_wasi_blobstore::{
+    BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata, Page,
+};
 
 use crate::{Client, blocking, collect, segment_ok};
 
@@ -82,7 +85,7 @@ impl Container for FsContainer {
         })
     }
 
-    fn get_data(&self, name: String, start: u64, end: u64) -> FutureResult<Option<Bytes>> {
+    fn get_data(&self, name: String, range: Range<u64>) -> FutureResult<Option<Bytes>> {
         tracing::trace!("getting object: {name} from container: {}", self.name);
         let dir = self.dir.clone();
 
@@ -94,15 +97,10 @@ impl Container for FsContainer {
                 Err(err) => return Err(err).with_context(|| format!("reading object `{name}`")),
             };
 
-            let unbounded = end == 0 || end == u64::MAX;
-            if !unbounded && end < start {
-                return Err(anyhow!("invalid byte range: end ({end}) < start ({start})"));
-            }
             let len = data.len();
             let clamp = |bound: u64| usize::try_from(bound).map_or(len, |bound| bound.min(len));
-            let from = clamp(start);
-            let to = if unbounded { len } else { clamp(end.saturating_add(1)) };
-            Ok(Some(data.slice(from..to)))
+            let end = clamp(range.end);
+            Ok(Some(data.slice(clamp(range.start).min(end)..end)))
         })
     }
 
@@ -129,11 +127,24 @@ impl Container for FsContainer {
         })
     }
 
-    fn list_objects(&self) -> FutureResult<Vec<String>> {
+    fn list_objects(&self, prefix: String, after: Option<String>) -> FutureResult<Page> {
         tracing::trace!("listing objects in container: {}", self.name);
         let dir = self.dir.clone();
+        let container = self.name.clone();
 
-        blocking(move || collect(&dir, ""))
+        blocking(move || {
+            let mut names = collect(&dir, "")?;
+            names.retain(|name| {
+                name.starts_with(&prefix) && after.as_ref().is_none_or(|after| name > after)
+            });
+            names.sort_unstable();
+            let objects = names
+                .into_iter()
+                .map(|name| stat(&dir, &container, name))
+                .filter_map(Result::transpose)
+                .collect::<Result<_>>()?;
+            Ok(Page { objects, next: None })
+        })
     }
 
     fn delete_object(&self, name: String) -> FutureResult<()> {
@@ -157,27 +168,12 @@ impl Container for FsContainer {
         blocking(move || Ok(object_path(&dir, &name)?.is_file()))
     }
 
-    fn object_info(&self, name: String) -> FutureResult<ObjectMetadata> {
+    fn object_info(&self, name: String) -> FutureResult<Option<ObjectMetadata>> {
         tracing::trace!("getting info for object: {name} in container: {}", self.name);
         let dir = self.dir.clone();
         let container = self.name.clone();
 
-        blocking(move || {
-            let path = object_path(&dir, &name)?;
-            let meta = match std::fs::metadata(&path) {
-                Ok(meta) => meta,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    bail!("object not found: {name}");
-                }
-                Err(err) => return Err(err).with_context(|| format!("reading object `{name}`")),
-            };
-            Ok(ObjectMetadata {
-                name,
-                container,
-                created_at: created_secs(&meta),
-                size: meta.len(),
-            })
-        })
+        blocking(move || stat(&dir, &container, name))
     }
 }
 
@@ -195,6 +191,23 @@ fn object_path(dir: &Path, name: &str) -> Result<PathBuf> {
     } else {
         bail!("object name `{name}` must be a container-relative path");
     }
+}
+
+// a name that is not a file, such as one deleted since it was listed, is absent
+fn stat(dir: &Path, container: &str, name: String) -> Result<Option<ObjectMetadata>> {
+    let path = object_path(dir, &name)?;
+    let meta = match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_file() => meta,
+        Ok(_) => return Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("reading object `{name}`")),
+    };
+    Ok(Some(ObjectMetadata {
+        name,
+        container: container.to_owned(),
+        created_at: created_secs(&meta),
+        size: meta.len(),
+    }))
 }
 
 fn created_secs(meta: &std::fs::Metadata) -> u64 {

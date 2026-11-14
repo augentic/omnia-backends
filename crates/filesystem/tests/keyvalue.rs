@@ -96,11 +96,13 @@ async fn shared_name() {
 
     assert_eq!(bucket.get("entry".to_owned()).await.expect("get"), Some(b"kv".to_vec()));
     assert_eq!(
-        container.get_data("entry".to_owned(), 0, 0).await.expect("get"),
+        container.get_data("entry".to_owned(), 0..u64::MAX).await.expect("get"),
         Some(Bytes::from_static(b"blob"))
     );
     assert_eq!(bucket.keys().await.expect("keys"), ["entry"]);
-    assert_eq!(container.list_objects().await.expect("list"), ["entry"]);
+    let page = container.list_objects(String::new(), None).await.expect("list");
+    let names: Vec<_> = page.objects.into_iter().map(|object| object.name).collect();
+    assert_eq!(names, ["entry"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

@@ -15,7 +15,7 @@ use omnia::Connect;
 use tracing::instrument;
 
 // The package store's own container: `PackageStore` writes it, the
-// `wasi:blobstore` view refuses the name.
+// `omnia:blobstore` view refuses the name.
 const STORE_CONTAINER: &str = "omnia-plugins";
 
 /// Azure Blob Storage backend client.

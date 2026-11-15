@@ -1,6 +1,6 @@
 //! Azure Blob Storage backend desk test. See `README.md`.
 //!
-//! The wasm32-wasip2 lint pass builds every example in this package, so the
+//! The wasm32-wasip3 lint pass builds every example in this package, so the
 //! host-only program lives in `desk.rs` and this entry point is an empty
 //! `main` on wasm32.
 

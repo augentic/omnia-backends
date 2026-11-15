@@ -1,11 +1,11 @@
 [task_config]
-includes = ["git::https://github.com/augentic/toolkit.git//mise/rust.toml?ref=v0.6.0"]
+includes = ["git::https://github.com/augentic/toolkit.git//mise/rust.toml?ref=v0.7.0"]
 
 # Knobs read by the included tasks. `WASM32_PACKAGES` matches the `wasm-packages`
 # passed to `.github/workflows/ci.yaml` and `publish.yaml`.
 #
 # The backend crates link host-only libraries (tokio and service SDKs)
-# and never build for wasm32-wasip2. The guest-capable members are the
+# and never build for wasm32-wasip3. The guest-capable members are the
 # `test-programs` scenarios and the `examples` package, whose host-only
 # examples are cfg-gated to an empty `main` on wasm32.
 [env]

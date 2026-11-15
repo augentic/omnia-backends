@@ -14,7 +14,7 @@ is refused as `invalid-request` before a provider request is made, and before
 anything is billed: a reserved tool name, an MCP server, a format schema that
 is not a JSON Schema, a worker grant with no shell to open.
 
-MSRV: Rust 1.99
+MSRV: Rust 1.100
 
 ## Tools
 

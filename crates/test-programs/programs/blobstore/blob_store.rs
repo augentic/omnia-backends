@@ -1,5 +1,5 @@
 //! The `omnia_test::contract::blob` rows over `WasiProvider`, all at once,
-//! so a backend's `wasi:blobstore` meets the contract the native double does.
+//! so a backend's `omnia:blobstore` meets the contract the native double does.
 //! The first argument scopes every container name, `contract` when none is
 //! given, so a live store reruns them under fresh names. One object of the
 //! program's own, `raw` in `<scope>-host`, is left for the host to read back.

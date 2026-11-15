@@ -23,7 +23,7 @@ as published crates.io dependencies (currently 0.38.0), declared once under
 | Task               | Command                                                                                                                |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------- |
 | Build              | `cargo build --all-features`                                                                                           |
-| Lint               | `mise run lint` (native workspace clippy, then `test-programs` and `examples` for `wasm32-wasip2`)                     |
+| Lint               | `mise run lint` (native workspace clippy, then `test-programs` and `examples` for `wasm32-wasip3`)                     |
 | Format check       | `mise run fmt-check` (`cargo +nightly fmt --all --check`)                                                              |
 | Format fix         | `cargo +nightly fmt --all`                                                                                             |
 | Test a crate       | `cargo nextest run -p <crate> --all-features` (the local verification step)                                            |
@@ -37,7 +37,7 @@ as published crates.io dependencies (currently 0.38.0), declared once under
 - Run the suite of the crate you changed, `mise run lint`, and
   `mise run fmt-check`. `mise run lint` is native workspace clippy over
   all targets, then clippy of `test-programs` and `examples` (their libs,
-  bins and examples, never tests) for `wasm32-wasip2`. `mise run test` is
+  bins and examples, never tests) for `wasm32-wasip3`. `mise run test` is
   the full run; leave it to CI.
 - Never build or run the `examples` to check a change. They are demos a
   human runs by hand against a real service; nothing they do is a test.
@@ -56,7 +56,7 @@ so the policy splits into three tiers:
   wherever the service's protocol is small enough to fake honestly — today
   the `cursor` and `genai` model backends and `azure-id`. A real guest
   component from [crates/test-programs](crates/test-programs) (compiled for
-  `wasm32-wasip2` by that crate's own build script) runs through
+  `wasm32-wasip3` by that crate's own build script) runs through
   `omnia_test::host::Deployment` over the backend's `Client`, whose service
   is a fake the test owns: `fake-cursor-sdk-bridge` for cursor (a binary
   linked onto the test process's `PATH` as `cursor-sdk-bridge`, which the
@@ -152,10 +152,10 @@ so the policy splits into three tiers:
 - Tasks run through [mise](https://mise.jdx.dev/getting-started.html), which
   must be installed by hand. `make <task>` only forwards to `mise run <task>`
   and fails, rather than installing mise, when it is missing.
-- `rust-toolchain.toml` auto-installs the `wasm32-wasip2` target; the
+- `rust-toolchain.toml` auto-installs the `wasm32-wasip3` target; the
   `test-programs` build script needs it, and it runs on every build of a
   crate that dev-depends on `test-programs`.
-- The `wasm32-wasip2` clippy pass covers only `test-programs` and `examples`
+- The `wasm32-wasip3` clippy pass covers only `test-programs` and `examples`
   (`WASM32_PACKAGES` in `mise.toml`, mirrored by `wasm-packages` in
   `.github/workflows/ci.yaml` and `publish.yaml`); the backend crates link
   host-only libraries and never build for it. Within that scope every lib,
@@ -181,14 +181,14 @@ so the policy splits into three tiers:
   declarations (`omnia = "0.38.0"` and friends); every `omnia-*` must stay
   on the same line, so bump them all together. Until the capability
   contract's omnia release is published, `[patch.crates-io]` points every
-  `omnia-*` at omnia's `capablities` branch, and `cargo update -p omnia-sdk`
+  `omnia-*` at omnia's default branch, and `cargo update -p omnia-sdk`
   re-locks them as one. Never add another git or path override to chase an
-  unreleased change. `.cargo/config.toml` sets
-  `registry.global-min-publish-age = "7 days"`; stable cargo ignores it
-  (it is enforced only under nightly `-Zmin-publish-age`), but where it is
-  enforced, re-locking onto a freshly published omnia line needs an explicit
-  bypass (`CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE="0 days" cargo fetch`).
-  Locked versions are exempt, so `--locked` builds are unaffected.
+  unreleased change. `.cargo/config.toml` carries
+  `registry.global-min-publish-age = "7 days"` commented out. Stable cargo
+  enforces it once set, and re-locking onto a freshly published omnia line
+  then needs an explicit bypass
+  (`CARGO_REGISTRY_GLOBAL_MIN_PUBLISH_AGE="0 days" cargo fetch`). Locked
+  versions are exempt, so `--locked` builds are unaffected.
 
 ## Code style
 
@@ -226,7 +226,7 @@ All from the repository root through `make` ([`Makefile`](Makefile) → mise). T
 make ci # exactly the CI jobs: fmt-check + lint + test + test-docs + docs + vet + deny  — run before handing over
 make check # local advisories: audit + fmt (rewrites) + lint + outdated + deps
 make test # cargo nextest run --locked --workspace --all-features, under -Dwarnings
-make lint # lint-host (cargo clippy --workspace --all-targets --all-features, then cargo hack --each-feature), then lint-wasm (the same over every lib, bin and example for wasm32-wasip2 — never tests)
+make lint # lint-host (cargo clippy --workspace --all-targets --all-features, then cargo hack --each-feature), then lint-wasm (the same over every lib, bin and example for wasm32-wasip3 — never tests)
 make fmt # cargo +nightly fmt --all
 make vet-regen # regenerate cargo-vet imports/exemptions/unpublished, then vet
 make cov # cargo llvm-cov nextest --workspace --all-features --summary-only

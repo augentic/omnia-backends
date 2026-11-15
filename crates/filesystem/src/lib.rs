@@ -14,7 +14,7 @@ use futures::future::BoxFuture;
 use omnia::Connect;
 use tracing::instrument;
 
-/// Filesystem backend for `wasi:blobstore` and `wasi:keyvalue`.
+/// Filesystem backend for `omnia:blobstore` and `wasi:keyvalue`.
 #[derive(Debug, Clone)]
 pub struct Client {
     root: PathBuf,

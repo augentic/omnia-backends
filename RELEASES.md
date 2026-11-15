@@ -11,6 +11,9 @@ Unreleased
 
 ### Changed
 
+- **Breaking:** MSRV is Rust 1.100. The guest-side members, `test-programs`
+  and `examples`, build for `wasm32-wasip3`, because omnia 0.38 runs WASI 0.3
+  guests alone.
 - **Breaking:** the Redis, NATS, and filesystem key-value backends implement
   the TTL-aware `Bucket` of `omnia:keyvalue`, under one set of rules:
   - an entry set without a TTL never expires;

@@ -108,7 +108,7 @@ pub async fn main() {
         CHUNK_TEST_SIZE / (1024 * 1024)
     );
 
-    let test_data: Vec<u8> = (0..CHUNK_TEST_SIZE).map(|i| (i % 256) as u8).collect();
+    let test_data: Vec<u8> = Vec::from_fn(CHUNK_TEST_SIZE, |i| (i % 256) as u8);
     container
         .write_data(CHUNK_TEST_BLOB.to_string(), test_data.clone().into())
         .await

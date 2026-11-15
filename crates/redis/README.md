@@ -8,7 +8,7 @@ Redis key-value backend for the Omnia WASI runtime, implementing the `omnia:keyv
 Uses the `redis` crate with a `ConnectionManager` for automatic reconnection and retry.
 Keys are namespaced by bucket (`{bucket}:{key}`). Needs Redis 6.0 or later.
 
-MSRV: Rust 1.99
+MSRV: Rust 1.100
 
 ## Key-value
 

@@ -29,7 +29,7 @@ futures.workspace = true
 hmac.workspace = true
 omnia.workspace = true
 omnia-wasi-docstore.workspace = true
-reqwest = { workspace = true, features = ["json", "rustls"] }
+reqwest = { workspace = true, features = ["default", "json", "rustls"] }
 serde_json.workspace = true
 sha2.workspace = true
 tracing.workspace = true

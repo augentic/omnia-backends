@@ -49,7 +49,7 @@ mise run ci
 ```
 
 This runs the format check (`cargo +nightly fmt --all --check`), clippy
-(warnings denied, natively and for `wasm32-wasip2`), the test suite, doc
+(warnings denied, natively and for `wasm32-wasip3`), the test suite, doc
 tests, rustdoc, and the supply-chain checks (`cargo vet`, `cargo deny`), exactly as CI does. Tasks run through
 [mise](https://mise.jdx.dev/getting-started.html), which is installed by
 hand; `mise tasks` lists them, and [mise.toml](mise.toml) includes the shared

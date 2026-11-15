@@ -22,7 +22,7 @@ path = "azure_blob/main.rs"
 name = "azure_table"
 path = "azure_table/main.rs"
 
-# Every example here is clippy-checked for wasm32-wasip2 (`WASM32_PACKAGES` in
+# Every example here is clippy-checked for wasm32-wasip3 (`WASM32_PACKAGES` in
 # mise.toml); the host-only ones gate their entry point with `cfg_select!`.
 [dependencies]
 omnia-wasi-model.workspace = true

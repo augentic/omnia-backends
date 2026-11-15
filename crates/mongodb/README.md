@@ -13,7 +13,7 @@ Maps blobstore containers to MongoDB collections using the official `mongodb` dr
   reports with the code `not-found`. Each open costs one `listCollections`.
 - Deleting an absent object or collection succeeds.
 
-MSRV: Rust 1.99
+MSRV: Rust 1.100
 
 ## Configuration
 

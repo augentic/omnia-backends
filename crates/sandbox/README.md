@@ -5,7 +5,7 @@
 
 A host process in the model's trust domain, sandboxed. A model backend that runs a program on the host — `omnia-cursor`'s `cursor-sdk-bridge`, and the shell, `node`, `npm` and `git` the agent runs through it — spawns it through this crate, so what the process reaches is the host's decision and never the model's: a working directory, an environment built from nothing, a process group of its own, a kernel boundary around its files and syscalls, and one way out to the network.
 
-MSRV: Rust 1.99
+MSRV: Rust 1.100
 
 ## What a sandboxed process gets
 

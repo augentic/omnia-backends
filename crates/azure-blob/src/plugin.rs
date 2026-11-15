@@ -1,7 +1,7 @@
 //! [`PackageStore`] backed by a dedicated Azure Blob container.
 //!
 //! The store owns the `omnia-plugins` container — a name the impl chooses,
-//! never an operator input, and one the `wasi:blobstore` view refuses — so
+//! never an operator input, and one the `omnia:blobstore` view refuses — so
 //! no guest container is it. One blob per release, named as omnia's
 //! `FsStore` files it (`namespace_name@version.wasm`); a blob already there
 //! is never replaced, so a stored release is final until removed.

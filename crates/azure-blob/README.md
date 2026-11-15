@@ -27,13 +27,13 @@ blob per release, named as omnia's `FsStore` files it
 a stored release is final until it is deleted. The acquirer verifies what it
 fetches before the write and what the store serves against a load's pin.
 
-Guest `wasi:blobstore` containers map one-to-one onto Azure containers, so a
+Guest `omnia:blobstore` containers map one-to-one onto Azure containers, so a
 guest container named `plugins` is simply the Azure container `plugins` —
 never the store's `omnia-plugins`. The name `omnia-plugins` is reserved: the
 blobstore view refuses to create, open, delete, or probe it, so the store is
 the container's only writer even when guests share the storage account.
 
-MSRV: Rust 1.99
+MSRV: Rust 1.100
 
 ## Configuration
 

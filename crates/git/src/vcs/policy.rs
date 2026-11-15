@@ -185,7 +185,7 @@ fn rule_for(path: &str, rules: &[Rule]) -> Option<Strategy> {
 // whole components, and any other `**` crosses anything.
 fn matches(pattern: &str, path: &str) -> bool {
     if pattern.contains('/') {
-        let anchored = pattern.strip_prefix('/').unwrap_or(pattern);
+        let anchored = pattern.trim_prefix('/');
         glob(anchored.as_bytes(), path.as_bytes())
     } else {
         let name = path.rsplit('/').next().unwrap_or(path);

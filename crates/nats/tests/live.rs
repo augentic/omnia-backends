@@ -1,5 +1,5 @@
 //! Live publish, key-value, and blob containers for the NATS backend, driven
-//! through the `omnia:messaging`, `omnia:keyvalue`, and `wasi:blobstore`
+//! through the `omnia:messaging`, `omnia:keyvalue`, and `omnia:blobstore`
 //! host boundaries.
 //!
 //! Beside the `omnia_test::contract::state` and `omnia_test::contract::blob`

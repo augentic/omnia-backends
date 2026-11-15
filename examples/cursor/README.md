@@ -11,7 +11,7 @@ Live model completion via `[omnia-cursor](../../crates/cursor)`: the guest calls
 
 ```bash
 # build the guest
-cargo build -p examples --example cursor-wasm --target wasm32-wasip2
+cargo build -p examples --example cursor-wasm --target wasm32-wasip3
 
 # create the working tree the mount lends
 mkdir -p examples/cursor/workspace
@@ -21,7 +21,7 @@ export CURSOR_API_KEY=<cursor API key>
 export RUST_LOG=info,omnia_cursor=debug
 
 # run the host (no config)
-cargo run --example cursor -- run ./target/wasm32-wasip2/debug/examples/cursor_wasm.wasm --mount path=examples/cursor/workspace,name=.,writable
+cargo run --example cursor -- run ./target/wasm32-wasip3/debug/examples/cursor_wasm.wasm --mount path=examples/cursor/workspace,name=.,writable
 
 # run the host (with config)
 cargo run --example cursor -- run --config examples/cursor/config.toml

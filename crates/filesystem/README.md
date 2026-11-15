@@ -1,6 +1,6 @@
 # omnia-filesystem
 
-Filesystem provider for `wasi:blobstore` and `wasi:keyvalue`: durable,
+Filesystem provider for `omnia:blobstore` and `wasi:keyvalue`: durable,
 local, network-free storage over one shared root directory — the
 local-first counterpart to the network-service backends (Azure Blob, Redis,
 MongoDB, NATS). One `Client` serves both surfaces from disjoint subtrees of

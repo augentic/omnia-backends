@@ -64,7 +64,7 @@ omnia-sandbox = { version = "0.32.0", path = "crates/sandbox" }
 process-wrap = { version = "10.0.1", default-features = false }
 prost = "0.14.6"
 prost-types = "0.14.6"
-reqwest = "0.13.5"
+reqwest = { version = "0.13.5", default-features = false }
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std"] }
 schemars = "1.2.3"
 serde = { version = "1.0.229", features = ["derive"] }

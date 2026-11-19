@@ -16,7 +16,7 @@ use omnia_sdk::model::types::{
     Call, CallResult, Format, Grants, Location, Message, Role, Tool, ToolCall, ToolResult,
     WorkspaceGrant,
 };
-use omnia_sdk::wit_stream;
+use omnia_sdk::{model, wit_stream};
 use serde_json::json;
 use wasip3::filesystem::preopens;
 
@@ -55,7 +55,7 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
         };
 
         // open the model the deployment binds as `default`
-        let model = match completion::open("default".to_string()).await {
+        let model = match completion::open(model::DEFAULT.to_owned()).await {
             Ok(model) => model,
             Err(error) => {
                 println!("error: {error:?}");

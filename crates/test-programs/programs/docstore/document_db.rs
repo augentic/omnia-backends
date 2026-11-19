@@ -5,7 +5,7 @@
 
 use omnia_test::contract::document;
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     futures::join!(

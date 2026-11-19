@@ -12,7 +12,7 @@ use std::fs;
 use omnia_sdk::vcs::{self, Change, ChangeKind, Error, Rule, Strategy};
 use test_programs::arguments;
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 const PROJECT: &str = "./project";
 const WORK: &str = "./work";

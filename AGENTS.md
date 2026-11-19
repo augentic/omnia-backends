@@ -86,7 +86,7 @@ so the policy splits into three tiers:
     becoming one program per failure.
   - **Adding a scenario**: write `crates/test-programs/programs/<capability>/<scenario>.rs`
     (`#![cfg(target_arch = "wasm32")]`, entered through
-    `omnia_sdk::api::command::export!(scenario)`, asserting what the guest observes and
+    `omnia_sdk::command::export!(scenario)`, asserting what the guest observes and
     panicking on failure; shared helpers live in `test-programs/src/helpers.rs`),
     then the paired test in each suite. The next `cargo nextest run -p <crate>
     --all-features` compiles the guest, regenerates the `[[example]]` list in

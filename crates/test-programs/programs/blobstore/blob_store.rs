@@ -10,7 +10,7 @@ use omnia_sdk::blobstore::admin;
 use omnia_test::contract::blob;
 use test_programs::arguments;
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     let scope = arguments().into_iter().next().unwrap_or_else(|| "contract".to_owned());

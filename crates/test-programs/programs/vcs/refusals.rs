@@ -15,7 +15,7 @@ use std::fs;
 use omnia_sdk::vcs::{self, CloneOptions, Error};
 use test_programs::arguments;
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 const WHOLE: CloneOptions = CloneOptions { depth: None };
 const REPO: &str = "./repo";

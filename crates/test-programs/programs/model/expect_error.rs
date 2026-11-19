@@ -16,7 +16,7 @@
 use omnia_sdk::model::{CHECK_TOOL, Error, Format, Function, Request, Tool, ToolCall};
 use test_programs::{arguments, lend, lookup, user};
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     let arguments = arguments();

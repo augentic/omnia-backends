@@ -10,7 +10,7 @@ use std::time::Duration;
 use omnia_sdk::identity::{AccessToken, DEFAULT, credentials};
 use omnia_sdk::{Error, Result};
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 const SCOPE: &str = "https://storage.azure.com/.default";
 

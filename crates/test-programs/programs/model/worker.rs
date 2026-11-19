@@ -9,7 +9,7 @@
 use omnia_sdk::model::{Error, Request, WorkerGrant};
 use test_programs::{arguments, lend, user};
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     let mut grant = WorkerGrant::default();

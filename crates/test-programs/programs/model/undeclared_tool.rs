@@ -6,7 +6,7 @@
 use omnia_sdk::model::Request;
 use test_programs::{lend, user};
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     // No tools declared, so no handler: the backend answers the `lookup`

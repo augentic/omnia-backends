@@ -5,7 +5,7 @@
 use omnia_sdk::model::{Request, ToolCall};
 use test_programs::{lend, lookup, user};
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     let request = Request::builder()

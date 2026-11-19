@@ -21,7 +21,7 @@ use std::path::Path;
 use omnia_sdk::vcs::{self, Change, ChangeKind, Entry, Error, Rule, Strategy};
 use test_programs::arguments;
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     let arguments = arguments();

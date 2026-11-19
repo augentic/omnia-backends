@@ -21,7 +21,7 @@ use std::fs;
 
 use omnia_sdk::vcs::{self, Error};
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 const REPO: &str = "./repo";
 const WORK: &str = "./work";

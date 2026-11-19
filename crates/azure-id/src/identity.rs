@@ -17,7 +17,7 @@ impl IdentityClient for Client {
 
         async move {
             let Some(credential) = credential else {
-                anyhow::bail!(Error::NoSuchIdentity);
+                anyhow::bail!(Error::NotFound(format!("identity `{name}` is not declared")));
             };
             let identity = AzIdentity { name, credential };
             Ok(Arc::new(identity) as Arc<dyn Identity>)

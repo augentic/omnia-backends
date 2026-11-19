@@ -100,7 +100,7 @@ mod config {
     /// routed by the model ID's prefix.
     #[derive(Debug, Clone, PartialEq, Eq, FromEnv)]
     pub struct ConnectOptions {
-        /// Default model ID when a request leaves `model` unset.
+        /// Model ID for a request that opens the model `default`.
         #[env(from = "GENAI_MODEL", default = "gpt-5.5")]
         pub model: String,
         /// Base URL override for a self-hosted gateway or proxy.
@@ -116,22 +116,21 @@ mod config {
         /// sandbox is initialized and worker grants are refused.
         #[env(from = "GENAI_SHELL_ROOTS", default = "", with = paths)]
         pub shell_roots: Vec<PathBuf>,
-        /// Maximum provider round-trips per completion before failing with
-        /// `budget-exhausted`.
+        /// Maximum provider round-trips per completion before it is
+        /// `exhausted`.
         #[env(from = "GENAI_MAX_ROUNDS", default = "128")]
         pub max_rounds: u32,
-        /// Maximum guest tool calls per completion before failing with
-        /// `budget-exhausted`.
+        /// Maximum guest tool calls per completion before it is `exhausted`.
         #[env(from = "GENAI_MAX_TOOL_CALLS", default = "128")]
         pub max_tool_calls: u32,
         /// Maximum candidate answers offered to the guest's `check`.
         ///
-        /// Rejecting the final candidate fails the completion with
-        /// `budget-exhausted` carrying the guest's correction.
+        /// Rejecting the final candidate ends the completion as `exhausted`,
+        /// carrying the guest's correction.
         #[env(from = "GENAI_MAX_CANDIDATES", default = "2")]
         pub max_candidates: u32,
-        /// Maximum identical tool-call failures before failing with
-        /// `budget-exhausted`.
+        /// Maximum identical tool-call failures before the completion is
+        /// `exhausted`.
         #[env(from = "GENAI_MAX_REPEATS", default = "5")]
         pub max_repeats: u32,
         /// Default per-round `max_tokens` when the request leaves it unset.

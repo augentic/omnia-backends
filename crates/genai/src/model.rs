@@ -34,7 +34,7 @@ static COMPLETION_ID: AtomicU64 = AtomicU64::new(0);
 impl ModelClient for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let client = self.clone();
-        let model = request.model.as_deref().unwrap_or(&self.model);
+        let model = self.model(&request);
         let n = COMPLETION_ID.fetch_add(1, Ordering::Relaxed) + 1;
 
         let span = info_span!("complete", n, model, format = %request.format, label = Empty);
@@ -57,12 +57,19 @@ impl ModelClient for Client {
 }
 
 impl Client {
+    // The provider model a request runs on: the configured one for the
+    // `default` a guest opens by default, and otherwise the name it opened.
+    fn model<'a>(&'a self, request: &'a Request) -> &'a str {
+        if request.model == "default" { &self.model } else { &request.model }
+    }
+
     async fn stage(
         &self, request: &Request, tool_host: Arc<dyn ToolHost>,
     ) -> anyhow::Result<Conversation> {
         let workspace = tool_host.local_path();
         let access = self.access(workspace).await?;
-        let prepared = PreparedRequest::translate(request, &self.model, self.max_tokens, access)?;
+        let model = self.model(request);
+        let prepared = PreparedRequest::translate(request, model, self.max_tokens, access)?;
         let shell = self.shell(request, access, workspace).await?;
         let tools =
             Tools::new(tool_host, shell, prepared.declared(), self.limits().max_result_bytes);
@@ -80,7 +87,7 @@ impl Client {
     async fn shell(
         &self, request: &Request, access: Access, workspace: Option<&Path>,
     ) -> anyhow::Result<Option<Shell>> {
-        let worker = request.grants.worker.as_ref();
+        let worker = request.grants.worker();
         let (Some(sandbox), Access::Shell) = (&self.sandbox, access) else {
             if worker.is_none() {
                 return Ok(None);
@@ -92,7 +99,7 @@ impl Client {
             } else {
                 "worker grant needs a shell: the workspace is not under a shell root"
             };
-            return Err(Error::InvalidRequest(detail.to_owned()).into());
+            return Err(Error::Invalid(detail.to_owned()).into());
         };
 
         let grant = worker.map_or_else(Grant::default, |worker| Grant {
@@ -107,7 +114,7 @@ impl Client {
 
 fn refusal(error: anyhow::Error) -> anyhow::Error {
     match error.downcast::<Denied>() {
-        Ok(denied) => Error::InvalidRequest(format!("worker grant: {denied}")).into(),
+        Ok(denied) => Error::Invalid(format!("worker grant: {denied}")).into(),
         Err(error) => error,
     }
 }

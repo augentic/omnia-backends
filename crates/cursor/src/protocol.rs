@@ -442,8 +442,6 @@ pub struct AgentOptions {
     pub model: ModelSelection,
     pub api_key: String,
     pub local: LocalAgentOptions,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolList>,
 }
@@ -470,31 +468,6 @@ pub struct CustomToolDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: Value,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpServerConfig {
-    http: HttpMcpServerConfig,
-}
-
-impl McpServerConfig {
-    pub fn streamable_http(url: &str) -> Self {
-        Self {
-            http: HttpMcpServerConfig {
-                transport: "HTTP_MCP_TRANSPORT_TYPE_HTTP",
-                url: url.to_owned(),
-            },
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HttpMcpServerConfig {
-    #[serde(rename = "type")]
-    transport: &'static str,
-    url: String,
 }
 
 #[derive(Serialize)]

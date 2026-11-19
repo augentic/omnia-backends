@@ -15,7 +15,9 @@ use async_nats::jetstream::stream::{DirectGetErrorKind, LastRawMessageErrorKind}
 use async_nats::{HeaderMap, jetstream};
 use futures::TryStreamExt;
 use futures::future::FutureExt;
-use omnia_wasi_keyvalue::{Bucket, Error, FutureResult, KeyValueClient};
+use omnia_wasi_keyvalue::{
+    Bucket, Entry, Error, FutureResult, KeyValueClient, Lifetime, Precondition, Revision,
+};
 
 use crate::Client;
 
@@ -168,11 +170,25 @@ struct Snapshot {
 }
 
 impl Snapshot {
-    // An atomic write keeps a live entry's deadline, and applies the call's
-    // TTL only to an entry it creates.
+    // A write that keeps the entry's time keeps a live entry's deadline, and
+    // applies the call's TTL only to an entry it creates.
     fn deadline_for(&self, ttl: Option<Duration>) -> Option<u64> {
         if self.value.is_some() { self.deadline } else { deadline(ttl) }
     }
+
+    // A live entry's revision is the sequence of the message that holds it.
+    fn current(&self) -> Option<Revision> {
+        self.value.is_some().then(|| revision(self.revision))
+    }
+
+    fn entry(self) -> Option<Entry> {
+        let revision = revision(self.revision);
+        self.value.map(|value| Entry { value, revision })
+    }
+}
+
+fn revision(sequence: u64) -> Revision {
+    Revision::from(sequence.to_string())
 }
 
 impl KvBucket {
@@ -222,24 +238,27 @@ impl KvBucket {
     }
 
     // Every write is one publish to the subject `kv::Store::put` writes to,
-    // with headers the store's own API cannot send together.
+    // with headers the store's own API cannot send together. It returns the
+    // sequence written.
     async fn publish(
         &self, key: &str, payload: Vec<u8>, headers: HeaderMap,
-    ) -> Result<(), PublishError> {
+    ) -> Result<u64, PublishError> {
         let prefix = self.store.put_prefix.as_deref().unwrap_or(&self.store.prefix);
-        self.jetstream
+        let ack = self
+            .jetstream
             .publish_with_headers(format!("{prefix}{key}"), headers, payload.into())
             .await?
             .await?;
-        Ok(())
+        Ok(ack.sequence)
     }
 
-    // A put conditioned on `revision` when one is given, where `false` means
-    // the key moved on first. A deadline sets the server's TTL, in whole
-    // seconds rounded up, beside the deadline a read checks.
+    // A put conditioned on `revision` when one is given, returning the
+    // sequence written, or `None` when the key moved on first. A deadline
+    // sets the server's TTL, in whole seconds rounded up, beside the
+    // deadline a read checks.
     async fn put(
         &self, key: &str, value: Vec<u8>, revision: Option<u64>, deadline: Option<u64>,
-    ) -> Result<bool> {
+    ) -> Result<Option<u64>> {
         let mut headers = HeaderMap::new();
         if let Some(revision) = revision {
             headers.insert(NATS_EXPECTED_LAST_SUBJECT_SEQUENCE, HeaderValue::from(revision));
@@ -255,42 +274,97 @@ impl KvBucket {
         }
 
         match self.publish(key, value, headers).await {
-            Ok(()) => Ok(true),
-            Err(err) if err.kind() == PublishErrorKind::WrongLastSequence => Ok(false),
+            Ok(sequence) => Ok(Some(sequence)),
+            Err(err) if err.kind() == PublishErrorKind::WrongLastSequence => Ok(None),
             Err(err) => Err(publish_failure(err, format!("writing `{key}`"))),
+        }
+    }
+
+    // A delete marker conditioned on `revision` when one is given, where
+    // `false` means the key moved on first.
+    async fn erase(&self, key: &str, revision: Option<u64>) -> Result<bool> {
+        let mut headers = HeaderMap::new();
+        headers.insert(KV_OPERATION, "DEL");
+        if let Some(revision) = revision {
+            headers.insert(NATS_EXPECTED_LAST_SUBJECT_SEQUENCE, HeaderValue::from(revision));
+        }
+
+        match self.publish(key, Vec::new(), headers).await {
+            Ok(_sequence) => Ok(true),
+            Err(err) if err.kind() == PublishErrorKind::WrongLastSequence => Ok(false),
+            Err(err) => Err(publish_failure(err, format!("deleting `{key}`"))),
         }
     }
 }
 
 impl Bucket for KvBucket {
-    fn get(&self, key: String) -> FutureResult<Option<Vec<u8>>> {
+    fn get(&self, key: String) -> FutureResult<Option<Entry>> {
         tracing::trace!("getting key: {key}");
         let bucket = self.clone();
-        async move { Ok(bucket.snapshot(&key).await?.value) }.boxed()
+        async move { Ok(bucket.snapshot(&key).await?.entry()) }.boxed()
     }
 
-    fn set(&self, key: String, value: Vec<u8>, ttl: Option<Duration>) -> FutureResult<()> {
+    fn set(
+        &self, key: String, value: Vec<u8>, lifetime: Lifetime, when: Option<Precondition>,
+    ) -> FutureResult<std::result::Result<Revision, Option<Entry>>> {
         tracing::trace!("setting key: {key}");
         let bucket = self.clone();
         async move {
             validate_key(&key)?;
-            bucket.put(&key, value, None, deadline(ttl)).await?;
-            Ok(())
+
+            // a write that neither checks nor keeps the entry reads nothing
+            if when.is_none()
+                && let Lifetime::Replace(ttl) = lifetime
+            {
+                let written = bucket.put(&key, value, None, deadline(ttl)).await?;
+                let sequence = written.context("an unconditioned write lost a race")?;
+                return Ok(Ok(revision(sequence)));
+            }
+
+            for _ in 0..MAX_RETRIES {
+                let snapshot = bucket.snapshot(&key).await?;
+                if when.as_ref().is_some_and(|when| !when.holds(snapshot.current().as_ref())) {
+                    return Ok(Err(snapshot.entry()));
+                }
+                let deadline = match lifetime {
+                    Lifetime::Replace(ttl) => deadline(ttl),
+                    Lifetime::Keep(ttl) => snapshot.deadline_for(ttl),
+                };
+                let written =
+                    bucket.put(&key, value.clone(), Some(snapshot.revision), deadline).await?;
+                if let Some(sequence) = written {
+                    return Ok(Ok(revision(sequence)));
+                }
+            }
+            let message = format!("setting `{key}` lost {MAX_RETRIES} races");
+            Err(Error::Unavailable(message).into())
         }
         .boxed()
     }
 
-    fn delete(&self, key: String) -> FutureResult<()> {
+    fn delete(
+        &self, key: String, when: Option<Revision>,
+    ) -> FutureResult<std::result::Result<(), Option<Entry>>> {
         tracing::trace!("deleting key: {key}");
         let bucket = self.clone();
         async move {
             validate_key(&key)?;
-            let mut headers = HeaderMap::new();
-            headers.insert(KV_OPERATION, "DEL");
-            bucket
-                .publish(&key, Vec::new(), headers)
-                .await
-                .map_err(|err| publish_failure(err, format!("deleting `{key}`")))
+            let Some(when) = when else {
+                bucket.erase(&key, None).await?;
+                return Ok(Ok(()));
+            };
+
+            for _ in 0..MAX_RETRIES {
+                let snapshot = bucket.snapshot(&key).await?;
+                if snapshot.current().as_ref() != Some(&when) {
+                    return Ok(Err(snapshot.entry()));
+                }
+                if bucket.erase(&key, Some(snapshot.revision)).await? {
+                    return Ok(Ok(()));
+                }
+            }
+            let message = format!("deleting `{key}` lost {MAX_RETRIES} races");
+            Err(Error::Unavailable(message).into())
         }
         .boxed()
     }
@@ -318,35 +392,13 @@ impl Bucket for KvBucket {
             for _ in 0..MAX_RETRIES {
                 let snapshot = bucket.snapshot(&key).await?;
                 let incremented = add(&key, snapshot.value.as_deref(), delta)?;
-                let payload = incremented.to_be_bytes().to_vec();
+                let payload = incremented.to_string().into_bytes();
                 let deadline = snapshot.deadline_for(ttl);
-                if bucket.put(&key, payload, Some(snapshot.revision), deadline).await? {
+                if bucket.put(&key, payload, Some(snapshot.revision), deadline).await?.is_some() {
                     return Ok(incremented);
                 }
             }
             let message = format!("incrementing `{key}` lost {MAX_RETRIES} races");
-            Err(Error::Unavailable(message).into())
-        }
-        .boxed()
-    }
-
-    fn compare_and_swap(
-        &self, key: String, current: Option<Vec<u8>>, new: Vec<u8>, ttl: Option<Duration>,
-    ) -> FutureResult<std::result::Result<(), Option<Vec<u8>>>> {
-        tracing::trace!("swapping key: {key}");
-        let bucket = self.clone();
-        async move {
-            for _ in 0..MAX_RETRIES {
-                let snapshot = bucket.snapshot(&key).await?;
-                if snapshot.value != current {
-                    return Ok(Err(snapshot.value));
-                }
-                let deadline = snapshot.deadline_for(ttl);
-                if bucket.put(&key, new.clone(), Some(snapshot.revision), deadline).await? {
-                    return Ok(Ok(()));
-                }
-            }
-            let message = format!("swapping `{key}` lost {MAX_RETRIES} races");
             Err(Error::Unavailable(message).into())
         }
         .boxed()
@@ -394,22 +446,26 @@ fn validate_key(key: &str) -> Result<()> {
     Err(Error::Invalid(message).into())
 }
 
-// Counters are 8-byte big-endian `i64`s, matching the other backends.
 fn add(key: &str, current: Option<&[u8]>, delta: i64) -> Result<i64> {
     let base = match current {
         None => 0,
-        Some(value) => {
-            let bytes: [u8; 8] = value.try_into().map_err(|_len_mismatch| {
-                let len = value.len();
-                Error::Invalid(format!(
-                    "`{key}` holds {len} bytes, not an 8-byte big-endian counter"
-                ))
-            })?;
-            i64::from_be_bytes(bytes)
-        }
+        Some(value) => counter(value)
+            .ok_or_else(|| Error::Invalid(format!("`{key}` does not hold a decimal counter")))?,
     };
     let added = base.checked_add(delta);
     added.ok_or_else(|| Error::Invalid(format!("incrementing `{key}` by {delta} overflows")).into())
+}
+
+// A counter is decimal text: `0`, or an optional `-` and digits that do not
+// start with `0`.
+fn counter(value: &[u8]) -> Option<i64> {
+    let digits = value.strip_prefix(b"-").unwrap_or(value);
+    let canonical = value == b"0"
+        || (matches!(digits.first(), Some(b'1'..=b'9')) && digits.iter().all(u8::is_ascii_digit));
+    if !canonical {
+        return None;
+    }
+    std::str::from_utf8(value).ok()?.parse().ok()
 }
 
 fn publish_failure(err: PublishError, context: String) -> anyhow::Error {

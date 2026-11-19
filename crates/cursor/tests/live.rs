@@ -12,17 +12,14 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use omnia::Connect as _;
+use omnia::wasmtime::component::Resource;
 use omnia_cursor::{Client, ConnectOptions};
 use omnia_wasi_model::{
-    Answer, Error, Format, Function, Grants, Mcp, Message, ModelClient as _, Request, Role, Schema,
-    Tool, WorkerGrant,
+    Answer, Budget, Exhausted, Format, Function, Grants, Location, Message, ModelClient as _,
+    Request, Role, Schema, Tool, WorkerGrant, WorkspaceGrant,
 };
 use serde_json::{Value, json};
-use support::{
-    CHECK_WORD, SENTINEL, TOOL_SENTINEL, checking_tool_host, local_path_tool_host, no_tool_host,
-    serve,
-};
-use tokio::net::TcpListener;
+use support::{CHECK_WORD, TOOL_SENTINEL, checking_tool_host, local_path_tool_host, no_tool_host};
 use tracing_subscriber::layer::SubscriberExt as _;
 
 // How long the pool may take to be rid of every process once the answers are
@@ -60,7 +57,7 @@ fn temp_workspace(label: &str) -> Result<std::path::PathBuf> {
 
 fn verdict_request() -> Request {
     Request {
-        model: None,
+        model: "default".to_owned(),
         system: Some(
             "You are a terse judge. Decide whether the candidate passes and reply with the \
              required JSON object."
@@ -87,10 +84,7 @@ fn verdict_request() -> Request {
             .to_string(),
         }),
         tools: vec![],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        grants: Grants { workspace: None },
         check: false,
     }
 }
@@ -295,7 +289,7 @@ async fn killed_mid_run() -> Result<()> {
 // stub session answers with `TOOL_SENTINEL`.
 fn tool_request() -> Request {
     Request {
-        model: None,
+        model: "default".to_owned(),
         system: Some("Answer only from tools. Do not guess or fabricate values.".to_owned()),
         messages: vec![Message {
             role: Role::User,
@@ -316,13 +310,10 @@ fn tool_request() -> Request {
         }),
         tools: vec![Tool::Function(Function {
             name: "lookup".to_owned(),
-            description: "Return the project secret token.".to_owned(),
+            description: Some("Return the project secret token.".to_owned()),
             parameters: json!({ "type": "object", "properties": {} }).to_string(),
         })],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        grants: Grants { workspace: None },
         check: false,
     }
 }
@@ -363,68 +354,11 @@ async fn no_workspace() -> Result<()> {
     Ok(())
 }
 
-fn secret_request(url: String) -> Request {
-    Request {
-        model: None,
-        system: Some("Answer only from tools. Do not guess or fabricate values.".to_owned()),
-        messages: vec![Message {
-            role: Role::User,
-            content: "Call the `read_secret` tool on the `omnia` MCP server to obtain the \
-                      project secret token, then return it unchanged."
-                .to_owned(),
-        }],
-        generation: None,
-        format: Format::Schema(Schema {
-            name: "secret".to_owned(),
-            schema: json!({
-                "type": "object",
-                "properties": { "secret": { "type": "string" } },
-                "required": ["secret"],
-                "additionalProperties": false,
-            })
-            .to_string(),
-        }),
-        // the grant rides inline through `CreateAgent`'s `mcp_servers`
-        tools: vec![Tool::Mcp(Mcp {
-            name: "omnia".to_owned(),
-            tools: vec![],
-            url,
-        })],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
-        check: false,
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "live: needs cursor-sdk-bridge and CURSOR_API_KEY; run with --run-ignored"]
-async fn mcp_tool() -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    tokio::spawn(serve(listener));
-
-    let client = connect().await?;
-    let answer: Answer = client
-        .complete(secret_request(format!("http://127.0.0.1:{port}/mcp")), no_tool_host())
-        .await
-        .map_err(|e| anyhow::anyhow!("live cursor MCP completion failed: {e}"))?;
-
-    let value = object(&answer);
-    assert!(
-        value.to_string().contains(SENTINEL),
-        "the agent must return the MCP-provided secret; got: {value}"
-    );
-
-    Ok(())
-}
-
 // A prompt whose first answer cannot contain the check's word — the agent
 // only learns it from the correction sent on its session.
 fn check_request() -> Request {
     Request {
-        model: None,
+        model: "default".to_owned(),
         system: Some(
             "Reply with a JSON object {\"word\": <a single English word>}. Follow any \
              correction you receive exactly."
@@ -437,10 +371,7 @@ fn check_request() -> Request {
         generation: None,
         format: Format::Json,
         tools: vec![],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        grants: Grants { workspace: None },
         check: true,
     }
 }
@@ -477,10 +408,10 @@ async fn check_exhausts() -> Result<()> {
         .await
         .expect_err("every candidate is rejected, so the round budget ends the completion");
 
-    let correction = match error.downcast_ref::<Error>() {
-        Some(Error::BudgetExhausted(correction)) => correction,
-        other => panic!("expected the typed budget-exhausted carrying the correction: {other:?}"),
-    };
+    let exhausted =
+        error.downcast_ref::<Exhausted>().expect("an exhaustion carrying the correction");
+    assert_eq!(exhausted.budget, Budget::Responses, "{exhausted:?}");
+    let correction = &exhausted.detail;
     let candidates = candidates.lock().expect("candidates lock").clone();
     assert_eq!(candidates.len(), 2, "the opening prompt and one correction: {candidates:?}");
     assert!(
@@ -520,7 +451,7 @@ async fn confined_turn() -> Result<()> {
 
 fn install_request() -> Request {
     Request {
-        model: None,
+        model: "default".to_owned(),
         system: Some(
             "You are a build agent working in the lent workspace. Run the command asked for \
              with the shell and reply with the required JSON object."
@@ -548,10 +479,7 @@ fn install_request() -> Request {
             .to_string(),
         }),
         tools: vec![],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        grants: Grants { workspace: None },
         check: false,
     }
 }
@@ -574,11 +502,21 @@ async fn confined_npm_install() -> Result<()> {
         ..options()
     })
     .await?;
-    let mut request = install_request();
-    request.grants.worker = Some(WorkerGrant {
+    let worker = WorkerGrant {
         egress: vec!["registry.npmjs.org".to_owned()],
         read: vec![],
         env: vec![],
+    };
+    // HACK: the backend reaches a lend through `ToolHost::local_path` alone,
+    // so a borrow no table holds stands in for the root
+    let location = Location {
+        root: Resource::new_borrow(0),
+        subpath: String::new(),
+    };
+    let mut request = install_request();
+    request.grants.workspace = Some(WorkspaceGrant {
+        location,
+        worker: Some(worker),
     });
     let answer: Answer = client
         .complete(request, local_path_tool_host(workspace.clone()))

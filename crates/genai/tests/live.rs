@@ -20,11 +20,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use futures::FutureExt as _;
+use omnia::wasmtime::component::Resource;
 use omnia::{Connect as _, FromEnv as _, FutureResult};
 use omnia_genai::{Client, ConnectOptions};
 use omnia_wasi_model::{
-    Answer, DirEntry, Error, Format, Function, Grants, Message, ModelClient as _, Request, Role,
-    Tool, ToolHost, WorkerGrant,
+    Answer, Budget, DirEntry, Exhausted, Format, Function, Grants, Location, Message,
+    ModelClient as _, Request, Role, Tool, ToolHost, WorkerGrant, WorkspaceGrant,
 };
 use serde_json::Value;
 
@@ -71,7 +72,7 @@ impl ToolHost for LiveTools {
 // embedding the tool's result.
 fn lookup_request() -> Request {
     Request {
-        model: None,
+        model: "default".to_owned(),
         system: Some(
             "Call the `lookup` tool with name \"alpha\" to fetch a value, then reply with a JSON \
              object {\"resolved\": <the exact string the tool returned>}. Use the tool result \
@@ -86,7 +87,7 @@ fn lookup_request() -> Request {
         format: Format::Json,
         tools: vec![Tool::Function(Function {
             name: "lookup".to_owned(),
-            description: "Look up a value by name and return its contents.".to_owned(),
+            description: Some("Look up a value by name and return its contents.".to_owned()),
             parameters: r#"{
                 "type": "object",
                 "properties": {
@@ -97,10 +98,7 @@ fn lookup_request() -> Request {
             }"#
             .to_owned(),
         })],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        grants: Grants { workspace: None },
         check: false,
     }
 }
@@ -192,8 +190,19 @@ impl ToolHost for LiveShell {
 // must run the command and answer with its first line. The grant is the
 // Rust toolchain's reach, as the omnia target adapter spells it.
 fn shell_request() -> Request {
+    let worker = WorkerGrant {
+        egress: vec![],
+        read: vec!["~/.rustup".to_owned(), "~/.cargo/bin".to_owned()],
+        env: vec![("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned())],
+    };
+    // HACK: the backend reaches a lend through `ToolHost::local_path` alone,
+    // so a borrow no table holds stands in for the root
+    let location = Location {
+        root: Resource::new_borrow(0),
+        subpath: String::new(),
+    };
     Request {
-        model: None,
+        model: "default".to_owned(),
         system: Some(
             "A workspace is granted for this task, with a `shell` tool that runs a command in \
              it. Run `cargo --version` through the shell, then reply with a JSON object \
@@ -209,11 +218,9 @@ fn shell_request() -> Request {
         format: Format::Json,
         tools: vec![],
         grants: Grants {
-            workspace: None,
-            worker: Some(WorkerGrant {
-                egress: vec![],
-                read: vec!["~/.rustup".to_owned(), "~/.cargo/bin".to_owned()],
-                env: vec![("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned())],
+            workspace: Some(WorkspaceGrant {
+                location,
+                worker: Some(worker),
             }),
         },
         check: false,
@@ -283,7 +290,7 @@ const CHECK_WORD: &str = "quokka";
 // only learns it from the correction turn.
 fn check_request() -> Request {
     Request {
-        model: None,
+        model: "default".to_owned(),
         system: Some(
             "Reply with a JSON object {\"word\": <a single English word>}. Follow any \
              correction you receive exactly."
@@ -296,10 +303,7 @@ fn check_request() -> Request {
         generation: None,
         format: Format::Json,
         tools: vec![],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        grants: Grants { workspace: None },
         check: true,
     }
 }
@@ -309,7 +313,7 @@ fn check_request() -> Request {
 // the value inside.
 fn workspace_request() -> Request {
     Request {
-        model: None,
+        model: "default".to_owned(),
         system: Some(
             "A workspace is granted for this task. Discover its single file by listing the \
              workspace root, read that file, then reply with a JSON object {\"reference\": <the \
@@ -323,10 +327,7 @@ fn workspace_request() -> Request {
         generation: None,
         format: Format::Json,
         tools: vec![],
-        grants: Grants {
-            workspace: None,
-            worker: None,
-        },
+        grants: Grants { workspace: None },
         check: false,
     }
 }
@@ -472,10 +473,10 @@ async fn check_exhausts() -> Result<()> {
         .await
         .expect_err("every candidate is rejected, so the round budget ends the completion");
 
-    let correction = match error.downcast_ref::<Error>() {
-        Some(Error::BudgetExhausted(correction)) => correction,
-        other => panic!("expected the typed budget-exhausted carrying the correction: {other:?}"),
-    };
+    let exhausted =
+        error.downcast_ref::<Exhausted>().expect("an exhaustion carrying the correction");
+    assert_eq!(exhausted.budget, Budget::Responses, "{exhausted:?}");
+    let correction = &exhausted.detail;
     assert!(correction.contains("## Findings"), "the last correction is the detail: {correction}");
     let candidates = candidates.lock().expect("candidates lock").clone();
     assert!(candidates.len() > 1, "the backend must go round before giving up: {candidates:?}");

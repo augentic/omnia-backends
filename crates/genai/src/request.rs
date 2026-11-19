@@ -23,16 +23,16 @@ pub struct PreparedRequest {
 }
 
 impl PreparedRequest {
-    // A fault in the request is `Error::InvalidRequest`: a reserved or
-    // unsupported tool, or a schema that is not JSON or not a JSON Schema.
+    // A fault in the request is `Error::Invalid`: a reserved tool, a schema
+    // that is not JSON or not a JSON Schema, or an effort genai does not know.
     pub fn translate(
-        request: &Request, default_model: &str, max_tokens: u32, access: Access,
+        request: &Request, model: &str, max_tokens: u32, access: Access,
     ) -> Result<Self> {
         let (response_format, validator) = translate_format(&request.format)?;
         Ok(Self {
-            model: request.model.as_deref().unwrap_or(default_model).to_owned(),
+            model: model.to_owned(),
             chat: chat_request(request, access)?,
-            options: chat_options(request, max_tokens, response_format),
+            options: chat_options(request, max_tokens, response_format)?,
             format: request.format.clone(),
             validator,
             check: request.check,
@@ -57,14 +57,10 @@ fn translate_format(format: &Format) -> Result<(Option<ChatResponseFormat>, Opti
         Format::Json => return Ok((Some(ChatResponseFormat::JsonMode), None)),
         Format::Schema(spec) => spec,
     };
-    let schema: Value = serde_json::from_str(&spec.schema).map_err(|error| {
-        Error::InvalidRequest(format!("format schema is not valid JSON: {error}"))
-    })?;
+    let schema: Value = serde_json::from_str(&spec.schema)
+        .map_err(|error| Error::Invalid(format!("format schema is not valid JSON: {error}")))?;
     let validator = jsonschema::validator_for(&schema).map_err(|error| {
-        Error::InvalidRequest(format!(
-            "format schema `{}` is not a valid JSON Schema: {error}",
-            spec.name
-        ))
+        Error::Invalid(format!("format schema `{}` is not a valid JSON Schema: {error}", spec.name))
     })?;
     let json_spec = JsonSpec::new(spec.name.clone(), schema);
     Ok((Some(ChatResponseFormat::JsonSpec(json_spec)), Some(validator)))
@@ -89,19 +85,11 @@ fn chat_request(request: &Request, access: Access) -> Result<ChatRequest> {
 
     // the declared tools first, then the workspace's
     let mut tools: Vec<Tool> = Vec::new();
-    for tool in &request.tools {
-        match tool {
-            ModelTool::Function(function) if function.name == SHELL_TOOL => {
-                bail!(Error::InvalidRequest(format!(
-                    "tool `{SHELL_TOOL}` is reserved by the backend"
-                )));
-            }
-            ModelTool::Function(function) => tools.push(function_tool(function)?),
-            ModelTool::Mcp(mcp) => bail!(Error::InvalidRequest(format!(
-                "MCP server `{}`: genai does not support MCP servers",
-                mcp.name
-            ))),
+    for ModelTool::Function(function) in &request.tools {
+        if function.name == SHELL_TOOL {
+            bail!(Error::Invalid(format!("tool `{SHELL_TOOL}` is reserved by the backend")));
         }
+        tools.push(function_tool(function)?);
     }
     tools.extend(workspace_tools(access));
     if !tools.is_empty() {
@@ -113,19 +101,19 @@ fn chat_request(request: &Request, access: Access) -> Result<ChatRequest> {
 
 fn function_tool(function: &Function) -> Result<Tool> {
     let schema: Value = serde_json::from_str(&function.parameters).map_err(|error| {
-        Error::InvalidRequest(format!(
+        Error::Invalid(format!(
             "function tool `{}` parameters is not valid JSON: {error}",
             function.name
         ))
     })?;
-    Ok(Tool::new(function.name.clone())
-        .with_description(function.description.clone())
-        .with_schema(schema))
+    let mut tool = Tool::new(function.name.clone()).with_schema(schema);
+    tool.description.clone_from(&function.description);
+    Ok(tool)
 }
 
 fn chat_options(
     request: &Request, max_tokens: u32, response_format: Option<ChatResponseFormat>,
-) -> ChatOptions {
+) -> Result<ChatOptions> {
     let mut options = ChatOptions::default().with_capture_usage(true);
     if let Some(response_format) = response_format {
         options = options.with_response_format(response_format);
@@ -150,21 +138,19 @@ fn chat_options(
         if let Some(seed) = generation.seed {
             options = options.with_seed(seed);
         }
-        if let Some(effort) = generation.effort {
-            options = options.with_reasoning_effort(reasoning_effort(effort));
+        if let Some(effort) = &generation.effort {
+            options = options.with_reasoning_effort(reasoning_effort(effort)?);
         }
     }
 
-    options
+    Ok(options)
 }
 
-const fn reasoning_effort(effort: Effort) -> ReasoningEffort {
-    match effort {
-        Effort::Minimal => ReasoningEffort::Minimal,
-        Effort::Low => ReasoningEffort::Low,
-        Effort::Medium => ReasoningEffort::Medium,
-        Effort::High => ReasoningEffort::High,
-    }
+// A level by genai's own name, such as `minimal` or `xhigh`, passes through.
+fn reasoning_effort(effort: &Effort) -> Result<ReasoningEffort, Error> {
+    let level = effort.as_str();
+    ReasoningEffort::from_keyword(level)
+        .ok_or_else(|| Error::Invalid(format!("genai has no reasoning effort `{level}`")))
 }
 
 fn prompt_bytes(request: &Request) -> u64 {

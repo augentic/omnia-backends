@@ -37,17 +37,21 @@ backend.
   key fails with `invalid`. Keys that differ only in case collide on a
   case-insensitive filesystem, such as macOS's default.
 - Writes are temp-file + atomic-rename, so a value is never observed torn. A
-  value file holds only the caller's bytes.
+  value file holds only the caller's bytes, and an entry's revision is a
+  digest of them, so two writes of the same bytes share one.
 - An entry's deadline lives at the same path under `keyvalue-ttl/`, as unix
   milliseconds rounded up, so it outlives the client that set it. An entry
   past its deadline reads as absent, and the next call on its key removes it.
-  - `set` replaces an entry's lifetime.
-  - `compare-and-swap` and `increment` apply their TTL only to an entry they
-    create. An update keeps the time the entry has left.
+  - A `set` that replaces the lifetime sets the TTL it names, and one that
+    keeps it applies the TTL only to an entry it creates. An update keeps
+    the time the entry has left.
+  - `increment` applies its TTL only to an entry it creates.
 - Every call on a key serializes on a per-key lock shared by every bucket
-  handle opened from one client. Counter values are 8-byte big-endian `i64`,
-  and incrementing any other value, or past the `i64` range, fails with
-  `invalid`.
+  handle opened from one client, so a `set` or `delete` conditioned on a
+  revision, or on the key being absent, is checked and applied as one step.
+  One whose condition fails returns the entry it found.
+- A counter is decimal text, as Redis keeps one, and incrementing any other
+  value, or past the `i64` range, fails with `invalid`.
 - A permission-denied I/O error is `denied`. Anything else is `other`.
 - Scope: the lock serializes writers within one host process; a single
   process owns the root (the same assumption the blobstore makes).

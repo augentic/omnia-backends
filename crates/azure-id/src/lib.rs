@@ -15,7 +15,7 @@ use tracing::instrument;
 /// Azure Identity backend client, authenticating via Managed Identity.
 ///
 /// It serves the identities its [`ConnectOptions`] declare and refuses every
-/// other name with [`Error::NoSuchIdentity`](omnia_wasi_identity::Error::NoSuchIdentity).
+/// other name with [`Error::NotFound`](omnia_wasi_identity::Error::NotFound).
 /// Each identity keeps one credential, which caches the tokens it
 /// issues. Connecting fails on a host whose managed-identity source
 /// [`azure_identity`] does not support, such as Azure Arc or Cloud Shell.

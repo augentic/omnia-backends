@@ -12,8 +12,8 @@
 //! - Repeated failed calls terminate the completion.
 //! - Transport failures are retried three times with backoff.
 //!
-//! Exhausted budgets and reply timeouts return the typed `budget-exhausted`
-//! error.
+//! An exhausted budget, or a reply timeout, ends the completion as
+//! `exhausted` with the tokens it spent.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
@@ -26,7 +26,7 @@ use genai::chat::{
     ToolChoice, ToolResponse,
 };
 use jsonschema::Validator;
-use omnia_wasi_model::{Answer, Error, Format, ToolTurn, Transcript, Usage};
+use omnia_wasi_model::{Answer, Budget, Exhausted, Format, ToolTurn, Transcript, Usage};
 use serde_json::Value;
 use tokio::time::timeout;
 
@@ -127,14 +127,15 @@ impl Conversation {
                         after: self.budgets.timeout,
                         waiting: self.completion.phase(),
                     }
-                    .into_error());
+                    .into_error(self.completion.spent()));
                 }
             };
             let Some(Reply { text, usage }) = reply else {
-                bail!(Error::BudgetExhausted(format!(
-                    "no answer after {} model round-trips",
-                    self.budgets.max_rounds
-                )));
+                let rounds = self.budgets.max_rounds;
+                bail!(self.exhausted(
+                    Budget::Responses,
+                    format!("no answer after {rounds} model round-trips")
+                ));
             };
 
             let candidate = self.format.candidate(&text);
@@ -169,7 +170,7 @@ impl Conversation {
                     if self.candidates >= self.budgets.max_candidates
                         || self.round == self.budgets.max_rounds =>
                 {
-                    bail!(Error::BudgetExhausted(correction));
+                    bail!(self.exhausted(Budget::Responses, correction));
                 }
                 Err(correction) => {
                     self.completion.rejected();
@@ -360,10 +361,13 @@ impl Conversation {
                 count,
                 "the same call failed the same way up to the repeat budget"
             );
-            bail!(Error::BudgetExhausted(format!(
-                "tool `{}` failed {count} times with the same arguments: {reason}",
-                call.fn_name
-            )));
+            bail!(self.exhausted(
+                Budget::ToolCalls,
+                format!(
+                    "tool `{}` failed {count} times with the same arguments: {reason}",
+                    call.fn_name
+                )
+            ));
         }
         let result = format!("tool `{}` failed: {reason}", call.fn_name);
         if count < REPEAT_NOTE_FROM {
@@ -420,6 +424,13 @@ impl Conversation {
             answer,
             usage,
             transcript: Some(mem::take(&mut self.transcript)),
+        }
+    }
+
+    fn exhausted(&self, budget: Budget, detail: impl Into<String>) -> Exhausted {
+        Exhausted {
+            usage: self.completion.spent(),
+            ..Exhausted::new(budget, detail)
         }
     }
 }

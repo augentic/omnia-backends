@@ -10,9 +10,10 @@ It wraps the [`genai`](https://crates.io/crates/genai) SDK (`OpenAI`,
 Anthropic, Gemini, Groq, Ollama, …) and maps the host-validated `Request`
 (`system` / `messages` channels) to a provider chat request. The tool loop
 runs in-process and is driven to completion. Whatever the request gets wrong
-is refused as `invalid-request` before a provider request is made, and before
-anything is billed: a reserved tool name, an MCP server, a format schema that
-is not a JSON Schema, a worker grant with no shell to open.
+is refused as `invalid` before a provider request is made, and before
+anything is billed: a reserved tool name, a format schema that is not a JSON
+Schema, a reasoning effort genai does not know, a worker grant with no shell
+to open.
 
 MSRV: Rust 1.100
 
@@ -70,26 +71,27 @@ closing rounds it opens:
 
 ## Budgets
 
-Four budgets bound a completion, and any spent is the typed
-`budget-exhausted`:
+Four budgets bound a completion. One spent ends it as `exhausted`, naming
+the `budget` and the tokens every round spent:
 
-- `max_rounds` (default 128). Every provider round-trip draws on it: a tool
-  round, a candidate, a nudge, or a correction. The last round forbids tool
-  calls with the tools still declared (`tool_choice` `none`), so a model that
-  would act once more answers the question instead where the provider
-  honours it, and a call made there is refused as in a closing round.
-- `max_candidates` (default 2, the count the `omnia-cursor` backend keeps).
-  The guest's `check` is offered at most this many candidates, every one but
-  the last corrected once; the rejection of the last fails the completion
-  with that correction as the detail.
-- `max_repeats` (default 5). A tool call that fails the same way with the
-  same arguments is counted, the model told the count from the third, and
-  this many such failures end the completion naming the call, since a model
-  repeating one refused call is not going to answer.
-- `timeout_secs` (default 600). Each reply of the model, the tool rounds
-  before it included, runs under this cap, a nudge or a correction starting a
-  fresh one, so a provider that never answers or a build that never ends
-  holds no completion for longer.
+- `max_rounds` (default 128), the `responses` budget. Every provider
+  round-trip draws on it: a tool round, a candidate, a nudge, or a
+  correction. The last round forbids tool calls with the tools still
+  declared (`tool_choice` `none`), so a model that would act once more
+  answers the question instead where the provider honours it, and a call
+  made there is refused as in a closing round.
+- `max_candidates` (default 2, the count the `omnia-cursor` backend keeps),
+  the `responses` budget. The guest's `check` is offered at most this many
+  candidates, every one but the last corrected once; the rejection of the
+  last ends the completion with that correction as the detail.
+- `max_repeats` (default 5), the `tool-calls` budget. A tool call that fails
+  the same way with the same arguments is counted, the model told the count
+  from the third, and this many such failures end the completion naming the
+  call, since a model repeating one refused call is not going to answer.
+- `timeout_secs` (default 600), the `completion-time` budget. Each reply of
+  the model, the tool rounds before it included, runs under this cap, a
+  nudge or a correction starting a fresh one, so a provider that never
+  answers or a build that never ends holds no completion for longer.
 
 The host's per-completion tool-call limit is answered through
 `ModelClient::limits()` as `max_tool_calls`.
@@ -123,23 +125,25 @@ socket the server is closing.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GENAI_MODEL` | no | `gpt-5.5` | Default model id when a request leaves `model` unset |
+| `GENAI_MODEL` | no | `gpt-5.5` | Model id for a request that opens the model `default` |
 | `GENAI_ENDPOINT` | no | | Base URL every request goes to in place of the provider's own (a self-hosted gateway or proxy) |
 | `GENAI_SHELL_ROOTS` | no | | Trees a lent workspace at or beneath which runs with the `shell` tool, `:`-separated, relative to the invocation directory; none configures no shell |
-| `GENAI_MAX_ROUNDS` | no | `128` | Provider round-trips one completion may make before it is ended as `budget-exhausted` |
-| `GENAI_MAX_TOOL_CALLS` | no | `128` | Guest tool calls one completion may make before `budget-exhausted` (the host's default is 32) |
-| `GENAI_MAX_CANDIDATES` | no | `2` | Candidates one completion may offer the guest's `check`; the rejection of the last is `budget-exhausted` carrying the correction |
-| `GENAI_MAX_REPEATS` | no | `5` | Failures one tool call may earn with the same arguments before the completion is `budget-exhausted` naming the call; the model is told the count from the third |
+| `GENAI_MAX_ROUNDS` | no | `128` | Provider round-trips one completion may make before it is ended as `exhausted` |
+| `GENAI_MAX_TOOL_CALLS` | no | `128` | Guest tool calls one completion may make before it is `exhausted` (the host's default is 32) |
+| `GENAI_MAX_CANDIDATES` | no | `2` | Candidates one completion may offer the guest's `check`; the rejection of the last is `exhausted` carrying the correction |
+| `GENAI_MAX_REPEATS` | no | `5` | Failures one tool call may earn with the same arguments before the completion is `exhausted` naming the call; the model is told the count from the third |
 | `GENAI_MAX_TOKENS` | no | `32768` | Tokens one reply of the model may decode in one round where the request names no `max_tokens` of its own; the tool calls of a reply cut there are refused, not run |
-| `GENAI_TIMEOUT_SECS` | no | `600` | Absolute cap in seconds on one reply of the model, tool rounds included, before the completion is ended as `budget-exhausted` |
+| `GENAI_TIMEOUT_SECS` | no | `600` | Absolute cap in seconds on one reply of the model, tool rounds included, before the completion is ended as `exhausted` |
 | `GENAI_SHELL_TIMEOUT_SECS` | no | `600` | Seconds one `shell` command may run before it is killed |
 | `OPENAI_API_KEY` | per provider | | `OpenAI` API key, read by genai from the ambient environment |
 | `ANTHROPIC_API_KEY` | per provider | | Anthropic API key |
 | `GEMINI_API_KEY` | per provider | | Gemini API key |
 | (other provider keys) | per provider | | Any key the [`genai`](https://crates.io/crates/genai) SDK supports (Groq, Ollama, …) |
 
-The provider model id is taken from each request (`request.model`); an unset
-value falls back to `GENAI_MODEL`, else `gpt-5.5`. genai routes to the
+The provider model id is the name the guest opened the model by, and the
+`default` a guest opens when it names none is `GENAI_MODEL`, else
+`gpt-5.5`. An `effort` level passes through by genai's own name, so
+`other("minimal")` and `other("xhigh")` reach the provider. genai routes to the
 provider by the model id's prefix. Only the key for the provider a request
 routes to is required, and keys are never logged or recorded.
 
@@ -192,20 +196,20 @@ is killed the same way, the completion ended. A `shell` call where no shell
 was advertised is answered as the model's slip, not the completion's
 failure.
 
-What the shell reaches beyond the lend is the completion's `grants.worker`
-— the `egress` hosts, `~/` `read` roots, and `env` the guest spells per
-request, as the `omnia-cursor` backend reads them — prepared as the
+What the shell reaches beyond the lend is the `worker` grant the lend
+carries — the `egress` hosts, `~/` `read` roots, and `env` the guest spells
+per request, as the `omnia-cursor` backend reads them — prepared as the
 session's `Grant` under the sandbox's own rules: a grant over a lend under
-no shell root, over no lend, or under a deployment with no shell root
-configured is `invalid-request` before any request is made, and a grant the
-sandbox denies (a root overlapping a credential store, a variable the
-sandbox reserves) is `invalid-request` in the sandbox's words. The provider
+no shell root, or under a deployment with no shell root configured, is
+`invalid` before any request is made, and a grant the sandbox denies (a
+root overlapping a credential store, a variable the sandbox reserves) is
+`invalid` in the sandbox's words. The provider
 keys the SDK reads (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
 `GROQ_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `COHERE_API_KEY`,
 `MISTRAL_API_KEY`, `OLLAMA_API_KEY`) are refused as a grant's `env`, and the
 shell inherits `USER`, `LOGNAME`, `SSL_CERT_FILE`, and `SSL_CERT_DIR` of the
 host's environment beyond what the sandbox sets. A guest tool named `shell`
-is `invalid-request`, as one named `read` is the host's. With no shell root
+is `invalid`, as one named `read` is the host's. With no shell root
 configured no kernel boundary is set up and the backend runs as before.
 
 ## Observability
@@ -388,7 +392,7 @@ shell root:
   grant and answers with its first line
 - the guest `check` loop: a stand-in check rejects the first candidate with
   a correction the model must follow, and one that rejects every candidate
-  proves the typed `budget-exhausted`
+  ends as `exhausted` on the `responses` budget
 
 They are `#[ignore]`d so they never touch the network in CI; run them with
 a provider key:

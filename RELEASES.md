@@ -15,13 +15,25 @@ Unreleased
   and `examples`, build for `wasm32-wasip3`, because omnia 0.38 runs WASI 0.3
   guests alone.
 - **Breaking:** the Redis, NATS, and filesystem key-value backends implement
-  the TTL-aware `Bucket` of `omnia:keyvalue`, under one set of rules:
+  the revisioned, TTL-aware `Bucket` of `omnia:keyvalue`, under one set of
+  rules:
   - an entry set without a TTL never expires;
   - a TTL is rounded up to the store's resolution, never down;
-  - `set` replaces an entry's lifetime;
-  - `compare_and_swap` and `increment` apply their TTL only to an entry they
-    create, and an update keeps the time the entry has left;
-  - a TTL longer than the store can hold is stored without expiry.
+  - a `set` that replaces the lifetime sets its TTL, and one that keeps it
+    applies its TTL only to an entry it creates, as `increment` does;
+  - an update that keeps the lifetime keeps the time the entry has left;
+  - a TTL longer than the store can hold is stored without expiry;
+  - `get` answers an entry's revision with its value;
+  - a `set` or `delete` conditioned on a revision, or on the key being
+    absent, fails with the entry it found.
+
+  A revision is a digest of the value on Redis and the filesystem, and the
+  sequence of the message that holds the entry on NATS.
+- **Breaking:** the NATS and filesystem backends keep a counter as decimal
+  text, as Redis does, where they kept an 8-byte big-endian integer. A
+  counter written by an earlier release fails its next `increment` with
+  `invalid`, so delete or rewrite each one before upgrading. All three refuse
+  a text that is not canonical, such as `007`, `-0`, or `+1`.
 - **Breaking:** `omnia-redis` no longer expires every `set`, `increment`, and
   `swap` after a day. A key written without a TTL now lives until deleted, so
   a caller that relied on the day must pass a TTL. `r9k-omnia`'s
@@ -48,8 +60,7 @@ Unreleased
   `other`.
 - **Breaking:** identities are declared. `omnia-azure-id` serves only the
   names `IDENTITY_NAMES` lists (comma-separated, default `default`), and
-  fails any other with `no-such-identity`, which a guest's `Identity`
-  reports with the code `not-found`. `default` is the host's system-assigned
+  fails any other with `not-found`. `default` is the host's system-assigned
   identity, or the user-assigned one whose client id `IDENTITY_CLIENT_ID`
   gives. Each other name takes its client id from
   `IDENTITY_CLIENT_ID__<NAME>`, and connecting fails without it. To migrate:
@@ -107,8 +118,24 @@ Unreleased
 
   `omnia-mongodb` lists blobs without reading their data.
 - `omnia-mongodb` dates a blob in seconds since the Unix epoch, as
-  `omnia:blobstore` documents, where it wrote milliseconds. A blob written
+  `omnia-wasi-blobstore` documents, where it wrote milliseconds. A blob written
   by an earlier release reads back in seconds too.
+- **Breaking:** `omnia-genai` and `omnia-cursor` serve the `omnia:model` of
+  omnia 0.38:
+  - a request that opens the model `default` runs on `GENAI_MODEL` or
+    `CURSOR_MODEL`, and any other name is the provider's model id;
+  - a fault in the request is `invalid`;
+  - a spent budget ends the completion as `exhausted`, naming the budget and
+    carrying the tokens spent where the provider reported them;
+  - a `worker` grant rides on the workspace lend it applies to.
+- **Breaking:** `omnia-cursor` no longer passes MCP server grants to the
+  agent, since `omnia:model` no longer carries them.
+- `omnia-genai` reports the tokens every round of a completion spent, where
+  it reported the last round's. Both model backends report the input tokens
+  read from and written to the provider's prompt cache.
+- `omnia-genai` sets the provider's reasoning effort from a request's
+  `effort`. Genai's own levels, such as `minimal` or `xhigh`, pass through
+  `other`, and any level genai does not know fails with `invalid`.
 
 ---
 

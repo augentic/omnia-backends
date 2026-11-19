@@ -42,7 +42,7 @@ static COMPLETION_ID: AtomicU64 = AtomicU64::new(0);
 impl ModelClient for Client {
     fn complete(&self, request: Request, tool_host: Arc<dyn ToolHost>) -> FutureResult<Answer> {
         let client = self.clone();
-        let model = request.model.as_deref().unwrap_or(&self.model);
+        let model = self.model(&request);
         let n = COMPLETION_ID.fetch_add(1, Ordering::Relaxed) + 1;
 
         // a schema's name is the guest's label for the question it asks
@@ -80,6 +80,12 @@ impl ModelClient for Client {
 }
 
 impl Client {
+    // The Cursor model a request runs on: the configured one for the
+    // `default` a guest opens by default, and otherwise the name it opened.
+    fn model<'a>(&'a self, request: &'a Request) -> &'a str {
+        if request.model == "default" { &self.model } else { &request.model }
+    }
+
     async fn attempt(
         &self, request: &Request, tool_host: &Arc<dyn ToolHost>,
     ) -> Result<Answer, Unanswered> {
@@ -95,7 +101,7 @@ impl Client {
         let api_key =
             self.api_key.as_deref().ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))?;
         let session = self.prepare(request, tool_host.local_path()).await?;
-        let turn = Turn::prepare(request, &session, &self.model, api_key)?;
+        let turn = Turn::prepare(request, &session, self.model(request), api_key)?;
         let lease = self.pool.acquire(&session).await?;
         Ok((lease, turn))
     }
@@ -106,7 +112,7 @@ impl Client {
     async fn prepare(
         &self, request: &Request, workspace: Option<&Path>,
     ) -> anyhow::Result<Session> {
-        let worker = request.grants.worker.as_ref();
+        let worker = request.grants.worker();
         let grant = worker.map_or_else(Grant::default, |worker| Grant {
             egress: worker.egress.clone(),
             read: worker.read.clone(),
@@ -120,7 +126,7 @@ impl Client {
             } else {
                 "worker grant needs a workspace"
             };
-            return Err(Error::InvalidRequest(detail.to_owned()).into());
+            return Err(Error::Invalid(detail.to_owned()).into());
         }
 
         Ok(session)
@@ -131,7 +137,7 @@ impl Client {
 // failure stays the backend's.
 fn refusal(error: anyhow::Error) -> anyhow::Error {
     match error.downcast::<Denied>() {
-        Ok(denied) => Error::InvalidRequest(format!("worker grant: {denied}")).into(),
+        Ok(denied) => Error::Invalid(format!("worker grant: {denied}")).into(),
         Err(error) => error,
     }
 }

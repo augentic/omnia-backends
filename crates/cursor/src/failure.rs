@@ -1,13 +1,15 @@
 //! Why a completion failed, typed, and the `outcome` label its `completion`
 //! event carries.
 
+use omnia_wasi_model::{Budget, Exhausted};
+
 use crate::Exit;
 use crate::protocol::{RpcError, RunStatus};
 
 /// Why a completion failed, by variant rather than by message.
 ///
-/// `complete`'s error downcasts to one of these, or to the typed
-/// `budget-exhausted` a rejected check ends on.
+/// `complete`'s error downcasts to one of these, or to the
+/// [`Exhausted`](omnia_wasi_model::Exhausted) a rejected check ends on.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Failure {
@@ -56,8 +58,8 @@ pub enum Failure {
 
 impl Failure {
     // The error `complete` ends on. The absolute cap is the completion's
-    // time budget, so a `Timeout` reaches the guest as the typed
-    // `BudgetExhausted` carrying this failure's text: the same request put
+    // time budget, so a `Timeout` reaches the guest as `exhausted` on
+    // `completion-time`, carrying this failure's text: the same request put
     // again would take as long, where a backend failure invites a retry.
     // Every other failure is the backend's. The failure itself stays
     // beneath for a caller that downcasts to it.
@@ -65,8 +67,8 @@ impl Failure {
     pub(crate) fn into_error(self) -> anyhow::Error {
         match &self {
             Self::Timeout { .. } => {
-                let budget = omnia_wasi_model::Error::BudgetExhausted(self.to_string());
-                anyhow::Error::new(self).context(budget)
+                let exhausted = Exhausted::new(Budget::CompletionTime, self.to_string());
+                anyhow::Error::new(self).context(exhausted)
             }
             _ => self.into(),
         }
@@ -101,10 +103,7 @@ impl Outcome {
         if let Some(failure) = error.downcast_ref::<Failure>() {
             return Self::of_failure(failure);
         }
-        match error.downcast_ref::<omnia_wasi_model::Error>() {
-            Some(omnia_wasi_model::Error::BudgetExhausted(_)) => Self::Exhausted,
-            _ => Self::Error,
-        }
+        if error.downcast_ref::<Exhausted>().is_some() { Self::Exhausted } else { Self::Error }
     }
 
     const fn of_failure(failure: &Failure) -> Self {

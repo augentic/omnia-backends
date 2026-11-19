@@ -216,7 +216,7 @@ async fn model_worker_unrooted() {
 }
 
 // The sandbox's own rules hold the grant: a `~/` root over a credential
-// store is denied as `invalid-request`, in the sandbox's words.
+// store is refused as `invalid`, in the sandbox's words.
 #[tokio::test]
 async fn model_worker_ssh_read() {
     let (scratch, roots) = tree();

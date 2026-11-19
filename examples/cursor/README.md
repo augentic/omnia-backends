@@ -1,6 +1,6 @@
 # Cursor Example
 
-Live model completion via `[omnia-cursor](../../crates/cursor)`: the guest calls `create` with a `lifecycle` function tool.
+Live model completion via `[omnia-cursor](../../crates/cursor)`: the guest opens the `default` model and calls `complete` with a `lifecycle` function tool.
 
 ## Prerequisites
 
@@ -29,15 +29,15 @@ cargo run --example cursor -- run --config examples/cursor/config.toml
 
 ## Host-to-guest tool calls
 
-`wasi-model` implements guest-defined tools using two streams rather than direct callbacks. The host sends `ToolCall` values to the guest through the session’s `calls` stream, while the guest returns corresponding `ToolResult` values through a second stream it creates.
+`wasi-model` implements guest-defined tools using two streams rather than direct callbacks. The host sends each `ToolCall` to the guest as a `Call` on the session’s `calls` stream, while the guest returns the corresponding `ToolResult` as a `CallResult` through a second stream it creates.
 
-To open a completion session, the guest creates the result stream, retains its writable end, and passes the readable end to `create`. The host returns a `reply` future and the `calls` stream. While awaiting the reply, the guest handles each tool call and writes a result with the same correlation ID, allowing the host to resume the completion.
+To open a completion session, the guest creates the result stream, retains its writable end, and passes the readable end to `complete`. The host returns a `reply` future and the `calls` stream. While awaiting the reply, the guest handles each tool call and writes a result with the same correlation ID, allowing the host to resume the completion.
 
 The mount (`--mount`, or `[[mount]]` in `config.toml`) preopens `examples/cursor/workspace` as the tree named `.`; the guest lends it through `grants.workspace` and the cursor backend resolves it to the working tree the agent runs in.
 
 ## Test
 
-The run command drives `wasi:cli/run` once, which opens a completion session, answers the function-tool call, and prints the answer — expect a `tool call: widget_lifecycle` line, then the widget lifecycle stages (`draft`, `assembled`, `shipped`), sourced from the `ToolResult`.
+The run command drives `wasi:cli/run` once, which opens a completion session, answers the function-tool call, and prints the answer — expect the `lifecycle` tool call, then the widget lifecycle stages (`draft`, `assembled`, `shipped`), sourced from the `ToolResult`.
 
 ## Installing cursor-sdk-bridge
 

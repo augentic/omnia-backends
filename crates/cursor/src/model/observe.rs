@@ -165,11 +165,7 @@ impl Completion {
 
 impl From<&Turn> for Completion {
     fn from(turn: &Turn) -> Self {
-        tracing::debug!(
-            prompt_bytes = turn.prompt.text.len(),
-            mcp = turn.agent.options.mcp_servers.len(),
-            "completion started"
-        );
+        tracing::debug!(prompt_bytes = turn.prompt.text.len(), "completion started");
         Self::new()
     }
 }
@@ -233,7 +229,7 @@ impl From<&TokenUsage> for Bill {
     }
 }
 
-// A wire count booked on the bill: negatives become 0.
+// A wire count: negatives become 0.
 fn count(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
@@ -241,14 +237,11 @@ fn count(value: i64) -> u64 {
 impl From<TokenUsage> for Usage {
     fn from(usage: TokenUsage) -> Self {
         Self {
-            input_tokens: clamp_u32(usage.input_tokens),
-            output_tokens: clamp_u32(usage.output_tokens),
-            reasoning_tokens: usage.reasoning_tokens.map(clamp_u32),
+            input_tokens: count(usage.input_tokens),
+            output_tokens: count(usage.output_tokens),
+            reasoning_tokens: usage.reasoning_tokens.map(count),
+            cache_read_tokens: usage.cache_read_tokens.map(count),
+            cache_write_tokens: usage.cache_write_tokens.map(count),
         }
     }
-}
-
-// Wire counts are `i64`; negatives become 0, values above `u32::MAX` saturate.
-fn clamp_u32(count: i64) -> u32 {
-    if count.is_negative() { 0 } else { u32::try_from(count).unwrap_or(u32::MAX) }
 }

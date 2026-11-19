@@ -17,9 +17,7 @@ use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use omnia::Connect;
 use omnia_kafka::{Client, ConnectOptions, ConsumerOptions, PartitionerScheme, RegistryOptions};
-use omnia_wasi_messaging::{
-    Endpoint, Error as MessagingError, HandleError, Handler, Message, MessagingClient, Metadata,
-};
+use omnia_wasi_messaging::{Endpoint, HandleError, Handler, Message, MessagingClient, Metadata};
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{Consumer, StreamConsumer};
@@ -566,7 +564,7 @@ async fn at_least_once() -> Result<()> {
     client.send(topic.clone(), keyed_message("f0", &[("key", "f")])).await?;
     let rejected = consuming.next().await?;
     assert_eq!(rejected.offset(), tail);
-    rejected.complete(Err(HandleError::Rejected(MessagingError::Other("rejected f".to_owned()))));
+    rejected.complete(Err(HandleError::Rejected("rejected f".to_owned())));
     let ended = (&mut consuming.task).await.context("the consume task joins")?;
     let error = ended.expect_err("a rejected record ends the consumer");
     assert!(

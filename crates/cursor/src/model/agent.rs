@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
-use omnia_wasi_model::{Answer, Error, Format, ToolHost, Transcript, Usage};
+use omnia_wasi_model::{Answer, Budget, Exhausted, Format, ToolHost, Transcript, Usage};
 use tokio::sync::watch;
 use tokio::time::{Instant, interval_at, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
@@ -205,7 +205,11 @@ impl Agent {
                     prompt = correction;
                 }
                 Err(correction) => {
-                    return Err(Unanswered::settled(Error::BudgetExhausted(correction).into()));
+                    let exhausted = Exhausted {
+                        usage: response.usage.map(Usage::from),
+                        ..Exhausted::new(Budget::Responses, correction)
+                    };
+                    return Err(Unanswered::settled(exhausted.into()));
                 }
             }
 

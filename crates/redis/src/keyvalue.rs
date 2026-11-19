@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use anyhow::{Result, ensure};
 use futures::FutureExt;
-use omnia_wasi_keyvalue::{Bucket, Error, FutureResult, KeyValueClient};
+use omnia_wasi_keyvalue::{
+    Bucket, Entry, Error, FutureResult, KeyValueClient, Lifetime, Precondition, Revision,
+};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, ErrorKind, RedisError, ServerErrorKind};
 
@@ -45,31 +47,44 @@ impl Debug for Conn {
     }
 }
 
-// Server-side compare-and-set: the compare and the write are one atomic
-// step. `WATCH`/`MULTI` is not an option on a multiplexed connection. A
-// swap that creates the key applies the TTL in `ARGV[4]`, and one that
-// replaces a value keeps its TTL. Returns `{swapped, present, current}`.
-const COMPARE_AND_SWAP: &str = r"
+// Server-side conditional write: the compare and the write are one atomic
+// step. `WATCH`/`MULTI` is not an option on a multiplexed connection.
+// `ARGV[1]` is `any`, `absent`, or `holds`, which writes only while the key
+// holds `ARGV[2]`. A `keep` in `ARGV[4]` leaves an existing key its TTL, and
+// otherwise the write applies the TTL in `ARGV[5]`. Returns
+// `{written, present, current}`.
+const WRITE: &str = r"
 local current = redis.call('GET', KEYS[1])
-local matches
-if ARGV[1] == '1' then
-  matches = current ~= false and current == ARGV[2]
-else
-  matches = current == false
-end
-if not matches then
+local holds = ARGV[1] == 'any'
+  or (ARGV[1] == 'absent' and current == false)
+  or (ARGV[1] == 'holds' and current == ARGV[2])
+if not holds then
   if current == false then
     return {0, 0, ''}
   end
   return {0, 1, current}
 end
-if current ~= false then
+if ARGV[4] == 'keep' and current ~= false then
   redis.call('SET', KEYS[1], ARGV[3], 'KEEPTTL')
-elseif ARGV[4] ~= '' then
-  redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[4])
+elseif ARGV[5] ~= '' then
+  redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[5])
 else
   redis.call('SET', KEYS[1], ARGV[3])
 end
+return {1, 0, ''}
+";
+
+// Server-side conditional delete, of a key only while it holds `ARGV[1]`.
+// Returns `{deleted, present, current}`.
+const DELETE: &str = r"
+local current = redis.call('GET', KEYS[1])
+if current == false then
+  return {0, 0, ''}
+end
+if current ~= ARGV[1] then
+  return {0, 1, current}
+end
+redis.call('DEL', KEYS[1])
 return {1, 0, ''}
 ";
 
@@ -102,35 +117,83 @@ impl RedisBucket {
 }
 
 impl Bucket for RedisBucket {
-    fn get(&self, key: String) -> FutureResult<Option<Vec<u8>>> {
+    fn get(&self, key: String) -> FutureResult<Option<Entry>> {
         let key = self.key(&key);
         let mut conn = self.conn.0.clone();
-        async move { conn.get(&key).await.map_err(|err| classify(err, format!("getting `{key}`"))) }
-            .boxed()
-    }
-
-    fn set(&self, key: String, value: Vec<u8>, ttl: Option<Duration>) -> FutureResult<()> {
-        let key = self.key(&key);
-        let mut conn = self.conn.0.clone();
-
         async move {
-            let mut set = redis::cmd("SET");
-            set.arg(&key).arg(value);
-            if let Some(millis) = px(ttl) {
-                set.arg("PX").arg(millis);
-            }
-            set.query_async(&mut conn)
-                .await
-                .map_err(|err| classify(err, format!("setting `{key}`")))
+            let value: Option<Vec<u8>> =
+                conn.get(&key).await.map_err(|err| classify(err, format!("getting `{key}`")))?;
+            Ok(value.map(entry))
         }
         .boxed()
     }
 
-    fn delete(&self, key: String) -> FutureResult<()> {
+    fn set(
+        &self, key: String, value: Vec<u8>, lifetime: Lifetime, when: Option<Precondition>,
+    ) -> FutureResult<Result<Revision, Option<Entry>>> {
         let key = self.key(&key);
         let mut conn = self.conn.0.clone();
-        async move { conn.del(&key).await.map_err(|err| classify(err, format!("deleting `{key}`"))) }
-            .boxed()
+
+        async move {
+            let (condition, expected) = match when {
+                None => ("any", Vec::new()),
+                Some(Precondition::Absent) => ("absent", Vec::new()),
+                Some(Precondition::Matches(revision)) => {
+                    match named(&mut conn, &key, &revision).await? {
+                        Ok(expected) => ("holds", expected),
+                        Err(found) => return Ok(Err(found)),
+                    }
+                }
+            };
+            let (keep, ttl) = match lifetime {
+                Lifetime::Replace(ttl) => ("replace", ttl),
+                Lifetime::Keep(ttl) => ("keep", ttl),
+            };
+
+            let revision = Revision::of(&value);
+            let reply = redis::Script::new(WRITE)
+                .key(&key)
+                .arg(condition)
+                .arg(expected)
+                .arg(value)
+                .arg(keep)
+                .arg(px(ttl).map_or_else(String::new, |millis| millis.to_string()))
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|err| classify(err, format!("setting `{key}`")))?;
+            Ok(outcome(reply).map(|()| revision))
+        }
+        .boxed()
+    }
+
+    fn delete(
+        &self, key: String, when: Option<Revision>,
+    ) -> FutureResult<Result<(), Option<Entry>>> {
+        let key = self.key(&key);
+        let mut conn = self.conn.0.clone();
+
+        async move {
+            let Some(revision) = when else {
+                return conn
+                    .del(&key)
+                    .await
+                    .map(|()| Ok(()))
+                    .map_err(|err| classify(err, format!("deleting `{key}`")));
+            };
+            let expected = match named(&mut conn, &key, &revision).await? {
+                Ok(expected) => expected,
+                Err(found) => return Ok(Err(found)),
+            };
+
+            let reply = redis::Script::new(DELETE)
+                .key(&key)
+                .arg(expected)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|err| classify(err, format!("deleting `{key}`")))?;
+            Ok(outcome(reply))
+        }
+        .boxed()
     }
 
     fn exists(&self, key: String) -> FutureResult<bool> {
@@ -186,33 +249,36 @@ impl Bucket for RedisBucket {
         }
         .boxed()
     }
+}
 
-    fn compare_and_swap(
-        &self, key: String, current: Option<Vec<u8>>, new: Vec<u8>, ttl: Option<Duration>,
-    ) -> FutureResult<Result<(), Option<Vec<u8>>>> {
-        let key = self.key(&key);
-        let mut conn = self.conn.0.clone();
+// The bytes at `key` while they have `revision`, or the entry found in their
+// place. A revision is a digest of the bytes, so the scripts compare the
+// bytes it names.
+async fn named(
+    conn: &mut ConnectionManager, key: &str, revision: &Revision,
+) -> Result<Result<Vec<u8>, Option<Entry>>> {
+    let current: Option<Vec<u8>> =
+        conn.get(key).await.map_err(|err| classify(err, format!("getting `{key}`")))?;
+    Ok(match current {
+        Some(current) if Revision::of(&current) == *revision => Ok(current),
+        found => Err(found.map(entry)),
+    })
+}
 
-        async move {
-            let present = i64::from(current.is_some());
-            let (swapped, found, observed): (i64, i64, Vec<u8>) =
-                redis::Script::new(COMPARE_AND_SWAP)
-                    .key(&key)
-                    .arg(present)
-                    .arg(current.unwrap_or_default())
-                    .arg(new)
-                    .arg(px(ttl).map_or_else(String::new, |millis| millis.to_string()))
-                    .invoke_async(&mut conn)
-                    .await
-                    .map_err(|err| classify(err, format!("swapping `{key}`")))?;
+// A script's `{done, present, current}` reply, as the entry found in place
+// of the one the call expected.
+fn outcome((done, present, current): (i64, i64, Vec<u8>)) -> Result<(), Option<Entry>> {
+    match (done, present) {
+        (1, _) => Ok(()),
+        (_, 1) => Err(Some(entry(current))),
+        _ => Err(None),
+    }
+}
 
-            match (swapped, found) {
-                (1, _) => Ok(Ok(())),
-                (_, 1) => Ok(Err(Some(observed))),
-                _ => Ok(Err(None)),
-            }
-        }
-        .boxed()
+fn entry(value: Vec<u8>) -> Entry {
+    Entry {
+        revision: Revision::of(&value),
+        value,
     }
 }
 

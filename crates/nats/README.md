@@ -28,13 +28,16 @@ MSRV: Rust 1.100
   caps it. A read checks the entry's deadline to the millisecond, rounded up, so it
   never sees an entry past it. The server removes the entry up to a second later,
   and `keys()` may list it until then.
-  - `set` replaces an entry's lifetime.
-  - `compare-and-swap` and `increment` apply their TTL only to an entry they create.
-    An update keeps the time the entry has left.
-- **Atomics.** `compare-and-swap` and `increment` are writes conditioned on the
-  key's revision, retried while another writer gets in first. Counters are 8-byte
-  big-endian `i64`s, and incrementing any other value, or past the `i64` range, fails
-  with `invalid`.
+  - A `set` that replaces the lifetime sets the TTL it names, and one that keeps it
+    applies the TTL only to an entry it creates. An update keeps the time the entry
+    has left.
+  - `increment` applies its TTL only to an entry it creates.
+- **Revisions.** An entry's revision is the sequence of the message that holds it, so
+  every write makes a new one. A conditioned `set` or `delete`, a `set` that keeps the
+  lifetime, and `increment` are writes conditioned on that sequence, retried while
+  another writer gets in first. One whose condition fails returns the entry it found.
+- **Counters.** A counter is decimal text, as Redis keeps one, and incrementing any
+  other value, or past the `i64` range, fails with `invalid`.
 - **Errors.** A timed-out or broken connection is `unavailable`. The server reports a
   permissions violation out of band, so it too surfaces as a timeout. Anything else is
   `other`.

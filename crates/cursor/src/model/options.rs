@@ -1,19 +1,18 @@
 //! Translate one host-validated request into a [`Turn`]: guest function
-//! tools become SDK custom tools, MCP grants ride inline as `mcp_servers`,
-//! the session's working directory becomes the agent's `cwd` and its
-//! access the agent's tool list, and the prompt gains the format's
-//! final-answer instruction and a hint naming the granted MCP servers.
+//! tools become SDK custom tools, the session's working directory becomes
+//! the agent's `cwd` and its access the agent's tool list, and the prompt
+//! gains the format's final-answer instruction.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result};
 use omnia_sandbox::{Access, Session};
-use omnia_wasi_model::{Format, Mcp, Request, Tool};
+use omnia_wasi_model::{Format, Request, Tool};
 use serde_json::Value;
 
 use crate::protocol::{
-    AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, McpServerConfig,
-    ModelSelection, ToolList,
+    AgentOperationOptions, AgentOptions, CustomToolDefinition, LocalAgentOptions, ModelSelection,
+    ToolList,
 };
 
 // Everything one completion derives from the request: the agent to create
@@ -25,7 +24,7 @@ pub struct Turn {
 
 impl Turn {
     pub fn prepare(
-        request: &Request, session: &Session, default_model: &str, api_key: &str,
+        request: &Request, session: &Session, model: &str, api_key: &str,
     ) -> Result<Self> {
         if request.generation.is_some() {
             tracing::debug!("request.generation is ignored (CreateAgent has no sampling controls)");
@@ -34,16 +33,15 @@ impl Turn {
         let cwd = session.cwd().to_str().with_context(|| {
             format!("working directory {} is not UTF-8", session.cwd().display())
         })?;
-        let options = agent_options(request, cwd, session.access(), default_model, api_key)?;
+        let options = agent_options(request, cwd, session.access(), model, api_key)?;
         let operation = AgentOperationOptions {
             cwd: cwd.to_owned(),
             api_key: api_key.to_owned(),
         };
-        let text = with_mcp_hint(&request.mcp_servers(), request.to_string());
         Ok(Self {
             agent: AgentSpec { options, operation },
             prompt: Prompt {
-                text,
+                text: request.to_string(),
                 format: request.format.clone(),
                 check: request.check,
             },
@@ -65,46 +63,31 @@ pub struct AgentSpec {
 }
 
 fn agent_options(
-    request: &Request, cwd: &str, access: Access, default_model: &str, api_key: &str,
+    request: &Request, cwd: &str, access: Access, model: &str, api_key: &str,
 ) -> Result<AgentOptions> {
     let mut custom_tools = BTreeMap::new();
-    let mut mcp_servers = BTreeMap::new();
-
-    // guest function tools become custom tools; mcp grants ride inline
-    for tool in &request.tools {
-        match tool {
-            Tool::Function(function) => {
-                let input_schema: Value =
-                    serde_json::from_str(&function.parameters).with_context(|| {
-                        format!("function tool `{}` parameters is not valid JSON", function.name)
-                    })?;
-                custom_tools.insert(
-                    function.name.clone(),
-                    CustomToolDefinition {
-                        description: (!function.description.is_empty())
-                            .then(|| function.description.clone()),
-                        input_schema,
-                    },
-                );
-            }
-
-            Tool::Mcp(mcp) => {
-                mcp_servers.insert(mcp.name.clone(), McpServerConfig::streamable_http(&mcp.url));
-            }
-        }
+    for Tool::Function(function) in &request.tools {
+        let input_schema: Value =
+            serde_json::from_str(&function.parameters).with_context(|| {
+                format!("function tool `{}` parameters is not valid JSON", function.name)
+            })?;
+        custom_tools.insert(
+            function.name.clone(),
+            CustomToolDefinition {
+                description: function.description.clone(),
+                input_schema,
+            },
+        );
     }
 
-    let model = request.model.as_deref().unwrap_or(default_model).to_owned();
-
     Ok(AgentOptions {
-        model: ModelSelection { id: model },
+        model: ModelSelection { id: model.to_owned() },
         api_key: api_key.to_owned(),
         local: LocalAgentOptions {
             cwd: vec![cwd.to_owned()],
             source: access.is_lent().then(|| "SETTING_SOURCE_PROJECT".to_owned()),
             custom_tools,
         },
-        mcp_servers,
         tools: Some(ToolList { names: tools(access) }),
     })
 }
@@ -118,29 +101,4 @@ fn tools(access: Access) -> Vec<String> {
         Access::Shell => &["glob", "grep", "ls", "mcp", "read", "shell"],
     };
     names.iter().map(ToString::to_string).collect()
-}
-
-// Prepend a hint naming the granted MCP servers and tool allowlist, so the
-// agent prefers them over assumptions.
-fn with_mcp_hint(servers: &[&Mcp], prompt: String) -> String {
-    if servers.is_empty() {
-        return prompt;
-    }
-    let lines: Vec<String> = servers
-        .iter()
-        .map(|server| {
-            if server.tools.is_empty() {
-                format!("- `{}`", server.name)
-            } else {
-                format!("- `{}` (use only: {})", server.name, server.tools.join(", "))
-            }
-        })
-        .collect();
-
-    format!(
-        "The following read-only MCP servers are available. Consult their tools and resources for \
-         authoritative reference material before answering, and prefer that material over \
-         assumptions:\n{}\n\n{prompt}",
-        lines.join("\n")
-    )
 }

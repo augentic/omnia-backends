@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use anyhow::Result;
-use omnia_wasi_model::{Answer, Error, Usage};
+use omnia_wasi_model::{Answer, Budget, Exhausted, Usage};
 use tokio::sync::watch;
 use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 
@@ -55,7 +55,7 @@ impl Outcome {
         if error.downcast_ref::<Timeout>().is_some() {
             return Self::Timeout;
         }
-        if matches!(error.downcast_ref::<Error>(), Some(Error::BudgetExhausted(_))) {
+        if error.downcast_ref::<Exhausted>().is_some() {
             return Self::Exhausted;
         }
         match error.downcast_ref::<genai::Error>() {
@@ -102,10 +102,13 @@ pub struct Timeout {
 }
 
 impl Timeout {
-    // Surface `BudgetExhausted` to the guest while keeping `Timeout` in the chain for `Outcome::of`.
-    pub fn into_error(self) -> anyhow::Error {
-        let budget = Error::BudgetExhausted(self.to_string());
-        anyhow::Error::new(self).context(budget)
+    // Surface `Exhausted` to the guest while keeping `Timeout` in the chain for `Outcome::of`.
+    pub fn into_error(self, usage: Option<Usage>) -> anyhow::Error {
+        let exhausted = Exhausted {
+            usage,
+            ..Exhausted::new(Budget::CompletionTime, self.to_string())
+        };
+        anyhow::Error::new(self).context(exhausted)
     }
 }
 
@@ -130,6 +133,7 @@ pub struct Completion {
     cuts: u32,
     corrected: bool,
     bill: Bill,
+    spent: Option<Usage>,
     model: Duration,
     tool: Duration,
     check: Duration,
@@ -153,6 +157,7 @@ impl Completion {
             cuts: 0,
             corrected: false,
             bill: Bill::default(),
+            spent: None,
             model: Duration::ZERO,
             tool: Duration::ZERO,
             check: Duration::ZERO,
@@ -193,8 +198,8 @@ impl Completion {
         *bucket = bucket.saturating_add(activity.at.elapsed());
     }
 
-    // Books one round, and returns its bill as the guest's `Usage`: `None`
-    // where the provider reported no count at all.
+    // Books one round, and returns what every round so far spent as the
+    // guest's `Usage`: `None` while the provider has reported no count.
     pub fn answered(
         &mut self, usage: &genai::chat::Usage, reply_bytes: Option<usize>, tool_calls: usize,
         cut: bool,
@@ -221,17 +226,25 @@ impl Completion {
         self.bill.add(&bill);
 
         if usage.prompt_tokens.is_none() && usage.completion_tokens.is_none() {
-            return None;
+            return self.spent;
         }
-        Some(Usage {
-            input_tokens: usage.prompt_tokens.map_or(0, non_negative),
-            output_tokens: usage.completion_tokens.map_or(0, non_negative),
-            reasoning_tokens: usage
-                .completion_tokens_details
-                .as_ref()
-                .and_then(|details| details.reasoning_tokens)
-                .map(non_negative),
-        })
+        let prompt = usage.prompt_tokens_details.as_ref();
+        let completion = usage.completion_tokens_details.as_ref();
+        let round = Usage {
+            input_tokens: count(usage.prompt_tokens),
+            output_tokens: count(usage.completion_tokens),
+            reasoning_tokens: completion.and_then(|details| details.reasoning_tokens).map(tokens),
+            cache_read_tokens: prompt.and_then(|details| details.cached_tokens).map(tokens),
+            cache_write_tokens: prompt
+                .and_then(|details| details.cache_creation_tokens)
+                .map(tokens),
+        };
+        self.spent = Some(self.spent.map_or(round, |spent| plus(spent, round)));
+        self.spent
+    }
+
+    pub const fn spent(&self) -> Option<Usage> {
+        self.spent
     }
 
     pub const fn rejected(&mut self) {
@@ -370,7 +383,26 @@ impl From<&genai::chat::Usage> for Bill {
 }
 
 fn count(value: Option<i32>) -> u64 {
-    value.map_or(0, |value| u64::from(non_negative(value)))
+    value.map_or(0, tokens)
+}
+
+fn tokens(value: i32) -> u64 {
+    u64::from(non_negative(value))
+}
+
+// What two spans of a completion spent. A count either span kept is kept.
+fn plus(spent: Usage, round: Usage) -> Usage {
+    let kept = |spent: Option<u64>, round: Option<u64>| match (spent, round) {
+        (None, None) => None,
+        (spent, round) => Some(spent.unwrap_or(0).saturating_add(round.unwrap_or(0))),
+    };
+    Usage {
+        input_tokens: spent.input_tokens.saturating_add(round.input_tokens),
+        output_tokens: spent.output_tokens.saturating_add(round.output_tokens),
+        reasoning_tokens: kept(spent.reasoning_tokens, round.reasoning_tokens),
+        cache_read_tokens: kept(spent.cache_read_tokens, round.cache_read_tokens),
+        cache_write_tokens: kept(spent.cache_write_tokens, round.cache_write_tokens),
+    }
 }
 
 // A wire count booked: a negative one is 0.

@@ -25,7 +25,9 @@ use omnia::{Connect, ExitStatus, FromEnv as _};
 use omnia_nats::{Client, ConnectOptions};
 use omnia_test::host::{Backends, Deployment};
 use omnia_wasi_blobstore::{BlobStoreClient, WasiBlobStore};
-use omnia_wasi_keyvalue::{Bucket, Error, KeyValueClient, WasiKeyValue};
+use omnia_wasi_keyvalue::{
+    Bucket, Entry, Error, KeyValueClient, Lifetime, Precondition, WasiKeyValue,
+};
 use omnia_wasi_messaging::{Endpoint, Message, MessagingClient};
 use tokio::task::JoinSet;
 
@@ -52,7 +54,7 @@ async fn connect(mut options: ConnectOptions, buckets: &[&str]) -> Result<Client
 
 async fn empty(bucket: &Arc<dyn Bucket>) -> Result<()> {
     for key in bucket.keys().await? {
-        bucket.delete(key).await?;
+        assert_eq!(bucket.delete(key, None).await?, Ok(()), "an unconditioned delete");
     }
     Ok(())
 }
@@ -95,27 +97,41 @@ async fn keyvalue_atomics() -> Result<()> {
     let client = connect(ConnectOptions::load_env()?, &["omnia-live"]).await?;
     let bucket = client.open_bucket("omnia-live".to_owned()).await?;
 
+    // counters are decimal text
     let counter = unique("counter");
     assert_eq!(bucket.increment(counter.clone(), 5, None).await?, 5);
-    assert_eq!(bucket.increment(counter, -2, None).await?, 3);
+    assert_eq!(bucket.increment(counter.clone(), -2, None).await?, 3);
+    assert_eq!(bucket.get(counter).await?.map(|entry| entry.value), Some(b"3".to_vec()));
 
+    // a revision is the sequence of the message that holds the entry
     let pointer = unique("pointer");
-    let created = bucket.compare_and_swap(pointer.clone(), None, b"first".to_vec(), None).await?;
-    assert_eq!(created, Ok(()));
-    let stale = bucket.compare_and_swap(pointer.clone(), None, b"lost".to_vec(), None).await?;
-    assert_eq!(stale, Err(Some(b"first".to_vec())));
-    let first = Some(b"first".to_vec());
-    let retried = bucket.compare_and_swap(pointer.clone(), first, b"second".to_vec(), None).await?;
-    assert_eq!(retried, Ok(()));
-    assert_eq!(bucket.get(pointer).await?, Some(b"second".to_vec()));
+    let forever = Lifetime::Replace(None);
+    let absent = Some(Precondition::Absent);
+    let first = bucket.set(pointer.clone(), b"first".to_vec(), forever, absent.clone()).await?;
+    let first = first.expect("an absent key takes the write");
+    let stale = bucket.set(pointer.clone(), b"lost".to_vec(), forever, absent).await?;
+    let found = Entry {
+        value: b"first".to_vec(),
+        revision: first.clone(),
+    };
+    assert_eq!(stale, Err(Some(found)));
+
+    let matching = Some(Precondition::Matches(first.clone()));
+    let second =
+        bucket.set(pointer.clone(), b"second".to_vec(), Lifetime::Keep(None), matching).await?;
+    let second = second.expect("the matching revision takes the write");
+    let moved = bucket.delete(pointer.clone(), Some(first)).await?;
+    assert!(matches!(&moved, Err(Some(entry)) if entry.value == b"second"), "{moved:?}");
+    assert_eq!(bucket.delete(pointer.clone(), Some(second)).await?, Ok(()));
+    assert_eq!(bucket.get(pointer).await?, None);
 
     let text = unique("text");
-    bucket.set(text.clone(), b"not a number".to_vec(), None).await?;
+    bucket.set(text.clone(), b"not a number".to_vec(), forever, None).await?.expect("set");
     let err = bucket.increment(text, 1, None).await.expect_err("a non-counter increments");
     assert!(matches!(err.downcast_ref::<Error>(), Some(Error::Invalid(_))), "{err}");
 
-    let err =
-        bucket.set("not portable".to_owned(), b"v".to_vec(), None).await.expect_err("a space");
+    let spaced = bucket.set("not portable".to_owned(), b"v".to_vec(), forever, None).await;
+    let err = spaced.expect_err("a space");
     assert!(matches!(err.downcast_ref::<Error>(), Some(Error::Invalid(_))), "{err}");
     Ok(())
 }
@@ -137,15 +153,18 @@ async fn keyvalue_contention() -> Result<()> {
     assert_eq!(observed, (1..=16).collect::<Vec<i64>>(), "every increment lands exactly once");
 
     let pointer = unique("pointer");
-    bucket.set(pointer.clone(), b"seed".to_vec(), None).await?;
-    let mut swaps = JoinSet::new();
+    let seeded = bucket.set(pointer.clone(), b"seed".to_vec(), Lifetime::Replace(None), None);
+    let seed = seeded.await?.expect("an unconditioned write");
+    let mut writes = JoinSet::new();
     for i in 0..8_u8 {
         let (bucket, pointer) = (Arc::clone(&bucket), pointer.clone());
-        let seed = Some(b"seed".to_vec());
-        swaps.spawn(async move { bucket.compare_and_swap(pointer, seed, vec![i], None).await });
+        let matching = Some(Precondition::Matches(seed.clone()));
+        writes.spawn(
+            async move { bucket.set(pointer, vec![i], Lifetime::Keep(None), matching).await },
+        );
     }
-    let swapped = swaps.join_all().await.into_iter().collect::<Result<Vec<_>>>()?;
-    assert_eq!(swapped.iter().filter(|swap| swap.is_ok()).count(), 1, "{swapped:?}");
+    let written = writes.join_all().await.into_iter().collect::<Result<Vec<_>>>()?;
+    assert_eq!(written.iter().filter(|write| write.is_ok()).count(), 1, "{written:?}");
     Ok(())
 }
 
@@ -165,7 +184,8 @@ async fn keyvalue_upgrade() -> Result<()> {
     jetstream.create_key_value(config).await?;
 
     let bucket = connect(options, &[LEGACY]).await?.open_bucket(LEGACY.to_owned()).await?;
-    bucket.set("expiring".to_owned(), b"v".to_vec(), Some(Duration::from_secs(1))).await?;
+    let expiring = Lifetime::Replace(Some(Duration::from_secs(1)));
+    bucket.set("expiring".to_owned(), b"v".to_vec(), expiring, None).await?.expect("set");
 
     let stream = jetstream.get_stream(format!("KV_{LEGACY}")).await?;
     assert!(stream.cached_info().config.allow_message_ttl, "the bucket kept no per-message TTL");

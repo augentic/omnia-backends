@@ -80,7 +80,8 @@ mod config {
     /// Connection options for the cursor backend.
     #[derive(Debug, Clone, FromEnv)]
     pub struct ConnectOptions {
-        /// Default model id; `auto` is Cursor's server-side choice.
+        /// Model id for a request that opens the model `default`; `auto` is
+        /// Cursor's server-side choice.
         #[env(from = "CURSOR_MODEL", default = "auto")]
         pub model: String,
         /// The Cursor backend the client's relay forwards the bridge's API
@@ -102,15 +103,15 @@ mod config {
         #[env(from = "CURSOR_MAX_AGENTS", default = "8")]
         pub max_agents: usize,
         /// Guest tool calls one completion may make before it is ended as
-        /// `budget-exhausted`; the host's default is 32.
+        /// `exhausted`; the host's default is 32.
         #[env(from = "CURSOR_MAX_TOOL_CALLS", default = "128")]
         pub max_tool_calls: u32,
         /// Trees a lent workspace at or beneath which runs with a shell,
         /// `:`-separated and relative to the invocation directory; a
         /// workspace lent elsewhere is read-only. What a worker reaches
         /// beyond its workspace — hosts, `~/` roots, variables — is the
-        /// completion's `grants.worker`, held to the sandbox's own rules
-        /// and to nothing of the deployment's.
+        /// `worker` grant of the completion's lend, held to the sandbox's
+        /// own rules and to nothing of the deployment's.
         #[env(from = "CURSOR_SHELL_ROOTS", default = "", with = paths)]
         pub shell_roots: Vec<PathBuf>,
     }

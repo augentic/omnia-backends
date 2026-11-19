@@ -17,9 +17,14 @@ MSRV: Rust 1.100
   `_`, and `-`, so no bucket's prefix reaches into another's keys.
 - **TTLs.** An entry set without a TTL never expires. A TTL is rounded up to the next
   millisecond (`SET .. PX`), and one too long for `PX` is stored without expiry.
-  - `set` replaces an entry's lifetime.
-  - `compare-and-swap` and `increment` apply their TTL only to an entry they create.
-    An update keeps the time the entry has left (`KEEPTTL`).
+  - A `set` that replaces the lifetime sets the TTL it names, and one that keeps it
+    applies the TTL only to an entry it creates. An update keeps the time the entry
+    has left (`KEEPTTL`).
+  - `increment` applies its TTL only to an entry it creates.
+- **Revisions.** An entry's revision is a digest of its value, so two writes of the
+  same bytes share one. A `set` or `delete` conditioned on a revision, or on the key
+  being absent, runs as one Lua script, and one whose condition fails returns the
+  entry it found.
 - **Counters.** `increment` is native `INCRBY`, so a counter reads back as decimal
   text. Incrementing a value that is not an integer, or past the `i64` range, fails
   with `invalid`.

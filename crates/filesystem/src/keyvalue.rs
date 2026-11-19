@@ -1,8 +1,8 @@
 //! `omnia:keyvalue` backed by a local directory tree.
 //!
 //! Writes are atomic and serialized per key. A value file holds only the
-//! caller's bytes. An entry's deadline lives at the same path in a parallel
-//! `keyvalue-ttl` tree.
+//! caller's bytes, and an entry's revision is a digest of them. An entry's
+//! deadline lives at the same path in a parallel `keyvalue-ttl` tree.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write as _};
@@ -12,7 +12,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, ensure};
 use futures::FutureExt as _;
-use omnia_wasi_keyvalue::{Bucket, Error, FutureResult, KeyValueClient};
+use omnia_wasi_keyvalue::{
+    Bucket, Entry, Error, FutureResult, KeyValueClient, Lifetime, Precondition, Revision,
+};
 
 use crate::{Client, blocking, collect, segment_ok};
 
@@ -88,6 +90,12 @@ impl FsBucket {
         read(&path, key)
     }
 
+    // The caller holds the key's lock.
+    fn live(&self, key: &str) -> Result<bool> {
+        let path = key_path(&self.dir, key)?;
+        Ok(!self.expire(key)? && path.is_file())
+    }
+
     // Removes an entry whose deadline has passed, reporting whether it did.
     // The caller holds the key's lock.
     fn expire(&self, key: &str) -> Result<bool> {
@@ -121,37 +129,62 @@ impl FsBucket {
 }
 
 impl Bucket for FsBucket {
-    fn get(&self, key: String) -> FutureResult<Option<Vec<u8>>> {
+    fn get(&self, key: String) -> FutureResult<Option<Entry>> {
         tracing::trace!("getting key: {key} from bucket: {}", self.name);
         let bucket = self.clone();
         let lock = self.key_lock(&key);
 
         on_disk(move || {
             let _guard = lock.lock().expect("key lock poisoned");
-            bucket.read_live(&key)
+            Ok(bucket.read_live(&key)?.map(entry))
         })
     }
 
-    fn set(&self, key: String, value: Vec<u8>, ttl: Option<Duration>) -> FutureResult<()> {
+    fn set(
+        &self, key: String, value: Vec<u8>, lifetime: Lifetime, when: Option<Precondition>,
+    ) -> FutureResult<std::result::Result<Revision, Option<Entry>>> {
         tracing::trace!("setting key: {key} in bucket: {}", self.name);
         let bucket = self.clone();
         let lock = self.key_lock(&key);
 
         on_disk(move || {
             let _guard = lock.lock().expect("key lock poisoned");
-            bucket.set_deadline(&key, deadline(ttl))?;
-            write(&bucket.dir, &key, &value)
+
+            if let Some(when) = when {
+                let existing = bucket.read_live(&key)?;
+                if !when.holds(existing.as_deref().map(Revision::of).as_ref()) {
+                    return Ok(Err(existing.map(entry)));
+                }
+            }
+
+            let (Lifetime::Keep(ttl) | Lifetime::Replace(ttl)) = lifetime;
+            let kept = matches!(lifetime, Lifetime::Keep(_)) && bucket.live(&key)?;
+            if !kept {
+                bucket.set_deadline(&key, deadline(ttl))?;
+            }
+            write(&bucket.dir, &key, &value)?;
+            Ok(Ok(Revision::of(&value)))
         })
     }
 
-    fn delete(&self, key: String) -> FutureResult<()> {
+    fn delete(
+        &self, key: String, when: Option<Revision>,
+    ) -> FutureResult<std::result::Result<(), Option<Entry>>> {
         tracing::trace!("deleting key: {key} from bucket: {}", self.name);
         let bucket = self.clone();
         let lock = self.key_lock(&key);
 
         on_disk(move || {
             let _guard = lock.lock().expect("key lock poisoned");
-            bucket.remove(&key)
+
+            if let Some(when) = when {
+                let existing = bucket.read_live(&key)?;
+                if existing.as_deref().map(Revision::of) != Some(when) {
+                    return Ok(Err(existing.map(entry)));
+                }
+            }
+            bucket.remove(&key)?;
+            Ok(Ok(()))
         })
     }
 
@@ -162,8 +195,7 @@ impl Bucket for FsBucket {
 
         on_disk(move || {
             let _guard = lock.lock().expect("key lock poisoned");
-            let path = key_path(&bucket.dir, &key)?;
-            Ok(!bucket.expire(&key)? && path.is_file())
+            bucket.live(&key)
         })
     }
 
@@ -200,31 +232,16 @@ impl Bucket for FsBucket {
             if existing.is_none() {
                 bucket.set_deadline(&key, deadline(ttl))?;
             }
-            write(&bucket.dir, &key, &incremented.to_be_bytes())?;
+            write(&bucket.dir, &key, incremented.to_string().as_bytes())?;
             Ok(incremented)
         })
     }
+}
 
-    fn compare_and_swap(
-        &self, key: String, current: Option<Vec<u8>>, new: Vec<u8>, ttl: Option<Duration>,
-    ) -> FutureResult<std::result::Result<(), Option<Vec<u8>>>> {
-        tracing::trace!("swapping key: {key} in bucket: {}", self.name);
-        let bucket = self.clone();
-        let lock = self.key_lock(&key);
-
-        on_disk(move || {
-            let _guard = lock.lock().expect("key lock poisoned");
-
-            let observed = bucket.read_live(&key)?;
-            if observed != current {
-                return Ok(Err(observed));
-            }
-            if observed.is_none() {
-                bucket.set_deadline(&key, deadline(ttl))?;
-            }
-            write(&bucket.dir, &key, &new)?;
-            Ok(Ok(()))
-        })
+fn entry(value: Vec<u8>) -> Entry {
+    Entry {
+        revision: Revision::of(&value),
+        value,
     }
 }
 
@@ -255,22 +272,26 @@ fn now_millis() -> u64 {
     u64::try_from(since_epoch.as_millis()).unwrap_or(u64::MAX)
 }
 
-// Counters are 8-byte big-endian `i64`s.
 fn add(key: &str, current: Option<&[u8]>, delta: i64) -> Result<i64> {
     let base = match current {
         None => 0,
-        Some(value) => {
-            let bytes: [u8; 8] = value.try_into().map_err(|_len_mismatch| {
-                let len = value.len();
-                Error::Invalid(format!(
-                    "`{key}` holds {len} bytes, not an 8-byte big-endian counter"
-                ))
-            })?;
-            i64::from_be_bytes(bytes)
-        }
+        Some(value) => counter(value)
+            .ok_or_else(|| Error::Invalid(format!("`{key}` does not hold a decimal counter")))?,
     };
     let added = base.checked_add(delta);
     added.ok_or_else(|| Error::Invalid(format!("incrementing `{key}` by {delta} overflows")).into())
+}
+
+// A counter is decimal text: `0`, or an optional `-` and digits that do not
+// start with `0`.
+fn counter(value: &[u8]) -> Option<i64> {
+    let digits = value.strip_prefix(b"-").unwrap_or(value);
+    let canonical = value == b"0"
+        || (matches!(digits.first(), Some(b'1'..=b'9')) && digits.iter().all(u8::is_ascii_digit));
+    if !canonical {
+        return None;
+    }
+    std::str::from_utf8(value).ok()?.parse().ok()
 }
 
 fn read(path: &Path, key: &str) -> Result<Option<Vec<u8>>> {

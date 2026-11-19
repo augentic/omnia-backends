@@ -12,8 +12,7 @@
 
 use std::fs;
 
-use omnia_sdk::WasiProvider;
-use omnia_sdk::vcs::{CloneOptions, Error, Vcs as _};
+use omnia_sdk::vcs::{self, CloneOptions, Error};
 use test_programs::arguments;
 
 omnia_sdk::api::command::export!(scenario);
@@ -43,89 +42,75 @@ async fn scenario() {
         panic!("the origin, missing, and unanswered URLs are the arguments");
     };
 
-    WasiProvider.init(REPO).await.expect("init");
+    vcs::init(REPO).await.expect("init");
     fs::write("repo/a.txt", "a\n").expect("writing a");
-    let first = WasiProvider.commit(REPO, "a").await.expect("commit").expect("a");
+    let first = vcs::commit(REPO, "a").await.expect("commit").expect("a");
     fs::create_dir_all("elsewhere").expect("creating a plain directory");
     fs::create_dir_all("taken").expect("creating a directory with files");
     fs::write("taken/x", "x\n").expect("filling it");
 
     // store
-    assert_eq!(WasiProvider.resolve(REPO, "nope").await, Err(not_found("nope")));
-    assert_eq!(WasiProvider.resolve(ELSEWHERE, "main").await, Err(Error::NotARepository));
-    assert_eq!(WasiProvider.head(ELSEWHERE).await, Err(Error::NotARepository));
-    assert_eq!(WasiProvider.commit(ELSEWHERE, "x").await, Err(Error::NotARepository));
-    assert_eq!(WasiProvider.merge(REPO, "nope", "x", &[]).await, Err(not_found("nope")));
+    assert_eq!(vcs::resolve(REPO, "nope").await, Err(not_found("nope")));
+    assert_eq!(vcs::resolve(ELSEWHERE, "main").await, Err(Error::NotARepository));
+    assert_eq!(vcs::head(ELSEWHERE).await, Err(Error::NotARepository));
+    assert_eq!(vcs::commit(ELSEWHERE, "x").await, Err(Error::NotARepository));
+    assert_eq!(vcs::merge(REPO, "nope", "x", &[]).await, Err(not_found("nope")));
 
     // workspace
-    exists_at(WasiProvider.init(REPO).await, "/repo");
-    exists_at(WasiProvider.add(REPO, TAKEN, &first).await, "/taken");
-    assert_eq!(WasiProvider.add(REPO, "./fresh", "nope").await, Err(not_found("nope")));
-    assert_eq!(WasiProvider.remove(ELSEWHERE).await, Err(Error::NotARepository));
-    let main = WasiProvider.remove(REPO).await.expect_err("the main working tree stays");
+    exists_at(vcs::init(REPO).await, "/repo");
+    exists_at(vcs::add(REPO, TAKEN, &first).await, "/taken");
+    assert_eq!(vcs::add(REPO, "./fresh", "nope").await, Err(not_found("nope")));
+    assert_eq!(vcs::remove(ELSEWHERE).await, Err(Error::NotARepository));
+    let main = vcs::remove(REPO).await.expect_err("the main working tree stays");
     assert!(
         matches!(main, Error::Other(ref message) if message.contains("main working tree")),
         "{main:?}"
     );
-    assert_eq!(WasiProvider.pending(ELSEWHERE).await, Err(Error::NotARepository));
+    assert_eq!(vcs::pending(ELSEWHERE).await, Err(Error::NotARepository));
 
     // transport
-    exists_at(WasiProvider.clone_repo(url, TAKEN, WHOLE).await, "/taken");
-    assert_eq!(
-        WasiProvider.clone_repo(missing, "./clone-missing", WHOLE).await,
-        Err(not_found(missing))
-    );
-    let access = WasiProvider.clone_repo(unanswered, "./clone-unanswered", WHOLE).await;
+    exists_at(vcs::clone(url, TAKEN, WHOLE).await, "/taken");
+    assert_eq!(vcs::clone(missing, "./clone-missing", WHOLE).await, Err(not_found(missing)));
+    let access = vcs::clone(unanswered, "./clone-unanswered", WHOLE).await;
     assert!(matches!(access, Err(Error::Access(_))), "a remote nothing answers: {access:?}");
-    assert_eq!(WasiProvider.fetch(REPO, "nope").await, Err(not_found("nope")));
-    assert_eq!(WasiProvider.label(REPO, "lbl", "nope").await, Err(not_found("nope")));
-    assert_eq!(WasiProvider.push(REPO, "nope", "main").await, Err(not_found("nope")));
-    assert_eq!(WasiProvider.fetched(REPO, "nope", "main").await, Err(not_found("nope")));
-    assert_eq!(WasiProvider.fetched(ELSEWHERE, "origin", "main").await, Err(Error::NotARepository));
-    WasiProvider.clone_repo(url, "./clone", WHOLE).await.expect("clone");
-    assert_eq!(WasiProvider.push("./clone", "origin", "nolabel").await, Err(not_found("nolabel")));
-    assert_eq!(
-        WasiProvider.fetched("./clone", "origin", "nolabel").await,
-        Err(not_found("nolabel"))
-    );
+    assert_eq!(vcs::fetch(REPO, "nope").await, Err(not_found("nope")));
+    assert_eq!(vcs::label(REPO, "lbl", "nope").await, Err(not_found("nope")));
+    assert_eq!(vcs::push(REPO, "nope", "main").await, Err(not_found("nope")));
+    assert_eq!(vcs::fetched(REPO, "nope", "main").await, Err(not_found("nope")));
+    assert_eq!(vcs::fetched(ELSEWHERE, "origin", "main").await, Err(Error::NotARepository));
+    vcs::clone(url, "./clone", WHOLE).await.expect("clone");
+    assert_eq!(vcs::push("./clone", "origin", "nolabel").await, Err(not_found("nolabel")));
+    assert_eq!(vcs::fetched("./clone", "origin", "nolabel").await, Err(not_found("nolabel")));
 
     // a guest string git would read as an option, or the empty one it reads
     // as a default, is nothing the repository knows — refused before any git
-    assert_eq!(WasiProvider.resolve(REPO, "").await, Err(not_found("")));
-    assert_eq!(WasiProvider.resolve(REPO, "-x").await, Err(not_found("-x")));
-    assert_eq!(WasiProvider.merge(REPO, "", "m", &[]).await, Err(not_found("")));
-    assert_eq!(WasiProvider.add(REPO, "./dashed", "-x").await, Err(not_found("-x")));
-    assert_eq!(WasiProvider.label(REPO, "-b", &first).await, Err(not_found("-b")));
+    assert_eq!(vcs::resolve(REPO, "").await, Err(not_found("")));
+    assert_eq!(vcs::resolve(REPO, "-x").await, Err(not_found("-x")));
+    assert_eq!(vcs::merge(REPO, "", "m", &[]).await, Err(not_found("")));
+    assert_eq!(vcs::add(REPO, "./dashed", "-x").await, Err(not_found("-x")));
+    assert_eq!(vcs::label(REPO, "-b", &first).await, Err(not_found("-b")));
+    assert_eq!(vcs::fetch(REPO, "--upload-pack=sh").await, Err(not_found("--upload-pack=sh")));
+    assert_eq!(vcs::fetched(REPO, "origin", "-x").await, Err(not_found("-x")));
     assert_eq!(
-        WasiProvider.fetch(REPO, "--upload-pack=sh").await,
-        Err(not_found("--upload-pack=sh"))
-    );
-    assert_eq!(WasiProvider.fetched(REPO, "origin", "-x").await, Err(not_found("-x")));
-    assert_eq!(
-        WasiProvider.push(REPO, "--receive-pack=sh", "main").await,
+        vcs::push(REPO, "--receive-pack=sh", "main").await,
         Err(not_found("--receive-pack=sh"))
     );
-    assert_eq!(WasiProvider.clone_repo("-x", "./dash-clone", WHOLE).await, Err(not_found("-x")));
+    assert_eq!(vcs::clone("-x", "./dash-clone", WHOLE).await, Err(not_found("-x")));
 
     // two clones label one name at commits of their own: the second's push
     // is refused while the remote's tip is unknown to it, and again once
     // fetched, since the label is behind the remote's either way
-    WasiProvider.clone_repo(url, "./clone-a", WHOLE).await.expect("clone a");
-    WasiProvider.clone_repo(url, "./clone-b", WHOLE).await.expect("clone b");
+    vcs::clone(url, "./clone-a", WHOLE).await.expect("clone a");
+    vcs::clone(url, "./clone-b", WHOLE).await.expect("clone b");
     fs::write("clone-a/a.txt", "a\n").expect("writing a's file");
-    let ours = WasiProvider.commit("./clone-a", "a's").await.expect("commit").expect("a's commit");
-    WasiProvider.label("./clone-a", "emery/x", &ours).await.expect("label a");
-    WasiProvider.push("./clone-a", "origin", "emery/x").await.expect("push a");
+    let ours = vcs::commit("./clone-a", "a's").await.expect("commit").expect("a's commit");
+    vcs::label("./clone-a", "emery/x", &ours).await.expect("label a");
+    vcs::push("./clone-a", "origin", "emery/x").await.expect("push a");
     fs::write("clone-b/b.txt", "b\n").expect("writing b's file");
-    let theirs =
-        WasiProvider.commit("./clone-b", "b's").await.expect("commit").expect("b's commit");
-    WasiProvider.label("./clone-b", "emery/x", &theirs).await.expect("label b");
+    let theirs = vcs::commit("./clone-b", "b's").await.expect("commit").expect("b's commit");
+    vcs::label("./clone-b", "emery/x", &theirs).await.expect("label b");
     let diverged = Err(Error::Diverged("emery/x".to_owned()));
-    assert_eq!(WasiProvider.push("./clone-b", "origin", "emery/x").await, diverged, "fetch first");
-    WasiProvider.fetch("./clone-b", "origin").await.expect("fetch");
-    assert_eq!(
-        WasiProvider.push("./clone-b", "origin", "emery/x").await,
-        diverged,
-        "non-fast-forward"
-    );
+    assert_eq!(vcs::push("./clone-b", "origin", "emery/x").await, diverged, "fetch first");
+    vcs::fetch("./clone-b", "origin").await.expect("fetch");
+    assert_eq!(vcs::push("./clone-b", "origin", "emery/x").await, diverged, "non-fast-forward");
 }

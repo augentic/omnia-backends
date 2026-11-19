@@ -13,8 +13,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use omnia_sdk::WasiProvider;
-use omnia_sdk::model::{CHECK_TOOL, Error, Format, Function, Model as _, Request, Tool, ToolCall};
+use omnia_sdk::model::{CHECK_TOOL, Error, Format, Function, Request, Tool, ToolCall};
 use test_programs::{arguments, lend, lookup, user};
 
 omnia_sdk::api::command::export!(scenario);
@@ -40,32 +39,28 @@ async fn scenario() {
     let absent: Vec<&str> = flags.iter().filter_map(|flag| flag.strip_prefix("without:")).collect();
     let format = if nudged { Format::Json } else { Format::Text };
 
+    let request = Request::builder()
+        .messages(vec![user("hi")])
+        .maybe_workspace(lend())
+        .tools(tools)
+        .format(format)
+        .check(check || nudged)
+        .build();
+
     let mut candidates = 0_usize;
-    let error = WasiProvider
-        .complete_with(
-            Request::builder()
-                .messages(vec![user("hi")])
-                .maybe_workspace(lend())
-                .tools(tools)
-                .format(format)
-                .check(check || nudged)
-                .build(),
-            |call: ToolCall| {
-                if call.name == CHECK_TOOL {
-                    candidates += 1;
-                }
-                async move {
-                    Err::<String, String>(if call.name == CHECK_TOOL {
-                        format!(
-                            "the scenario rejects every candidate; this was `{}`",
-                            call.arguments
-                        )
-                    } else {
-                        format!("tool `{}` has no handler in this scenario", call.name)
-                    })
-                }
-            },
-        )
+    let error = request
+        .complete_with(|call: ToolCall| {
+            if call.name == CHECK_TOOL {
+                candidates += 1;
+            }
+            async move {
+                Err::<String, String>(if call.name == CHECK_TOOL {
+                    format!("the scenario rejects every candidate; this was `{}`", call.arguments)
+                } else {
+                    format!("tool `{}` has no handler in this scenario", call.name)
+                })
+            }
+        })
         .await
         .expect_err("the backend fails the completion");
     let ((Error::Backend(detail), "backend")

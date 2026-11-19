@@ -70,8 +70,8 @@ let client = Client::connect_with(options).await?;
 ## Live tests
 
 [`tests/live.rs`](tests/live.rs) exercises the `omnia:keyvalue` boundary against a
-real Redis. `keyvalue_state_store` runs the shared `StateStore` rows from a real
-guest, and the other tests cover the round trip and the atomics. Every test is
+real Redis. `keyvalue_state_store` runs the shared `omnia_test::contract::state` rows from
+a real guest, and the other tests cover the round trip and the atomics. Every test is
 `#[ignore]`d so it never runs in CI.
 
 The rows first empty the `default` and `second` buckets, so run them against a

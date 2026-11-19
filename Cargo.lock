@@ -1750,6 +1750,7 @@ dependencies = [
  "omnia-azure-blob",
  "omnia-azure-table",
  "omnia-cursor",
+ "omnia-sdk",
  "omnia-wasi-blobstore",
  "omnia-wasi-docstore",
  "omnia-wasi-model",

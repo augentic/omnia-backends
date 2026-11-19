@@ -4,8 +4,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use futures::future::join_all;
-use omnia_sdk::WasiProvider;
-use omnia_sdk::model::{Model as _, Request};
+use omnia_sdk::model::Request;
 use test_programs::{fanout_width, lend, seam, user};
 
 omnia_sdk::api::command::export!(scenario);
@@ -13,13 +12,11 @@ omnia_sdk::api::command::export!(scenario);
 async fn scenario() {
     let width = fanout_width();
     let replies = join_all((0..width).map(|index| async move {
-        WasiProvider
-            .complete(
-                Request::builder()
-                    .messages(vec![user(&seam(index))])
-                    .maybe_workspace(lend())
-                    .build(),
-            )
+        Request::builder()
+            .messages(vec![user(&seam(index))])
+            .maybe_workspace(lend())
+            .build()
+            .complete()
             .await
             .unwrap_or_else(|error| panic!("completion {index} failed: {error}"))
     }))

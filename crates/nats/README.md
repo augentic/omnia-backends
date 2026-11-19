@@ -47,8 +47,8 @@ MSRV: Rust 1.100
 - A container is a JetStream object store, which only `create-container` makes.
   Creating one that exists opens it, whatever configuration made it.
 - Opening a store that does not exist fails with
-  `omnia_wasi_blobstore::Error::missing_container`, which a guest's `BlobStore`
-  reports with the code `not-found`.
+  `omnia_wasi_blobstore::Error::missing_container`, which reaches a guest as
+  the code `not-found`.
 - Deleting an absent object or store succeeds.
 
 ## Configuration
@@ -97,8 +97,8 @@ let client = Client::connect_with(options).await?;
 
 [`tests/live.rs`](tests/live.rs) exercises the `wasi-messaging`, `omnia:keyvalue`,
 and `wasi-blobstore` boundaries against a real server. `keyvalue_state_store` and
-`blobstore_blob_store` run the shared `StateStore` and `BlobStore` rows from a real
-guest, the latter covering the container rules above. The other key-value tests
+`blobstore_blob_store` run the shared `omnia_test::contract` `state` and `blob` rows from
+a real guest, the latter covering the container rules above. The other key-value tests
 cover the atomics under contention and a bucket gaining per-message TTL when
 opened. Every test is `#[ignore]`d so it never runs in CI.
 

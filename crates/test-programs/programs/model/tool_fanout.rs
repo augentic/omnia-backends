@@ -26,7 +26,8 @@ async fn scenario() {
                 async move { Ok::<_, String>(seam(index)) }
             })
             .await
-            .unwrap_or_else(|error| panic!("completion {index} failed: {error}"));
+            .unwrap_or_else(|error| panic!("completion {index} failed: {error}"))
+            .unwrap_or_else(|exhausted| panic!("completion {index} ran out: {exhausted}"));
         (calls, reply)
     }))
     .await;

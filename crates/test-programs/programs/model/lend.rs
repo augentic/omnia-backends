@@ -17,6 +17,7 @@ async fn scenario() {
         .build()
         .complete()
         .await
+        .expect("the completion runs")
         .expect("echo answers over the lend");
     assert_eq!(reply.answer, "hi");
 }

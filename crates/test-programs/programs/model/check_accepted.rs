@@ -13,6 +13,7 @@ async fn scenario() {
         .system("judge")
         .ask("judge this", None, Verdict::passing)
         .await
+        .expect("the completion runs")
         .expect("the candidate passes the check");
     assert_eq!(
         verdict,

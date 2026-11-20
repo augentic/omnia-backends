@@ -15,6 +15,7 @@ async fn scenario() {
         .build()
         .complete()
         .await
+        .expect("the completion runs")
         .expect("echo answers");
     assert_eq!(reply.answer, "second");
     assert!(reply.usage.is_none());

@@ -1,6 +1,8 @@
 //! Shared helpers for the guest scenario programs in `programs/<capability>/`.
 
-use omnia_sdk::model::{Function, Message, Question, Tool};
+use std::fmt;
+
+use omnia_sdk::model::{Message, Question, Tool};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -41,9 +43,45 @@ pub fn user(content: &str) -> Message {
 /// A declared `lookup` function tool.
 #[must_use]
 pub fn lookup() -> Tool {
-    Tool::Function(
-        Function::builder().name("lookup").description("test lookup").parameters("{}").build(),
-    )
+    tool("lookup", "test lookup")
+}
+
+/// A declared function tool taking any arguments.
+#[must_use]
+pub fn tool(name: &str, description: &str) -> Tool {
+    Tool {
+        name: name.to_owned(),
+        description: Some(description.to_owned()),
+        input_schema: "{}".to_owned(),
+    }
+}
+
+/// Assert `error` is the failure `code`, its description holding `needle`.
+///
+/// # Panics
+///
+/// Panics when the code differs or the description lacks the needle.
+#[track_caller]
+pub fn fails_with(error: impl Into<omnia_sdk::Error>, code: &str, needle: &str) {
+    let error = error.into();
+    assert!(
+        error.code() == code && error.description().contains(needle),
+        "expected `{code}` holding {needle:?}, got {error:?}"
+    );
+}
+
+/// Assert `outcome` failed as `not-found`, naming exactly `name`.
+///
+/// # Panics
+///
+/// Panics when `outcome` succeeded, or failed another way.
+#[track_caller]
+pub fn not_found<T: fmt::Debug>(outcome: Result<T, impl Into<omnia_sdk::Error>>, name: &str) {
+    let outcome: Result<T, omnia_sdk::Error> = outcome.map_err(Into::into);
+    match outcome {
+        Err(error) if error.code() == "not-found" && error.description() == name => {}
+        outcome => panic!("expected `not-found` naming {name:?}, got {outcome:?}"),
+    }
 }
 
 // The argument naming the workspace a scenario lends with its request.

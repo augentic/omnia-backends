@@ -19,7 +19,8 @@
 
 use std::fs;
 
-use omnia_sdk::vcs::{self, Error};
+use omnia_sdk::vcs::{self, CommitId, Workspace};
+use test_programs::fails_with;
 
 omnia_sdk::command::export!(scenario);
 
@@ -43,30 +44,29 @@ async fn scenario() {
     an_enclosing_repository_is_not_reached().await;
 }
 
+async fn open(path: &str) -> Workspace {
+    vcs::open(path).await.unwrap_or_else(|error| panic!("open {path}: {error}"))
+}
+
+async fn head(workspace: &Workspace) -> CommitId {
+    workspace.head().await.expect("head").expect("a commit")
+}
+
 // The place holds no `.git` of its own and sits inside a repository that
 // does; git's search for one stops at the place, so a guest lent the
-// directory alone neither reads nor seals the repository around it.
+// directory alone opens no workspace there, and neither reads nor seals the
+// repository around it.
 async fn an_enclosing_repository_is_not_reached() {
-    for result in [
-        vcs::head(INNER).await.map(drop),
-        vcs::pending(INNER).await.map(drop),
-        vcs::commit(INNER, "steal").await.map(drop),
-    ] {
-        assert!(
-            matches!(result, Err(Error::NotARepository)),
-            "{INNER} is no repository: {result:?}"
-        );
-    }
+    let error = vcs::open(INNER).await.expect_err("no workspace of its own");
+    fails_with(error, "not-found", "not a repository");
 }
 
 // The repository names a clean filter under a subsection that is not UTF-8,
 // which a pin spelled as text cannot name; the operation is refused rather
 // than run it over the change.
 async fn an_unnameable_key_is_refused() {
-    match vcs::commit(BYTES, "seal").await {
-        Err(Error::Other(message)) => assert!(message.contains("UTF-8"), "{message}"),
-        other => panic!("{BYTES} is refused, not {other:?}"),
-    }
+    let refused = open(BYTES).await.commit("seal".to_owned()).await;
+    fails_with(refused.expect_err("the commit is refused"), "other", "UTF-8");
 }
 
 // The repository's `remote.evil.uploadPack` and `receivePack` name what the
@@ -74,8 +74,11 @@ async fn an_unnameable_key_is_refused() {
 // on the command line instead, and the operation fails on the host's ssh,
 // which answers nothing.
 async fn a_repository_names_no_pack_program() {
-    for result in [vcs::fetch(PACKER, "evil").await, vcs::push(PACKER, "evil", "main").await] {
-        assert!(matches!(result, Err(Error::Access(_))), "the host's ssh answered: {result:?}");
+    let packer = open(PACKER).await;
+    let fetched = packer.fetch("evil").await.expect_err("the fetch fails");
+    let pushed = packer.push("evil", "main").await.expect_err("the push fails");
+    for error in [fetched, pushed] {
+        assert_eq!(error.code(), "unavailable", "the host's ssh answered: {error:?}");
     }
 }
 
@@ -83,8 +86,8 @@ async fn a_repository_names_no_pack_program() {
 // operator's ssh would carry there is the repository's own; a checkout that
 // needs a blob it lacks fails rather than fetch it, so the ssh never runs.
 async fn a_lazy_fetch_reaches_no_command() {
-    let head = vcs::head(LAZY).await.expect("head");
-    let added = vcs::add(LAZY, "./lazy-copy", &head).await;
+    let lazy = open(LAZY).await;
+    let added = lazy.add("./lazy-copy", &head(&lazy).await).await;
     assert!(added.is_err(), "a blob only the promisor could supply: {added:?}");
 }
 
@@ -94,53 +97,59 @@ async fn a_lazy_fetch_reaches_no_command() {
 // for the real remote through a proxy of its own. A repository that sets how
 // a transport runs is refused on every transport instead, the key named.
 async fn a_shaping_repository_is_refused() {
-    for (repo, key) in [(REWRITER, "insteadof"), (PROXIED, "http.")] {
-        for result in [vcs::fetch(repo, "evil").await, vcs::push(repo, "evil", "main").await] {
-            match result {
-                Err(Error::Other(message)) => {
-                    assert!(message.contains(key), "{key} is named: {message}");
-                }
-                other => panic!("{repo} is refused, not {other:?}"),
-            }
+    for (path, key) in [(REWRITER, "insteadof"), (PROXIED, "http.")] {
+        let repo = open(path).await;
+        let fetched = repo.fetch("evil").await.expect_err("the fetch is refused");
+        let pushed = repo.push("evil", "main").await.expect_err("the push is refused");
+        for error in [fetched, pushed] {
+            fails_with(error, "other", key);
         }
     }
 }
 
 async fn repo_config_runs_nothing() {
-    let head = vcs::head(REPO).await.expect("head");
+    let repo = open(REPO).await;
+    let head = head(&repo).await;
 
     // a working copy checked out of the hostile repository runs no smudge
-    vcs::add(REPO, WORK, &head).await.expect("add");
+    repo.add(WORK, &head).await.expect("add").expect("a new workspace");
 
     // a commit runs no hook, fsmonitor, or signing program, reads the place
     // and not the `core.worktree` the repository points elsewhere, and seals
     fs::write("repo/b.txt", "b\n").expect("writing b");
-    let pending = vcs::pending(REPO).await.expect("pending");
+    let pending = repo.status_all().await.expect("status");
     assert_eq!(pending.len(), 1, "one change, in the place: {pending:?}");
     assert_eq!(pending[0].path, "b.txt");
-    let sealed = vcs::commit(REPO, "seal").await.expect("commit").expect("a commit");
+    let sealed = repo.commit("seal".to_owned()).await.expect("commit").expect("a commit");
     assert_ne!(sealed, head, "the commit landed");
-    assert_eq!(vcs::pending(REPO).await.expect("pending"), []);
+    assert!(repo.status_all().await.expect("status").is_empty());
 
     // a push runs neither the client's receive-pack nor the origin's hooks or
     // alternate-refs command, signs no certificate the origin asks for, and a
     // fetch runs no alternate-refs command of the repository's own
-    vcs::label(REPO, "emery/hardened", &sealed).await.expect("label");
-    vcs::push(REPO, "origin", "emery/hardened").await.expect("push");
-    vcs::fetch(REPO, "origin").await.expect("fetch");
+    let moved = repo.set_bookmark("emery/hardened".to_owned(), sealed, None).await;
+    moved.expect("bookmark").expect("no precondition to fail");
+    repo.push("origin", "emery/hardened").await.expect("push").expect("a forward push");
+    repo.fetch("origin").await.expect("fetch");
 
     // a push into a working copy lands a branch it has not checked out, and
     // refuses the one it has rather than write the copy's tree through its
     // own filters and monitor, as its `receive.denyCurrentBranch` asks
-    vcs::push(REPO, "checked", "emery/hardened").await.expect("push to a working copy");
-    let current = vcs::push(REPO, "checked", "main").await;
-    assert!(matches!(current, Err(Error::Other(_))), "the checked-out branch stays: {current:?}");
+    let landed = repo.push("checked", "emery/hardened").await.expect("push to a working copy");
+    landed.expect("a forward push");
+    let current = repo.push("checked", "main").await;
+    assert!(
+        matches!(&current, Err(error) if error.code() == "other"),
+        "the checked-out branch stays: {current:?}"
+    );
 }
 
 async fn a_failed_merge_leaves_no_merge() {
-    let before = vcs::head(NOIDENT).await.expect("head");
-    let merged = vcs::merge(NOIDENT, "feature", "merge", &[]).await;
+    let noident = open(NOIDENT).await;
+    let before = head(&noident).await;
+    let merged = noident.merge("feature".to_owned(), "merge".to_owned(), vec![]).await;
     assert!(merged.is_err(), "a merge with no identity cannot be sealed: {merged:?}");
-    assert_eq!(vcs::head(NOIDENT).await.expect("head"), before, "the head did not move");
-    assert_eq!(vcs::pending(NOIDENT).await.expect("pending"), [], "nothing is left staged");
+    assert_eq!(head(&noident).await, before, "the head did not move");
+    let pending = noident.status_all().await.expect("status");
+    assert!(pending.is_empty(), "nothing is left staged: {pending:?}");
 }

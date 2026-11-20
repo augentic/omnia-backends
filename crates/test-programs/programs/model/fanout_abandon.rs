@@ -27,7 +27,9 @@ async fn scenario() {
         .collect();
 
     let ((index, reply), _, losers) = select_all(pending).await;
-    let reply = reply.unwrap_or_else(|error| panic!("the winner {index} failed: {error}"));
+    let reply = reply
+        .unwrap_or_else(|error| panic!("the winner {index} failed: {error}"))
+        .unwrap_or_else(|exhausted| panic!("the winner {index} ran out: {exhausted}"));
     assert!(reply.answer.contains(&seam(index)), "the winner got {:?}", reply.answer);
     drop(losers);
 }

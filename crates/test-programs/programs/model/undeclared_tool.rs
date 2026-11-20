@@ -17,6 +17,7 @@ async fn scenario() {
         .build()
         .complete()
         .await
+        .expect("the completion runs")
         .expect("an undeclared tool is answered, not failed");
     assert_eq!(
         reply.answer,

@@ -19,6 +19,7 @@ async fn scenario() {
             .complete()
             .await
             .unwrap_or_else(|error| panic!("completion {index} failed: {error}"))
+            .unwrap_or_else(|exhausted| panic!("completion {index} ran out: {exhausted}"))
     }))
     .await;
 

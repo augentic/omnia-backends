@@ -7,14 +7,16 @@
 //! - `tool:<name>` declares a function tool with that name.
 //! - `check` rejects every candidate and requires one before the failure.
 //! - `nudged` requires failure after a JSON nudge but before a candidate.
-//! - `budget` expects `budget-exhausted` instead of `backend`.
-//! - `invalid` expects `invalid-request` instead of `backend`.
+//! - `budget` expects the completion exhausted instead of failed as `other`.
+//! - `invalid` expects `invalid` instead of `other`.
 //! - `without:<text>` requires the detail to omit `text`.
 
 #![cfg(target_arch = "wasm32")]
 
-use omnia_sdk::model::{CHECK_TOOL, Error, Format, Function, Request, Tool, ToolCall};
-use test_programs::{arguments, lend, lookup, user};
+use std::future::ready;
+
+use omnia_sdk::model::{Candidate, Format, Request, ToolCall};
+use test_programs::{arguments, lend, lookup, tool, user};
 
 omnia_sdk::command::export!(scenario);
 
@@ -22,20 +24,16 @@ async fn scenario() {
     let arguments = arguments();
     let (needle, flags) = arguments.split_first().expect("the needle is the first argument");
     let mut tools = if flags.iter().any(|flag| flag == "tools") { vec![lookup()] } else { vec![] };
-    tools.extend(flags.iter().filter_map(|flag| flag.strip_prefix("tool:")).map(|name| {
-        Tool::Function(
-            Function::builder().name(name).description("test tool").parameters("{}").build(),
-        )
-    }));
+    tools.extend(
+        flags
+            .iter()
+            .filter_map(|flag| flag.strip_prefix("tool:"))
+            .map(|name| tool(name, "test tool")),
+    );
     let check = flags.iter().any(|flag| flag == "check");
     let nudged = flags.iter().any(|flag| flag == "nudged");
-    let expected = if flags.iter().any(|flag| flag == "budget") {
-        "budget-exhausted"
-    } else if flags.iter().any(|flag| flag == "invalid") {
-        "invalid-request"
-    } else {
-        "backend"
-    };
+    let budget = flags.iter().any(|flag| flag == "budget");
+    let expected = if flags.iter().any(|flag| flag == "invalid") { "invalid" } else { "other" };
     let absent: Vec<&str> = flags.iter().filter_map(|flag| flag.strip_prefix("without:")).collect();
     let format = if nudged { Format::Json } else { Format::Text };
 
@@ -44,32 +42,34 @@ async fn scenario() {
         .maybe_workspace(lend())
         .tools(tools)
         .format(format)
-        .check(check || nudged)
         .build();
+    let unhandled = |call: ToolCall| {
+        ready(Err::<String, String>(format!(
+            "tool `{}` has no handler in this scenario",
+            call.name
+        )))
+    };
 
     let mut candidates = 0_usize;
-    let error = request
-        .complete_with(|call: ToolCall| {
-            if call.name == CHECK_TOOL {
-                candidates += 1;
-            }
-            async move {
-                Err::<String, String>(if call.name == CHECK_TOOL {
-                    format!("the scenario rejects every candidate; this was `{}`", call.arguments)
-                } else {
-                    format!("tool `{}` has no handler in this scenario", call.name)
-                })
-            }
-        })
-        .await
-        .expect_err("the backend fails the completion");
-    let ((Error::Backend(detail), "backend")
-    | (Error::BudgetExhausted(detail), "budget-exhausted")
-    | (Error::InvalidRequest(detail), "invalid-request")) = (&error, expected)
-    else {
-        panic!("expected {expected}, got {error:?}");
+    let outcome = if check || nudged {
+        let reject = |candidate: Candidate| {
+            candidates += 1;
+            ready(Err(format!(
+                "the scenario rejects every candidate; this was `{}`",
+                candidate.answer
+            )))
+        };
+        request.complete_checked(unhandled, reject).await
+    } else {
+        request.complete_with(unhandled).await
     };
-    assert!(detail.contains(needle), "expected {needle:?} in the detail: {detail}");
+    let detail = match (outcome, budget) {
+        (Ok(Err(exhausted)), true) => exhausted.detail,
+        (Err(error), false) if error.code() == expected => error.description().to_owned(),
+        (outcome, true) => panic!("expected the completion exhausted, got {outcome:?}"),
+        (outcome, false) => panic!("expected `{expected}`, got {outcome:?}"),
+    };
+    assert!(detail.contains(needle.as_str()), "expected {needle:?} in the detail: {detail}");
     for text in absent {
         assert!(!detail.contains(text), "{text:?} must not reach the detail: {detail}");
     }

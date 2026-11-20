@@ -1,13 +1,13 @@
 //! Named identities through the `omnia_sdk` identity helpers, one scope per
 //! request: two declared names issue distinct tokens, a token's lifetime
-//! arrives as a `Duration`, and an undeclared name fails with the code
+//! reads back as a `Duration`, and an undeclared name fails with the code
 //! `not-found`.
 
 #![cfg(target_arch = "wasm32")]
 
 use std::time::Duration;
 
-use omnia_sdk::identity::{AccessToken, DEFAULT, credentials};
+use omnia_sdk::identity::{self, AccessToken, DEFAULT};
 use omnia_sdk::{Error, Result};
 
 omnia_sdk::command::export!(scenario);
@@ -20,7 +20,7 @@ async fn scenario() {
 
     assert_ne!(default.token, reports.token, "each identity has its own token");
     let hour = Duration::from_mins(59)..=Duration::from_hours(1);
-    assert!(hour.contains(&reports.expires_in), "an hour-long token: {reports:?}");
+    assert!(hour.contains(&reports.expires_in()), "an hour-long token: {reports:?}");
 
     let error = token("undeclared").await.expect_err("undeclared");
     assert!(
@@ -30,5 +30,5 @@ async fn scenario() {
 }
 
 async fn token(name: &str) -> Result<AccessToken> {
-    credentials::open(name.to_owned()).await?.token(&[SCOPE]).await
+    identity::open(name).await?.token(&[SCOPE]).await
 }

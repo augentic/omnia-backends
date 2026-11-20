@@ -3,18 +3,21 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use omnia_sdk::WasiProvider;
-use omnia_sdk::model::{Model as _, Request};
+use omnia_sdk::model::Request;
 use test_programs::{lend, user};
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     // No tools declared, so no handler: the backend answers the `lookup`
     // call itself and the model's next reply is the answer.
-    let reply = WasiProvider
-        .complete(Request::builder().messages(vec![user("hi")]).maybe_workspace(lend()).build())
+    let reply = Request::builder()
+        .messages(vec![user("hi")])
+        .maybe_workspace(lend())
+        .build()
+        .complete()
         .await
+        .expect("the completion runs")
         .expect("an undeclared tool is answered, not failed");
     assert_eq!(
         reply.answer,

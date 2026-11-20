@@ -8,8 +8,8 @@ Azure Blob Storage blobstore backend for the Omnia WASI runtime, implementing th
 Maps blobstore containers to Azure Blob containers and blobs to block blobs using the official `azure_storage_blob` SDK.
 
 - A call on an object in a container that does not exist fails with
-  `omnia_wasi_blobstore::Error::missing_container`, which a guest's `BlobStore`
-  reports with the code `not-found`. The backend reads it from the
+  `omnia_wasi_blobstore::Error::missing_container`, which reaches a guest as
+  the code `not-found`. The backend reads it from the
   `ContainerNotFound` code the service answers, so opening a container costs
   no request.
 - An absent blob reads as absent, and deleting one succeeds.

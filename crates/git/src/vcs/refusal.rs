@@ -7,6 +7,7 @@ pub enum Class {
     NotARepository,
     Exists,
     NotFound,
+    Denied,
     Access,
     Diverged,
     Other,
@@ -40,19 +41,26 @@ const NOT_FOUND: [&str; 13] = [
     "not found",
 ];
 
-const ACCESS: [&str; 12] = [
+// A remote that refuses the caller, or wants credentials it was not given.
+// Git follows a refusal with "Could not read from remote repository" or
+// "unable to access", so these are tried before the access patterns.
+const DENIED: [&str; 7] = [
     "Authentication failed",
     "Permission denied",
     "could not read Username",
     "terminal prompts disabled",
+    "Host key verification failed",
+    "The requested URL returned error: 401",
+    "The requested URL returned error: 403",
+];
+
+const ACCESS: [&str; 6] = [
     "Could not resolve host",
     "Could not read from remote repository",
     "Connection refused",
     "Connection timed out",
     "Network is unreachable",
-    "Host key verification failed",
     "unable to access",
-    "The requested URL returned error: 403",
 ];
 
 pub fn classify(stderr: &str) -> Class {
@@ -65,9 +73,24 @@ pub fn classify(stderr: &str) -> Class {
         Class::Diverged
     } else if matches(&NOT_FOUND) {
         Class::NotFound
+    } else if matches(&DENIED) {
+        Class::Denied
     } else if matches(&ACCESS) {
         Class::Access
     } else {
         Class::Other
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Class, classify};
+
+    // git often appends "unable to access" after an HTTP status line; denied
+    // must win over access
+    #[test]
+    fn http_401_before_access() {
+        let stderr = "fatal: The requested URL returned error: 401\nfatal: unable to access";
+        assert_eq!(classify(stderr), Class::Denied);
     }
 }

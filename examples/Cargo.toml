@@ -25,8 +25,6 @@ path = "azure_table/main.rs"
 # Every example here is clippy-checked for wasm32-wasip3 (`WASM32_PACKAGES` in
 # mise.toml); the host-only ones gate their entry point with `cfg_select!`.
 [dependencies]
-omnia-wasi-model.workspace = true
-omnia-wasi-otel.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -38,6 +36,8 @@ omnia-azure-table.workspace = true
 omnia-cursor.workspace = true
 omnia-wasi-blobstore.workspace = true
 omnia-wasi-docstore.workspace = true
+omnia-wasi-model.workspace = true
+omnia-wasi-otel.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing.workspace = true
@@ -45,6 +45,7 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures.workspace = true
+omnia-sdk.workspace = true
 wasip3 = { version = "0.10.0", features = ["http-compat"] }
 wit-bindgen = { version = "0.63.0", features = ["async-spawn"] }
 

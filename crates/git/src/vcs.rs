@@ -588,6 +588,7 @@ fn refuse(output: &Output, at: &Place, missing: &str, label: Option<&str>) -> Er
         (Class::NotARepository, _) => Error::NotARepository,
         (Class::Exists, _) => Error::Exists(display_path(at)),
         (Class::NotFound, _) => Error::NotFound(missing.to_owned()),
+        (Class::Denied, _) => Error::Denied(detail),
         (Class::Access, _) => Error::Access(detail),
         (Class::Diverged, Some(label)) => Error::Diverged(label.to_owned()),
         (Class::Diverged | Class::Other, None) | (Class::Other, Some(_)) => Error::Other(detail),

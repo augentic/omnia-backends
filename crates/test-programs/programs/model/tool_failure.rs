@@ -2,11 +2,10 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use omnia_sdk::WasiProvider;
-use omnia_sdk::model::{Model as _, Request};
+use omnia_sdk::model::Request;
 use test_programs::{lend, lookup, user};
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     let request = Request::builder()
@@ -15,9 +14,10 @@ async fn scenario() {
         .tools(vec![lookup()])
         .build();
 
-    let reply = WasiProvider
-        .complete_with(request, |_call| async { Err::<String, _>("no data".to_owned()) })
+    let reply = request
+        .complete_with(|_call| async { Err::<String, _>("no data".to_owned()) })
         .await
+        .expect("the completion runs")
         .expect("the model turns the failure into an answer");
     assert_eq!(reply.answer, "tool failed: no data");
 }

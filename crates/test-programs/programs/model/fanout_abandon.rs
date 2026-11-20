@@ -5,24 +5,21 @@
 #![cfg(target_arch = "wasm32")]
 
 use futures::future::select_all;
-use omnia_sdk::WasiProvider;
-use omnia_sdk::model::{Model as _, Request};
+use omnia_sdk::model::Request;
 use test_programs::{fanout_width, lend, seam, user};
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     let width = fanout_width();
     let pending: Vec<_> = (0..width)
         .map(|index| {
             Box::pin(async move {
-                let reply = WasiProvider
-                    .complete(
-                        Request::builder()
-                            .messages(vec![user(&seam(index))])
-                            .maybe_workspace(lend())
-                            .build(),
-                    )
+                let reply = Request::builder()
+                    .messages(vec![user(&seam(index))])
+                    .maybe_workspace(lend())
+                    .build()
+                    .complete()
                     .await;
                 (index, reply)
             })
@@ -30,7 +27,9 @@ async fn scenario() {
         .collect();
 
     let ((index, reply), _, losers) = select_all(pending).await;
-    let reply = reply.unwrap_or_else(|error| panic!("the winner {index} failed: {error}"));
+    let reply = reply
+        .unwrap_or_else(|error| panic!("the winner {index} failed: {error}"))
+        .unwrap_or_else(|exhausted| panic!("the winner {index} ran out: {exhausted}"));
     assert!(reply.answer.contains(&seam(index)), "the winner got {:?}", reply.answer);
     drop(losers);
 }

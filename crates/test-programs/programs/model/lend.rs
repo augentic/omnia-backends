@@ -3,18 +3,21 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use omnia_sdk::WasiProvider;
-use omnia_sdk::model::{Model as _, Request};
+use omnia_sdk::model::Request;
 use test_programs::{arguments, user};
 
-omnia_sdk::api::command::export!(scenario);
+omnia_sdk::command::export!(scenario);
 
 async fn scenario() {
     let arguments = arguments();
     let lend = arguments.first().expect("the lend is the first argument");
-    let reply = WasiProvider
-        .complete(Request::builder().messages(vec![user("hi")]).workspace(lend.as_str()).build())
+    let reply = Request::builder()
+        .messages(vec![user("hi")])
+        .workspace(lend.as_str())
+        .build()
+        .complete()
         .await
+        .expect("the completion runs")
         .expect("echo answers over the lend");
     assert_eq!(reply.answer, "hi");
 }

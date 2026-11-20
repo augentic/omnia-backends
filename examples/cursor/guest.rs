@@ -7,16 +7,16 @@
 //!
 //! The raw `omnia:model/completion` bindings are used so the `calls` and
 //! `results` streams are visible; most guests use `omnia_sdk::model`'s
-//! `Model::complete_with`, which runs the same loop behind a closure.
+//! `Request::complete_with`, which runs the same loop behind a closure.
 
 #![cfg(target_arch = "wasm32")]
 
-use omnia_wasi_model::omnia::completion::{self, Request, Session};
-use omnia_wasi_model::omnia::types::{
+use omnia_sdk::model::completion::{self, Request, Session};
+use omnia_sdk::model::types::{
     Call, CallResult, Format, Grants, Location, Message, Role, Tool, ToolCall, ToolResult,
     WorkspaceGrant,
 };
-use omnia_wasi_model::wit_stream;
+use omnia_sdk::{model, wit_stream};
 use serde_json::json;
 use wasip3::filesystem::preopens;
 
@@ -55,7 +55,7 @@ impl wasip3::exports::cli::run::Guest for CliGuest {
         };
 
         // open the model the deployment binds as `default`
-        let model = match completion::open("default".to_string()).await {
+        let model = match completion::open(model::DEFAULT.to_owned()).await {
             Ok(model) => model,
             Err(error) => {
                 println!("error: {error:?}");

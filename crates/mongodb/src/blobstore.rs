@@ -12,7 +12,7 @@ use mongodb::bson::{self, Binary};
 use mongodb::error::ErrorKind;
 use omnia::FutureResult;
 use omnia_wasi_blobstore::{
-    BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata, Page,
+    BlobStoreClient, Container, ContainerMetadata, ObjectMetadata, Page, missing_container,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,10 +35,9 @@ struct BlobInfo {
 }
 
 impl BlobInfo {
-    fn metadata(self, container: String) -> ObjectMetadata {
+    fn metadata(self) -> ObjectMetadata {
         ObjectMetadata {
             name: self.name,
-            container,
             created_at: seconds(self.created_at),
             size: self.size,
         }
@@ -64,7 +63,7 @@ impl BlobStoreClient for Client {
                 return Err(err).context("creating container");
             }
             let collection = db.collection::<Blob>(&name);
-            Ok(Arc::new(MongoDbContainer { name, collection }) as Arc<dyn Container>)
+            Ok(Arc::new(MongoDbContainer { collection }) as Arc<dyn Container>)
         }
         .boxed()
     }
@@ -76,11 +75,11 @@ impl BlobStoreClient for Client {
 
         async move {
             if !exists.await? {
-                anyhow::bail!(Error::missing_container(&name));
+                anyhow::bail!(missing_container(&name));
             }
             let db = client.default_database().ok_or_else(|| anyhow!("No default database"))?;
             let collection = db.collection::<Blob>(&name);
-            Ok(Arc::new(MongoDbContainer { name, collection }) as Arc<dyn Container>)
+            Ok(Arc::new(MongoDbContainer { collection }) as Arc<dyn Container>)
         }
         .boxed()
     }
@@ -120,22 +119,13 @@ fn already_exists(err: &mongodb::error::Error) -> bool {
 
 #[derive(Debug)]
 struct MongoDbContainer {
-    name: String,
     collection: Collection<Blob>,
 }
 
 impl Container for MongoDbContainer {
-    fn name(&self) -> anyhow::Result<String> {
-        tracing::trace!("getting container name");
-        Ok(self.name.clone())
-    }
-
     fn info(&self) -> anyhow::Result<ContainerMetadata> {
         tracing::trace!("getting container info");
-        Ok(ContainerMetadata {
-            name: self.name.clone(),
-            created_at: 0,
-        })
+        Ok(ContainerMetadata { created_at: 0 })
     }
 
     fn get_data(&self, name: String, range: Range<u64>) -> FutureResult<Option<Bytes>> {
@@ -184,7 +174,6 @@ impl Container for MongoDbContainer {
     fn list_objects(&self, prefix: String, after: Option<String>) -> FutureResult<Page> {
         tracing::trace!("listing objects");
         let collection = self.collection.clone_with_type::<BlobInfo>();
-        let container = self.name.clone();
 
         async move {
             let mut list = collection
@@ -205,7 +194,7 @@ impl Container for MongoDbContainer {
                 if info.name.starts_with(&prefix)
                     && after.as_ref().is_none_or(|after| &info.name > after)
                 {
-                    objects.push(info.metadata(container.clone()));
+                    objects.push(info.metadata());
                 }
             }
 
@@ -235,7 +224,6 @@ impl Container for MongoDbContainer {
     fn object_info(&self, name: String) -> FutureResult<Option<ObjectMetadata>> {
         tracing::trace!("getting object info: {name}");
         let collection = self.collection.clone_with_type::<BlobInfo>();
-        let container = self.name.clone();
 
         async move {
             let info = collection
@@ -243,7 +231,7 @@ impl Container for MongoDbContainer {
                 .projection(bson::doc! { "data": 0 })
                 .await
                 .context("getting object info")?;
-            Ok(info.map(|info| info.metadata(container)))
+            Ok(info.map(BlobInfo::metadata))
         }
         .boxed()
     }

@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use futures::future::FutureExt;
 use futures::stream::{self, StreamExt};
 use omnia::FutureResult;
 use omnia_wasi_messaging::{
-    Endpoint, Handler, Message, MessagingClient, Metadata, Reply, RequestOptions, dispatch,
+    Endpoint, Handler, Message, MessagingClient, Metadata, Reply, dispatch,
 };
 
 use crate::Client;
@@ -65,14 +66,13 @@ impl Endpoint for Client {
     }
 
     fn request(
-        &self, topic: String, message: Message, options: Option<RequestOptions>,
+        &self, topic: String, message: Message, timeout: Option<Duration>,
     ) -> FutureResult<Message> {
         let client = self.inner.clone();
         let topic = format!("{}{topic}", self.topic_prefix);
 
         async move {
             let nats_headers = message.metadata.as_ref().map_or_default(nats_headers);
-            let timeout = options.and_then(|options| options.timeout);
 
             let request = async_nats::Request::new()
                 .payload(message.payload.into())

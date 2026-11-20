@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, bail};
 use bytes::Bytes;
 use omnia::FutureResult;
 use omnia_wasi_blobstore::{
-    BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata, Page,
+    BlobStoreClient, Container, ContainerMetadata, ObjectMetadata, Page, missing_container,
 };
 
 use crate::{Client, blocking, collect, segment_ok};
@@ -37,7 +37,7 @@ impl BlobStoreClient for Client {
         blocking(move || {
             let dir = container_dir(&root, &name)?;
             if !dir.is_dir() {
-                bail!(Error::missing_container(&name));
+                bail!(missing_container(&name));
             }
             Ok(Arc::new(FsContainer { name, dir }) as Arc<dyn Container>)
         })
@@ -72,15 +72,10 @@ struct FsContainer {
 }
 
 impl Container for FsContainer {
-    fn name(&self) -> Result<String> {
-        Ok(self.name.clone())
-    }
-
     fn info(&self) -> Result<ContainerMetadata> {
         let meta = std::fs::metadata(&self.dir)
             .with_context(|| format!("reading container `{}`", self.name))?;
         Ok(ContainerMetadata {
-            name: self.name.clone(),
             created_at: created_secs(&meta),
         })
     }
@@ -111,7 +106,7 @@ impl Container for FsContainer {
 
         blocking(move || {
             if !dir.is_dir() {
-                bail!(Error::missing_container(&container));
+                bail!(missing_container(&container));
             }
             let path = object_path(&dir, &name)?;
             if let Some(parent) = path.parent() {
@@ -130,7 +125,6 @@ impl Container for FsContainer {
     fn list_objects(&self, prefix: String, after: Option<String>) -> FutureResult<Page> {
         tracing::trace!("listing objects in container: {}", self.name);
         let dir = self.dir.clone();
-        let container = self.name.clone();
 
         blocking(move || {
             let mut names = collect(&dir, "")?;
@@ -140,7 +134,7 @@ impl Container for FsContainer {
             names.sort_unstable();
             let objects = names
                 .into_iter()
-                .map(|name| stat(&dir, &container, name))
+                .map(|name| stat(&dir, name))
                 .filter_map(Result::transpose)
                 .collect::<Result<_>>()?;
             Ok(Page { objects, next: None })
@@ -171,9 +165,8 @@ impl Container for FsContainer {
     fn object_info(&self, name: String) -> FutureResult<Option<ObjectMetadata>> {
         tracing::trace!("getting info for object: {name} in container: {}", self.name);
         let dir = self.dir.clone();
-        let container = self.name.clone();
 
-        blocking(move || stat(&dir, &container, name))
+        blocking(move || stat(&dir, name))
     }
 }
 
@@ -194,7 +187,7 @@ fn object_path(dir: &Path, name: &str) -> Result<PathBuf> {
 }
 
 // a name that is not a file, such as one deleted since it was listed, is absent
-fn stat(dir: &Path, container: &str, name: String) -> Result<Option<ObjectMetadata>> {
+fn stat(dir: &Path, name: String) -> Result<Option<ObjectMetadata>> {
     let path = object_path(dir, &name)?;
     let meta = match std::fs::metadata(&path) {
         Ok(meta) if meta.is_file() => meta,
@@ -204,7 +197,6 @@ fn stat(dir: &Path, container: &str, name: String) -> Result<Option<ObjectMetada
     };
     Ok(Some(ObjectMetadata {
         name,
-        container: container.to_owned(),
         created_at: created_secs(&meta),
         size: meta.len(),
     }))

@@ -9,7 +9,7 @@ Maps blobstore containers to MongoDB collections using the official `mongodb` dr
 
 - Only `create-container` makes a collection, and creating one that exists opens it.
 - Opening a collection that does not exist fails with
-  `omnia_wasi_blobstore::Error::missing_container`, which reaches a guest as
+  `omnia_wasi_blobstore::missing_container`, which reaches a guest as
   the code `not-found`. Each open costs one `listCollections`.
 - Deleting an absent object or collection succeeds.
 

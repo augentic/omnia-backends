@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow};
 use futures::future::FutureExt;
 use omnia::FutureResult;
-use omnia_wasi_messaging::{Endpoint, Handler, Message, MessagingClient, Metadata, RequestOptions};
+use omnia_wasi_messaging::{Endpoint, Handler, Message, MessagingClient, Metadata};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::ToBytes;
 use rdkafka::producer::{BaseRecord, ThreadedProducer};
@@ -88,7 +88,7 @@ impl Endpoint for crate::Client {
     }
 
     fn request(
-        &self, _topic: String, _message: Message, _options: Option<RequestOptions>,
+        &self, _topic: String, _message: Message, _timeout: Option<Duration>,
     ) -> FutureResult<Message> {
         async { Err(anyhow!("request-reply is not supported by the Kafka backend")) }.boxed()
     }

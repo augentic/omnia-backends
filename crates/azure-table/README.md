@@ -107,22 +107,22 @@ from string values.
 
 | Filter or option | Supported | Notes |
 |--------|-----------|-------|
-| `Compare` (eq/ne/gt/gte/lt/lte) | Yes | Translated to `OData` operators |
-| `Compare` with `null` | **No** | `unsupported`: a null property is omitted from the entity |
-| `InList` / `NotInList` | Yes | Expanded to OR chains |
-| `And` / `Or` / `Not` | Yes | Supported when all children are supported |
+| `Eq` / `Lt` / `Lte` / `Gt` / `Gte` | Yes | Translated to `OData` operators |
+| `In` | Yes | Expanded to an OR chain |
+| `negated` | Yes | Wrapped in `not (...)` |
+| Groups | Yes | Each group's conditions join with `or`, and the groups with `and` |
 | `Contains` / `StartsWith` / `EndsWith` | **No** | `unsupported` |
-| `IsNull` / `IsNotNull` | **No** | `unsupported` |
+| `Null` | **No** | `unsupported`: a null property is omitted from the entity |
+| `ArrayContains` | **No** | `unsupported`: arrays are stored as JSON strings |
 | Dotted field path (`meta.level`) | **No** | `unsupported`: nested values are stored as JSON strings |
 | `order_by` | **No** | `unsupported`: entities come back in `PartitionKey` / `RowKey` order |
-| `offset` | **No** | `unsupported`: use continuation tokens |
-| `limit` | Yes | Sent as `$top`; zero is `invalid` |
+| `limit` | Yes | Sent as `$top` |
 | `continuation` | Yes | Native Azure Table continuation tokens |
 
 What Azure Table cannot serve fails with `unsupported` rather than being
 ignored or evaluated client-side, which could pull unbounded data from the
 table service. Azure Table's `OData` `$filter` does not support string
-functions or null checks, and there is no `$orderby` or `$skip`; see
+functions or null checks, and there is no `$orderby`; see
 [Querying tables and entities](https://learn.microsoft.com/en-us/rest/api/storageservices/querying-tables-and-entities#supported-query-options).
 
 ## Errors
@@ -131,7 +131,7 @@ A failure reaches the guest as one of the `omnia:docstore` error kinds.
 
 | Kind | Failure |
 |------|---------|
-| `invalid` | A malformed collection, table name, or id; a body that is not a JSON object; a zero `limit`; or a request the service refuses with `400` or `413` |
+| `invalid` | A malformed collection, table name, or id; a body that is not a JSON object; or a request the service refuses with `400` or `413` |
 | `denied` | A request the service refuses with `401` or `403` |
 | `unsupported` | A query feature in the table above, or an integer beyond the `Edm.Int64` range |
 | `unavailable` | A table still being deleted, a `408`, `429`, or `5xx`, or a connection that fails or times out |

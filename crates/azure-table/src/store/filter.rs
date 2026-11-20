@@ -1,101 +1,73 @@
-//! Translation of [`FilterTree`] into Azure Table `OData` `$filter` strings.
+//! Translation of a [`Filter`] into an Azure Table `OData` `$filter` string.
 //!
-//! Azure Table's `OData` query layer supports comparison operators, logical
-//! combinators (`and`, `or`, `not`), and set membership (`InList` / `NotInList`
-//! expanded to OR chains). It does **not** support string functions
-//! (`contains`, `startswith`, `endswith`), null-checks, or nested fields — see
+//! Azure Table's `OData` query layer supports comparison operators and the
+//! logical combinators `and`, `or`, and `not`, so an `in` expands to an `or`
+//! chain. It does **not** support string functions (`contains`,
+//! `startswith`, `endswith`), null-checks, or nested fields — see
 //! <https://learn.microsoft.com/en-us/rest/api/storageservices/querying-tables-and-entities#supported-query-options>.
 //!
 //! Filters that cannot be evaluated server-side fail with
 //! [`Error::Unsupported`] rather than silently falling back to client-side
 //! evaluation, which could pull unbounded data from the table service.
 
-use std::fmt::Write;
-
 use anyhow::bail;
-use omnia_wasi_docstore::{ComparisonOp, Error, FilterTree, ScalarValue};
+use omnia_wasi_docstore::{Condition, Error, Filter, Test, Value};
 
-/// Translate a [`FilterTree`] to an `OData` `$filter` string.
+/// Translate a [`Filter`] to an `OData` `$filter` string, `None` when it selects every entity.
+///
+/// Each group is an `or` of its conditions in parentheses, and the groups
+/// join with `and`. A negated condition is a `not`.
 ///
 /// # Errors
 ///
-/// - [`Error::Unsupported`] for a node Azure Table cannot evaluate
-///   server-side, anywhere in the tree: `IsNull`, `IsNotNull`, `Contains`,
-///   `StartsWith`, `EndsWith`, a comparison with `Null`, or a dotted field
-///   path.
+/// - [`Error::Unsupported`] for a condition Azure Table cannot evaluate
+///   server-side, anywhere in the filter: a [`Test::Null`],
+///   [`Test::StartsWith`], [`Test::EndsWith`], [`Test::Contains`], or
+///   [`Test::ArrayContains`], or a dotted field path.
 /// - [`Error::Invalid`] for any other field that is not an identifier.
-/// - An untyped error for an empty `InList`, `NotInList`, `And`, or `Or`.
-pub fn to_odata(filter: &FilterTree) -> anyhow::Result<String> {
-    match filter {
-        FilterTree::Compare { field, op, value } => {
-            validate_field(field)?;
-            Ok(format!("{field} {} {}", odata_op(*op), odata_value(value)?))
+pub fn to_odata(filter: &Filter) -> anyhow::Result<Option<String>> {
+    let groups = filter
+        .iter()
+        .map(|group| {
+            let conditions = group.iter().map(condition).collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(format!("({})", conditions.join(" or ")))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok((!groups.is_empty()).then(|| groups.join(" and ")))
+}
+
+fn condition(condition: &Condition) -> anyhow::Result<String> {
+    let Condition { field, test, negated } = condition;
+    validate_field(field)?;
+    let compare = |op: &str, value: &Value| format!("{field} {op} {}", odata_value(value));
+
+    let test = match test {
+        Test::Eq(value) => compare("eq", value),
+        Test::Lt(value) => compare("lt", value),
+        Test::Lte(value) => compare("le", value),
+        Test::Gt(value) => compare("gt", value),
+        Test::Gte(value) => compare("ge", value),
+        Test::In(values) => {
+            let equals: Vec<String> = values.iter().map(|value| compare("eq", value)).collect();
+            format!("({})", equals.join(" or "))
         }
-        FilterTree::InList { field, values } => {
-            validate_field(field)?;
-            if values.is_empty() {
-                bail!("InList('{field}') requires at least one value");
-            }
-            let parts: Vec<String> = values
-                .iter()
-                .map(|v| Ok(format!("{field} eq {}", odata_value(v)?)))
-                .collect::<anyhow::Result<_>>()?;
-            Ok(format!("({})", parts.join(" or ")))
-        }
-        FilterTree::NotInList { field, values } => {
-            validate_field(field)?;
-            if values.is_empty() {
-                bail!("NotInList('{field}') requires at least one value");
-            }
-            let parts: Vec<String> = values
-                .iter()
-                .map(|v| Ok(format!("{field} eq {}", odata_value(v)?)))
-                .collect::<anyhow::Result<_>>()?;
-            Ok(format!("not ({})", parts.join(" or ")))
-        }
-        FilterTree::And(children) => {
-            if children.is_empty() {
-                bail!("And requires at least one child filter");
-            }
-            let parts: Vec<String> =
-                children.iter().map(to_odata).collect::<anyhow::Result<_>>()?;
-            Ok(parts.join(" and "))
-        }
-        FilterTree::Or(children) => {
-            if children.is_empty() {
-                bail!("Or requires at least one child filter");
-            }
-            let parts: Vec<String> =
-                children.iter().map(to_odata).collect::<anyhow::Result<_>>()?;
-            Ok(format!("({})", parts.join(" or ")))
-        }
-        FilterTree::Not(inner) => Ok(format!("not ({})", to_odata(inner)?)),
-        FilterTree::IsNull(field) => {
+        Test::Null => {
             bail!(Error::Unsupported(format!(
-                "IsNull('{field}') is not supported by Azure Table — properties that are null are omitted from entities entirely"
+                "a null test of '{field}' is not supported by Azure Table — properties that are null are omitted from entities entirely"
             )))
         }
-        FilterTree::IsNotNull(field) => {
+        Test::StartsWith(_) | Test::EndsWith(_) | Test::Contains(_) => {
             bail!(Error::Unsupported(format!(
-                "IsNotNull('{field}') is not supported by Azure Table — properties that are null are omitted from entities entirely"
+                "a text test of '{field}' is not supported by Azure Table — OData $filter does not support string functions"
             )))
         }
-        FilterTree::Contains { field, .. } => {
+        Test::ArrayContains(_) => {
             bail!(Error::Unsupported(format!(
-                "Contains('{field}') is not supported by Azure Table — OData $filter does not support string functions"
+                "an array test of '{field}' is not supported by Azure Table — arrays are stored as JSON strings"
             )))
         }
-        FilterTree::StartsWith { field, .. } => {
-            bail!(Error::Unsupported(format!(
-                "StartsWith('{field}') is not supported by Azure Table — OData $filter does not support string functions"
-            )))
-        }
-        FilterTree::EndsWith { field, .. } => {
-            bail!(Error::Unsupported(format!(
-                "EndsWith('{field}') is not supported by Azure Table — OData $filter does not support string functions"
-            )))
-        }
-    }
+    };
+    Ok(if *negated { format!("not ({test})") } else { test })
 }
 
 // A property name is emitted unquoted, so it must be a bare identifier. A
@@ -120,44 +92,19 @@ fn is_identifier(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-const fn odata_op(op: ComparisonOp) -> &'static str {
-    match op {
-        ComparisonOp::Eq => "eq",
-        ComparisonOp::Ne => "ne",
-        ComparisonOp::Gt => "gt",
-        ComparisonOp::Gte => "ge",
-        ComparisonOp::Lt => "lt",
-        ComparisonOp::Lte => "le",
-    }
-}
-
-fn odata_value(v: &ScalarValue) -> anyhow::Result<String> {
-    Ok(match v {
-        ScalarValue::Null => {
-            bail!(Error::Unsupported(
-                "null comparison is not supported by Azure Table — \
-                 properties that are null are omitted from entities entirely"
-                    .to_owned()
-            ))
-        }
-        ScalarValue::Boolean(b) => b.to_string(),
-        ScalarValue::Int32(i) => i.to_string(),
-        ScalarValue::Int64(i) => format!("{i}L"),
-        ScalarValue::Float64(f) => {
+// `document` stores an integer that fits in 32 bits as an `Edm.Int32`, so a
+// literal that fits is written as one too.
+fn odata_value(value: &Value) -> String {
+    match value {
+        Value::Boolean(b) => b.to_string(),
+        Value::Integer(i) => i32::try_from(*i).map_or_else(|_| format!("{i}L"), |i| i.to_string()),
+        Value::Number(f) => {
             if f.fract() == 0.0 {
                 format!("{f:.1}")
             } else {
                 format!("{f}")
             }
         }
-        ScalarValue::Str(s) => format!("'{}'", s.replace('\'', "''")),
-        ScalarValue::Binary(b) => {
-            let hex = b.iter().fold(String::with_capacity(b.len() * 2), |mut acc, byte| {
-                let _ = write!(acc, "{byte:02x}");
-                acc
-            });
-            format!("X'{hex}'")
-        }
-        ScalarValue::Timestamp(t) => format!("datetime'{}'", t.replace('\'', "''")),
-    })
+        Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
+    }
 }

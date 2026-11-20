@@ -13,7 +13,7 @@ use chrono::Utc;
 use futures::{FutureExt, StreamExt};
 use omnia::FutureResult;
 use omnia_wasi_blobstore::{
-    BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata, Page,
+    BlobStoreClient, Container, ContainerMetadata, ObjectMetadata, Page, missing_container,
 };
 use tokio::io::AsyncReadExt;
 
@@ -38,9 +38,8 @@ impl BlobStoreClient for Client {
                     Err(_) => return Err(err).context("creating object store"),
                 },
             };
-            let metadata = container_metadata(name);
 
-            Ok(Arc::new(NatsContainer { metadata, store }) as Arc<dyn Container>)
+            Ok(Arc::new(NatsContainer::new(name, store)) as Arc<dyn Container>)
         }
         .boxed()
     }
@@ -52,12 +51,11 @@ impl BlobStoreClient for Client {
         async move {
             let store = match jetstream.get_object_store(&name).await {
                 Ok(store) => store,
-                Err(err) if stream_missing(&err) => bail!(Error::missing_container(&name)),
+                Err(err) if stream_missing(&err) => bail!(missing_container(&name)),
                 Err(err) => return Err(err).context("getting object store"),
             };
-            let metadata = container_metadata(name);
 
-            Ok(Arc::new(NatsContainer { metadata, store }) as Arc<dyn Container>)
+            Ok(Arc::new(NatsContainer::new(name, store)) as Arc<dyn Container>)
         }
         .boxed()
     }
@@ -103,30 +101,32 @@ fn stream_missing(err: &ObjectStoreError) -> bool {
         })
 }
 
-fn container_metadata(name: String) -> ContainerMetadata {
-    ContainerMetadata {
-        name,
-        created_at: u64::try_from(Utc::now().timestamp()).unwrap_or_default(),
-    }
-}
-
 struct NatsContainer {
+    name: String,
     metadata: ContainerMetadata,
     store: ObjectStore,
 }
 
+impl NatsContainer {
+    fn new(name: String, store: ObjectStore) -> Self {
+        let metadata = ContainerMetadata {
+            created_at: u64::try_from(Utc::now().timestamp()).unwrap_or_default(),
+        };
+        Self {
+            name,
+            metadata,
+            store,
+        }
+    }
+}
+
 impl Debug for NatsContainer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NatsContainer").field("name", &self.metadata.name).finish_non_exhaustive()
+        f.debug_struct("NatsContainer").field("name", &self.name).finish_non_exhaustive()
     }
 }
 
 impl Container for NatsContainer {
-    fn name(&self) -> anyhow::Result<String> {
-        tracing::trace!("getting container name");
-        Ok(self.metadata.name.clone())
-    }
-
     fn info(&self) -> anyhow::Result<ContainerMetadata> {
         Ok(self.metadata.clone())
     }
@@ -240,7 +240,6 @@ impl Container for NatsContainer {
 fn object_metadata(container: &ContainerMetadata, info: ObjectInfo) -> ObjectMetadata {
     ObjectMetadata {
         name: info.name,
-        container: container.name.clone(),
         created_at: info
             .modified
             .and_then(|time| u64::try_from(time.unix_timestamp()).ok())

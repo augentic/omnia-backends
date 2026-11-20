@@ -113,7 +113,6 @@ omnia-wasi-messaging = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-model = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-otel = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-sql = { git = "https://github.com/augentic/omnia" }
-omnia-wasi-types = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-vault = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-vcs = { git = "https://github.com/augentic/omnia" }
 
@@ -130,7 +129,6 @@ omnia-wasi-vcs = { git = "https://github.com/augentic/omnia" }
 # omnia-wasi-model = { path = "../omnia/crates/wasi-model" }
 # omnia-wasi-otel = { path = "../omnia/crates/wasi-otel" }
 # omnia-wasi-sql = { path = "../omnia/crates/wasi-sql" }
-# omnia-wasi-types = { path = "../omnia/crates/wasi-types" }
 # omnia-wasi-vault = { path = "../omnia/crates/wasi-vault" }
 # omnia-wasi-vcs = { path = "../omnia/crates/wasi-vcs" }
 

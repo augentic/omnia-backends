@@ -8523,8 +8523,3 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[patch.unused]]
-name = "omnia-wasi-types"
-version = "0.38.0"
-source = "git+https://github.com/augentic/omnia#fd8e0bc02d65d6c90fcee54e5d3374ef216a300c"

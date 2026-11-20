@@ -44,12 +44,13 @@ const NOT_FOUND: [&str; 13] = [
 // A remote that refuses the caller, or wants credentials it was not given.
 // Git follows a refusal with "Could not read from remote repository" or
 // "unable to access", so these are tried before the access patterns.
-const DENIED: [&str; 6] = [
+const DENIED: [&str; 7] = [
     "Authentication failed",
     "Permission denied",
     "could not read Username",
     "terminal prompts disabled",
     "Host key verification failed",
+    "The requested URL returned error: 401",
     "The requested URL returned error: 403",
 ];
 
@@ -78,5 +79,18 @@ pub fn classify(stderr: &str) -> Class {
         Class::Access
     } else {
         Class::Other
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Class, classify};
+
+    // git often appends "unable to access" after an HTTP status line; denied
+    // must win over access
+    #[test]
+    fn http_401_before_access() {
+        let stderr = "fatal: The requested URL returned error: 401\nfatal: unable to access";
+        assert_eq!(classify(stderr), Class::Denied);
     }
 }

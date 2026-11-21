@@ -17,7 +17,7 @@ backend.
   their own sharding in names.
 - A container is a directory only `create-container` makes, and creating
   one that exists opens it. `get-container` on a missing directory fails
-  with `omnia_wasi_blobstore::Error::missing_container`, which reaches a
+  with `omnia_wasi_blobstore::missing_container`, which reaches a
   guest as the code `not-found`. So does a write through a
   handle on a container deleted since, so nothing recreates it.
 - `delete-container` and `delete-object` succeed when their target is

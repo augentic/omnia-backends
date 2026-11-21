@@ -10,7 +10,7 @@ use base64ct::{Base64, Encoding};
 use futures::future::FutureExt;
 use hmac::{Hmac, KeyInit, Mac};
 use omnia_wasi_docstore::{
-    DocStoreClient, Document, Error, FilterTree, FutureResult, QueryOpts, QueryResult,
+    DocStoreClient, Document, Error, Filter, FutureResult, QueryOpts, QueryResult,
 };
 use reqwest::{Method, Response, StatusCode};
 use serde_json::Value;
@@ -95,8 +95,7 @@ impl Client {
     // for the next page, if any. A table that does not exist yet answers
     // with an empty last page.
     async fn fetch_page(
-        &self, table: &str, odata_filter: Option<&str>, fetch_limit: Option<usize>,
-        continuation: Option<&str>,
+        &self, table: &str, odata_filter: Option<&str>, top: usize, continuation: Option<&str>,
     ) -> anyhow::Result<(Value, Option<String>)> {
         let base_uri = format!("{}/{table}()", self.base_url);
 
@@ -104,9 +103,7 @@ impl Client {
         if let Some(f) = odata_filter {
             query_params.push(format!("$filter={}", urlencoding::encode(f)));
         }
-        if let Some(limit) = fetch_limit {
-            query_params.push(format!("$top={limit}"));
-        }
+        query_params.push(format!("$top={top}"));
         if let Some(cont) = continuation {
             let (next_partition, next_row) = query::decode_continuation(cont);
             query_params.push(format!("NextPartitionKey={}", urlencoding::encode(&next_partition)));
@@ -115,11 +112,7 @@ impl Client {
             }
         }
 
-        let uri = if query_params.is_empty() {
-            base_uri
-        } else {
-            format!("{base_uri}?{}", query_params.join("&"))
-        };
+        let uri = format!("{base_uri}?{}", query_params.join("&"));
 
         let response = self
             .signed_request(Method::GET, &uri)?
@@ -247,22 +240,22 @@ impl DocStoreClient for Client {
     }
 
     fn query(
-        &self, collection: String, filter: Option<FilterTree>, options: QueryOpts,
+        &self, collection: String, filter: Filter, options: QueryOpts,
     ) -> FutureResult<QueryResult> {
         let client = self.clone();
         async move {
             check_options(&options)?;
-            let fetch_limit = options.limit.map(|l| l as usize);
+            let fetch_limit = options.limit as usize;
 
             let (table, pk) = parse_collection(&collection)?;
-            let user_filter = filter.as_ref().map(filter::to_odata).transpose()?;
+            let user_filter = filter::to_odata(&filter)?;
             let odata_filter = build_odata_filter(pk.as_deref(), user_filter.as_deref());
 
             let mut all_documents: Vec<Document> = Vec::new();
             let mut next_continuation = options.continuation.clone();
 
             loop {
-                let remaining = fetch_limit.map(|lim| lim - all_documents.len());
+                let remaining = fetch_limit - all_documents.len();
 
                 let (body, continuation) = client
                     .fetch_page(
@@ -282,7 +275,7 @@ impl DocStoreClient for Client {
                 let has_more_pages = continuation.is_some();
                 next_continuation = continuation;
 
-                let reached_limit = fetch_limit.is_some_and(|lim| all_documents.len() >= lim);
+                let reached_limit = all_documents.len() >= fetch_limit;
 
                 if !has_more_pages || reached_limit {
                     break;
@@ -395,24 +388,13 @@ fn azure_headers(date: &str, auth: &str) -> anyhow::Result<reqwest::header::Head
     Ok(headers)
 }
 
-// A zero limit is `invalid`. The service returns entities in key order and
-// has no `$skip`, so `order_by` and an offset are `unsupported`, never
-// ignored or served client-side.
+// The service returns entities in key order, so `order_by` is
+// `unsupported`, never ignored or served client-side.
 fn check_options(options: &QueryOpts) -> anyhow::Result<()> {
-    if options.limit == Some(0) {
-        bail!(Error::Invalid("query limit must be at least 1".to_owned()));
-    }
     if !options.order_by.is_empty() {
         bail!(Error::Unsupported(
             "order_by is not supported by Azure Table — \
              entities come back in PartitionKey and RowKey order"
-                .to_owned()
-        ));
-    }
-    if options.offset.is_some_and(|offset| offset > 0) {
-        bail!(Error::Unsupported(
-            "offset is not supported by Azure Table — \
-             use continuation tokens for pagination instead"
                 .to_owned()
         ));
     }

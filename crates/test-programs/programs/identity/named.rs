@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use omnia_sdk::identity::{self, AccessToken, DEFAULT};
-use omnia_sdk::{Error, Result};
+use omnia_sdk::{ErrorKind, Result};
 
 omnia_sdk::command::export!(scenario);
 
@@ -23,8 +23,9 @@ async fn scenario() {
     assert!(hour.contains(&reports.expires_in()), "an hour-long token: {reports:?}");
 
     let error = token("undeclared").await.expect_err("undeclared");
-    assert!(
-        matches!(&error, Error::ServerError { code, .. } if code == "not-found"),
+    assert_eq!(
+        (error.kind(), error.code()),
+        (ErrorKind::ServerError, "not-found"),
         "unexpected error: {error}"
     );
 }

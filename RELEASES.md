@@ -86,7 +86,11 @@ Unreleased
   - A duplicate `insert` returns `already-exists` and leaves the stored
     entity untouched.
   - `order_by` fails with `unsupported` instead of being ignored.
-  - A zero `limit` fails with `invalid`.
+  - A query's filter arrives as the groups of conditions `omnia:docstore`
+    defines. Each group's conditions join with `or` and the groups with
+    `and`, and a negated condition is wrapped in `not (...)`.
+  - An `array-contains` test fails with `unsupported`, as the host refused
+    it before.
 - Postgres and Azure Table failures carry typed error kinds. A malformed
   statement, value, or id is `invalid`, and a refused credential or
   permission is `denied`. A feature the service cannot serve is
@@ -95,7 +99,7 @@ Unreleased
 - **Breaking:** only `create-container` makes a blob container. The
   filesystem, MongoDB, Azure Blob, and NATS backends fail a call on an
   object in a container that does not exist with
-  `omnia_wasi_blobstore::Error::missing_container`, which a guest's
+  `omnia_wasi_blobstore::missing_container`, which a guest's
   `BlobStore` reports with the code `not-found`. Creating a container that
   exists opens it, and deleting an absent object or container succeeds. To
   migrate:

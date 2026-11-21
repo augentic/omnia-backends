@@ -17,7 +17,7 @@ use bytes::Bytes;
 use futures::{FutureExt, TryStreamExt};
 use omnia::FutureResult;
 use omnia_wasi_blobstore::{
-    BlobStoreClient, Container, ContainerMetadata, Error, ObjectMetadata, Page,
+    BlobStoreClient, Container, ContainerMetadata, ObjectMetadata, Page, missing_container,
 };
 
 use crate::{Client, STORE_CONTAINER};
@@ -143,15 +143,9 @@ impl Debug for AzureBlobContainer {
 }
 
 impl Container for AzureBlobContainer {
-    fn name(&self) -> anyhow::Result<String> {
-        tracing::trace!("getting container name");
-        Ok(self.name.clone())
-    }
-
     fn info(&self) -> anyhow::Result<ContainerMetadata> {
         tracing::trace!("getting container info");
         Ok(ContainerMetadata {
-            name: self.name.clone(),
             created_at: self.created_at,
         })
     }
@@ -230,7 +224,6 @@ impl Container for AzureBlobContainer {
                     let properties = item.properties.unwrap_or_default();
                     Some(ObjectMetadata {
                         name: item.name?,
-                        container: container.clone(),
                         created_at: properties.creation_time.map_or(0, unix_secs),
                         size: properties.content_length.unwrap_or(0),
                     })
@@ -289,7 +282,6 @@ impl Container for AzureBlobContainer {
             };
             Ok(Some(ObjectMetadata {
                 name,
-                container: container_name,
                 size: response.content_length().ok().flatten().unwrap_or(0),
                 created_at: response.creation_time().ok().flatten().map_or(0, unix_secs),
             }))
@@ -314,7 +306,7 @@ fn http_range(range: Range<u64>) -> Option<HttpRange> {
 // absence, and any other failure keeps the request's context
 fn fault(err: azure_core::Error, container: &str, action: &'static str) -> anyhow::Error {
     if storage_code(&err) == Some(StorageErrorCode::ContainerNotFound) {
-        return Error::missing_container(container).into();
+        return missing_container(container).into();
     }
     anyhow::Error::new(err).context(action)
 }

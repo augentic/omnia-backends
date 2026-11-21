@@ -4,7 +4,7 @@ use dotenvy::dotenv;
 use omnia::Connect;
 use omnia_azure_table::{Client, ConnectOptions, decode_id, encode_id};
 use omnia_wasi_docstore::{
-    ComparisonOp, DocStoreClient, Document, FilterTree, QueryOpts, QueryResult, ScalarValue,
+    Condition, DocStoreClient, Document, Filter, QueryOpts, QueryResult, Test, Value as Operand,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -56,26 +56,40 @@ fn row_keys(r: &QueryResult) -> Vec<&str> {
     r.documents.iter().map(|d| decode_id(&d.id).expect("valid composite id").1).collect()
 }
 
-fn cmp(field: &str, op: ComparisonOp, value: ScalarValue) -> FilterTree {
-    FilterTree::Compare {
+fn test(field: &str, test: Test) -> Condition {
+    Condition {
         field: field.into(),
-        op,
-        value,
+        test,
+        negated: false,
     }
 }
 
-async fn q(
-    client: &Client, collection: &str, filter: Option<FilterTree>, opts: QueryOpts,
-) -> QueryResult {
+fn not(condition: Condition) -> Condition {
+    Condition {
+        negated: true,
+        ..condition
+    }
+}
+
+fn text(text: &str) -> Operand {
+    Operand::Text(text.into())
+}
+
+// the largest page the host asks for
+const fn page() -> QueryOpts {
+    QueryOpts {
+        order_by: Vec::new(),
+        limit: 1000,
+        continuation: None,
+    }
+}
+
+async fn q(client: &Client, collection: &str, filter: Filter, opts: QueryOpts) -> QueryResult {
     client.query(collection.into(), filter, opts).await.expect("query")
 }
 
-async fn q_err(client: &Client, filter: FilterTree) -> String {
-    client
-        .query(SCOPE_DESK.into(), Some(filter), QueryOpts::default())
-        .await
-        .unwrap_err()
-        .to_string()
+async fn q_err(client: &Client, condition: Condition) -> String {
+    client.query(SCOPE_DESK.into(), vec![vec![condition]], page()).await.unwrap_err().to_string()
 }
 
 fn pass(label: &str) {
@@ -166,7 +180,7 @@ pub async fn main() {
     let created = client.ensure_table(TABLE).await.expect("ensure_table");
     println!("Table '{TABLE}': {}", if created { "created" } else { "already exists" });
 
-    let existing = q(&client, TABLE, None, QueryOpts::default()).await;
+    let existing = q(&client, TABLE, Vec::new(), page()).await;
     for d in &existing.documents {
         client.delete(TABLE.into(), d.id.clone()).await.expect("cleanup delete");
     }
@@ -201,7 +215,7 @@ pub async fn main() {
     pass("get round-trip (all fields verified)");
 
     // ── 2. Cross-partition query returns all 5 docs ──────────────────
-    let r = q(&client, TABLE, None, QueryOpts::default()).await;
+    let r = q(&client, TABLE, Vec::new(), page()).await;
     assert_eq!(r.documents.len(), 5, "expected 5, got {}", r.documents.len());
     for d in &r.documents {
         assert!(d.id.contains('\0'), "composite id should contain \\0: {:?}", d.id);
@@ -209,7 +223,7 @@ pub async fn main() {
     pass("cross-partition query (5 records, all composite ids)");
 
     // ── 3. Partition-scoped query: desk ──────────────────────────────
-    let r = q(&client, SCOPE_DESK, None, QueryOpts::default()).await;
+    let r = q(&client, SCOPE_DESK, Vec::new(), page()).await;
     assert_eq!(r.documents.len(), 3, "desk partition should have 3");
     let rks = row_keys(&r);
     assert!(rks.contains(&"alice"));
@@ -218,126 +232,79 @@ pub async fn main() {
     pass("partition-scoped query: desk (3 records)");
 
     // ── 4. Partition-scoped query: mobile ────────────────────────────
-    let r = q(&client, SCOPE_MOBILE, None, QueryOpts::default()).await;
+    let r = q(&client, SCOPE_MOBILE, Vec::new(), page()).await;
     assert_eq!(r.documents.len(), 2, "mobile partition should have 2");
     let rks = row_keys(&r);
     assert!(rks.contains(&"dana"));
     assert!(rks.contains(&"eve"));
     pass("partition-scoped query: mobile (2 records)");
 
-    // ── 5. Compare: Eq Boolean (within desk partition) ───────────────
-    let r = q(
-        &client,
-        SCOPE_DESK,
-        Some(cmp("IsActive", ComparisonOp::Eq, ScalarValue::Boolean(true))),
-        QueryOpts::default(),
-    )
-    .await;
+    // ── 5. Eq Boolean (within desk partition) ───────────────────────
+    let active = vec![vec![test("IsActive", Test::Eq(Operand::Boolean(true)))]];
+    let r = q(&client, SCOPE_DESK, active, page()).await;
     assert_eq!(r.documents.len(), 2);
-    pass("Compare: IsActive eq true in desk (2)");
+    pass("Eq: IsActive eq true in desk (2)");
 
-    // ── 6. Compare: Gt Int32 (within desk partition) ─────────────────
-    let r = q(
-        &client,
-        SCOPE_DESK,
-        Some(cmp("Points", ComparisonOp::Gt, ScalarValue::Int32(500))),
-        QueryOpts::default(),
-    )
-    .await;
+    // ── 6. Gt Integer (within desk partition) ───────────────────────
+    let r =
+        q(&client, SCOPE_DESK, vec![vec![test("Points", Test::Gt(Operand::Integer(500)))]], page())
+            .await;
     assert_eq!(r.documents.len(), 2);
     let rks = row_keys(&r);
     assert!(rks.contains(&"alice"));
     assert!(rks.contains(&"charlie"));
-    pass("Compare: Points gt 500 in desk (2)");
+    pass("Gt: Points gt 500 in desk (2)");
 
-    // ── 7. Compare: Lte Float64 (within desk partition) ──────────────
-    let r = q(
-        &client,
-        SCOPE_DESK,
-        Some(cmp("Rating", ComparisonOp::Lte, ScalarValue::Float64(3.9))),
-        QueryOpts::default(),
-    )
-    .await;
+    // ── 7. Lte Number (within desk partition) ───────────────────────
+    let r =
+        q(&client, SCOPE_DESK, vec![vec![test("Rating", Test::Lte(Operand::Number(3.9)))]], page())
+            .await;
     assert_eq!(r.documents.len(), 1);
-    pass("Compare: Rating le 3.9 in desk (1)");
+    pass("Lte: Rating le 3.9 in desk (1)");
 
-    // ── 8. Compare: Gte String (timestamp, cross-partition) ──────────
-    let r = q(
-        &client,
-        TABLE,
-        Some(cmp("Created", ComparisonOp::Gte, ScalarValue::Str("2026-02-01T00:00:00Z".into()))),
-        QueryOpts::default(),
-    )
-    .await;
+    // ── 8. Gte Text (timestamp, cross-partition) ────────────────────
+    let created = vec![vec![test("Created", Test::Gte(text("2026-02-01T00:00:00Z")))]];
+    let r = q(&client, TABLE, created, page()).await;
     assert_eq!(r.documents.len(), 2);
     let rks = row_keys(&r);
     assert!(rks.contains(&"bob"));
     assert!(rks.contains(&"dana"));
-    pass("Compare: Created ge '2026-02-01' cross-partition (2)");
+    pass("Gte: Created ge '2026-02-01' cross-partition (2)");
 
-    // ── 9. InList (within desk partition) ────────────────────────────
-    let r = q(
-        &client,
-        SCOPE_DESK,
-        Some(FilterTree::InList {
-            field: "Points".into(),
-            values: vec![ScalarValue::Int32(200), ScalarValue::Int32(950)],
-        }),
-        QueryOpts::default(),
-    )
-    .await;
+    // ── 9. In (within desk partition) ───────────────────────────────
+    let listed = Test::In(vec![Operand::Integer(200), Operand::Integer(950)]);
+    let r = q(&client, SCOPE_DESK, vec![vec![test("Points", listed)]], page()).await;
     assert_eq!(r.documents.len(), 2);
     let rks = row_keys(&r);
     assert!(rks.contains(&"alice"));
     assert!(rks.contains(&"bob"));
-    pass("InList: Points in [200, 950] in desk (2)");
+    pass("In: Points in [200, 950] in desk (2)");
 
-    // ── 10. NotInList (within desk partition) ────────────────────────
-    let r = q(
-        &client,
-        SCOPE_DESK,
-        Some(FilterTree::NotInList {
-            field: "Name".into(),
-            values: vec![
-                ScalarValue::Str("Alice Montgomery".into()),
-                ScalarValue::Str("Bob Burns".into()),
-            ],
-        }),
-        QueryOpts::default(),
-    )
-    .await;
+    // ── 10. Negated In (within desk partition) ──────────────────────
+    let listed = Test::In(vec![text("Alice Montgomery"), text("Bob Burns")]);
+    let r = q(&client, SCOPE_DESK, vec![vec![not(test("Name", listed))]], page()).await;
     assert_eq!(r.documents.len(), 1);
-    pass("NotInList: Name not in [Alice, Bob] in desk (1)");
+    pass("negated In: Name not in [Alice, Bob] in desk (1)");
 
-    // ── 11. Compare: Ne (within desk partition) ─────────────────────
-    let r = q(
-        &client,
-        SCOPE_DESK,
-        Some(cmp("Region", ComparisonOp::Ne, ScalarValue::Str("US-West".into()))),
-        QueryOpts::default(),
-    )
-    .await;
+    // ── 11. Negated Eq (within desk partition) ──────────────────────
+    let west = not(test("Region", Test::Eq(text("US-West"))));
+    let r = q(&client, SCOPE_DESK, vec![vec![west]], page()).await;
     assert_eq!(r.documents.len(), 1);
     let rks = row_keys(&r);
     assert!(rks.contains(&"bob"));
-    pass("Compare: Region ne 'US-West' in desk (1)");
+    pass("negated Eq: Region ne 'US-West' in desk (1)");
 
-    // ── 12. And (all server-side, within desk partition) ─────────────
-    let r = q(
-        &client,
-        SCOPE_DESK,
-        Some(FilterTree::And(vec![
-            cmp("IsActive", ComparisonOp::Eq, ScalarValue::Boolean(true)),
-            cmp("Points", ComparisonOp::Gt, ScalarValue::Int32(500)),
-        ])),
-        QueryOpts::default(),
-    )
-    .await;
+    // ── 12. Two groups (all server-side, within desk partition) ─────
+    let groups = vec![
+        vec![test("IsActive", Test::Eq(Operand::Boolean(true)))],
+        vec![test("Points", Test::Gt(Operand::Integer(500)))],
+    ];
+    let r = q(&client, SCOPE_DESK, groups, page()).await;
     assert_eq!(r.documents.len(), 2);
     let rks = row_keys(&r);
     assert!(rks.contains(&"alice"));
     assert!(rks.contains(&"charlie"));
-    pass("And: IsActive=true AND Points gt 500 in desk (2)");
+    pass("two groups: IsActive=true AND Points gt 500 in desk (2)");
 
     // ── 13. Edm.Int64 round-trip ────────────────────────────────────
     let charlie_id = encode_id(PK_DESK, "charlie");
@@ -363,112 +330,56 @@ pub async fn main() {
     assert!(missing.is_none(), "non-existent id should return None");
     pass("get non-existent returns None");
 
-    // ── 16–20. Unsupported filters are rejected ─────────────────────
-    let err = q_err(
-        &client,
-        FilterTree::Contains {
-            field: "Name".into(),
-            pattern: "Delta".into(),
-        },
-    )
-    .await;
+    // ── 16–20. Unsupported tests are rejected ───────────────────────
+    let err = q_err(&client, test("Name", Test::Contains("Delta".into()))).await;
     assert!(err.contains("not supported"), "Contains should be rejected: {err}");
     pass("Contains rejected");
 
-    let err = q_err(
-        &client,
-        FilterTree::StartsWith {
-            field: "Name".into(),
-            pattern: "Eve".into(),
-        },
-    )
-    .await;
+    let err = q_err(&client, test("Name", Test::StartsWith("Eve".into()))).await;
     assert!(err.contains("not supported"), "StartsWith should be rejected: {err}");
     pass("StartsWith rejected");
 
-    let err = q_err(
-        &client,
-        FilterTree::EndsWith {
-            field: "Name".into(),
-            pattern: "Burns".into(),
-        },
-    )
-    .await;
+    let err = q_err(&client, test("Name", Test::EndsWith("Burns".into()))).await;
     assert!(err.contains("not supported"), "EndsWith should be rejected: {err}");
     pass("EndsWith rejected");
 
-    let err = q_err(&client, FilterTree::IsNull("Region".into())).await;
-    assert!(err.contains("not supported"), "IsNull should be rejected: {err}");
-    pass("IsNull rejected");
+    let err = q_err(&client, test("Region", Test::Null)).await;
+    assert!(err.contains("not supported"), "Null should be rejected: {err}");
+    pass("Null rejected");
 
-    let err = q_err(&client, FilterTree::IsNotNull("Region".into())).await;
-    assert!(err.contains("not supported"), "IsNotNull should be rejected: {err}");
-    pass("IsNotNull rejected");
+    let err = q_err(&client, not(test("Region", Test::Null))).await;
+    assert!(err.contains("not supported"), "negated Null should be rejected: {err}");
+    pass("negated Null rejected");
 
-    // ── 21. Not (server-side, within desk partition) ─────────────────
-    let r = q(
-        &client,
-        SCOPE_DESK,
-        Some(FilterTree::Not(Box::new(cmp(
-            "IsActive",
-            ComparisonOp::Eq,
-            ScalarValue::Boolean(true),
-        )))),
-        QueryOpts::default(),
-    )
-    .await;
+    // ── 21. Negation (server-side, within desk partition) ───────────
+    let inactive = not(test("IsActive", Test::Eq(Operand::Boolean(true))));
+    let r = q(&client, SCOPE_DESK, vec![vec![inactive]], page()).await;
     assert_eq!(r.documents.len(), 1);
     let rks = row_keys(&r);
     assert!(rks.contains(&"bob"));
-    pass("Not: NOT(IsActive eq true) in desk (1)");
+    pass("negated: NOT(IsActive eq true) in desk (1)");
 
-    // ── 22. Or (server-side, cross-partition) ────────────────────────
-    let r = q(
-        &client,
-        TABLE,
-        Some(FilterTree::Or(vec![
-            cmp("Points", ComparisonOp::Eq, ScalarValue::Int32(200)),
-            cmp("Points", ComparisonOp::Eq, ScalarValue::Int32(150)),
-        ])),
-        QueryOpts::default(),
-    )
-    .await;
+    // ── 22. One group of two (server-side, cross-partition) ─────────
+    let either = vec![vec![
+        test("Points", Test::Eq(Operand::Integer(200))),
+        test("Points", Test::Eq(Operand::Integer(150))),
+    ]];
+    let r = q(&client, TABLE, either, page()).await;
     assert_eq!(r.documents.len(), 2);
     let rks = row_keys(&r);
     assert!(rks.contains(&"bob"));
     assert!(rks.contains(&"eve"));
-    pass("Or: Points=200 OR Points=150 cross-partition (2)");
+    pass("one group: Points=200 OR Points=150 cross-partition (2)");
 
     // ── 23. Limit (within desk partition) ────────────────────────────
-    let r = q(
-        &client,
-        SCOPE_DESK,
-        None,
-        QueryOpts {
-            limit: Some(2),
-            ..Default::default()
-        },
-    )
-    .await;
+    let r = q(&client, SCOPE_DESK, Vec::new(), QueryOpts { limit: 2, ..page() }).await;
     assert_eq!(r.documents.len(), 2);
     pass("limit=2");
 
-    // ── 24. Offset rejected ─────────────────────────────────────────
-    let err = client
-        .query(
-            SCOPE_DESK.into(),
-            None,
-            QueryOpts {
-                offset: Some(1),
-                limit: Some(2),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("offset is not supported"), "offset should be rejected: {err}");
-    pass("offset rejected");
+    // ── 24. ArrayContains rejected ──────────────────────────────────
+    let err = q_err(&client, test("Tags", Test::ArrayContains(text("x")))).await;
+    assert!(err.contains("not supported"), "ArrayContains should be rejected: {err}");
+    pass("ArrayContains rejected");
 
     // ── 25. Edm.Guid + Edm.DateTime via serde annotations ───────────
     let typed = TypedRecord {
@@ -536,7 +447,7 @@ pub async fn main() {
     pass("put + get (verify Points changed to 999)");
 
     // ── 27. Round-trip update from cross-partition query ─────────────
-    let all = q(&client, TABLE, None, QueryOpts::default()).await;
+    let all = q(&client, TABLE, Vec::new(), page()).await;
     let dana = all.documents.iter().find(|d| d.id == encode_id(PK_MOBILE, "dana")).expect("dana");
     let mut dana_body: Value = serde_json::from_slice(&dana.data).expect("parse dana");
     dana_body["Points"] = json!(777);
@@ -609,7 +520,7 @@ pub async fn main() {
     pass("table-only collection accepted for get with composite id");
 
     // ── Teardown ─────────────────────────────────────────────────────
-    let remaining = q(&client, TABLE, None, QueryOpts::default()).await;
+    let remaining = q(&client, TABLE, Vec::new(), page()).await;
     for d in &remaining.documents {
         client.delete(TABLE.into(), d.id.clone()).await.expect("teardown delete");
     }

@@ -18,7 +18,7 @@ use omnia::{Connect, ExitStatus};
 use omnia_azure_table::{Client, encode_id};
 use omnia_test::host::{Backends, Deployment};
 use omnia_wasi_docstore::{
-    ComparisonOp, DocStoreClient, Document, Error, FilterTree, QueryOpts, ScalarValue, SortField,
+    Condition, DocStoreClient, Document, Error, QueryOpts, SortField, Test, Value as Operand,
     WasiDocStore,
 };
 use serde_json::{Value, json};
@@ -42,13 +42,25 @@ fn unique_partition(tag: &str) -> String {
     format!("{tag}-{}-{nanos}", std::process::id())
 }
 
+// the largest page the host asks for
 const fn opts() -> QueryOpts {
     QueryOpts {
         order_by: Vec::new(),
-        limit: None,
-        offset: None,
+        limit: 1000,
         continuation: None,
     }
+}
+
+fn test(field: &str, test: Test) -> Condition {
+    Condition {
+        field: field.to_owned(),
+        test,
+        negated: false,
+    }
+}
+
+fn text(text: &str) -> Operand {
+    Operand::Text(text.to_owned())
 }
 
 // The rows need their collections empty. A deleted table stays unusable
@@ -58,7 +70,7 @@ const fn opts() -> QueryOpts {
 async fn docstore_document_db() -> Result<()> {
     let client = <Client as Connect>::connect().await?;
     for collection in ["insertexists", "portablequery", "optionalquery"] {
-        let stored = client.query(collection.to_owned(), None, opts()).await?;
+        let stored = client.query(collection.to_owned(), Vec::new(), opts()).await?;
         for document in stored.documents {
             client.delete(collection.to_owned(), document.id).await?;
         }
@@ -150,8 +162,8 @@ async fn edm_type() -> Result<()> {
 }
 
 // Server-side filter translation against the real OData layer: comparisons,
-// combinators, and InList expansion; `$top` produces a native continuation
-// token that drains the partition without duplicates.
+// groups, `in` expansion, and negation; `$top` produces a native
+// continuation token that drains the partition without duplicates.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs Azure Table Storage (AZURE_STORAGE_ACCOUNT/KEY); run with --run-ignored"]
 async fn filtered_query() -> Result<()> {
@@ -169,56 +181,38 @@ async fn filtered_query() -> Result<()> {
     }
 
     // Comparison: Points > 3.
-    let filter = FilterTree::Compare {
-        field: "Points".to_owned(),
-        op: ComparisonOp::Gt,
-        value: ScalarValue::Int32(3),
-    };
-    let result = client.query(scoped.clone(), Some(filter), opts()).await?;
+    let filter = vec![vec![test("Points", Test::Gt(Operand::Integer(3)))]];
+    let result = client.query(scoped.clone(), filter, opts()).await?;
     assert_eq!(result.documents.len(), 2, "Points gt 3 matches rows 4 and 5");
 
-    // Combinator + InList: Points >= 2 and Tier in {even}.
-    let filter = FilterTree::And(vec![
-        FilterTree::Compare {
-            field: "Points".to_owned(),
-            op: ComparisonOp::Gte,
-            value: ScalarValue::Int32(2),
-        },
-        FilterTree::InList {
-            field: "Tier".to_owned(),
-            values: vec![ScalarValue::Str("even".to_owned())],
-        },
-    ]);
-    let result = client.query(scoped.clone(), Some(filter), opts()).await?;
-    assert_eq!(result.documents.len(), 2, "rows 2 and 4 are even and >= 2");
+    // Groups: Points >= 2 and (Tier in {even} or Points eq 5).
+    let filter = vec![
+        vec![test("Points", Test::Gte(Operand::Integer(2)))],
+        vec![
+            test("Tier", Test::In(vec![text("even")])),
+            test("Points", Test::Eq(Operand::Integer(5))),
+        ],
+    ];
+    let result = client.query(scoped.clone(), filter, opts()).await?;
+    assert_eq!(result.documents.len(), 3, "rows 2, 4, and 5 are >= 2 and even or 5");
 
     // Negation: not (Tier eq odd).
-    let filter = FilterTree::Not(Box::new(FilterTree::Compare {
-        field: "Tier".to_owned(),
-        op: ComparisonOp::Eq,
-        value: ScalarValue::Str("odd".to_owned()),
-    }));
-    let result = client.query(scoped.clone(), Some(filter), opts()).await?;
+    let odd = Condition {
+        negated: true,
+        ..test("Tier", Test::Eq(text("odd")))
+    };
+    let result = client.query(scoped.clone(), vec![vec![odd]], opts()).await?;
     assert_eq!(result.documents.len(), 2, "negation excludes the three odd rows");
 
     // Pagination: a limit below the partition size yields a native
     // continuation token; following it drains the rest without duplicates.
-    let first = client
-        .query(
-            scoped.clone(),
-            None,
-            QueryOpts {
-                limit: Some(2),
-                ..opts()
-            },
-        )
-        .await?;
+    let first = client.query(scoped.clone(), Vec::new(), QueryOpts { limit: 2, ..opts() }).await?;
     assert_eq!(first.documents.len(), 2, "limit caps the first page");
     let token = first.continuation.expect("a capped page carries a continuation token");
     let rest = client
         .query(
             scoped.clone(),
-            None,
+            Vec::new(),
             QueryOpts {
                 continuation: Some(token),
                 ..opts()
@@ -244,22 +238,16 @@ async fn filtered_query() -> Result<()> {
 #[ignore = "live: needs Azure Table Storage (AZURE_STORAGE_ACCOUNT/KEY); run with --run-ignored"]
 async fn unsupported_query_shapes() -> Result<()> {
     let client = client().await?;
-    let compare = |field: &str, value| FilterTree::Compare {
-        field: field.to_owned(),
-        op: ComparisonOp::Eq,
-        value,
-    };
 
-    for filter in [
-        FilterTree::Contains {
-            field: "Name".to_owned(),
-            pattern: "Ada".to_owned(),
-        },
-        compare("Name", ScalarValue::Null),
-        compare("Meta.x", ScalarValue::Int32(1)),
+    for condition in [
+        test("Name", Test::Contains("Ada".to_owned())),
+        test("Name", Test::Null),
+        test("Meta.x", Test::Eq(Operand::Integer(1))),
+        test("Tags", Test::ArrayContains(text("a"))),
     ] {
-        let shown = format!("{filter:?}");
-        let err = client.query(TABLE.to_owned(), Some(filter), opts()).await.expect_err(&shown);
+        let shown = format!("{condition:?}");
+        let filter = vec![vec![condition]];
+        let err = client.query(TABLE.to_owned(), filter, opts()).await.expect_err(&shown);
         assert!(matches!(err.downcast_ref::<Error>(), Some(Error::Unsupported(_))), "{err:#}");
     }
 
@@ -270,21 +258,7 @@ async fn unsupported_query_shapes() -> Result<()> {
         }],
         ..opts()
     };
-    let skipped = QueryOpts {
-        offset: Some(1),
-        ..opts()
-    };
-    for options in [sorted, skipped] {
-        let shown = format!("{options:?}");
-        let err = client.query(TABLE.to_owned(), None, options).await.expect_err(&shown);
-        assert!(matches!(err.downcast_ref::<Error>(), Some(Error::Unsupported(_))), "{err:#}");
-    }
-
-    let zero = QueryOpts {
-        limit: Some(0),
-        ..opts()
-    };
-    let err = client.query(TABLE.to_owned(), None, zero).await.expect_err("a zero limit ran");
-    assert!(matches!(err.downcast_ref::<Error>(), Some(Error::Invalid(_))), "{err:#}");
+    let err = client.query(TABLE.to_owned(), Vec::new(), sorted).await.expect_err("a sort ran");
+    assert!(matches!(err.downcast_ref::<Error>(), Some(Error::Unsupported(_))), "{err:#}");
     Ok(())
 }

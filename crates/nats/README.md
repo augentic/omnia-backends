@@ -47,7 +47,7 @@ MSRV: Rust 1.100
 - A container is a JetStream object store, which only `create-container` makes.
   Creating one that exists opens it, whatever configuration made it.
 - Opening a store that does not exist fails with
-  `omnia_wasi_blobstore::Error::missing_container`, which reaches a guest as
+  `omnia_wasi_blobstore::missing_container`, which reaches a guest as
   the code `not-found`.
 - Deleting an absent object or store succeeds.
 

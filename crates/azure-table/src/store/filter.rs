@@ -24,12 +24,16 @@ use omnia_wasi_docstore::{Condition, Error, Filter, Test, Value};
 ///   server-side, anywhere in the filter: a [`Test::Null`],
 ///   [`Test::StartsWith`], [`Test::EndsWith`], [`Test::Contains`], or
 ///   [`Test::ArrayContains`], or a dotted field path.
-/// - [`Error::Invalid`] for any other field that is not an identifier.
+/// - [`Error::Invalid`] for an empty group, an [`Test::In`] with no values, or
+///   any other field that is not an identifier.
 pub fn to_odata(filter: &Filter) -> anyhow::Result<Option<String>> {
     let groups = filter
         .iter()
         .map(|group| {
             let conditions = group.iter().map(condition).collect::<anyhow::Result<Vec<_>>>()?;
+            if conditions.is_empty() {
+                bail!(Error::Invalid("a filter group holds no condition".to_owned()));
+            }
             Ok(format!("({})", conditions.join(" or ")))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -48,6 +52,9 @@ fn condition(condition: &Condition) -> anyhow::Result<String> {
         Test::Gt(value) => compare("gt", value),
         Test::Gte(value) => compare("ge", value),
         Test::In(values) => {
+            if values.is_empty() {
+                bail!(Error::Invalid(format!("the `in` on `{field}` holds no values")));
+            }
             let equals: Vec<String> = values.iter().map(|value| compare("eq", value)).collect();
             format!("({})", equals.join(" or "))
         }

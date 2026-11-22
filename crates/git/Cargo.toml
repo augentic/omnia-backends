@@ -20,7 +20,6 @@ all-features = true
 
 [dependencies]
 anyhow.workspace = true
-fromenv.workspace = true
 futures.workspace = true
 libc.workspace = true
 omnia.workspace = true

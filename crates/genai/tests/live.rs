@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use futures::FutureExt as _;
 use omnia::wasmtime::component::Resource;
-use omnia::{Connect as _, FromEnv as _, FutureResult};
+use omnia::{Connect as _, FutureResult};
 use omnia_genai::{Client, ConnectOptions};
 use omnia_wasi_model::{
     Answer, Budget, DirEntry, Exhausted, Format, Function, Grants, Location, Message,

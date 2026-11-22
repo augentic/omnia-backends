@@ -68,7 +68,7 @@ For direct or embedded use, connect it yourself:
 
 ```rust,ignore
 use omnia_azure_blob::Client;
-use omnia::{Connect, FromEnv};
+use omnia::Connect;
 
 let options = omnia_azure_blob::ConnectOptions::load_env()?;
 let client = Client::connect_with(options).await?;

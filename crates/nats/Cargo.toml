@@ -24,7 +24,6 @@ anyhow.workspace = true
 async-nats = { version = "0.52.0", features = ["server_2_11"] }
 bytes.workspace = true
 chrono.workspace = true
-fromenv.workspace = true
 futures.workspace = true
 nkeys = "0.4.5"
 omnia.workspace = true

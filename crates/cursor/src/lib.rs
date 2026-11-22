@@ -9,12 +9,13 @@ mod relay;
 mod worker;
 
 use std::env;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 pub use failure::Failure;
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 pub use omnia_sandbox::Exit;
 pub use protocol::{RpcError, RunStatus};
 use tokio::time::Instant;
@@ -71,79 +72,45 @@ impl Connect for Client {
     }
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use std::path::PathBuf;
-
-    use fromenv::{FromEnv, ParseResult};
-
-    /// Connection options for the cursor backend.
-    #[derive(Debug, Clone, FromEnv)]
-    pub struct ConnectOptions {
-        /// Model id for a request that opens the model `default`; `auto` is
-        /// Cursor's server-side choice.
-        #[env(from = "CURSOR_MODEL", default = "auto")]
-        pub model: String,
-        /// The Cursor backend the client's relay forwards the bridge's API
-        /// calls to, an `http` or `https` URL; the bridge itself is pointed
-        /// at the relay. Set in code alone, Cursor's own backend from the
-        /// environment: nothing in it points the client elsewhere.
-        pub backend_url: String,
-        /// Absolute cap in seconds on one agent run; a correction's send gets
-        /// a fresh cap.
-        #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
-        pub timeout_secs: u64,
-        /// Seconds without stream events before a run waiting on the bridge
-        /// (its opening frame, a tool call) is cancelled; a model composing
-        /// its answer, or a shell command the bridge bounds itself, is
-        /// bounded by `timeout_secs` alone.
-        #[env(from = "CURSOR_INACTIVITY_SECS", default = "120")]
-        pub inactivity_secs: u64,
-        /// Maximum agents live at once.
-        #[env(from = "CURSOR_MAX_AGENTS", default = "8")]
-        pub max_agents: usize,
-        /// Guest tool calls one completion may make before it is ended as
-        /// `exhausted`; the host's default is 32.
-        #[env(from = "CURSOR_MAX_TOOL_CALLS", default = "128")]
-        pub max_tool_calls: u32,
-        /// Trees a lent workspace at or beneath which runs with a shell,
-        /// `:`-separated and relative to the invocation directory; a
-        /// workspace lent elsewhere is read-only. What a worker reaches
-        /// beyond its workspace — hosts, `~/` roots, variables — is the
-        /// `worker` grant of the completion's lend, held to the sandbox's
-        /// own rules and to nothing of the deployment's.
-        #[env(from = "CURSOR_SHELL_ROOTS", default = "", with = paths)]
-        pub shell_roots: Vec<PathBuf>,
-    }
-
-    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
-    fn paths(s: &str) -> ParseResult<Vec<PathBuf>> {
-        Ok(std::env::split_paths(s).filter(|path| !path.as_os_str().is_empty()).collect())
-    }
-}
-pub use config::ConnectOptions;
-
-impl Default for ConnectOptions {
-    fn default() -> Self {
-        Self {
-            model: "auto".to_owned(),
-            backend_url: relay::BACKEND_URL.to_owned(),
-            timeout_secs: 600,
-            inactivity_secs: 120,
-            max_agents: 8,
-            max_tool_calls: 128,
-            shell_roots: Vec::new(),
-        }
-    }
-}
-
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> Result<Self> {
-        Self::from_env()
-            .backend_url(relay::BACKEND_URL.to_owned())
-            .finalize()
-            .context("issue loading connection options")
-    }
+/// Connection options for the cursor backend.
+#[derive(Debug, Clone, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// Model id for a request that opens the model `default`; `auto` is
+    /// Cursor's server-side choice.
+    #[env(from = "CURSOR_MODEL", default = "auto")]
+    pub model: String,
+    /// The Cursor backend the client's relay forwards the bridge's API
+    /// calls to, an `http` or `https` URL; the bridge itself is pointed
+    /// at the relay. Set in code alone, Cursor's own backend from the
+    /// environment: nothing in it points the client elsewhere.
+    #[env(default = "https://api2.cursor.sh")]
+    pub backend_url: String,
+    /// Absolute cap in seconds on one agent run; a correction's send gets
+    /// a fresh cap.
+    #[env(from = "CURSOR_TIMEOUT_SECS", default = "600")]
+    pub timeout_secs: u64,
+    /// Seconds without stream events before a run waiting on the bridge
+    /// (its opening frame, a tool call) is cancelled; a model composing
+    /// its answer, or a shell command the bridge bounds itself, is
+    /// bounded by `timeout_secs` alone.
+    #[env(from = "CURSOR_INACTIVITY_SECS", default = "120")]
+    pub inactivity_secs: u64,
+    /// Maximum agents live at once.
+    #[env(from = "CURSOR_MAX_AGENTS", default = "8")]
+    pub max_agents: usize,
+    /// Guest tool calls one completion may make before it is ended as
+    /// `exhausted`; the host's default is 32.
+    #[env(from = "CURSOR_MAX_TOOL_CALLS", default = "128")]
+    pub max_tool_calls: u32,
+    /// Trees a lent workspace at or beneath which runs with a shell,
+    /// `:`-separated and relative to the invocation directory; a
+    /// workspace lent elsewhere is read-only. What a worker reaches
+    /// beyond its workspace — hosts, `~/` roots, variables — is the
+    /// `worker` grant of the completion's lend, held to the sandbox's
+    /// own rules and to nothing of the deployment's.
+    #[env(from = "CURSOR_SHELL_ROOTS", default = "", with = omnia::env::paths)]
+    pub shell_roots: Vec<PathBuf>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

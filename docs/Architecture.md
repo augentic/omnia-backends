@@ -133,10 +133,13 @@ This workspace consumes the `omnia` runtime as published crates.io dependencies,
 
 ## Configuration
 
-All backends configure themselves from environment variables through the `FromEnv` derive:
+Backends configure themselves from environment variables through omnia's `FromEnv` derive. A crate reaches the derive through `omnia`, so it names that root in `#[env(crate = omnia)]`:
 
 ```rust
+use omnia::FromEnv;
+
 #[derive(Debug, Clone, FromEnv)]
+#[env(crate = omnia)]
 pub struct ConnectOptions {
     #[env(from = "REDIS_URL", default = "redis://localhost:6379")]
     pub url: String,
@@ -144,6 +147,13 @@ pub struct ConnectOptions {
     pub max_retries: usize,
 }
 ```
+
+The derive emits:
+
+- `FromEnv`, which `Connect::connect()` calls;
+- `with_env`, which applies the variables an operator sets over options built in code;
+- `load_from`, which loads through a lookup in place of the environment;
+- `Default`, where every field has a `default` or is an `Option`.
 
 Each crate's README documents its variable set.
 
@@ -161,7 +171,7 @@ cargo nextest run -p <crate> --run-ignored all   # with the service + credential
 ## Adding a New Backend
 
 1. Create `crates/<name>/`
-2. Implement the `Connect` trait with a `FromEnv`-derived `ConnectOptions`
+2. Implement the `Connect` trait with a `ConnectOptions` that derives `omnia::FromEnv` under `#[env(crate = omnia)]`
 3. Implement the `XxxClient` contract trait(s) for the interfaces it serves
 4. Add `#[ignore]`-gated live tests in `tests/live.rs` and document the run recipe in the crate README
 5. Add example(s) under `examples/` if the backend benefits from an end-to-end demo

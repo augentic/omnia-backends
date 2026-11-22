@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 use tracing::instrument;
 
 /// Filesystem backend for `omnia:blobstore` and `wasi:keyvalue`.
@@ -57,37 +57,16 @@ impl Connect for Client {
     }
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use fromenv::{FromEnv, ParseResult};
-
-    /// Connection options for the filesystem backend.
-    #[derive(Clone, Debug, FromEnv)]
-    pub struct ConnectOptions {
-        /// Root directory of the store; created when absent.
-        #[env(from = "FILESYSTEM_ROOT", default = ".omnia/storage")]
-        pub root: String,
-        /// Key-value buckets a guest may open, comma-separated.
-        #[env(from = "KEYVALUE_BUCKETS", default = "default", with = comma_separated)]
-        pub buckets: Vec<String>,
-    }
-
-    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
-    fn comma_separated(value: &str) -> ParseResult<Vec<String>> {
-        Ok(value
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(ToOwned::to_owned)
-            .collect())
-    }
-}
-pub use config::ConnectOptions;
-
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> Result<Self> {
-        Self::from_env().finalize().context("issue loading connection options")
-    }
+/// Connection options for the filesystem backend.
+#[derive(Clone, Debug, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// Root directory of the store; created when absent.
+    #[env(from = "FILESYSTEM_ROOT", default = ".omnia/storage")]
+    pub root: String,
+    /// Key-value buckets a guest may open, comma-separated.
+    #[env(from = "KEYVALUE_BUCKETS", default = "default", with = omnia::env::list)]
+    pub buckets: Vec<String>,
 }
 
 fn blocking<T: Send + 'static>(

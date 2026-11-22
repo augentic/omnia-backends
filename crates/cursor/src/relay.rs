@@ -44,8 +44,6 @@ use tokio::time;
 
 type Body = BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
 
-// Cursor's backend, the default `ConnectOptions::backend_url`.
-pub const BACKEND_URL: &str = "https://api2.cursor.sh";
 const REST_API: &str = "https://api.cursor.com";
 
 // The bound loopback relay; dropping it stops serving, in-flight connections

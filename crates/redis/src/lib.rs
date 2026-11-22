@@ -3,12 +3,12 @@
 mod keyvalue;
 
 use std::collections::HashSet;
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use tracing::instrument;
 
@@ -50,54 +50,31 @@ impl Connect for Client {
     }
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use std::fmt;
-
-    use fromenv::{FromEnv, ParseResult};
-
-    /// Connection options for the Redis backend.
-    #[derive(Clone, FromEnv)]
-    pub struct ConnectOptions {
-        /// Redis connection URL.
-        #[env(from = "REDIS_URL", default = "redis://localhost:6379")]
-        pub url: String,
-        /// Maximum number of reconnection retries.
-        #[env(from = "REDIS_MAX_RETRIES", default = "3")]
-        pub max_retries: usize,
-        /// Maximum backoff delay in milliseconds.
-        #[env(from = "REDIS_MAX_DELAY", default = "1000")]
-        pub max_delay: u64,
-        /// Buckets a guest may open, comma-separated.
-        #[env(from = "KEYVALUE_BUCKETS", default = "default", with = comma_separated)]
-        pub buckets: Vec<String>,
-    }
-
-    impl fmt::Debug for ConnectOptions {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("ConnectOptions")
-                .field("url", &"<redacted>")
-                .field("max_retries", &self.max_retries)
-                .field("max_delay", &self.max_delay)
-                .field("buckets", &self.buckets)
-                .finish()
-        }
-    }
-
-    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
-    fn comma_separated(value: &str) -> ParseResult<Vec<String>> {
-        Ok(value
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(ToOwned::to_owned)
-            .collect())
-    }
+/// Connection options for the Redis backend.
+#[derive(Clone, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// Redis connection URL.
+    #[env(from = "REDIS_URL", default = "redis://localhost:6379")]
+    pub url: String,
+    /// Maximum number of reconnection retries.
+    #[env(from = "REDIS_MAX_RETRIES", default = "3")]
+    pub max_retries: usize,
+    /// Maximum backoff delay in milliseconds.
+    #[env(from = "REDIS_MAX_DELAY", default = "1000")]
+    pub max_delay: u64,
+    /// Buckets a guest may open, comma-separated.
+    #[env(from = "KEYVALUE_BUCKETS", default = "default", with = omnia::env::list)]
+    pub buckets: Vec<String>,
 }
-pub use config::ConnectOptions;
 
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> Result<Self> {
-        Self::from_env().finalize().context("issue loading connection options")
+impl Debug for ConnectOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectOptions")
+            .field("url", &"<redacted>")
+            .field("max_retries", &self.max_retries)
+            .field("max_delay", &self.max_delay)
+            .field("buckets", &self.buckets)
+            .finish()
     }
 }

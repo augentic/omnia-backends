@@ -2,10 +2,10 @@
 
 mod blobstore;
 
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 
 use anyhow::{Context, Result};
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 use tracing::instrument;
 
 /// MongoDB blobstore backend client.
@@ -32,30 +32,17 @@ impl Connect for Client {
     }
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use std::fmt;
-
-    use fromenv::FromEnv;
-
-    /// Connection options for the MongoDB backend.
-    #[derive(Clone, FromEnv)]
-    pub struct ConnectOptions {
-        /// MongoDB connection URI (must include a default database).
-        #[env(from = "MONGODB_URL")]
-        pub uri: String,
-    }
-
-    impl fmt::Debug for ConnectOptions {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("ConnectOptions").field("uri", &"<redacted>").finish()
-        }
-    }
+/// Connection options for the MongoDB backend.
+#[derive(Clone, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// MongoDB connection URI (must include a default database).
+    #[env(from = "MONGODB_URL")]
+    pub uri: String,
 }
-pub use config::ConnectOptions;
 
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> Result<Self> {
-        Self::from_env().finalize().context("issue loading connection options")
+impl Debug for ConnectOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectOptions").field("uri", &"<redacted>").finish()
     }
 }

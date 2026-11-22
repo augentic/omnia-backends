@@ -140,6 +140,19 @@ Unreleased
 - `omnia-genai` sets the provider's reasoning effort from a request's
   `effort`. Genai's own levels, such as `minimal` or `xhigh`, pass through
   `other`, and any level genai does not know fails with `invalid`.
+- **Breaking:** the options of every backend but `omnia-postgres` and
+  `omnia-azure-id` derive omnia's `FromEnv` in place of `fromenv`'s. That
+  covers each `ConnectOptions` and the `ConsumerOptions`, `RegistryOptions`,
+  and `CredentialOptions` it nests:
+  - the builder goes: `from_env()`, the `*Builder` it returned with a setter
+    per field and `finalize()`, and `requirements()`;
+  - `with_env` applies the environment over options built in code, and
+    `load_from` loads through a lookup;
+  - a load fails with one error naming every variable that is unset or does
+    not parse, and no error prints a value;
+  - a value that is not valid Unicode is invalid, where it read as unset;
+  - the `ConnectOptions` of `omnia-azure-vault`, `omnia-filesystem`,
+    `omnia-nats`, `omnia-opentelemetry`, and `omnia-redis` gain `Default`.
 
 ---
 

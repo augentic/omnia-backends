@@ -7,13 +7,14 @@ mod request;
 mod shell;
 mod tools;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use genai::ServiceTarget;
 use genai::resolver::{Endpoint, ServiceTargetResolver};
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 use omnia_sandbox::{Options, Sandbox};
 use tokio::time::Instant;
 use tracing::instrument;
@@ -88,69 +89,57 @@ impl Connect for Client {
     }
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use std::path::PathBuf;
-
-    use fromenv::{FromEnv, ParseResult};
-
-    /// Connection options for the genai backend.
+/// Connection options for the genai backend.
+///
+/// Provider API keys are read from the ambient environment per request,
+/// routed by the model ID's prefix.
+#[derive(Debug, Clone, PartialEq, Eq, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// Model ID for a request that opens the model `default`.
+    #[env(from = "GENAI_MODEL", default = "gpt-5.5")]
+    pub model: String,
+    /// Base URL override for a self-hosted gateway or proxy.
     ///
-    /// Provider API keys are read from the ambient environment per request,
-    /// routed by the model ID's prefix.
-    #[derive(Debug, Clone, PartialEq, Eq, FromEnv)]
-    pub struct ConnectOptions {
-        /// Model ID for a request that opens the model `default`.
-        #[env(from = "GENAI_MODEL", default = "gpt-5.5")]
-        pub model: String,
-        /// Base URL override for a self-hosted gateway or proxy.
-        ///
-        /// Requests keep the wire format and API key of the provider selected
-        /// by the model ID.
-        #[env(from = "GENAI_ENDPOINT")]
-        pub endpoint: Option<String>,
-        /// Colon-separated directories under which a lent workspace gets a
-        /// sandboxed `shell` tool.
-        ///
-        /// Workspaces outside these roots are read-only. When empty, no
-        /// sandbox is initialized and worker grants are refused.
-        #[env(from = "GENAI_SHELL_ROOTS", default = "", with = paths)]
-        pub shell_roots: Vec<PathBuf>,
-        /// Maximum provider round-trips per completion before it is
-        /// `exhausted`.
-        #[env(from = "GENAI_MAX_ROUNDS", default = "128")]
-        pub max_rounds: u32,
-        /// Maximum guest tool calls per completion before it is `exhausted`.
-        #[env(from = "GENAI_MAX_TOOL_CALLS", default = "128")]
-        pub max_tool_calls: u32,
-        /// Maximum candidate answers offered to the guest's `check`.
-        ///
-        /// Rejecting the final candidate ends the completion as `exhausted`,
-        /// carrying the guest's correction.
-        #[env(from = "GENAI_MAX_CANDIDATES", default = "2")]
-        pub max_candidates: u32,
-        /// Maximum identical tool-call failures before the completion is
-        /// `exhausted`.
-        #[env(from = "GENAI_MAX_REPEATS", default = "5")]
-        pub max_repeats: u32,
-        /// Default per-round `max_tokens` when the request leaves it unset.
-        #[env(from = "GENAI_MAX_TOKENS", default = "32768")]
-        pub max_tokens: u32,
-        /// Timeout in seconds for producing each candidate reply, including
-        /// tool rounds.
-        #[env(from = "GENAI_TIMEOUT_SECS", default = "600")]
-        pub timeout_secs: u64,
-        /// Timeout in seconds for a single `shell` command.
-        #[env(from = "GENAI_SHELL_TIMEOUT_SECS", default = "600")]
-        pub shell_timeout_secs: u64,
-    }
-
-    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
-    fn paths(s: &str) -> ParseResult<Vec<PathBuf>> {
-        Ok(std::env::split_paths(s).filter(|path| !path.as_os_str().is_empty()).collect())
-    }
+    /// Requests keep the wire format and API key of the provider selected
+    /// by the model ID.
+    #[env(from = "GENAI_ENDPOINT")]
+    pub endpoint: Option<String>,
+    /// Colon-separated directories under which a lent workspace gets a
+    /// sandboxed `shell` tool.
+    ///
+    /// Workspaces outside these roots are read-only. When empty, no
+    /// sandbox is initialized and worker grants are refused.
+    #[env(from = "GENAI_SHELL_ROOTS", default = "", with = omnia::env::paths)]
+    pub shell_roots: Vec<PathBuf>,
+    /// Maximum provider round-trips per completion before it is
+    /// `exhausted`.
+    #[env(from = "GENAI_MAX_ROUNDS", default = "128")]
+    pub max_rounds: u32,
+    /// Maximum guest tool calls per completion before it is `exhausted`.
+    #[env(from = "GENAI_MAX_TOOL_CALLS", default = "128")]
+    pub max_tool_calls: u32,
+    /// Maximum candidate answers offered to the guest's `check`.
+    ///
+    /// Rejecting the final candidate ends the completion as `exhausted`,
+    /// carrying the guest's correction.
+    #[env(from = "GENAI_MAX_CANDIDATES", default = "2")]
+    pub max_candidates: u32,
+    /// Maximum identical tool-call failures before the completion is
+    /// `exhausted`.
+    #[env(from = "GENAI_MAX_REPEATS", default = "5")]
+    pub max_repeats: u32,
+    /// Default per-round `max_tokens` when the request leaves it unset.
+    #[env(from = "GENAI_MAX_TOKENS", default = "32768")]
+    pub max_tokens: u32,
+    /// Timeout in seconds for producing each candidate reply, including
+    /// tool rounds.
+    #[env(from = "GENAI_TIMEOUT_SECS", default = "600")]
+    pub timeout_secs: u64,
+    /// Timeout in seconds for a single `shell` command.
+    #[env(from = "GENAI_SHELL_TIMEOUT_SECS", default = "600")]
+    pub shell_timeout_secs: u64,
 }
-pub use config::ConnectOptions;
 
 // Stay under uvicorn's 5s keep-alive timeout to avoid racing server-side close.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -187,29 +176,6 @@ impl ConnectOptions {
             .with_service_target_resolver(resolver)
             .build()
             .context("failed to create genai client with custom endpoint")
-    }
-}
-
-impl Default for ConnectOptions {
-    fn default() -> Self {
-        Self {
-            model: "gpt-5.5".to_owned(),
-            endpoint: None,
-            shell_roots: Vec::new(),
-            max_rounds: 128,
-            max_tool_calls: 128,
-            max_candidates: 2,
-            max_repeats: 5,
-            max_tokens: 32_768,
-            timeout_secs: 600,
-            shell_timeout_secs: 600,
-        }
-    }
-}
-
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> Result<Self> {
-        Self::from_env().finalize().context("issue loading connection options")
     }
 }
 

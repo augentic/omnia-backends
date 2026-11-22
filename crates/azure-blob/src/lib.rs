@@ -3,7 +3,7 @@
 mod blobstore;
 mod plugin;
 
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -11,7 +11,7 @@ use azure_core::credentials::TokenCredential;
 use azure_core::http::Url;
 use azure_identity::{ClientSecretCredential, DeveloperToolsCredential};
 use azure_storage_blob::BlobServiceClient;
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 use tracing::instrument;
 
 // The package store's own container: `PackageStore` writes it, the
@@ -57,52 +57,40 @@ impl Connect for Client {
     }
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use std::fmt;
+/// Connection options for the Azure Blob Storage backend.
+#[derive(Clone, Debug, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// Storage account endpoint URL.
+    #[env(from = "AZURE_BLOB_ENDPOINT")]
+    pub endpoint: String,
 
-    use fromenv::FromEnv;
-
-    /// Connection options for the Azure Blob Storage backend.
-    #[derive(Clone, Debug, FromEnv)]
-    pub struct ConnectOptions {
-        /// Storage account endpoint URL.
-        #[env(from = "AZURE_BLOB_ENDPOINT")]
-        pub endpoint: String,
-
-        /// Optional service principal credentials (falls back to developer tools).
-        #[env(nested)]
-        pub credential: Option<CredentialOptions>,
-    }
-
-    /// Azure service principal credential fields.
-    #[derive(Clone, FromEnv)]
-    pub struct CredentialOptions {
-        /// Azure AD tenant identifier.
-        #[env(from = "AZURE_TENANT_ID")]
-        pub tenant_id: String,
-        /// Azure AD application (client) identifier.
-        #[env(from = "AZURE_CLIENT_ID")]
-        pub client_id: String,
-        /// Azure AD application secret.
-        #[env(from = "AZURE_CLIENT_SECRET")]
-        pub client_secret: String,
-    }
-
-    impl fmt::Debug for CredentialOptions {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("CredentialOptions")
-                .field("tenant_id", &self.tenant_id)
-                .field("client_id", &self.client_id)
-                .field("client_secret", &"<redacted>")
-                .finish()
-        }
-    }
+    /// Optional service principal credentials (falls back to developer tools).
+    #[env(nested)]
+    pub credential: Option<CredentialOptions>,
 }
-pub use config::{ConnectOptions, CredentialOptions};
 
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> Result<Self> {
-        Self::from_env().finalize().context("issue loading azure blob connection options")
+/// Azure service principal credential fields.
+#[derive(Clone, FromEnv)]
+#[env(crate = omnia)]
+pub struct CredentialOptions {
+    /// Azure AD tenant identifier.
+    #[env(from = "AZURE_TENANT_ID")]
+    pub tenant_id: String,
+    /// Azure AD application (client) identifier.
+    #[env(from = "AZURE_CLIENT_ID")]
+    pub client_id: String,
+    /// Azure AD application secret.
+    #[env(from = "AZURE_CLIENT_SECRET")]
+    pub client_secret: String,
+}
+
+impl Debug for CredentialOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialOptions")
+            .field("tenant_id", &self.tenant_id)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .finish()
     }
 }

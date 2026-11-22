@@ -24,7 +24,6 @@ all-features = true
 anyhow.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-fromenv.workspace = true
 futures.workspace = true
 mongodb = "3.10.1"
 omnia.workspace = true

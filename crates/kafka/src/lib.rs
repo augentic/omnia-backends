@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 use rand::random_range;
 use rdkafka::consumer::Consumer;
 use rdkafka::producer::{DeliveryResult, Producer, ProducerContext, ThreadedProducer};
@@ -135,133 +135,107 @@ impl Drop for Inner {
     }
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use std::fmt;
-
-    use fromenv::{FromEnv, ParseResult};
-
-    use crate::partitioner::PartitionerScheme;
-
-    /// Connection options for the Kafka backend.
-    #[derive(Clone, FromEnv)]
-    pub struct ConnectOptions {
-        /// Client identifier prefix (suffixed with a random number). The
-        /// runtime no longer writes `COMPONENT` into the process environment,
-        /// so set it explicitly for per-deployment client ids.
-        #[env(from = "COMPONENT", default = "omnia")]
-        pub client_id: String,
-        /// Comma-separated broker addresses.
-        #[env(from = "KAFKA_BROKERS")]
-        pub brokers: String,
-        /// SASL username (enables `SASL_SSL` when set with password).
-        #[env(from = "KAFKA_USERNAME")]
-        pub username: Option<String>,
-        /// SASL password.
-        #[env(from = "KAFKA_PASSWORD")]
-        pub password: Option<String>,
-        /// Partition count for custom partitioner.
-        #[env(from = "KAFKA_PARTITION_COUNT", default = "12")]
-        pub partition_count: i32,
-        /// Key-to-partition scheme when a send has no `metadata["partition"]`.
-        #[env(from = "KAFKA_PARTITIONER", default = "kafkajs", with = partitioner)]
-        pub partitioner: PartitionerScheme,
-        /// How often processed offsets are committed, in milliseconds.
-        #[env(from = "KAFKA_COMMIT_INTERVAL_MS", default = "200")]
-        pub commit_interval_ms: u64,
-        /// Optional prefix prepended to every produced and consumed topic, and
-        /// stripped from each delivered record's topic before it reaches the host.
-        #[env(from = "KAFKA_TOPIC_PREFIX")]
-        pub topic_prefix: Option<String>,
-        /// Optional consumer configuration.
-        #[env(nested)]
-        pub consumer: Option<ConsumerOptions>,
-        /// Optional Schema Registry configuration.
-        #[env(nested)]
-        pub registry: Option<RegistryOptions>,
-    }
-
-    impl fmt::Debug for ConnectOptions {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("ConnectOptions")
-                .field("client_id", &self.client_id)
-                .field("brokers", &self.brokers)
-                .field("username", &self.username)
-                .field("password", &self.password.as_ref().map(|_| "<redacted>"))
-                .field("partition_count", &self.partition_count)
-                .field("partitioner", &self.partitioner)
-                .field("commit_interval_ms", &self.commit_interval_ms)
-                .field("topic_prefix", &self.topic_prefix)
-                .field("consumer", &self.consumer)
-                .field("registry", &self.registry)
-                .finish()
-        }
-    }
-
-    /// Kafka consumer configuration.
-    #[derive(Debug, Clone, FromEnv)]
-    pub struct ConsumerOptions {
-        /// Comma-separated topics to subscribe to.
-        #[env(from = "KAFKA_TOPICS", with = split)]
-        pub topics: Vec<String>,
-        /// Consumer group ID.
-        #[env(from = "KAFKA_CONSUMER_GROUP", default = "wrt-kafka-consumer")]
-        pub group_id: String,
-    }
-
-    /// Confluent Schema Registry configuration.
-    #[derive(Clone, FromEnv)]
-    pub struct RegistryOptions {
-        /// Schema Registry URL.
-        #[env(from = "KAFKA_REGISTRY_URL")]
-        pub url: String,
-        /// Optional Schema Registry API key.
-        #[env(from = "KAFKA_REGISTRY_API_KEY")]
-        pub api_key: Option<String>,
-        /// Optional Schema Registry API secret.
-        #[env(from = "KAFKA_REGISTRY_API_SECRET")]
-        pub api_secret: Option<String>,
-    }
-
-    impl fmt::Debug for RegistryOptions {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("RegistryOptions")
-                .field("url", &self.url)
-                .field("api_key", &self.api_key)
-                .field("api_secret", &self.api_secret.as_ref().map(|_| "<redacted>"))
-                .finish()
-        }
-    }
-
-    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
-    fn split(s: &str) -> ParseResult<Vec<String>> {
-        Ok(s.split(',')
-            .map(str::trim)
-            .filter(|topic| !topic.is_empty())
-            .map(ToOwned::to_owned)
-            .collect())
-    }
-
-    fn partitioner(value: &str) -> ParseResult<PartitionerScheme> {
-        match value {
-            "kafkajs" => Ok(PartitionerScheme::KafkaJs),
-            "java" => Ok(PartitionerScheme::Java),
-            other => Err(UnknownPartitioner(other.to_owned()).into()),
-        }
-    }
-
-    #[derive(Debug)]
-    struct UnknownPartitioner(String);
-
-    impl std::fmt::Display for UnknownPartitioner {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "unknown KAFKA_PARTITIONER `{}`", self.0)
-        }
-    }
-
-    impl std::error::Error for UnknownPartitioner {}
+/// Connection options for the Kafka backend.
+#[derive(Clone, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// Client identifier prefix (suffixed with a random number). The
+    /// runtime no longer writes `COMPONENT` into the process environment,
+    /// so set it explicitly for per-deployment client ids.
+    #[env(from = "COMPONENT", default = "omnia")]
+    pub client_id: String,
+    /// Comma-separated broker addresses.
+    #[env(from = "KAFKA_BROKERS")]
+    pub brokers: String,
+    /// SASL username (enables `SASL_SSL` when set with password).
+    #[env(from = "KAFKA_USERNAME")]
+    pub username: Option<String>,
+    /// SASL password.
+    #[env(from = "KAFKA_PASSWORD")]
+    pub password: Option<String>,
+    /// Partition count for custom partitioner.
+    #[env(from = "KAFKA_PARTITION_COUNT", default = "12")]
+    pub partition_count: i32,
+    /// Key-to-partition scheme when a send has no `metadata["partition"]`.
+    #[env(from = "KAFKA_PARTITIONER", default = "kafkajs", with = partitioner)]
+    pub partitioner: PartitionerScheme,
+    /// How often processed offsets are committed, in milliseconds.
+    #[env(from = "KAFKA_COMMIT_INTERVAL_MS", default = "200")]
+    pub commit_interval_ms: u64,
+    /// Optional prefix prepended to every produced and consumed topic, and
+    /// stripped from each delivered record's topic before it reaches the host.
+    #[env(from = "KAFKA_TOPIC_PREFIX")]
+    pub topic_prefix: Option<String>,
+    /// Optional consumer configuration.
+    #[env(nested)]
+    pub consumer: Option<ConsumerOptions>,
+    /// Optional Schema Registry configuration.
+    #[env(nested)]
+    pub registry: Option<RegistryOptions>,
 }
-pub use config::{ConnectOptions, ConsumerOptions, RegistryOptions};
+
+impl Debug for ConnectOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectOptions")
+            .field("client_id", &self.client_id)
+            .field("brokers", &self.brokers)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("partition_count", &self.partition_count)
+            .field("partitioner", &self.partitioner)
+            .field("commit_interval_ms", &self.commit_interval_ms)
+            .field("topic_prefix", &self.topic_prefix)
+            .field("consumer", &self.consumer)
+            .field("registry", &self.registry)
+            .finish()
+    }
+}
+
+/// Kafka consumer configuration.
+#[derive(Debug, Clone, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConsumerOptions {
+    /// Comma-separated topics to subscribe to.
+    #[env(from = "KAFKA_TOPICS", with = omnia::env::list)]
+    pub topics: Vec<String>,
+    /// Consumer group ID.
+    #[env(from = "KAFKA_CONSUMER_GROUP", default = "wrt-kafka-consumer")]
+    pub group_id: String,
+}
+
+/// Confluent Schema Registry configuration.
+#[derive(Clone, FromEnv)]
+#[env(crate = omnia)]
+pub struct RegistryOptions {
+    /// Schema Registry URL.
+    #[env(from = "KAFKA_REGISTRY_URL")]
+    pub url: String,
+    /// Optional Schema Registry API key.
+    #[env(from = "KAFKA_REGISTRY_API_KEY")]
+    pub api_key: Option<String>,
+    /// Optional Schema Registry API secret.
+    #[env(from = "KAFKA_REGISTRY_API_SECRET")]
+    pub api_secret: Option<String>,
+}
+
+impl Debug for RegistryOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegistryOptions")
+            .field("url", &self.url)
+            .field("api_key", &self.api_key)
+            .field("api_secret", &self.api_secret.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+fn partitioner(value: &str) -> Result<PartitionerScheme, &'static str> {
+    match value {
+        "kafkajs" => Ok(PartitionerScheme::KafkaJs),
+        "java" => Ok(PartitionerScheme::Java),
+        _ => Err("expected `kafkajs` or `java`"),
+    }
+}
+
 pub use partitioner::PartitionerScheme;
 
 impl From<&ConnectOptions> for ClientConfig {
@@ -282,12 +256,6 @@ impl From<&ConnectOptions> for ClientConfig {
         }
 
         config
-    }
-}
-
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> Result<Self> {
-        Self::from_env().finalize().context("issue loading connection options")
     }
 }
 

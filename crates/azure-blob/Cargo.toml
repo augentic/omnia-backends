@@ -26,7 +26,6 @@ azure_core.workspace = true
 azure_identity.workspace = true
 azure_storage_blob.workspace = true
 bytes.workspace = true
-fromenv.workspace = true
 futures.workspace = true
 omnia.workspace = true
 omnia-plugin.workspace = true

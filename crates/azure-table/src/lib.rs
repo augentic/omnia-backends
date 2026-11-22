@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64ct::{Base64, Encoding};
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -49,56 +49,46 @@ impl Connect for Client {
     }
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use fromenv::FromEnv;
+/// Azure Table connection options.
+#[derive(Clone, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// Storage account name.
+    #[env(from = "AZURE_STORAGE_ACCOUNT")]
+    pub name: String,
 
-    /// Azure Table connection options.
-    #[derive(Clone, FromEnv)]
-    pub struct ConnectOptions {
-        /// Storage account name.
-        #[env(from = "AZURE_STORAGE_ACCOUNT")]
-        pub name: String,
+    /// Storage account access key.
+    #[env(from = "AZURE_STORAGE_KEY")]
+    pub key: String,
 
-        /// Storage account access key.
-        #[env(from = "AZURE_STORAGE_KEY")]
-        pub key: String,
+    /// Table service endpoint URL. When empty (the default), the Azure
+    /// public cloud URL `https://{name}.table.core.windows.net` is used.
+    /// Set to `http://127.0.0.1:10002/{name}` for Azurite, or to a
+    /// sovereign-cloud / Azure Stack endpoint as needed.
+    #[env(from = "AZURE_TABLE_ENDPOINT", default = "")]
+    pub endpoint: String,
+}
 
-        /// Table service endpoint URL. When empty (the default), the Azure
-        /// public cloud URL `https://{name}.table.core.windows.net` is used.
-        /// Set to `http://127.0.0.1:10002/{name}` for Azurite, or to a
-        /// sovereign-cloud / Azure Stack endpoint as needed.
-        #[env(from = "AZURE_TABLE_ENDPOINT", default = "")]
-        pub endpoint: String,
+impl Debug for ConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectOptions")
+            .field("name", &self.name)
+            .field("endpoint", &self.endpoint)
+            .field("key", &"<redacted>")
+            .finish()
     }
+}
 
-    impl std::fmt::Debug for ConnectOptions {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("ConnectOptions")
-                .field("name", &self.name)
-                .field("endpoint", &self.endpoint)
-                .field("key", &"<redacted>")
-                .finish()
-        }
-    }
-
-    impl ConnectOptions {
-        /// Resolved base URL for the table service (no trailing slash).
-        #[must_use]
-        pub fn base_url(&self) -> String {
-            if self.endpoint.is_empty() {
-                format!("https://{}.table.core.windows.net", self.name)
-            } else {
-                self.endpoint.trim_end_matches('/').to_owned()
-            }
+impl ConnectOptions {
+    /// Resolved base URL for the table service (no trailing slash).
+    #[must_use]
+    pub fn base_url(&self) -> String {
+        if self.endpoint.is_empty() {
+            format!("https://{}.table.core.windows.net", self.name)
+        } else {
+            self.endpoint.trim_end_matches('/').to_owned()
         }
     }
 }
-pub use config::ConnectOptions;
+
 pub use store::document::{decode_id, encode_id};
-
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> anyhow::Result<Self> {
-        Self::from_env().finalize().context("issue loading azure table connection options")
-    }
-}

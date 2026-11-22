@@ -9,7 +9,7 @@ use std::path::{self, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context as _, Result, ensure};
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 use omnia_wasi_vcs::Place;
 use tracing::instrument;
 
@@ -108,30 +108,11 @@ fn leading_number(part: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use fromenv::FromEnv;
-
-    /// Connection options for the git backend.
-    #[derive(Clone, Debug, FromEnv)]
-    pub struct ConnectOptions {
-        /// The git to run: a name on `PATH` or a path.
-        #[env(from = "GIT_BINARY", default = "git")]
-        pub binary: String,
-    }
-}
-pub use config::ConnectOptions;
-
-impl Default for ConnectOptions {
-    fn default() -> Self {
-        Self {
-            binary: "git".to_owned(),
-        }
-    }
-}
-
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> Result<Self> {
-        Self::from_env().finalize().context("issue loading connection options")
-    }
+/// Connection options for the git backend.
+#[derive(Clone, Debug, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// The git to run: a name on `PATH` or a path.
+    #[env(from = "GIT_BINARY", default = "git")]
+    pub binary: String,
 }

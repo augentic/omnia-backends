@@ -103,7 +103,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::{Connect, FromEnv};
+use omnia::Connect;
 use omnia_kafka::Client;
 
 let options = omnia_kafka::ConnectOptions::load_env()?;

@@ -5,7 +5,7 @@ mod otel;
 use std::fmt::Debug;
 
 use anyhow::{Context, Result};
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
 use opentelemetry_proto::tonic::collector::trace::v1::trace_service_client::TraceServiceClient;
 use tonic::transport::Channel;
@@ -48,23 +48,12 @@ impl Connect for Client {
     }
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use fromenv::FromEnv;
-
-    /// Connection options for the OpenTelemetry backend.
-    #[derive(Debug, Clone, FromEnv)]
-    pub struct ConnectOptions {
-        /// gRPC endpoint URL for the OpenTelemetry Collector: OpenTelemetry's
-        /// own variable, the one the omnia host exports its spans to.
-        #[env(from = "OTEL_EXPORTER_OTLP_ENDPOINT", default = "http://localhost:4317")]
-        pub grpc_url: String,
-    }
-}
-pub use config::ConnectOptions;
-
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> Result<Self> {
-        Self::from_env().finalize().context("issue loading connection options")
-    }
+/// Connection options for the OpenTelemetry backend.
+#[derive(Debug, Clone, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// gRPC endpoint URL for the OpenTelemetry Collector: OpenTelemetry's
+    /// own variable, the one the omnia host exports its spans to.
+    #[env(from = "OTEL_EXPORTER_OTLP_ENDPOINT", default = "http://localhost:4317")]
+    pub grpc_url: String,
 }

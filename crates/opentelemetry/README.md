@@ -34,7 +34,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::{Connect, FromEnv};
+use omnia::Connect;
 use omnia_opentelemetry::Client;
 
 let options = omnia_opentelemetry::ConnectOptions::load_env()?;

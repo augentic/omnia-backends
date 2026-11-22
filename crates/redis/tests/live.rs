@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use omnia::{Connect as _, ExitStatus, FromEnv as _};
+use omnia::{Connect as _, ExitStatus};
 use omnia_redis::{Client, ConnectOptions};
 use omnia_test::host::{Backends, Deployment};
 use omnia_wasi_keyvalue::{

@@ -60,7 +60,7 @@ omnia::runtime!({
 For direct or embedded use, connect it yourself:
 
 ```rust,ignore
-use omnia::{Connect, FromEnv};
+use omnia::Connect;
 use omnia_redis::Client;
 
 let options = omnia_redis::ConnectOptions::load_env()?;

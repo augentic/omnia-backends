@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use async_nats::{AuthError, jetstream};
-use omnia::Connect;
+use omnia::{Connect, FromEnv};
 use tracing::instrument;
 
 /// NATS backend client for messaging, key-value, and blobstore.
@@ -72,68 +72,46 @@ impl Connect for Client {
     }
 }
 
-#[expect(missing_docs, reason = "`FromEnv` has no docs")]
-mod config {
-    use std::fmt;
-
-    use fromenv::{FromEnv, ParseResult};
-
-    /// Connection options for the NATS backend.
-    #[derive(Clone, FromEnv)]
-    pub struct ConnectOptions {
-        /// NATS server address.
-        #[env(from = "NATS_ADDR", default = "demo.nats.io")]
-        pub address: String,
-        /// Optional topics for subscription mode.
-        #[env(from = "NATS_TOPICS", with = split)]
-        pub topics: Option<Vec<String>>,
-        /// Optional prefix prepended to every published and subscribed topic,
-        /// and stripped from each delivered message's subject before it reaches
-        /// the host.
-        #[env(from = "NATS_TOPIC_PREFIX")]
-        pub topic_prefix: Option<String>,
-        /// Optional JWT used for NATS authentication.
-        #[env(from = "NATS_JWT")]
-        pub jwt: Option<String>,
-        /// Optional `NKey` seed used to sign server nonce challenges.
-        #[env(from = "NATS_SEED")]
-        pub seed: Option<String>,
-        /// Bucket-wide max age in seconds, applied to each JetStream KV bucket
-        /// this client creates (`NATS_KV_MAX_AGE_SECS`, default none).
-        #[env(from = "NATS_KV_MAX_AGE_SECS")]
-        pub kv_max_age_secs: Option<u64>,
-        /// Key-value buckets a guest may open, comma-separated.
-        #[env(from = "KEYVALUE_BUCKETS", default = "default", with = split)]
-        pub buckets: Vec<String>,
-    }
-
-    impl fmt::Debug for ConnectOptions {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("ConnectOptions")
-                .field("address", &self.address)
-                .field("topics", &self.topics)
-                .field("topic_prefix", &self.topic_prefix)
-                .field("jwt", &self.jwt.as_ref().map(|_| "<redacted>"))
-                .field("seed", &self.seed.as_ref().map(|_| "<redacted>"))
-                .field("kv_max_age_secs", &self.kv_max_age_secs)
-                .field("buckets", &self.buckets)
-                .finish()
-        }
-    }
-
-    #[expect(clippy::unnecessary_wraps, reason = "a `FromEnv` `with =` hook returns `ParseResult`")]
-    fn split(s: &str) -> ParseResult<Vec<String>> {
-        Ok(s.split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(ToOwned::to_owned)
-            .collect())
-    }
+/// Connection options for the NATS backend.
+#[derive(Clone, FromEnv)]
+#[env(crate = omnia)]
+pub struct ConnectOptions {
+    /// NATS server address.
+    #[env(from = "NATS_ADDR", default = "demo.nats.io")]
+    pub address: String,
+    /// Optional topics for subscription mode.
+    #[env(from = "NATS_TOPICS", with = omnia::env::list)]
+    pub topics: Option<Vec<String>>,
+    /// Optional prefix prepended to every published and subscribed topic,
+    /// and stripped from each delivered message's subject before it reaches
+    /// the host.
+    #[env(from = "NATS_TOPIC_PREFIX")]
+    pub topic_prefix: Option<String>,
+    /// Optional JWT used for NATS authentication.
+    #[env(from = "NATS_JWT")]
+    pub jwt: Option<String>,
+    /// Optional `NKey` seed used to sign server nonce challenges.
+    #[env(from = "NATS_SEED")]
+    pub seed: Option<String>,
+    /// Bucket-wide max age in seconds, applied to each JetStream KV bucket
+    /// this client creates (`NATS_KV_MAX_AGE_SECS`, default none).
+    #[env(from = "NATS_KV_MAX_AGE_SECS")]
+    pub kv_max_age_secs: Option<u64>,
+    /// Key-value buckets a guest may open, comma-separated.
+    #[env(from = "KEYVALUE_BUCKETS", default = "default", with = omnia::env::list)]
+    pub buckets: Vec<String>,
 }
-pub use config::ConnectOptions;
 
-impl omnia::FromEnv for ConnectOptions {
-    fn load_env() -> Result<Self> {
-        Self::from_env().finalize().context("issue loading connection options")
+impl fmt::Debug for ConnectOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectOptions")
+            .field("address", &self.address)
+            .field("topics", &self.topics)
+            .field("topic_prefix", &self.topic_prefix)
+            .field("jwt", &self.jwt.as_ref().map(|_| "<redacted>"))
+            .field("seed", &self.seed.as_ref().map(|_| "<redacted>"))
+            .field("kv_max_age_secs", &self.kv_max_age_secs)
+            .field("buckets", &self.buckets)
+            .finish()
     }
 }

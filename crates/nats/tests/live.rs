@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use anyhow::{Result, ensure};
 use async_nats::jetstream::{self, kv};
-use omnia::{Connect, ExitStatus, FromEnv as _};
+use omnia::{Connect, ExitStatus};
 use omnia_nats::{Client, ConnectOptions};
 use omnia_test::host::{Backends, Deployment};
 use omnia_wasi_blobstore::{BlobStoreClient, WasiBlobStore};

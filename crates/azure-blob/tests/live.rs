@@ -88,7 +88,6 @@ async fn delete_stored(reference: &omnia_plugin::Reference) -> Result<()> {
     use azure_core::credentials::{Secret, TokenCredential};
     use azure_identity::{ClientSecretCredential, DeveloperToolsCredential};
     use azure_storage_blob::BlobServiceClient;
-    use omnia::FromEnv as _;
     use omnia_azure_blob::ConnectOptions;
 
     let options = ConnectOptions::load_env()?;

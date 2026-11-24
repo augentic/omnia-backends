@@ -13,6 +13,8 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: read
+  copilot-requests: write
 
 jobs:
   patch:

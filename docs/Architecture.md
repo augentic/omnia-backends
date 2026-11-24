@@ -129,7 +129,7 @@ omnia::runtime!({
 
 At startup the generated code calls each backend's `connect()` (reading its environment variables), links every WASI interface into the shared linker, and starts the trigger servers. See the [Production Backends guide](https://github.com/augentic/omnia/blob/main/docs/guides/production-backends.md) for the full walk-through.
 
-This workspace consumes the `omnia` runtime as published crates.io dependencies, declared once under `[workspace.dependencies]` in the workspace `Cargo.toml` (currently the 0.38.0 line). Each release of this repository pairs with one omnia line; see [RELEASES.md](../RELEASES.md).
+This workspace consumes the `omnia` runtime as published crates.io dependencies, declared once under `[workspace.dependencies]` in the workspace `Cargo.toml` (currently the 0.38.1 line). Each release of this repository pairs with one omnia line; see [RELEASES.md](../RELEASES.md).
 
 ## Configuration
 

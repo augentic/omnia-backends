@@ -25,9 +25,6 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
-[policy.omnia]
-audit-as-crates-io = false
-
 [policy.omnia-azure-blob]
 audit-as-crates-io = false
 
@@ -38,12 +35,6 @@ audit-as-crates-io = false
 audit-as-crates-io = false
 
 [policy.omnia-azure-vault]
-audit-as-crates-io = false
-
-[policy.omnia-cli]
-audit-as-crates-io = false
-
-[policy.omnia-core]
 audit-as-crates-io = false
 
 [policy.omnia-cursor]
@@ -58,16 +49,7 @@ audit-as-crates-io = false
 [policy.omnia-git]
 audit-as-crates-io = false
 
-[policy.omnia-guest-macros]
-audit-as-crates-io = false
-
-[policy.omnia-host-macros]
-audit-as-crates-io = false
-
 [policy.omnia-kafka]
-audit-as-crates-io = false
-
-[policy.omnia-link]
 audit-as-crates-io = false
 
 [policy.omnia-mongodb]
@@ -79,9 +61,6 @@ audit-as-crates-io = false
 [policy.omnia-opentelemetry]
 audit-as-crates-io = false
 
-[policy.omnia-plugin]
-audit-as-crates-io = false
-
 [policy.omnia-postgres]
 audit-as-crates-io = false
 
@@ -89,48 +68,6 @@ audit-as-crates-io = false
 audit-as-crates-io = false
 
 [policy.omnia-sandbox]
-audit-as-crates-io = false
-
-[policy.omnia-sdk]
-audit-as-crates-io = false
-
-[policy.omnia-test]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-blobstore]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-config]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-docstore]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-http]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-identity]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-keyvalue]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-messaging]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-model]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-otel]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-sql]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-vault]
-audit-as-crates-io = false
-
-[policy.omnia-wasi-websocket]
 audit-as-crates-io = false
 
 [[exemptions.addr2line]]
@@ -870,7 +807,7 @@ version = "0.1.25"
 criteria = "safe-to-deploy"
 
 [[exemptions.libsqlite3-sys]]
-version = "0.39.1"
+version = "0.40.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.libz-sys]]
@@ -1039,6 +976,102 @@ criteria = "safe-to-deploy"
 
 [[exemptions.olpc-cjson]]
 version = "0.1.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-cli]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-compile]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-core]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-guest-macros]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-host-macros]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-link]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-plugin]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-sdk]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-test]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-blobstore]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-config]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-docstore]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-http]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-identity]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-keyvalue]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-messaging]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-model]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-otel]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-sql]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-types]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-vault]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-vcs]]
+version = "0.38.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.omnia-wasi-websocket]]
+version = "0.38.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.once_cell]]
@@ -1306,7 +1339,7 @@ version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rusqlite]]
-version = "0.41.1"
+version = "0.43.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustc-hash]]

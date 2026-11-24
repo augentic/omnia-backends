@@ -154,6 +154,32 @@ Unreleased
   - the `ConnectOptions` of `omnia-azure-vault`, `omnia-filesystem`,
     `omnia-nats`, `omnia-opentelemetry`, and `omnia-redis` gain `Default`.
 
+<!-- Release notes generated using configuration in .github/release.yaml at 23d9b2581dd5cbe384786c0142f0e454410b52dc -->
+
+## What's Changed
+* Bump to 0.32.0 by @andrewweston in https://github.com/augentic/omnia-backends/pull/159
+* Fixes from last eval run by @andrewweston in https://github.com/augentic/omnia-backends/pull/160
+* Support for qwen3-coder dense model by @andrewweston in https://github.com/augentic/omnia-backends/pull/161
+* Improve SLM observability by @andrewweston in https://github.com/augentic/omnia-backends/pull/162
+* Cleanup genai after SML evals by @andrewweston in https://github.com/augentic/omnia-backends/pull/164
+* Release idle Postgres connections  by @karthik-phl in https://github.com/augentic/omnia-backends/pull/165
+* Add Dapr support by @andrewweston in https://github.com/augentic/omnia-backends/pull/172
+* Simplify codegen by @andrewweston in https://github.com/augentic/omnia-backends/pull/173
+* Update deps by @andrewweston in https://github.com/augentic/omnia-backends/pull/174
+* Code hygine by @andrewweston in https://github.com/augentic/omnia-backends/pull/175
+* Simplify capabilities by @andrewweston in https://github.com/augentic/omnia-backends/pull/176
+* Migrate to wasip3 by @andrewweston in https://github.com/augentic/omnia-backends/pull/177
+* Fix the Audit workflow's outdated check by @andrewweston in https://github.com/augentic/omnia-backends/pull/178
+* Omnia WIT upgrade by @andrewweston in https://github.com/augentic/omnia-backends/pull/180
+* Reshape SDK around WIT changes by @andrewweston in https://github.com/augentic/omnia-backends/pull/181
+* Post-SDK refactor improvements by @andrewweston in https://github.com/augentic/omnia-backends/pull/182
+* Fix filter bug by @andrewweston in https://github.com/augentic/omnia-backends/pull/183
+* Switch to omnia fromenv by @andrewweston in https://github.com/augentic/omnia-backends/pull/184
+* Prepare for 0.32.0 release by @andrew-goldie in https://github.com/augentic/omnia-backends/pull/188
+
+
+**Full Changelog**: https://github.com/augentic/omnia-backends/compare/v0.31.0...v0.32.0
+
 ---
 
 Release notes for previous releases can be found on the respective release

@@ -2,18 +2,33 @@
 
 Unreleased
 
+Pairs with omnia 0.38.x.
+
 ### Added
 
 - `omnia-kafka` (`KAFKA_TOPIC_PREFIX`) and `omnia-nats`
-  (`NATS_TOPIC_PREFIX`): optional topic prefix prepended on produce and
-  subscribe and stripped from each delivered message's topic before it
-  reaches the host, so guests speak logical topic names across environments.
+  (`NATS_TOPIC_PREFIX`), via `ConnectOptions::topic_prefix`: optional topic
+  prefix prepended on produce and subscribe and stripped from each delivered
+  message's topic before it reaches the host, so guests speak logical topic
+  names across environments.
+- `omnia-nats` (`NATS_KV_MAX_AGE_SECS`, `ConnectOptions::kv_max_age_secs`):
+  optional max age in seconds applied to each JetStream KV bucket the client
+  creates, capping every entry's lifetime even when set without a TTL.
+- `omnia-genai` (`GENAI_MAX_TOKENS`, `ConnectOptions::max_tokens`, default
+  `32768`): default per-round `max_tokens` when a request leaves `max_tokens`
+  unset. When a reply is cut at the token bound, its tool calls are refused
+  rather than run, and `cut` is counted on the `round answered` and
+  `completion` events.
 
 ### Changed
 
 - **Breaking:** MSRV is Rust 1.100. The guest-side members, `test-programs`
   and `examples`, build for `wasm32-wasip3`, because omnia 0.38 runs WASI 0.3
-  guests alone.
+  guests alone. Wasmtime is 51.0.0.
+- **Breaking:** every backend `Client` implements `omnia::Connect` in place
+  of `omnia::Backend`, and each capability's `*Client` contract trait in
+  place of `Wasi*Ctx`. In `omnia::runtime!`,
+  `omnia_wasi_blobstore::WasiBlobStore` replaces `WasiBlobstore`.
 - **Breaking:** the Redis, NATS, and filesystem key-value backends implement
   the revisioned, TTL-aware `Bucket` of `omnia:keyvalue`, under one set of
   rules:
@@ -78,6 +93,9 @@ Unreleased
   transaction. A failing statement, or a batch dropped before it commits,
   rolls the whole batch back. A database name the deployment does not
   declare fails with `not-found`.
+- `omnia-postgres` opens pooled connections on demand, closes connections
+  idle past a minute, and checks each connection on checkout so one dropped
+  by the server or network is replaced rather than handed out.
 - **Breaking:** `omnia-azure-table` accepts a plain document id, stored as
   the `PartitionKey` with an empty `RowKey`, and composite ids keep
   working. Other changes:
@@ -88,7 +106,8 @@ Unreleased
   - `order_by` fails with `unsupported` instead of being ignored.
   - A query's filter arrives as the groups of conditions `omnia:docstore`
     defines. Each group's conditions join with `or` and the groups with
-    `and`, and a negated condition is wrapped in `not (...)`.
+    `and`, and a negated condition is wrapped in `not (...)`. An empty group
+    or an `in` with no values fails with `invalid`.
   - An `array-contains` test fails with `unsupported`, as the host refused
     it before.
 - Postgres and Azure Table failures carry typed error kinds. A malformed
@@ -140,6 +159,14 @@ Unreleased
 - `omnia-genai` sets the provider's reasoning effort from a request's
   `effort`. Genai's own levels, such as `minimal` or `xhigh`, pass through
   `other`, and any level genai does not know fails with `invalid`.
+- `omnia-genai` caps each tool result sent to the model at 64 kibibytes,
+  keeping its head and tail with the omitted byte count between them.
+- `omnia-genai` retries a provider request that fails at the transport
+  before any reply up to three times (after 1, 5, and 15 seconds, counted as
+  `retries` on `completion`), and drops pooled connections after 2 seconds
+  idle.
+- `omnia-git` reports a remote authentication, permission, or host-key
+  refusal as `denied`, leaving `access` for a remote that cannot be reached.
 - **Breaking:** the options of every backend but `omnia-postgres` and
   `omnia-azure-id` derive omnia's `FromEnv` in place of `fromenv`'s. That
   covers each `ConnectOptions` and the `ConsumerOptions`, `RegistryOptions`,
@@ -153,32 +180,6 @@ Unreleased
   - a value that is not valid Unicode is invalid, where it read as unset;
   - the `ConnectOptions` of `omnia-azure-vault`, `omnia-filesystem`,
     `omnia-nats`, `omnia-opentelemetry`, and `omnia-redis` gain `Default`.
-
-<!-- Release notes generated using configuration in .github/release.yaml at 23d9b2581dd5cbe384786c0142f0e454410b52dc -->
-
-## What's Changed
-* Bump to 0.32.0 by @andrewweston in https://github.com/augentic/omnia-backends/pull/159
-* Fixes from last eval run by @andrewweston in https://github.com/augentic/omnia-backends/pull/160
-* Support for qwen3-coder dense model by @andrewweston in https://github.com/augentic/omnia-backends/pull/161
-* Improve SLM observability by @andrewweston in https://github.com/augentic/omnia-backends/pull/162
-* Cleanup genai after SML evals by @andrewweston in https://github.com/augentic/omnia-backends/pull/164
-* Release idle Postgres connections  by @karthik-phl in https://github.com/augentic/omnia-backends/pull/165
-* Add Dapr support by @andrewweston in https://github.com/augentic/omnia-backends/pull/172
-* Simplify codegen by @andrewweston in https://github.com/augentic/omnia-backends/pull/173
-* Update deps by @andrewweston in https://github.com/augentic/omnia-backends/pull/174
-* Code hygine by @andrewweston in https://github.com/augentic/omnia-backends/pull/175
-* Simplify capabilities by @andrewweston in https://github.com/augentic/omnia-backends/pull/176
-* Migrate to wasip3 by @andrewweston in https://github.com/augentic/omnia-backends/pull/177
-* Fix the Audit workflow's outdated check by @andrewweston in https://github.com/augentic/omnia-backends/pull/178
-* Omnia WIT upgrade by @andrewweston in https://github.com/augentic/omnia-backends/pull/180
-* Reshape SDK around WIT changes by @andrewweston in https://github.com/augentic/omnia-backends/pull/181
-* Post-SDK refactor improvements by @andrewweston in https://github.com/augentic/omnia-backends/pull/182
-* Fix filter bug by @andrewweston in https://github.com/augentic/omnia-backends/pull/183
-* Switch to omnia fromenv by @andrewweston in https://github.com/augentic/omnia-backends/pull/184
-* Prepare for 0.32.0 release by @andrew-goldie in https://github.com/augentic/omnia-backends/pull/188
-
-
-**Full Changelog**: https://github.com/augentic/omnia-backends/compare/v0.31.0...v0.32.0
 
 ---
 

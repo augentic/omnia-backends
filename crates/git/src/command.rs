@@ -12,6 +12,7 @@
 //! forks — a credential helper, `ssh`, a merge driver — opens no terminal
 //! and never outlives the operation that started it.
 
+mod frozen;
 mod pins;
 
 use std::borrow::Cow;
@@ -26,7 +27,8 @@ use omnia_wasi_vcs::Place;
 use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessSession};
 use tokio::process::Command;
 
-pub use self::pins::Pins;
+pub use self::frozen::Frozen;
+pub use self::pins::{Listing, Pins};
 use crate::Client;
 
 // The repository selection a shell exports; left in place, it would point
@@ -75,7 +77,7 @@ impl Client {
     // `env` set on top of the fixed interactive lockout, and wait for it; a
     // failure here is the spawn's, never git's own exit.
     pub(crate) async fn git<I, S>(
-        &self, at: Option<&Place>, args: I, env: &[(&str, &str)],
+        &self, at: Option<&Place>, args: I, env: &[(&str, &OsStr)],
     ) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
@@ -102,7 +104,7 @@ impl Client {
         for var in SCRUBBED {
             command.env_remove(var);
         }
-        for (key, value) in FIXED.iter().chain(env) {
+        for (key, value) in FIXED.map(|(key, value)| (key, OsStr::new(value))).iter().chain(env) {
             command.env(key, value);
         }
 

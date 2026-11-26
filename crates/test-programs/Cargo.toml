@@ -137,6 +137,11 @@ path = "programs/vcs/matrix.rs"
 crate-type = ["cdylib"]
 
 [[example]]
+name = "vcs_planted"
+path = "programs/vcs/planted.rs"
+crate-type = ["cdylib"]
+
+[[example]]
 name = "vcs_refusals"
 path = "programs/vcs/refusals.rs"
 crate-type = ["cdylib"]

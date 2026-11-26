@@ -7,20 +7,22 @@
 //! - Worktree settings and an enclosing repository.
 //! - URL rewrites, proxies, and disabled TLS verification.
 //! - SSH, remote pack commands, and a promisor remote.
+//! - Bundle URIs, the repository's own and one an origin advertises.
 //! - Configuration keys whose raw bytes cannot be pinned.
 //! - A bare repository nested inside a sealed repository.
 //!
 //! The guest runs the operations that would trigger each vector. The host
 //! verifies that no marker ran, no data or credentials escaped the place,
-//! SSH received only Git's expected commands, the enclosing repository was
-//! untouched, and valid work still completed.
+//! no bundle of the host's reached a repository, SSH received only Git's
+//! expected commands, the enclosing repository was untouched, and valid
+//! work still completed.
 
 #![cfg(target_arch = "wasm32")]
 
 use std::fs;
 
 use omnia_sdk::vcs::{self, CommitId, Workspace};
-use test_programs::fails_with;
+use test_programs::{arguments, fails_with};
 
 omnia_sdk::command::export!(scenario);
 
@@ -31,15 +33,19 @@ const REWRITER: &str = "./rewriter";
 const PROXIED: &str = "./proxied";
 const PACKER: &str = "./packer";
 const LAZY: &str = "./lazy";
+const BUNDLED: &str = "./bundled";
 const BYTES: &str = "./bytes";
 const INNER: &str = "./outer/inner";
 
 async fn scenario() {
+    let arguments = arguments();
+    let bundling = arguments.first().expect("the bundling origin's URL is the first argument");
     repo_config_runs_nothing().await;
     a_failed_merge_leaves_no_merge().await;
     a_shaping_repository_is_refused().await;
     a_repository_names_no_pack_program().await;
     a_lazy_fetch_reaches_no_command().await;
+    a_clone_takes_no_advertised_bundle(bundling).await;
     an_unnameable_key_is_refused().await;
     an_enclosing_repository_is_not_reached().await;
 }
@@ -91,6 +97,14 @@ async fn a_lazy_fetch_reaches_no_command() {
     assert!(added.is_err(), "a blob only the promisor could supply: {added:?}");
 }
 
+// The origin advertises a bundle file on the host, and the host's own
+// configuration asks a clone to take advertised bundles; the clone lands
+// from the origin alone.
+async fn a_clone_takes_no_advertised_bundle(url: &str) {
+    let cloned = vcs::clone(url, BUNDLED, None).await;
+    cloned.expect("clone").expect("a new workspace");
+}
+
 // One repository's `url.<local>.insteadOf=https://` would turn its `https`
 // remote into a local path the protocol rule then lets through; another's
 // `http.proxy` with `http.sslVerify=false` would carry the host's credentials
@@ -111,6 +125,10 @@ async fn repo_config_runs_nothing() {
     let repo = open(REPO).await;
     let head = head(&repo).await;
 
+    // a revision naming an index path reads the index, and runs no fsmonitor
+    let indexed = repo.resolve(":a.txt".to_owned()).await.expect("resolve");
+    assert_eq!(indexed, None, "an index path names no commit");
+
     // a working copy checked out of the hostile repository runs no smudge
     repo.add(WORK, &head).await.expect("add").expect("a new workspace");
 
@@ -126,7 +144,8 @@ async fn repo_config_runs_nothing() {
 
     // a push runs neither the client's receive-pack nor the origin's hooks or
     // alternate-refs command, signs no certificate the origin asks for, and a
-    // fetch runs no alternate-refs command of the repository's own
+    // fetch runs no alternate-refs command of the repository's own and takes
+    // no bundle it names
     let moved = repo.set_bookmark("emery/hardened".to_owned(), sealed, None).await;
     moved.expect("bookmark").expect("no precondition to fail");
     repo.push("origin", "emery/hardened").await.expect("push").expect("a forward push");

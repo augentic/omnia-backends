@@ -9,6 +9,7 @@
 //! tests): `cargo nextest run -p omnia-kafka --run-ignored all`.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +30,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 const RECV_TIMEOUT: Duration = Duration::from_mins(1);
+
+// A handler bound past the backend's own, which then holds alone.
+const UNBOUNDED: NonZeroUsize = NonZeroUsize::MAX;
 
 // A produce case: payload, message metadata, and the expected partition.
 type Case = (&'static str, Vec<(&'static str, &'static str)>, i32);
@@ -117,12 +121,15 @@ fn keyed_message(payload: &str, metadata: &[(&str, &str)]) -> Message {
 // The host's side of the seam. Every delivery reaches the test with the
 // sender its outcome goes back through; a delivery the test never decides
 // stays with the handler, as a guest that never returns would.
-struct Recorder(mpsc::UnboundedSender<Delivery>);
+struct Recorder {
+    sender: mpsc::UnboundedSender<Delivery>,
+    bound: NonZeroUsize,
+}
 
 impl Handler for Recorder {
     fn handle(&self, message: Message) -> BoxFuture<'static, Result<(), HandleError>> {
         let (outcome, decided) = oneshot::channel();
-        let _ = self.0.send(Delivery { message, outcome });
+        let _ = self.sender.send(Delivery { message, outcome });
         async move {
             match decided.await {
                 Ok(outcome) => outcome,
@@ -130,6 +137,10 @@ impl Handler for Recorder {
             }
         }
         .boxed()
+    }
+
+    fn max_in_flight(&self) -> NonZeroUsize {
+        self.bound
     }
 }
 
@@ -162,18 +173,18 @@ impl Delivery {
     }
 }
 
-// A running `consume` over a `Recorder`. The backend consumer starts from
-// the latest offset, so `start` returns once it is assigned and a caller
-// can produce.
+// A running `consume` over a `Recorder` that takes at most `bound` records
+// at once. The backend consumer starts from the latest offset, so `start`
+// returns once it is assigned and a caller can produce.
 struct Consuming {
     deliveries: mpsc::UnboundedReceiver<Delivery>,
     task: JoinHandle<Result<()>>,
 }
 
 impl Consuming {
-    async fn start(client: &Arc<dyn Endpoint>) -> Self {
-        let (recorder, deliveries) = mpsc::unbounded_channel();
-        let task = tokio::spawn(client.consume(Arc::new(Recorder(recorder))));
+    async fn start(client: &Arc<dyn Endpoint>, bound: NonZeroUsize) -> Self {
+        let (sender, deliveries) = mpsc::unbounded_channel();
+        let task = tokio::spawn(client.consume(Arc::new(Recorder { sender, bound })));
         tokio::time::sleep(Duration::from_secs(8)).await;
         Self { deliveries, task }
     }
@@ -331,7 +342,7 @@ impl RegistrySubscriber {
         );
         let backend = Client::connect_with(options).await?;
         let client: Arc<dyn Endpoint> = MessagingClient::endpoint(&backend).await?;
-        let consuming = Consuming::start(&client).await;
+        let consuming = Consuming::start(&client, UNBOUNDED).await;
 
         Ok(Self {
             client,
@@ -457,8 +468,8 @@ async fn wait_offset(group: &str, topic: &str, expected: i64) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a reachable Kafka broker (KAFKA_BROKERS); run with --run-ignored"]
 async fn at_least_once() -> Result<()> {
-    // matches `consume::IN_FLIGHT`
-    const BOUND: usize = 64;
+    // the handler's, below the backend's own 64, so it is the bound held
+    const BOUND: usize = 8;
 
     let topic = unique("omnia.live.offsets");
     create_topic(&topic, 1).await?;
@@ -474,15 +485,15 @@ async fn at_least_once() -> Result<()> {
     ))
     .await?;
     let client: Arc<dyn Endpoint> = MessagingClient::endpoint(&backend).await?;
-    let mut consuming = Consuming::start(&client).await;
+    let bound = NonZeroUsize::new(BOUND).context("a bound")?;
+    let mut consuming = Consuming::start(&client, bound).await;
 
-    // 64 distinct keys in flight, a second record for k0 waiting behind the
-    // first, and one more record that waits until a slot frees.
+    // `BOUND` distinct keys in flight, a second record for k0 waiting behind
+    // the first, and one more record that waits until a slot frees.
     let mut produced = vec![("k0".to_owned(), "p0".to_owned()), ("k0".to_owned(), "p1".to_owned())];
-    for index in 1..BOUND {
+    for index in 1..=BOUND {
         produced.push((format!("k{index}"), format!("p{}", index + 1)));
     }
-    produced.push(("k64".to_owned(), "p65".to_owned()));
     for (key, payload) in &produced {
         client.send(topic.clone(), keyed_message(payload, &[("key", key)])).await?;
     }
@@ -515,7 +526,7 @@ async fn at_least_once() -> Result<()> {
     freed.sort_by_key(Delivery::offset);
     assert_eq!(freed[0].payload(), b"p1", "k0's second record follows its first");
     assert_eq!(freed[0].key(), "k0");
-    assert_eq!(freed[1].payload(), b"p65", "the record past the bound takes the freed slot");
+    assert_eq!(freed[1].key(), format!("k{BOUND}"), "the record past the bound takes the slot");
     held.extend(freed);
 
     for record in held {

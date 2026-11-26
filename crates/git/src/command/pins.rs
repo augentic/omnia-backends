@@ -28,6 +28,7 @@ use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use anyhow::Result;
 use omnia_wasi_vcs::{Error, Place};
 
+use super::Address;
 use crate::Client;
 
 // Keys forced on every operation whatever scope set them: each names a
@@ -138,27 +139,36 @@ fn os(bytes: &[u8]) -> OsString {
 }
 
 // The `-c` overrides and the environment that hold one repository's
-// operations to host policy, and the first setting the repository made of
-// how a transport runs, if any, which no pin can undo.
+// operations to host policy, the first setting the repository made of how a
+// transport runs, if any, which no pin can undo, and the first remote URL it
+// set across lines, if any.
 #[derive(Debug)]
 pub struct Pins {
     overrides: Vec<OsString>,
     env: Vec<(&'static str, OsString)>,
     blocked_transport_key: Option<String>,
+    split_url_key: Option<String>,
 }
 
 impl Pins {
     pub fn build(listing: &Listing) -> Self {
         let settings = &listing.settings;
 
-        // a URL rewrite, an HTTP setting, or a proxy the repository set would
-        // carry the operator's credentials anywhere or over anything, and is
-        // config no `-c` can put back to unset; the first is named for the
-        // transport operations to refuse the repository on
+        // a URL rewrite, an HTTP setting, a proxy, or a remote helper the
+        // repository set would carry the operator's credentials anywhere or
+        // over anything, and is config no `-c` can put back to unset; the
+        // first is named for the transport operations to refuse the
+        // repository on
         let blocked_transport_key = settings
             .iter()
             .find(|s| s.is_repo() && s.is_transport_override())
             .map(|s| s.key.clone());
+
+        // git dials a remote URL the repository set across lines whole, where
+        // `remote get-url` lists it as two, so no address read from that list
+        // is the one git dials; the first is named the same way
+        let split_url_key =
+            settings.iter().find(|s| s.is_repo() && s.is_split_url()).map(|s| s.key.clone());
 
         let mut overrides: Vec<OsString> = FORCED.iter().map(OsString::from).collect();
 
@@ -186,6 +196,7 @@ impl Pins {
             overrides,
             env: listing.operator_env(),
             blocked_transport_key,
+            split_url_key,
         }
     }
 
@@ -196,6 +207,7 @@ impl Pins {
             overrides: FORCED.iter().map(OsString::from).collect(),
             env: Vec::new(),
             blocked_transport_key: None,
+            split_url_key: None,
         }
     }
 
@@ -211,9 +223,16 @@ impl Pins {
     }
 
     // The first key the repository itself set of how a transport runs — a
-    // URL rewrite, an HTTP setting, a proxy — as git lists it.
+    // URL rewrite, an HTTP setting, a proxy, a remote helper — as git lists
+    // it.
     pub fn blocked_transport_key(&self) -> Option<&str> {
         self.blocked_transport_key.as_deref()
+    }
+
+    // The first remote URL the repository itself set across lines, as git
+    // lists its key.
+    pub fn split_url_key(&self) -> Option<&str> {
+        self.split_url_key.as_deref()
     }
 }
 
@@ -267,14 +286,24 @@ impl Setting {
     }
 
     // `url.<base>.insteadOf` / `pushInsteadOf`; `http.*` and `http.<url>.*`
-    // beyond the tuning keys; `remote.<name>.proxy` / `proxyAuthMethod`.
+    // beyond the tuning keys; `remote.<name>.proxy` / `proxyAuthMethod` /
+    // `vcs`, the last naming a remote helper that reads the URL its own way.
     fn is_transport_override(&self) -> bool {
         let Some((named, last)) = self.key.rsplit_once('.') else { return false };
         let rewrite = named.starts_with("url.") && matches!(last, "insteadof" | "pushinsteadof");
         let http =
             (named == "http" || named.starts_with("http.")) && !ALLOWED_HTTP_KEYS.contains(&last);
-        let proxy = named.starts_with("remote.") && matches!(last, "proxy" | "proxyauthmethod");
-        rewrite || http || proxy
+        let remote =
+            named.starts_with("remote.") && matches!(last, "proxy" | "proxyauthmethod" | "vcs");
+        rewrite || http || remote
+    }
+
+    // `remote.<name>.url` / `pushurl` holding a line break.
+    fn is_split_url(&self) -> bool {
+        let Some((named, last)) = self.key.rsplit_once('.') else { return false };
+        named.starts_with("remote.")
+            && matches!(last, "url" | "pushurl")
+            && self.value.as_deref().is_some_and(|value| value.contains(&b'\n'))
     }
 }
 
@@ -330,7 +359,7 @@ impl Client {
     // `LOCAL_PACK_PINS`; for a remote one, git's own default.
     pub(crate) fn transport_args(&self, address: &str, push: bool) -> (&'static str, String) {
         let operation = if push { "receive-pack" } else { "upload-pack" };
-        if is_local(address) {
+        if Address::parse(address).is_local() {
             ("file", self.pack_arg(operation))
         } else {
             ("http:https:ssh", format!("--{operation}=git-{operation}"))
@@ -349,19 +378,6 @@ impl Client {
             pins.push_str(pin);
         }
         format!("--{operation}={binary}{pins} {operation}")
-    }
-}
-
-// git's own rule: a `file://` URL, or an address with no scheme and no
-// scp-like `host:path`, is a local path; everything else crosses a network.
-fn is_local(address: &str) -> bool {
-    if let Some(scheme) = address.split_once("://") {
-        return scheme.0.eq_ignore_ascii_case("file");
-    }
-    match (address.find(':'), address.find('/')) {
-        (Some(colon), Some(slash)) => colon > slash,
-        (Some(_), None) => false,
-        (None, _) => true,
     }
 }
 

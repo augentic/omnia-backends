@@ -2,7 +2,8 @@
 //! revision is `not-found`, or nothing found where the call is a lookup. A
 //! plain directory is `not-found` as no repository. A place already holding
 //! a repository or files is occupied. A remote that does not exist is
-//! `not-found` where one nothing answers is `unavailable`, a push the
+//! `not-found` where one nothing answers is `unavailable`, and an address or
+//! a name only a legacy remote file defines is no remote. A push the
 //! remote's bookmark has moved past is diverged, and what git alone can say
 //! stays `other`. The operator arguments are the origin's `file://` URL, a
 //! `file://` URL nothing holds, and a URL nothing answers; the host asserts
@@ -59,13 +60,27 @@ async fn scenario() {
     // remotes
     occupied_at(vcs::clone(url, TAKEN, None).await, "/taken");
     not_found(vcs::clone(missing, "./clone-missing", None).await, missing);
-    let unanswered = vcs::clone(unanswered, "./clone-unanswered", None).await;
-    let unanswered = unanswered.expect_err("a remote nothing answers");
-    assert_eq!(unanswered.code(), "unavailable", "{unanswered:?}");
+    let dialled = vcs::clone(unanswered, "./clone-unanswered", None).await;
+    let dialled = dialled.expect_err("a remote nothing answers");
+    assert_eq!(dialled.code(), "unavailable", "{dialled:?}");
     not_found(repo.fetch("nope").await, "nope");
     not_found(repo.set_bookmark("lbl".to_owned(), "nope".to_owned(), None).await, "nope");
     not_found(repo.push("nope", "main").await, "nope");
     not_found(repo.remote_bookmark("nope", "main").await, "nope");
+
+    // a remote is a name the repository's configuration records: an address
+    // is none, and nor is a name only a legacy remote file defines, so the
+    // URL nothing answers is never dialled
+    not_found(repo.fetch(unanswered).await, unanswered);
+    not_found(repo.push(unanswered, "main").await, unanswered);
+    fs::create_dir_all("repo/.git/remotes").expect("the legacy remotes directory");
+    fs::write("repo/.git/remotes/legacy", format!("URL: {unanswered}\n")).expect("a legacy remote");
+    fs::create_dir_all("repo/.git/branches").expect("the legacy branches directory");
+    fs::write("repo/.git/branches/old", format!("{unanswered}\n")).expect("a legacy branch remote");
+    for name in ["legacy", "old"] {
+        not_found(repo.fetch(name).await, name);
+        not_found(repo.push(name, "main").await, name);
+    }
     let clone = vcs::clone(url, "./clone", None).await.expect("clone").expect("a new workspace");
     not_found(clone.push("origin", "nolabel").await, "nolabel");
     let unseen = clone.remote_bookmark("origin", "nolabel").await.expect("remote bookmark");

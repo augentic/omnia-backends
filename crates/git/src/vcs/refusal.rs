@@ -8,6 +8,7 @@ pub enum Class {
     Exists,
     NotFound,
     Denied,
+    Redirected,
     Access,
     Diverged,
     Other,
@@ -54,6 +55,10 @@ const DENIED: [&str; 7] = [
     "The requested URL returned error: 403",
 ];
 
+// A 30x git did not follow, which it too follows with "unable to access", so
+// this is tried before the access patterns.
+const REDIRECTED: [&str; 1] = ["The requested URL returned error: 30"];
+
 const ACCESS: [&str; 6] = [
     "Could not resolve host",
     "Could not read from remote repository",
@@ -75,6 +80,8 @@ pub fn classify(stderr: &str) -> Class {
         Class::NotFound
     } else if matches(&DENIED) {
         Class::Denied
+    } else if matches(&REDIRECTED) {
+        Class::Redirected
     } else if matches(&ACCESS) {
         Class::Access
     } else {

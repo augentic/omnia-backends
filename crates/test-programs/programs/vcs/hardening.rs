@@ -5,7 +5,8 @@
 //!
 //! - Hooks, monitors, filters, signing, and alternate-reference commands.
 //! - Worktree settings and an enclosing repository.
-//! - URL rewrites, proxies, and disabled TLS verification.
+//! - URL rewrites, remote helpers, proxies, disabled TLS verification, and a
+//!   remote URL across lines.
 //! - SSH, remote pack commands, and a promisor remote.
 //! - Credential helpers, for every URL and for one remote's host alone.
 //! - Bundle URIs, the repository's own and one an origin advertises.
@@ -33,6 +34,8 @@ const WORK: &str = "./work";
 const NOIDENT: &str = "./noident";
 const REWRITER: &str = "./rewriter";
 const PROXIED: &str = "./proxied";
+const HELPER: &str = "./helper";
+const SPLIT: &str = "./split";
 const PACKER: &str = "./packer";
 const ASKING: &str = "./asking";
 const LAZY: &str = "./lazy";
@@ -119,13 +122,25 @@ async fn a_clone_takes_no_advertised_bundle(url: &str) {
     cloned.expect("clone").expect("a new workspace");
 }
 
-// One repository's `url.<local>.insteadOf=https://` would turn its `https`
-// remote into a local path the protocol rule then lets through; another's
-// `http.proxy` with `http.sslVerify=false` would carry the host's credentials
-// for the real remote through a proxy of its own. A repository that sets how
-// a transport runs is refused on every transport instead, the key named.
+// A repository that sets how a transport runs is refused on every transport,
+// the key named. Each would otherwise carry its remote somewhere else:
+//
+// - `url.<local>.insteadOf=https://` turns an `https` remote into a local
+//   path the protocol rule then lets through;
+// - `http.proxy` with `http.sslVerify=false` carries the host's credentials
+//   for the real remote through a proxy of its own;
+// - `remote.evil.vcs` hands the remote to a helper that reads the URL its
+//   own way;
+// - a `remote.evil.url` across lines is dialled whole, though its listing
+//   splits it into two URLs.
 async fn a_shaping_repository_is_refused() {
-    for (path, key) in [(REWRITER, "insteadof"), (PROXIED, "http.")] {
+    let shaping = [
+        (REWRITER, "insteadof"),
+        (PROXIED, "http."),
+        (HELPER, "remote.evil.vcs"),
+        (SPLIT, "remote.evil.url"),
+    ];
+    for (path, key) in shaping {
         let repo = open(path).await;
         let fetched = repo.fetch("evil").await.expect_err("the fetch is refused");
         let pushed = repo.push("evil", "main").await.expect_err("the push is refused");

@@ -24,7 +24,7 @@ const IN_FLIGHT: usize = 64;
 
 // Total records pulled and not yet done, in flight or waiting behind their
 // key. A memory ceiling for a stream with fewer distinct keys than slots,
-// where `IN_FLIGHT` is never reached and nothing else would stop the pull.
+// where the slots are never all taken and nothing else would stop the pull.
 // It must sit well above a few partition fetches (64 KiB each), or it trips
 // on an ordinary stream and the pull stops with most slots idle.
 const BACKLOG: usize = 4096;
@@ -195,8 +195,9 @@ pub fn records(consumer: &KafkaConsumer) -> impl Stream<Item = Result<OwnedMessa
 
 // Deliver `records` to `handler` until the stream ends or a record fails.
 //
-// At most `IN_FLIGHT` records are with the handler at once, and records
-// sharing a key go one at a time in pull order. A record is done, and its
+// At most `IN_FLIGHT` records are with the handler at once, or the handler's
+// `max_in_flight` where it takes fewer, and records sharing a key go one at
+// a time in pull order. A record is done, and its
 // offset eligible to commit, once the handler returns `Ok` and every send
 // issued before that is delivered. A failed outcome ends the loop: the
 // record was never done, so a restart redelivers it from the committed
@@ -205,12 +206,14 @@ pub async fn run(
     records: impl Stream<Item = Result<OwnedMessage>>, shared: Arc<Shared>,
     registry: Option<Registry>, topic_prefix: String, handler: Arc<dyn Handler>,
 ) -> Result<()> {
+    let limit = IN_FLIGHT.min(handler.max_in_flight().get());
     let delivery = Arc::new(Delivery {
         shared,
         registry,
         topic_prefix,
         handler,
-        slots: Arc::new(Semaphore::new(IN_FLIGHT)),
+        limit,
+        slots: Arc::new(Semaphore::new(limit)),
         backlog: Arc::new(Semaphore::new(BACKLOG)),
         lanes: Mutex::new(Lanes::default()),
     });
@@ -253,6 +256,7 @@ struct Delivery {
     registry: Option<Registry>,
     topic_prefix: String,
     handler: Arc<dyn Handler>,
+    limit: usize,
     slots: Arc<Semaphore>,
     backlog: Arc<Semaphore>,
     lanes: Mutex<Lanes>,
@@ -355,12 +359,12 @@ impl Delivery {
         self.shared.done(record, ticket, sends_before);
     }
 
-    // `kafka_in_flight` pinned at `IN_FLIGHT` under lag means the slot count
-    // is the limit; `kafka_parked` climbing while `kafka_in_flight` sits low
+    // `kafka_in_flight` pinned at `limit` under lag means the slot count is
+    // the limit; `kafka_parked` climbing while `kafka_in_flight` sits low
     // means the stream has fewer keys than slots, or one partition's fetch is
     // crowding the others out.
     fn report(&self) {
-        let in_flight = IN_FLIGHT - self.slots.available_permits();
+        let in_flight = self.limit - self.slots.available_permits();
         let pulled = BACKLOG - self.backlog.available_permits();
         tracing::trace!(
             gauge.kafka_in_flight = in_flight as u64,

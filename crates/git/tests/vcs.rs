@@ -11,10 +11,11 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{fs, thread};
 
-use omnia::ExitStatus;
+use omnia::{ExitStatus, Grants, GuestEntry};
 use omnia_git::Client;
 use omnia_test::host::{Backends, Deployment, Scratch, scratch};
 use omnia_wasi_vcs::WasiVcs;
@@ -238,6 +239,8 @@ async fn vcs_hardening() {
     let noident = salt.identityless();
     salt.rewriter(&origin);
     salt.proxied();
+    salt.helper();
+    salt.split();
     let ssh_argv = salt.packer();
     let asking = salt.asking();
     salt.lazy();
@@ -371,6 +374,46 @@ async fn vcs_refusals() {
         git.git(&at("clone-a"), &["rev-parse", "HEAD"])
     );
     assert_eq!(git.git(&origin, &["log", "-1", "--format=%s", "emery/x"]), "a's");
+}
+
+// The operator lets git follow redirects of the redirecting host, which the
+// guest's list must still refuse, and runs ssh as the simple variant, so a
+// dial is one record of the host and the pack command.
+#[tokio::test]
+async fn vcs_hosts() {
+    let git = Hermetic::new();
+    let (origin, url) = git.bare("origin.git");
+    let scratch = scratch();
+    let salt = Salt::new(&git, scratch.path());
+    let ssh_argv = salt.host_ssh();
+    git.host("ssh.variant", "simple");
+    salt.remotes();
+    let redirecting = Redirecting::start();
+    let redirects = format!("http.http://localhost:{}/.followRedirects", redirecting.port);
+    git.host(&redirects, "true");
+
+    let grants = Grants::all().hosts(["listed.invalid", "localhost"]);
+    let guest = GuestEntry::new("guest", test_programs::VCS_HOSTS).command().grants(grants);
+    let status = Deployment::new()
+        .entry(guest)
+        .args([url, redirecting.port.to_string()])
+        .mount(scratch.mount(true))
+        .run_host::<WasiVcs, _>(Backends::defaults().await.vcs(git.client().await))
+        .await
+        .expect("guest runs");
+    assert_eq!(status, ExitStatus::SUCCESS, "the guest failed");
+
+    // the operator's ssh dialled the listed host alone, for the clone and
+    // for the fetch
+    let argv = fs::read_to_string(&ssh_argv).expect("the host's ssh ran");
+    let dial = ["listed.invalid", "git-upload-pack '/x.git'"];
+    assert_eq!(argv.lines().collect::<Vec<_>>(), [dial, dial].concat(), "{argv}");
+
+    // the redirecting host was sent the one request its redirect answered
+    assert_eq!(redirecting.sent(), 1);
+
+    // the local clone's push landed
+    assert_eq!(git.git(&origin, &["log", "-1", "--format=%s", "main"]), "hosted");
 }
 
 // A repository at `repo` with one uncommitted file, for a suite to salt and
@@ -615,6 +658,44 @@ impl<'a> Salt<'a> {
         self.git.git(&proxied, &["remote", "add", "evil", "https://example.invalid/x.git"]);
         self.config(&proxied, "http.proxy", "http://127.0.0.1:1");
         self.config(&proxied, "http.sslVerify", "false");
+    }
+
+    // A repository whose own `remote.<name>.vcs` hands its https remote to a
+    // helper, which reads the URL its own way.
+    fn helper(&self) {
+        let helper = self.at("helper");
+        seed(self.git, &helper, "a.txt");
+        self.git.git(&helper, &["add", "-A"]);
+        self.git.git(&helper, &["commit", "-qm", "base"]);
+        self.git.git(&helper, &["remote", "add", "evil", "https://example.invalid/x.git"]);
+        self.config(&helper, "remote.evil.vcs", "https");
+    }
+
+    // A repository whose own remote URL runs across lines: git dials it
+    // whole, where its listing reads a first line naming another host.
+    fn split(&self) {
+        let split = self.at("split");
+        seed(self.git, &split, "a.txt");
+        self.git.git(&split, &["add", "-A"]);
+        self.git.git(&split, &["commit", "-qm", "base"]);
+        self.git.git(&split, &["remote", "add", "evil", "ssh://example.invalid/x.git"]);
+        self.config(&split, "remote.evil.url", "ssh://example.invalid\n@elsewhere.invalid/x.git");
+    }
+
+    // A repository whose remotes dial `elsewhere.invalid`: `elsewhere`
+    // alone, `mirrored` for a push in place of its listed URL, and `doubled`
+    // beyond its first, listed URL.
+    fn remotes(&self) {
+        let repo = self.at("remotes");
+        seed(self.git, &repo, "a.txt");
+        self.git.git(&repo, &["add", "-A"]);
+        self.git.git(&repo, &["commit", "-qm", "base"]);
+        let (listed, elsewhere) = ("ssh://listed.invalid/x.git", "ssh://elsewhere.invalid/x.git");
+        self.git.git(&repo, &["remote", "add", "elsewhere", elsewhere]);
+        self.git.git(&repo, &["remote", "add", "mirrored", listed]);
+        self.config(&repo, "remote.mirrored.pushurl", elsewhere);
+        self.git.git(&repo, &["remote", "add", "doubled", listed]);
+        self.git.git(&repo, &["remote", "set-url", "--add", "doubled", elsewhere]);
     }
 
     // A repository naming the program the operator's ssh would carry to the
@@ -916,4 +997,44 @@ fn refuse(mut stream: &TcpStream, sent: &Mutex<Vec<String>>) {
               Content-Length: 0\r\nConnection: close\r\n\r\n",
         )
         .expect("answering the request");
+}
+
+// An HTTP host on a loopback port that answers every request with a redirect
+// back to itself, by name, and the number of requests it was sent.
+struct Redirecting {
+    port: u16,
+    sent: Arc<AtomicUsize>,
+}
+
+impl Redirecting {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let port = listener.local_addr().expect("the port's address").port();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&sent);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                count.fetch_add(1, Ordering::SeqCst);
+                redirect(&stream.expect("a connection"), port);
+            }
+        });
+        Self { port, sent }
+    }
+
+    fn sent(&self) -> usize {
+        self.sent.load(Ordering::SeqCst)
+    }
+}
+
+// Every header is read before the answer, as for `refuse`.
+fn redirect(mut stream: &TcpStream, port: u16) {
+    let mut lines = BufReader::new(stream).lines().map(|line| line.expect("a request line"));
+    let request = lines.next().expect("a request");
+    lines.take_while(|line| !line.is_empty()).for_each(drop);
+    let path = request.split(' ').nth(1).expect("a request target");
+    let answer = format!(
+        "HTTP/1.1 301 Moved Permanently\r\nLocation: http://localhost:{port}{path}\r\n\
+         Content-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(answer.as_bytes()).expect("answering the request");
 }

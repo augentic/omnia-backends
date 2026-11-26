@@ -65,15 +65,15 @@ user-login = "sunfishcode"
 user-name = "Dan Gohman"
 
 [[publisher.clap]]
-version = "4.6.9"
-when = "2026-11-20"
+version = "4.6.10"
+when = "2026-11-24"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.clap_builder]]
-version = "4.6.7"
-when = "2026-09-14"
+version = "4.6.10"
+when = "2026-11-24"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -220,8 +220,8 @@ user-login = "sunfishcode"
 user-name = "Dan Gohman"
 
 [[publisher.h2]]
-version = "0.4.20"
-when = "2026-10-06"
+version = "0.4.21"
+when = "2026-11-24"
 user-id = 359
 user-login = "seanmonstar"
 user-name = "Sean McArthur"
@@ -675,15 +675,15 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.toml_edit]]
-version = "0.25.20+spec-1.1.0"
-when = "2026-11-21"
+version = "0.25.21+spec-1.1.0"
+when = "2026-11-25"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.toml_parser]]
-version = "1.1.6+spec-1.1.0"
-when = "2026-11-21"
+version = "1.1.7+spec-1.1.0"
+when = "2026-11-25"
 user-id = 6743
 user-login = "epage"
 user-name = "Ed Page"
@@ -1586,15 +1586,6 @@ criteria = "safe-to-deploy"
 version = "2.0.0"
 notes = "Fork of the original `adler` crate, zero unsfae code, works in `no_std`, does what it says on th tin."
 
-[[audits.bytecode-alliance.audits.allocator-api2]]
-who = "Chris Fallin <chris@cfallin.org>"
-criteria = "safe-to-deploy"
-delta = "0.2.18 -> 0.2.20"
-notes = """
-The changes appear to be reasonable updates from Rust's stdlib imported into
-`allocator-api2`'s copy of this code.
-"""
-
 [[audits.bytecode-alliance.audits.ambient-authority]]
 who = "Dan Gohman <dev@sunfishcode.online>"
 criteria = "safe-to-deploy"
@@ -2443,18 +2434,6 @@ aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/mai
 who = "Erich Gubler <erichdongubler@gmail.com>"
 criteria = "safe-to-deploy"
 delta = "2.0.0 -> 2.0.1"
-aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.allocator-api2]]
-who = "Nicolas Silva <nical@fastmail.com>"
-criteria = "safe-to-deploy"
-version = "0.2.18"
-aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
-
-[[audits.mozilla.audits.allocator-api2]]
-who = "Mike Hommey <mh+mozilla@glandium.org>"
-criteria = "safe-to-deploy"
-delta = "0.2.20 -> 0.2.21"
 aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.bit-set]]

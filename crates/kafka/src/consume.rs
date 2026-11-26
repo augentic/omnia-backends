@@ -193,7 +193,8 @@ pub fn records(consumer: &KafkaConsumer) -> impl Stream<Item = Result<OwnedMessa
     })
 }
 
-// Deliver `records` to `handler` until the stream ends or a record fails.
+// Deliver `records` to `handler` until it stops, the stream ends, or a
+// record fails.
 //
 // At most `IN_FLIGHT` records are with the handler at once, or the handler's
 // `max_in_flight` where it takes fewer, and records sharing a key go one at
@@ -201,12 +202,15 @@ pub fn records(consumer: &KafkaConsumer) -> impl Stream<Item = Result<OwnedMessa
 // offset eligible to commit, once the handler returns `Ok` and every send
 // issued before that is delivered. A failed outcome ends the loop: the
 // record was never done, so a restart redelivers it from the committed
-// offset.
+// offset. A stop ends the pull, and a record whose turn comes after it is
+// never handed over, so it is never done either. The loop then returns once
+// the records already with the handler are done.
 pub async fn run(
     records: impl Stream<Item = Result<OwnedMessage>>, shared: Arc<Shared>,
     registry: Option<Registry>, topic_prefix: String, handler: Arc<dyn Handler>,
 ) -> Result<()> {
     let limit = IN_FLIGHT.min(handler.max_in_flight().get());
+    let mut stopped = handler.stopped();
     let delivery = Arc::new(Delivery {
         shared,
         registry,
@@ -228,6 +232,7 @@ pub async fn run(
         // ends the loop without one more record going out
         let record = tokio::select! {
             biased;
+            () = &mut stopped => break,
             Some(finished) = tasks.join_next() => {
                 finished.context("delivery task panicked")??;
                 continue;
@@ -284,16 +289,24 @@ impl Delivery {
         self: Arc<Self>, record: OwnedMessage, ticket: Ticket, mut lane: Option<Lane>,
         slot: Option<OwnedSemaphorePermit>, place: OwnedSemaphorePermit,
     ) -> Result<()> {
-        if let Some(lane) = &mut lane {
-            lane.turn().await;
-        }
-        let slot = match slot {
-            Some(slot) => slot,
-            None => take(&self.slots).await,
+        // wait for the record's turn and a slot, unless the stop comes first
+        let turn = async {
+            if let Some(lane) = &mut lane {
+                lane.turn().await;
+            }
+            match slot {
+                Some(slot) => slot,
+                None => take(&self.slots).await,
+            }
+        };
+        let slot = tokio::select! {
+            biased;
+            () = self.handler.stopped() => None,
+            slot = turn => Some(slot),
         };
         self.report();
 
-        let outcome = self.handle(&record, ticket).await;
+        let outcome = if slot.is_some() { self.handle(&record, ticket).await } else { Ok(()) };
 
         // the slot goes before the lane, so the record behind can take it
         drop(slot);

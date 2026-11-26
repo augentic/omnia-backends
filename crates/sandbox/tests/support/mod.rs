@@ -1,4 +1,5 @@
-//! What the `child`, `session`, `proxy`, and `toolchain` suites share:
+//! What the `bounds`, `child`, `session`, `proxy`, and `toolchain` suites
+//! share:
 //!
 //! - a connected [`Sandbox`] over `/bin/sh`
 //! - a session around a workspace, and a script run inside it

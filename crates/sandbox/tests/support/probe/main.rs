@@ -1,5 +1,5 @@
-//! The session suite's probe, copied into a workspace and run inside the
-//! session.
+//! The session and bounds suites' probe, copied into a workspace and run
+//! inside the session or the bounds.
 //!
 //! It makes one attempt per row. It exits 0 when the attempt succeeded, and
 //! 1 with the reason on stderr when the kernel refused it.
@@ -13,6 +13,7 @@ fn main() -> ExitCode {
     let row = args.next().unwrap_or_default();
     let outcome = match row.as_str() {
         "loopback" => loopback(),
+        "unix" => unix(&args.next().unwrap_or_default()),
         "resolve" => resolve(&args.next().unwrap_or_default()),
         "tunnel" => tunnel(&args.next().unwrap_or_default()),
         #[cfg(target_os = "macos")]
@@ -110,6 +111,12 @@ fn tunnel(target: &str) -> Result<String, String> {
     let mut echoed = [0; 4];
     stream.read_exact(&mut echoed).map_err(|error| format!("read: {error}"))?;
     if &echoed == b"ping" { Ok(status) } else { Err(format!("echoed {echoed:?}")) }
+}
+
+// A connect to the unix socket a host process listens on at `path`.
+fn unix(path: &str) -> Result<String, String> {
+    std::os::unix::net::UnixStream::connect(path).map_err(|error| format!("connect: {error}"))?;
+    Ok("connected".to_owned())
 }
 
 // A server on port 0 answered over loopback from inside: the loop a tree's

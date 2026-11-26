@@ -1,11 +1,11 @@
-//! The transport operations over git, from a guest: a bare origin cloned
-//! beneath the `.` mount, a commit bookmarked and pushed, a second clone that
-//! sees the bookmark and takes a later push only by fetch, a shallow clone
-//! that holds every bookmark at the one commit it asked for and takes a later
-//! push by fetch, and a fetch that prunes a remote-tracking ref the origin
-//! lacks from a repository the host laid. The origin's `file://` URL is the
-//! one operator argument; the host reads the origin and the clones with git
-//! afterwards.
+//! The transport operations over git, from a guest: a bare origin holding
+//! one tagged commit cloned beneath the `.` mount, a commit bookmarked and
+//! pushed, a second clone that sees the bookmark and takes a later push only
+//! by fetch, a shallow clone that holds every bookmark at the one commit it
+//! asked for and takes a later push by fetch, and a fetch that prunes a
+//! remote-tracking ref the origin lacks from a repository the host laid. The
+//! origin's URL, `file://` or `ssh://`, is the one operator argument; the
+//! host reads the origin and the clones with git afterwards.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -27,7 +27,7 @@ async fn scenario() {
     let arguments = arguments();
     let url = arguments.first().expect("the origin's URL is the first argument");
 
-    // a clone of the empty origin, with one commit bookmarked and pushed
+    // a clone of the origin, with one commit bookmarked and pushed
     let first_clone = clone(url, FIRST, None).await;
     fs::write("clones/first/a.txt", "a\n").expect("writing a");
     let first = commit(&first_clone, "a").await;

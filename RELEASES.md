@@ -16,10 +16,16 @@ Pairs with omnia 0.39.x.
   - a `push` checks every URL its remote pushes to;
   - an http(s) redirect is `denied`, even to the same host.
 
-  A guest without a `hosts` list dials as before. A local address names no
-  host, so a list does not hold it, and `omnia-git` does not yet hold it to
-  the guest's mounts
-  ([omnia#477](https://github.com/augentic/omnia/issues/477)).
+  A guest without a `hosts` list dials as before.
+- `omnia-git` holds every local address and every repository a transport
+  operation touches to the guest's mounts
+  ([omnia#477](https://github.com/augentic/omnia/issues/477)):
+  - a `clone`, `fetch`, or `push` beneath no mount, or a `push` beneath a
+    read-only one, is `denied`;
+  - a place, gitdir, `commondir`, or local dial outside the mounts is
+    `denied` or `not-found` before anything runs;
+  - network dials run from backend-owned mirrors and staging, outside every
+    mount, while git at the guest's place runs inside the kernel boundary.
 - `omnia-git` takes a `fetch` or `push` remote as a name the repository's
   configuration records. An address, or a name only `.git/remotes` or
   `.git/branches` defines, is `not-found`. A repository that sets

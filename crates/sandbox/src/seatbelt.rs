@@ -11,6 +11,9 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt::Write as _;
+use std::io;
+use std::os::fd::{AsRawFd as _, BorrowedFd};
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -18,7 +21,7 @@ use anyhow::{Context as _, Result, ensure};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::session::Place;
+use crate::session::{Place, Root};
 
 // Named by absolute path, so no `PATH` of the operator's can stand in for it.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -53,10 +56,11 @@ const DEVICES: &str = "
 (allow file-read-metadata (literal \"/dev\"))
 ";
 
-// Loopback alone: the egress proxy and the callback endpoint are there, and
-// a workspace's own tests serve and connect there. No unix socket is
-// reachable, so no name resolves inside. Every way out goes through the
-// proxy by name.
+// A session's loopback alone: the egress proxy and the callback endpoint are
+// there, and a workspace's own tests serve and connect there. No unix socket
+// is reachable, so no name resolves inside. Every way out goes through the
+// proxy by name. A bounded process gets none of it, since the base policy
+// opens no network.
 const NETWORK: &str = "
 ; --- network ---
 (deny network*)
@@ -121,11 +125,13 @@ impl Seatbelt {
 
     // `sandbox-exec -p <profile> -D<KEY>=<path>.. -- <program>`: the profile
     // names every path through a parameter, so a path holding a quote or a
-    // glob character cannot change what it means. The working directory and
-    // the scratch arrive canonical; the program is resolved here.
+    // glob character cannot change what it means. A root arrives canonical
+    // or open, read back through `F_GETPATH`; the program is resolved here.
     pub fn command(&self, place: &Place<'_>) -> Result<Command> {
         let program = std::fs::canonicalize(place.program)
             .with_context(|| format!("resolving {}", place.program.display()))?;
+        let read = place.read.iter().map(|root| root.path()).collect::<Result<Vec<_>>>()?;
+        let write = place.write.iter().map(|root| root.path()).collect::<Result<Vec<_>>>()?;
         let mut params = Params::default();
         let mut profile = String::with_capacity(BASE.len() + 4096);
         profile.push_str(BASE);
@@ -147,31 +153,38 @@ impl Seatbelt {
 
         // the grants
         profile.push_str("\n; --- the grants ---\n");
-        for (index, root) in place.read.iter().enumerate() {
+        for (index, root) in read.iter().enumerate() {
             let _ = writeln!(
                 profile,
                 "(allow file-read* (subpath {}))",
                 params.add(format!("ROOT_{index}"), root)
             );
         }
-        let cwd = params.add("CWD".to_owned(), place.cwd);
-        let home = params.add("SCRATCH".to_owned(), place.scratch);
-        let _ =
-            writeln!(profile, "(allow file-read* file-write* (subpath {cwd}) (subpath {home}))");
-        let _ = writeln!(
-            profile,
-            "(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal {cwd})))"
-        );
+        if !write.is_empty() {
+            profile.push_str("(allow file-read* file-write*");
+            for (index, root) in write.iter().enumerate() {
+                let _ =
+                    write!(profile, " (subpath {})", params.add(format!("WRITE_{index}"), root));
+            }
+            profile.push_str(")\n");
+        }
 
-        // the engine's own directories beneath the working directory, closed
-        // after its grant
-        let git = params.add("CWD_GIT".to_owned(), &place.cwd.join(".git"));
-        let emery = params.add("CWD_EMERY".to_owned(), &place.cwd.join(".emery"));
-        let _ = writeln!(
-            profile,
-            "(deny file-read* file-write* (literal {git}) (subpath {git}) (literal {emery}) \
-             (subpath {emery}))"
-        );
+        // a session's working directory kept, and the engine's own directories
+        // beneath it closed after its grant
+        if let Some(workspace) = place.workspace {
+            let cwd = params.add("CWD".to_owned(), workspace);
+            let _ = writeln!(
+                profile,
+                "(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal {cwd})))"
+            );
+            let git = params.add("CWD_GIT".to_owned(), &workspace.join(".git"));
+            let emery = params.add("CWD_EMERY".to_owned(), &workspace.join(".emery"));
+            let _ = writeln!(
+                profile,
+                "(deny file-read* file-write* (literal {git}) (subpath {git}) (literal {emery}) \
+                 (subpath {emery}))"
+            );
+        }
 
         // the root, which a process reads to start, and the metadata a
         // resolution reads on its way to a granted path
@@ -179,11 +192,13 @@ impl Seatbelt {
         for node in NODES {
             let _ = write!(profile, " (literal \"{node}\")");
         }
-        let granted = [place.cwd, place.scratch, &program]
-            .into_iter()
-            .chain(place.read.iter().map(PathBuf::as_path))
+        let granted = write
+            .iter()
+            .map(PathBuf::as_path)
+            .chain([program.as_path()])
+            .chain(read.iter().map(PathBuf::as_path))
             .chain(self.system.iter().map(PathBuf::as_path));
-        let above_cwd = ancestors([place.cwd]);
+        let above_cwd = ancestors(place.workspace);
         let mut listed = Vec::new();
         for (index, ancestor) in ancestors(granted).iter().enumerate() {
             let param = params.add(format!("ANCESTOR_{index}"), ancestor);
@@ -194,11 +209,11 @@ impl Seatbelt {
         }
         profile.push_str(")\n");
 
-        // the working directory's ancestors, readable: a Bun program reads
-        // every directory on the way to its working directory before it reads
-        // its environment, and runs with none when one is closed. An allow
-        // with no filter would open every file, so a directory with nothing
-        // above it lists nothing
+        // a session's working directory's ancestors, readable: a Bun program
+        // reads every directory on the way to its working directory before it
+        // reads its environment, and runs with none when one is closed. An
+        // allow with no filter would open every file, so a directory with
+        // nothing above it lists nothing
         if !listed.is_empty() {
             profile.push_str("(allow file-read-data");
             for param in &listed {
@@ -206,7 +221,9 @@ impl Seatbelt {
             }
             profile.push_str(")\n");
         }
-        profile.push_str(NETWORK);
+        if place.network {
+            profile.push_str(NETWORK);
+        }
 
         let mut command = Command::new(SANDBOX_EXEC);
         command.arg("-p").arg(profile);
@@ -216,9 +233,34 @@ impl Seatbelt {
             command.arg(definition);
         }
         command.arg("--").arg(program);
-        place.enter(&mut command);
+        place.enter(&mut command)?;
         Ok(command)
     }
+}
+
+impl Root<'_> {
+    // The path the profile names the root by.
+    fn path(self) -> Result<PathBuf> {
+        match self {
+            Self::Path(path) => Ok(path.to_owned()),
+            Self::Open(fd) => held_path(fd),
+        }
+    }
+}
+
+// The path the kernel holds for an open descriptor, symlinks resolved.
+#[expect(unsafe_code, reason = "`F_GETPATH` writes into a caller's buffer")]
+fn held_path(fd: BorrowedFd<'_>) -> Result<PathBuf> {
+    let mut buffer = vec![0_u8; usize::try_from(libc::PATH_MAX).unwrap_or(1024)];
+    // SAFETY: the buffer is `PATH_MAX` bytes, as `F_GETPATH` requires, and
+    // outlives the call.
+    let answered = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
+    if answered == -1 {
+        return Err(io::Error::last_os_error()).context("reading the path of an open root");
+    }
+    let length = buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len());
+    buffer.truncate(length);
+    Ok(PathBuf::from(OsString::from_vec(buffer)))
 }
 
 #[derive(Default)]

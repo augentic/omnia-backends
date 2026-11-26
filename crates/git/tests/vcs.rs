@@ -1,43 +1,51 @@
 //! End-to-end tests for the git backend at the `omnia:vcs` boundary: a
 //! guest component from `crates/test-programs` runs through the omnia
 //! runtime over an `omnia_git::Client`, driving real repositories beneath
-//! its `.` mount. The guest asserts what it observes and traps on failure;
-//! the test asserts what git left behind, with git as the oracle.
+//! its `.` mount and the origins a scenario mounts beside it. The guest
+//! asserts what it observes and traps on failure; the test asserts what git
+//! left behind, with git as the oracle.
 
 mod support;
 
-use std::ffi::OsString;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::ffi::{OsStr, OsString};
+use std::io::{self, BufRead as _, BufReader, Write as _};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{fs, thread};
 
-use omnia::{ExitStatus, Grants, GuestEntry};
+use omnia::{ExitStatus, Grants, GuestEntry, Mount};
 use omnia_git::Client;
 use omnia_test::host::{Backends, Deployment, Scratch, scratch};
 use omnia_wasi_vcs::WasiVcs;
-use support::Hermetic;
+use support::{Dial, Hermetic};
 
 // Every guest program in `crates/test-programs` must have a matching test
 // here; a new program without one fails to compile.
 test_programs::foreach_vcs!();
 
 // Run `program` over the hermetic git with the scratch root as its `.`
-// mount, held to a clean exit.
-async fn run(git: &Hermetic, scratch: &Scratch, program: &str, args: Vec<String>) {
-    run_over(git.client().await, scratch, program, args).await;
+// mount, and `mounts` beside it, held to a clean exit.
+async fn run(
+    git: &Hermetic, scratch: &Scratch, program: &str, args: Vec<String>,
+    mounts: impl IntoIterator<Item = Mount>,
+) {
+    run_over(git.client().await, scratch, program, args, mounts).await;
 }
 
 // `run`, over a client of the scenario's own.
-async fn run_over(client: Client, scratch: &Scratch, program: &str, args: Vec<String>) {
+async fn run_over(
+    client: Client, scratch: &Scratch, program: &str, args: Vec<String>,
+    mounts: impl IntoIterator<Item = Mount>,
+) {
     let backends = Backends::defaults().await.vcs(client);
     let status = Deployment::new()
         .guest("guest", program)
         .args(args)
         .mount(scratch.mount(true))
+        .mounts(mounts)
         .run_host::<WasiVcs, _>(backends)
         .await
         .expect("guest runs");
@@ -49,7 +57,7 @@ async fn vcs_journey() {
     let git = Hermetic::new();
     let (origin, url) = git.bare("origin.git");
     let scratch = scratch();
-    run(&git, &scratch, test_programs::VCS_JOURNEY, vec![url]).await;
+    run(&git, &scratch, test_programs::VCS_JOURNEY, vec![url], [git.origins()]).await;
 
     // the origin holds the one label pushed, at the slice it names
     assert_eq!(git.git(&origin, &["for-each-ref", "--format=%(refname:short)"]), "emery/rev1");
@@ -91,7 +99,7 @@ async fn vcs_matrix() {
     let tag = git.git(&shadowed, &["rev-parse", "refs/tags/slice"]);
 
     let arguments = vec!["shadowed".to_owned(), branch.clone(), tag.clone()];
-    run(&git, &scratch, test_programs::VCS_MATRIX, arguments).await;
+    run(&git, &scratch, test_programs::VCS_MATRIX, arguments, []).await;
 
     // the merge by label is one commit over both parents
     assert_eq!(git.git(&at("repo"), &["log", "--first-parent", "--format=%s"]), "merge feature\na");
@@ -197,33 +205,79 @@ async fn vcs_matrix() {
 #[tokio::test]
 async fn vcs_transport() {
     let git = Hermetic::new();
-    let (origin, url) = git.bare("origin.git");
-    let scratch = scratch();
-    let at = |name: &str| scratch.path().join(name);
+    let local = (git.bare("origin.git"), vec![git.origins()]);
+    let served = (git.served("served.git"), vec![]);
+    for ((origin, url), mounts) in [local, served] {
+        let tag = tagged(&git, &origin);
+        let scratch = scratch();
+        let at = |name: &str| scratch.path().join(name);
 
-    // a repository that prunes on fetch, holding a packed remote-tracking ref
-    // whose bookmark the origin lacks, so the prune rewrites `packed-refs`
-    let pruned = at("pruned");
-    seed(&git, &pruned, "a.txt");
-    git.git(&pruned, &["add", "-A"]);
-    git.git(&pruned, &["commit", "-qm", "base"]);
-    git.git(&pruned, &["remote", "add", "origin", &url]);
-    git.git(&pruned, &["update-ref", "refs/remotes/origin/emery/gone", "HEAD"]);
-    git.git(&pruned, &["pack-refs", "--all"]);
-    git.git(&pruned, &["config", "--local", "fetch.prune", "true"]);
+        // a repository that prunes on fetch, holding a packed remote-tracking
+        // ref whose bookmark the origin lacks, so the prune rewrites
+        // `packed-refs`
+        let pruned = at("pruned");
+        seed(&git, &pruned, "a.txt");
+        git.git(&pruned, &["add", "-A"]);
+        git.git(&pruned, &["commit", "-qm", "base"]);
+        git.git(&pruned, &["remote", "add", "origin", &url]);
+        git.git(&pruned, &["update-ref", "refs/remotes/origin/emery/gone", "HEAD"]);
+        git.git(&pruned, &["pack-refs", "--all"]);
+        git.git(&pruned, &["config", "--local", "fetch.prune", "true"]);
 
-    run(&git, &scratch, test_programs::VCS_TRANSPORT, vec![url]).await;
+        run(&git, &scratch, test_programs::VCS_TRANSPORT, vec![url.clone()], mounts).await;
 
-    // the origin holds the moved label at the first clone's head
-    assert_eq!(
-        git.git(&origin, &["rev-parse", "emery/rev-1"]),
-        git.git(&at("clones/first"), &["rev-parse", "HEAD"])
-    );
-    assert_eq!(git.git(&origin, &["log", "-1", "--format=%s", "emery/rev-1"]), "c");
+        // the origin holds the moved label at the first clone's head
+        assert_eq!(
+            git.git(&origin, &["rev-parse", "emery/rev-1"]),
+            git.git(&at("clones/first"), &["rev-parse", "HEAD"])
+        );
+        assert_eq!(git.git(&origin, &["log", "-1", "--format=%s", "emery/rev-1"]), "c");
 
-    // the shallow clone holds the commit it asked for and the one it fetched
-    assert!(at("clones/shallow/.git/shallow").is_file());
-    assert_eq!(git.git(&at("clones/shallow"), &["rev-list", "--count", "origin/emery/rev-1"]), "2");
+        // every clone knows the origin by the URL the guest named, and holds its tag
+        for clone in ["clones/first", "clones/second", "clones/shallow"] {
+            assert_eq!(git.git(&at(clone), &["remote", "get-url", "origin"]), url);
+            assert_eq!(git.git(&at(clone), &["rev-parse", "refs/tags/seed"]), tag);
+        }
+
+        // the shallow clone holds the commit it asked for and the one it fetched
+        assert!(at("clones/shallow/.git/shallow").is_file());
+        let shallow =
+            git.git(&at("clones/shallow"), &["rev-list", "--count", "origin/emery/rev-1"]);
+        assert_eq!(shallow, "2");
+    }
+    owned_dials(&git);
+}
+
+// One commit on `origin`'s `main`, tagged `seed`; the commit.
+fn tagged(git: &Hermetic, origin: &Path) -> String {
+    let name = origin.file_name().and_then(OsStr::to_str).expect("the origin's name");
+    let work = git.path(&format!("tagged-{name}"));
+    seed(git, &work, "seed.txt");
+    git.git(&work, &["add", "-A"]);
+    git.git(&work, &["commit", "-qm", "seed"]);
+    git.git(&work, &["tag", "seed"]);
+    let origin = origin.display().to_string();
+    git.git(&work, &["push", "--quiet", &origin, "main", "seed"]);
+    git.git(&work, &["rev-parse", "HEAD"])
+}
+
+// The dials the ssh fake took, held to have each run from a mirror or a
+// push's staging, the backend's own repositories, and never from a place of
+// the guest's; at least one ran.
+fn owned_dials(git: &Hermetic) -> Vec<Dial> {
+    let mirrors = git.mirrors();
+    let dials = git.dials();
+    assert!(!dials.is_empty(), "nothing dialled the ssh remote");
+    for dial in &dials {
+        let mirrored = dial.from.parent() == Some(mirrors.as_path());
+        let staged = dial
+            .from
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.starts_with("staging-"));
+        assert!(mirrored || staged, "a dial from {}", dial.from.display());
+    }
+    dials
 }
 
 #[tokio::test]
@@ -241,14 +295,28 @@ async fn vcs_hardening() {
     salt.proxied();
     salt.helper();
     salt.split();
-    let ssh_argv = salt.packer();
+    salt.packer();
     let asking = salt.asking();
     salt.lazy();
     let bundling = salt.bundling_origin(&bundle);
     salt.bytes();
     let outer = salt.enclosing();
+    let held = salt.held();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port nothing inside may dial");
+    let port = listener.local_addr().expect("the port").port();
+    let (beyond, probed) = salt.beyond(port);
+    let before = snapshot(&git, &beyond);
 
-    run(&git, &scratch, test_programs::VCS_HARDENING, vec![bundling]).await;
+    let outside = held.outside.display().to_string();
+    let arguments = vec![bundling, outside, held.encoded.clone()];
+    let readonly = Mount {
+        name: "ro".to_owned(),
+        path: held.readonly.clone(),
+        writable: false,
+    };
+    let mounts = [git.origins(), readonly];
+    let client = git.client_over(git.escaping()).await;
+    run_over(client, &scratch, test_programs::VCS_HARDENING, arguments, mounts).await;
 
     // nothing the repositories salted ran
     let ran = salt.ran();
@@ -279,16 +347,30 @@ async fn vcs_hardening() {
     assert_eq!(refs, "refs/heads/emery/hardened", "{refs}");
 
     // the operator's ssh was handed git's own pack programs, never the
-    // repository's, once for the fetch and once for the push, and nothing at
-    // all for the partial clone's promisor
-    let argv = fs::read_to_string(&ssh_argv).expect("the host's ssh ran");
-    let carried: Vec<_> = argv.lines().filter(|line| line.ends_with(".git'")).collect();
-    assert_eq!(carried, ["git-upload-pack '/x.git'", "git-receive-pack '/x.git'"], "{argv}");
+    // repository's, once for the fetch and once for the push, nothing at all
+    // for the partial clone's promisor, and once for the probing fetch
+    let carried: Vec<_> = owned_dials(&git).iter().map(|dial| dial.command().to_owned()).collect();
+    let probing = format!("git-upload-pack '{}'", probed.display());
+    assert_eq!(carried, ["git-upload-pack '/x.git'", "git-receive-pack '/x.git'", &probing]);
 
     // the asking host was sent its refs request twice: bare, then with the
     // credentials the host's own helper supplied, `omnia:secret`
     let refs = "GET /x.git/info/refs?service=git-upload-pack HTTP/1.1";
     assert_eq!(asking.sent(), [format!("{refs} -"), format!("{refs} Basic b21uaWE6c2VjcmV0")]);
+
+    // the boundary held git to the mounts: nothing beyond them changed, the
+    // probing git could neither write the mirror it read nor read beyond the
+    // mounts, and no socket opened from inside
+    assert_eq!(snapshot(&git, &beyond), before);
+    let probe = scratch.path().join("beyond-probe/.git/probed");
+    let outcomes = fs::read_to_string(probe).expect("the escaping git probed");
+    assert_eq!(outcomes, "mirror refused\noutside refused\n");
+    listener.set_nonblocking(true).expect("a non-blocking listener");
+    let dialled = listener.accept();
+    assert!(
+        matches!(&dialled, Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+        "a socket opened from inside the boundary: {dialled:?}"
+    );
 
     // the host's bundle reached neither the repository that named it nor the
     // clone its origin advertised it to
@@ -304,6 +386,33 @@ async fn vcs_hardening() {
     // the repository enclosing a lent directory was neither read nor sealed
     assert_eq!(git.git(&outer, &["rev-list", "--count", "HEAD"]), "1");
     assert_eq!(git.git(&outer, &["status", "--porcelain"]), "?? inner/");
+
+    // no repository outside the mounts, nor the read-only one, took a push,
+    // and the guest fetched only from the two its mounts hold, the planted
+    // one as itself
+    let refs = |repo: &Path, prefix: &str| {
+        git.git(repo, &["for-each-ref", "--format=%(refname) %(objectname)", prefix])
+    };
+    for (repo, commit) in &held.untouched {
+        assert_eq!(refs(repo, "refs"), format!("refs/heads/main {commit}"), "{}", repo.display());
+    }
+    let fetched = format!(
+        "refs/remotes/planted/main {}\nrefs/remotes/readonly/main {}\nrefs/remotes/relative/main {}",
+        held.planted, held.readonly_origin, held.inside
+    );
+    assert_eq!(refs(&held.holder, "refs/remotes"), fetched);
+
+    // the encoded URL reached the origin beneath the place
+    assert_eq!(git.git(&scratch.path().join("encoded"), &["rev-parse", "HEAD"]), held.inside);
+}
+
+// What a repository holds: its refs, its objects, and the state of its tree.
+fn snapshot(git: &Hermetic, repo: &Path) -> [String; 3] {
+    [
+        git.git(repo, &["for-each-ref", "--format=%(refname) %(objectname)"]),
+        git.git(repo, &["cat-file", "--batch-all-objects", "--batch-check=%(objectname)"]),
+        git.git(repo, &["status", "--porcelain"]),
+    ]
 }
 
 #[tokio::test]
@@ -311,7 +420,7 @@ async fn vcs_planted() {
     let git = Hermetic::new();
     let scratch = scratch();
     let salt = Salt::new(&git, scratch.path());
-    let ssh_argv = salt.host_ssh();
+    git.ssh();
     let (origin, url) = salt.planted_origin();
     let template = salt.template();
     salt.planted_ssh();
@@ -322,8 +431,8 @@ async fn vcs_planted() {
     let unlisted = salt.unlisted();
     let faithful = salt.faithful();
 
-    let planting = support::connect(git.planting(&template)).await.expect("the planting git");
-    run_over(planting, &scratch, test_programs::VCS_PLANTED, vec![url]).await;
+    let planting = git.client_over(git.planting(&template)).await;
+    run_over(planting, &scratch, test_programs::VCS_PLANTED, vec![url], []).await;
 
     // nothing the plants named ran, the merge's included once it landed
     let ran = salt.ran();
@@ -331,9 +440,8 @@ async fn vcs_planted() {
     assert!(!merged.join(".git/plant-merge").exists(), "the merge's plant landed");
 
     // the fetch and the clone over ssh dialled the host's ssh
-    let argv = fs::read_to_string(&ssh_argv).expect("the host's ssh ran");
-    let carried: Vec<_> = argv.lines().filter(|line| line.ends_with(".git'")).collect();
-    assert_eq!(carried, ["git-upload-pack '/x.git'", "git-upload-pack '/x.git'"], "{argv}");
+    let carried: Vec<_> = owned_dials(&git).iter().map(|dial| dial.command().to_owned()).collect();
+    assert_eq!(carried, ["git-upload-pack '/x.git'", "git-upload-pack '/x.git'"]);
 
     // the filtered change sealed, the rewritten fetch carried nothing, and
     // the repository whose listing failed sealed nothing
@@ -351,10 +459,11 @@ async fn vcs_planted() {
 async fn vcs_refusals() {
     let git = Hermetic::new();
     let (origin, url) = git.bare("origin.git");
-    let missing = format!("file://{}", git.path("missing.git").display());
+    let missing = format!("file://{}", git.path("origins/missing.git").display());
     let unanswered = "https://127.0.0.1:1/x.git".to_owned();
     let scratch = scratch();
-    run(&git, &scratch, test_programs::VCS_REFUSALS, vec![url, missing, unanswered]).await;
+    let arguments = vec![url, missing, unanswered];
+    run(&git, &scratch, test_programs::VCS_REFUSALS, arguments, [git.origins()]).await;
     let at = |name: &str| scratch.path().join(name);
 
     // nothing refused reached the repository
@@ -382,10 +491,10 @@ async fn vcs_refusals() {
 #[tokio::test]
 async fn vcs_hosts() {
     let git = Hermetic::new();
+    git.served("x.git");
     let (origin, url) = git.bare("origin.git");
     let scratch = scratch();
     let salt = Salt::new(&git, scratch.path());
-    let ssh_argv = salt.host_ssh();
     git.host("ssh.variant", "simple");
     salt.remotes();
     let redirecting = Redirecting::start();
@@ -398,6 +507,7 @@ async fn vcs_hosts() {
         .entry(guest)
         .args([url, redirecting.port.to_string()])
         .mount(scratch.mount(true))
+        .mount(git.origins())
         .run_host::<WasiVcs, _>(Backends::defaults().await.vcs(git.client().await))
         .await
         .expect("guest runs");
@@ -405,9 +515,9 @@ async fn vcs_hosts() {
 
     // the operator's ssh dialled the listed host alone, for the clone and
     // for the fetch
-    let argv = fs::read_to_string(&ssh_argv).expect("the host's ssh ran");
-    let dial = ["listed.invalid", "git-upload-pack '/x.git'"];
-    assert_eq!(argv.lines().collect::<Vec<_>>(), [dial, dial].concat(), "{argv}");
+    let dials = owned_dials(&git);
+    let carried: Vec<_> = dials.iter().map(Dial::command).collect();
+    assert_eq!(carried, ["git-upload-pack '/x.git'", "git-upload-pack '/x.git'"], "{carried:?}");
 
     // the redirecting host was sent the one request its redirect answered
     assert_eq!(redirecting.sent(), 1);
@@ -444,6 +554,21 @@ fn filter(markers: &Path, name: &str) -> String {
 // reached it would fail outright.
 fn blocking(markers: &Path, name: &str) -> String {
     format!("#!/bin/sh\ntouch '{}/{}'\nexit 1\n", markers.display(), name)
+}
+
+// What `Salt::held` laid: the read-only mount's root, the origin outside
+// every mount, the repository whose remotes name each address, the inside
+// origin's encoded URL, the commits the guest fetches or clones, and every
+// repository no push may reach, with the commit it holds.
+struct Held {
+    readonly: PathBuf,
+    outside: PathBuf,
+    holder: PathBuf,
+    encoded: String,
+    readonly_origin: String,
+    inside: String,
+    planted: String,
+    untouched: Vec<(PathBuf, String)>,
 }
 
 // The scratch a hardening scenario is laid in: the oracle git, the root, and
@@ -487,19 +612,6 @@ impl<'a> Salt<'a> {
     // configuration file, where an unquoted `;` starts a comment.
     fn marking(&self, name: &str) -> String {
         format!("\"touch {}; false\"", self.markers.join(name).display())
-    }
-
-    // The host's ssh, which records what it was handed and answers nothing;
-    // the file the record lands in.
-    fn host_ssh(&self) -> PathBuf {
-        let argv = self.git.path("ssh-argv");
-        let ssh = self.git.path("ssh");
-        executable(
-            &ssh,
-            &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nexit 255\n", argv.display()),
-        );
-        self.git.host("core.sshCommand", &ssh.display().to_string());
-        argv
     }
 
     // A sealed repository beside the others, as an alternates line for a
@@ -648,18 +760,6 @@ impl<'a> Salt<'a> {
         );
     }
 
-    // A repository whose own proxy and TLS trust would carry the host's
-    // credentials for its https remote through a connection of its choosing.
-    fn proxied(&self) {
-        let proxied = self.at("proxied");
-        seed(self.git, &proxied, "a.txt");
-        self.git.git(&proxied, &["add", "-A"]);
-        self.git.git(&proxied, &["commit", "-qm", "base"]);
-        self.git.git(&proxied, &["remote", "add", "evil", "https://example.invalid/x.git"]);
-        self.config(&proxied, "http.proxy", "http://127.0.0.1:1");
-        self.config(&proxied, "http.sslVerify", "false");
-    }
-
     // A repository whose own `remote.<name>.vcs` hands its https remote to a
     // helper, which reads the URL its own way.
     fn helper(&self) {
@@ -682,6 +782,18 @@ impl<'a> Salt<'a> {
         self.config(&split, "remote.evil.url", "ssh://example.invalid\n@elsewhere.invalid/x.git");
     }
 
+    // A repository whose own proxy and TLS trust would carry the host's
+    // credentials for its https remote through a connection of its choosing.
+    fn proxied(&self) {
+        let proxied = self.at("proxied");
+        seed(self.git, &proxied, "a.txt");
+        self.git.git(&proxied, &["add", "-A"]);
+        self.git.git(&proxied, &["commit", "-qm", "base"]);
+        self.git.git(&proxied, &["remote", "add", "evil", "https://example.invalid/x.git"]);
+        self.config(&proxied, "http.proxy", "http://127.0.0.1:1");
+        self.config(&proxied, "http.sslVerify", "false");
+    }
+
     // A repository whose remotes dial `elsewhere.invalid`: `elsewhere`
     // alone, `mirrored` for a push in place of its listed URL, and `doubled`
     // beyond its first, listed URL.
@@ -699,9 +811,9 @@ impl<'a> Salt<'a> {
     }
 
     // A repository naming the program the operator's ssh would carry to the
-    // far host for a fetch and a push, over a host ssh that records what it
-    // was handed and answers nothing; the file the record lands in.
-    fn packer(&self) -> PathBuf {
+    // far host for a fetch and a push, over the ssh fake, which serves no
+    // repository of that name.
+    fn packer(&self) {
         let packer = self.at("packer");
         seed(self.git, &packer, "a.txt");
         self.git.git(&packer, &["add", "-A"]);
@@ -713,7 +825,7 @@ impl<'a> Salt<'a> {
         ] {
             self.config(&packer, key, &format!("touch {}", self.markers.join(marker).display()));
         }
-        self.host_ssh()
+        self.git.ssh();
     }
 
     // A repository whose remote `guarded` is an HTTP host that refuses every
@@ -765,11 +877,11 @@ impl<'a> Salt<'a> {
             .expect("removing the blob");
     }
 
-    // An origin on the host that advertises `bundle` to a clone as a file
-    // URI, under a host whose own configuration asks a clone for advertised
-    // bundles; the origin's URL.
+    // An origin beneath the origins that advertises `bundle` to a clone as a
+    // file URI, under a host whose own configuration asks a clone for
+    // advertised bundles; the origin's URL.
     fn bundling_origin(&self, bundle: &Path) -> String {
-        let origin = self.git.path("bundling");
+        let origin = self.git.path("origins/bundling");
         seed(self.git, &origin, "a.txt");
         self.git.git(&origin, &["add", "-A"]);
         self.git.git(&origin, &["commit", "-qm", "base"]);
@@ -784,6 +896,139 @@ impl<'a> Salt<'a> {
         }
         self.git.host("transfer.bundleURI", "true");
         format!("file://{}", origin.display())
+    }
+
+    // A repository at `path` holding one commit, `message`, bare unless
+    // `checkout`; the commit.
+    fn sealed(&self, path: &Path, message: &str, checkout: bool) -> String {
+        let seeded =
+            if checkout { path.to_path_buf() } else { self.git.path(&format!("seed-{message}")) };
+        seed(self.git, &seeded, "s.txt");
+        self.git.git(&seeded, &["add", "-A"]);
+        self.git.git(&seeded, &["commit", "-qm", message]);
+        if !checkout {
+            let (from, to) = (seeded.display().to_string(), path.display().to_string());
+            self.git.git(self.root, &["clone", "--quiet", "--bare", &from, &to]);
+        }
+        self.git.git(&seeded, &["rev-parse", "HEAD"])
+    }
+
+    // The local addresses a guest's mounts hold or refuse, and `holder`,
+    // whose remotes name each of them.
+    fn held(&self) -> Held {
+        // outside every mount: an origin, and a repository beside the
+        // read-only mount's root, which holds an origin of its own
+        let outside = self.git.path("outside.git");
+        let readonly = self.git.path("readonly");
+        fs::create_dir_all(&readonly).expect("the read-only mount");
+        let beside = self.git.path("readonly.git");
+        let ro_origin = readonly.join("origin.git");
+        let inside = self.at("inside.git");
+        let planted = self.at("planted");
+        let untouched = vec![
+            (outside.clone(), self.sealed(&outside, "outside", false)),
+            (beside.clone(), self.sealed(&beside, "beside", false)),
+            (ro_origin.clone(), self.sealed(&ro_origin, "readonly", false)),
+            (inside.clone(), self.sealed(&inside, "inside", false)),
+            (planted.clone(), self.sealed(&planted, "planted", true)),
+        ];
+        let commit = |at: usize| untouched[at].1.clone();
+
+        // in the place: a `.git` file and a link that lead out, a bundle,
+        // and a repository whose gitdir holds a `.git` file of its own
+        let gitfile = self.at("gitfile");
+        fs::create_dir_all(&gitfile).expect("the gitfile directory");
+        fs::write(gitfile.join(".git"), format!("gitdir: {}\n", outside.display()))
+            .expect("the .git file");
+        symlink(&outside, self.at("link-out")).expect("the link out");
+        let bundle = self.at("held.bundle");
+        let path = bundle.display().to_string();
+        self.git.git(&planted, &["bundle", "create", "--quiet", &path, "--all"]);
+        fs::write(planted.join(".git/.git"), format!("gitdir: {}\n", outside.display()))
+            .expect("the planted .git file");
+
+        // the remotes naming each, one with a second push URL outside
+        let holder = self.at("holder");
+        seed(self.git, &holder, "h.txt");
+        self.git.git(&holder, &["add", "-A"]);
+        self.git.git(&holder, &["commit", "-qm", "holder"]);
+        let inside_url = format!("file://{}", inside.display());
+        for (name, url) in [
+            ("outside", outside.display().to_string()),
+            ("linked", self.at("link-out").display().to_string()),
+            ("gitfile", gitfile.display().to_string()),
+            ("readonly", format!("file://{}", ro_origin.display())),
+            ("planted", planted.display().to_string()),
+            ("rooted", readonly.display().to_string()),
+            ("bundle", path),
+            ("split", inside_url.clone()),
+            ("relative", "../inside.git".to_owned()),
+        ] {
+            self.git.git(&holder, &["remote", "add", name, &url]);
+        }
+        for url in [inside_url.as_str(), &outside.display().to_string()] {
+            self.git.git(&holder, &["config", "--add", "remote.split.pushurl", url]);
+        }
+
+        // the inside origin by a URL naming a host, its path percent-encoded
+        let encoded = format!("file://localhost{}", inside.display());
+        let encoded = encoded.replace("/inside.git", "/%69nside.git");
+        Held {
+            readonly,
+            outside,
+            holder,
+            encoded,
+            readonly_origin: commit(2),
+            inside: commit(3),
+            planted: commit(4),
+            untouched,
+        }
+    }
+
+    // A repository outside every mount, and places in the scratch that lead
+    // git into it once the backend has held them, each with a change to
+    // seal: a `.git` file, a gitdir whose `commondir` leads out, a clone
+    // borrowing its objects, a repository including a file outside, and one
+    // whose `.git` the escaping git swaps for a link out. Beside them, a
+    // repository fetching a served remote, whose fetch the escaping git
+    // probes the boundary from, dialling `port`. The repository outside,
+    // and the served remote's path.
+    fn beyond(&self, port: u16) -> (PathBuf, PathBuf) {
+        let beyond = self.git.path("beyond");
+        self.sealed(&beyond, "beyond", true);
+        let gitdir = beyond.join(".git");
+
+        let gitfile = self.at("beyond-gitfile");
+        fs::create_dir_all(&gitfile).expect("the gitfile's place");
+        fs::write(gitfile.join(".git"), format!("gitdir: {}\n", gitdir.display()))
+            .expect("the .git file");
+        let common = self.at("beyond-commondir/.git");
+        fs::create_dir_all(&common).expect("the gitdir");
+        fs::write(common.join("HEAD"), "ref: refs/heads/main\n").expect("the gitdir's HEAD");
+        fs::write(common.join("commondir"), format!("{}\n", gitdir.display()))
+            .expect("the commondir");
+        let (from, to) = (beyond.display().to_string(), self.at("beyond-alternate"));
+        self.git
+            .git(self.root, &["clone", "--quiet", "--shared", &from, &to.display().to_string()]);
+        let included = self.git.path("beyond.config");
+        fs::write(&included, "[user]\n\tname = Beyond\n").expect("the included file");
+        self.sealed(&self.at("beyond-include"), "include", true);
+        self.config(&self.at("beyond-include"), "include.path", &included.display().to_string());
+        self.sealed(&self.at("beyond-swap"), "swap", true);
+        fs::write(self.at("beyond-swap/.git/swap"), gitdir.display().to_string())
+            .expect("the swap");
+        for place in ["gitfile", "commondir", "alternate", "include", "swap"] {
+            fs::write(self.at(&format!("beyond-{place}/b.txt")), "b\n").expect("a change to seal");
+        }
+
+        let probe = self.at("beyond-probe");
+        self.sealed(&probe, "probe", true);
+        let (served, url) = self.git.served("probed.git");
+        self.git.git(&probe, &["remote", "add", "served", &url]);
+        let secret = beyond.join("s.txt");
+        fs::write(probe.join(".git/probe"), format!("{port}\n{}\n", secret.display()))
+            .expect("the probe");
+        (beyond, served)
     }
 
     // A sealed repository with a bare directory inside it, holding a file,
@@ -851,9 +1096,9 @@ impl<'a> Salt<'a> {
 
     // What the planting git lays a clone's destination from: a configuration
     // naming the filter `evil` and an ssh command, each recording that it
-    // ran.
+    // ran. It lies beneath the place, where a bounded git can read it.
     fn template(&self) -> PathBuf {
-        let template = self.git.path("template");
+        let template = self.at("template");
         fs::create_dir_all(&template).expect("the template");
         let program = self.at("template-filter");
         executable(&program, &filter(&self.markers, "template-filter"));

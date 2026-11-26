@@ -12,7 +12,9 @@
 // - `clone3` refused with `ENOSYS` in a filter of its own
 
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io;
+use std::os::fd::{AsFd, AsRawFd as _};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, anyhow, ensure};
@@ -26,7 +28,7 @@ use seccompiler::{
 };
 use tokio::process::Command;
 
-use crate::session::Place;
+use crate::session::{Place, Root};
 
 // The first ABI that fences TCP, which the follow-ups build on. Its kernel,
 // 6.7, carries every filesystem right the ruleset handles.
@@ -40,9 +42,12 @@ const EXECUTABLE: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib3
 const READABLE: [&str; 4] = ["/etc", "/proc", "/sys", "/run"];
 const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
 
-// The boundary as probed: the filters every process gets, compiled once.
+// The boundary as probed: the filters a session's process gets, and the
+// ones a bounded process gets, which opens no socket at all, each compiled
+// once.
 pub struct Linux {
     filters: Filters,
+    bounded: Filters,
 }
 
 impl Linux {
@@ -74,14 +79,15 @@ impl Linux {
 
         ensure!(scope >= 1, "`kernel.yama.ptrace_scope` is {scope}; 1 or more is required");
 
-        let filters = Filters::compile()?;
+        let filters = Filters::compile(true)?;
+        let bounded = Filters::compile(false)?;
         undumpable()?;
-        Ok(Self { filters })
+        Ok(Self { filters, bounded })
     }
 
     pub fn command(&self, place: &Place<'_>) -> Result<Command> {
         let mut command = Command::new(place.program);
-        place.enter(&mut command);
+        place.enter(&mut command)?;
         self.restrain(&mut command, place)?;
         Ok(command)
     }
@@ -92,7 +98,8 @@ impl Linux {
     #[expect(unsafe_code, reason = "`pre_exec` runs in the forked child")]
     fn restrain(&self, command: &mut Command, place: &Place<'_>) -> Result<()> {
         let mut ruleset = Some(Self::ruleset(place)?);
-        let mut filters = Some(self.filters.clone());
+        let filters = if place.network { &self.filters } else { &self.bounded };
+        let mut filters = Some(filters.clone());
 
         // SAFETY: the hook applies rules built here and allocates only on its
         // failure path.
@@ -118,11 +125,21 @@ impl Linux {
 
     fn ruleset(place: &Place<'_>) -> Result<RulesetCreated> {
         let abi = REQUIRED;
-        let mut ruleset = Ruleset::default()
+        let handled = Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
-            .handle_access(AccessFs::from_all(abi))
-            .and_then(Ruleset::create)
-            .context("creating the Landlock ruleset")?;
+            .handle_access(AccessFs::from_all(abi));
+
+        // no network: TCP handled with no rule to admit any of it, beside
+        // the filter that opens no socket
+        let handled = if place.network {
+            handled
+        } else {
+            handled.and_then(|ruleset| {
+                ruleset.handle_access(AccessNet::BindTcp | AccessNet::ConnectTcp)
+            })
+        };
+        let mut ruleset =
+            handled.and_then(Ruleset::create).context("creating the Landlock ruleset")?;
 
         // the system, each path as the distribution lays it
         let executable = AccessFs::ReadFile | AccessFs::ReadDir | AccessFs::Execute;
@@ -138,13 +155,28 @@ impl Linux {
 
         // the process's own, a granted root executable too since a toolchain
         // lives there
-        required(&mut ruleset, place.cwd, AccessFs::from_all(abi))?;
-        required(&mut ruleset, place.scratch, AccessFs::from_all(abi))?;
+        for root in &place.write {
+            root.bind(&mut ruleset, AccessFs::from_all(abi))?;
+        }
         required(&mut ruleset, place.program, AccessFs::ReadFile | AccessFs::Execute)?;
-        for root in place.read {
-            required(&mut ruleset, root, AccessFs::from_read(abi) | AccessFs::Execute)?;
+        for root in &place.read {
+            root.bind(&mut ruleset, AccessFs::from_read(abi) | AccessFs::Execute)?;
         }
         Ok(ruleset)
+    }
+}
+
+impl Root<'_> {
+    // A root by path is opened here; an open one is bound as it is, so the
+    // rule names the directory its caller opened.
+    fn bind(&self, ruleset: &mut RulesetCreated, access: BitFlags<AccessFs>) -> Result<()> {
+        match *self {
+            Self::Path(path) => required(ruleset, path, access),
+            Self::Open(fd) => {
+                let shown = format!("descriptor {}", fd.as_raw_fd());
+                grant(ruleset, Path::new(&shown), fd, access)
+            }
+        }
     }
 }
 
@@ -189,11 +221,13 @@ fn required(ruleset: &mut RulesetCreated, path: &Path, access: BitFlags<AccessFs
 }
 
 // Landlock refuses a directory right on a file, so a rule over a file keeps
-// the file rights alone.
+// the file rights alone. What the descriptor opened decides, not the path.
 fn grant(
-    ruleset: &mut RulesetCreated, path: &Path, fd: PathFd, access: BitFlags<AccessFs>,
+    ruleset: &mut RulesetCreated, path: &Path, fd: impl AsFd, access: BitFlags<AccessFs>,
 ) -> Result<()> {
-    let access = if path.is_dir() { access } else { access & AccessFs::from_file(REQUIRED) };
+    let opened = fd.as_fd().try_clone_to_owned().map(File::from).and_then(|file| file.metadata());
+    let is_dir = opened.with_context(|| format!("reading {}", path.display()))?.is_dir();
+    let access = if is_dir { access } else { access & AccessFs::from_file(REQUIRED) };
     ensure!(!access.is_empty(), "{} is a file and takes no directory right", path.display());
     ruleset
         .add_rule(PathBeneath::new(fd, access))
@@ -217,9 +251,9 @@ struct Filters {
 }
 
 impl Filters {
-    fn compile() -> Result<Self> {
+    fn compile(network: bool) -> Result<Self> {
         let arch = ARCH.context("seccomp filters are compiled for x86-64 and aarch64 alone")?;
-        let denied = compile(denied()?, SeccompAction::Errno(errno(libc::EPERM)), arch)?;
+        let denied = compile(denied(network)?, SeccompAction::Errno(errno(libc::EPERM)), arch)?;
         let unsupported = compile(
             BTreeMap::from([(libc::SYS_clone3, Vec::new())]),
             SeccompAction::Errno(errno(libc::ENOSYS)),
@@ -258,8 +292,10 @@ const TIOCSTI: u64 = 0x5412;
 const TIOCLINUX: u64 = 0x541C;
 
 // What a confined process has no use for. An empty rule list matches the
-// syscall whole, and a condition narrows it to the arguments named.
-fn denied() -> Result<BTreeMap<i64, Vec<SeccompRule>>> {
+// syscall whole, and a condition narrows it to the arguments named. A
+// process with no network opens no socket of any family, a unix one under
+// `/run` included.
+fn denied(network: bool) -> Result<BTreeMap<i64, Vec<SeccompRule>>> {
     const OUTRIGHT: &[i64] = &[
         libc::SYS_ptrace,
         libc::SYS_process_vm_readv,
@@ -313,7 +349,7 @@ fn denied() -> Result<BTreeMap<i64, Vec<SeccompRule>>> {
     ];
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
         OUTRIGHT.iter().map(|&syscall| (syscall, Vec::new())).collect();
-    rules.insert(libc::SYS_socket, sockets()?);
+    rules.insert(libc::SYS_socket, if network { sockets()? } else { Vec::new() });
     rules.insert(libc::SYS_clone, vec![rule(vec![masked(0, flag(libc::CLONE_NEWUSER))?])?]);
     rules.insert(
         libc::SYS_ioctl,

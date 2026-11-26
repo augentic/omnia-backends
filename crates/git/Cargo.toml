@@ -23,8 +23,10 @@ anyhow.workspace = true
 futures.workspace = true
 libc.workspace = true
 omnia.workspace = true
+omnia-sandbox.workspace = true
 omnia-wasi-vcs.workspace = true
 process-wrap = { workspace = true, features = ["kill-on-drop", "process-session", "tokio1"] }
+sha2.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["process", "rt"] }
 tracing.workspace = true

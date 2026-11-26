@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::os::fd::{AsRawFd as _, RawFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -124,21 +125,15 @@ impl Session {
     /// - a bare `program` is not on the host's `PATH`
     /// - the kernel boundary cannot be laid over the working directory
     pub fn command(&self, program: &str) -> Result<Command> {
-        let program = if program.contains('/') {
-            PathBuf::from(program)
-        } else {
-            env::split_paths(&self.0.path)
-                .map(|dir| dir.join(program))
-                .find(|path| executable(path))
-                .with_context(|| format!("`{program}` is not on PATH"))?
-        };
+        let program = resolve(Path::new(program), &self.0.path)?;
 
         let mut inner = self.0.kernel.command(&Place {
-            cwd: &self.0.cwd,
-            scratch: &self.0.scratch,
+            dir: self.0.dir.as_fd(),
             program: &program,
-            read: &self.0.read,
-            dir: self.0.dir.as_raw_fd(),
+            read: self.0.read.iter().map(|root| Root::Path(root)).collect(),
+            write: vec![Root::Path(&self.0.cwd), Root::Path(&self.0.scratch)],
+            workspace: Some(&self.0.cwd),
+            network: true,
         })?;
 
         inner.env_clear().envs(&self.0.env);
@@ -293,30 +288,68 @@ impl fmt::Debug for Command {
     }
 }
 
-// Where the kernel puts one process: its working directory, open and as a
-// path, its scratch, the program, and the directories its grant opened.
+// Where the kernel puts one process: the working directory it enters, the
+// program, what it reads and what it writes, and whether it reaches the
+// network at all.
 pub struct Place<'a> {
-    pub cwd: &'a Path,
-    pub scratch: &'a Path,
+    pub dir: BorrowedFd<'a>,
     pub program: &'a Path,
-    pub read: &'a [PathBuf],
-    pub dir: RawFd,
+    pub read: Vec<Root<'a>>,
+    pub write: Vec<Root<'a>>,
+    // A session's working directory, which its processes never remove, whose
+    // ancestors they list, and whose `.git` and `.emery` are closed to them.
+    #[cfg_attr(
+        target_os = "linux",
+        expect(
+            dead_code,
+            reason = "Landlock cannot deny beneath a grant, so Linux reads none of it"
+        )
+    )]
+    pub workspace: Option<&'a Path>,
+    pub network: bool,
 }
 
 impl Place<'_> {
     // The child enters the working directory by its open descriptor. Hooks
     // run in the order registered, so the kernel calls this before its rules.
     #[expect(unsafe_code, reason = "`pre_exec` runs in the forked child")]
-    pub fn enter(&self, command: &mut tokio::process::Command) {
-        let dir = self.dir;
-        // SAFETY: the descriptor is inherited across the fork and held open
-        // past `spawn`, and `fchdir` is async-signal-safe.
+    pub fn enter(&self, command: &mut tokio::process::Command) -> Result<()> {
+        let dir = self.dir.try_clone_to_owned().context("holding the working directory open")?;
+        // SAFETY: the duplicate moves into the hook, so it is open in the
+        // child whenever the command spawns, and `fchdir` is
+        // async-signal-safe.
         unsafe {
             command.pre_exec(move || {
-                if libc::fchdir(dir) == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+                if libc::fchdir(dir.as_raw_fd()) == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
             });
         }
+        Ok(())
     }
+}
+
+// A file or directory a process is opened to: by the path it resolved to, or
+// by a descriptor its caller holds, which names what was opened whatever its
+// path reads as now.
+#[derive(Clone, Copy)]
+pub enum Root<'a> {
+    Path(&'a Path),
+    Open(BorrowedFd<'a>),
+}
+
+// `program` as given where it holds a separator, else the first executable of
+// its name along `path`.
+pub fn resolve(program: &Path, path: &OsStr) -> Result<PathBuf> {
+    if program.as_os_str().as_bytes().contains(&b'/') {
+        return Ok(program.to_owned());
+    }
+    env::split_paths(path)
+        .map(|dir| dir.join(program))
+        .find(|path| executable(path))
+        .with_context(|| format!("`{}` is not on PATH", program.display()))
 }
 
 fn executable(path: &Path) -> bool {

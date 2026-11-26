@@ -14,22 +14,24 @@
 
 mod address;
 mod frozen;
+mod host;
 mod pins;
 
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::os::fd::{AsRawFd as _, RawFd};
+use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
 use std::path::{self, Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 
 use anyhow::{Context as _, Result};
 use omnia_wasi_vcs::Place;
-use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessSession};
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop, ProcessSession};
 use tokio::process::Command;
 
 pub use self::address::Address;
 pub use self::frozen::Frozen;
+pub use self::host::Host;
 pub use self::pins::{Listing, Pins};
 use crate::Client;
 
@@ -74,10 +76,38 @@ impl Output {
     }
 }
 
+// Where one git process runs, and what holds it there.
+#[derive(Clone, Copy)]
+pub enum Run<'a> {
+    // For no repository, in the backend's own directory, with the
+    // operator's environment.
+    Backend,
+    // In a repository the backend owns, a mirror or a staging, with the
+    // operator's environment: the one process that dials a network remote.
+    Owned(&'a Path),
+    // In a place, beside an operation's scratch, reading the one mirror it
+    // dials where it dials one, held as `Host::command` holds it.
+    Place { at: &'a Place, scratch: &'a Path, mirror: Option<&'a Path> },
+}
+
+impl<'a> Run<'a> {
+    pub const fn place(self) -> Option<&'a Place> {
+        match self {
+            Self::Backend | Self::Owned(_) => None,
+            Self::Place { at, .. } => Some(at),
+        }
+    }
+}
+
+// A running git and what it is called, for the errors waiting on it.
+pub struct Spawned {
+    child: Box<dyn ChildWrapper>,
+    binary: String,
+}
+
 impl Client {
-    // Run git in `at` — none for a command that reads no repository — with
-    // `env` set on top of the fixed interactive lockout, and wait for it; a
-    // failure here is the spawn's, never git's own exit.
+    // Run git in `at`, beside a scratch of its own, or for no place in the
+    // backend's own directory.
     pub(crate) async fn git<I, S>(
         &self, at: Option<&Place>, args: I, env: &[(&str, &OsStr)],
     ) -> Result<Output>
@@ -85,23 +115,79 @@ impl Client {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = Command::new(&self.binary);
-        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        if let Some(place) = at {
-            enter(&mut command, place.dir().as_raw_fd());
-            match self.gitdir(place) {
-                Some(gitdir) => {
-                    let mut flag = OsString::from("--git-dir=");
-                    flag.push(gitdir);
-                    command.arg(flag);
+        match at {
+            Some(at) => {
+                let scratch = self.host.scratch()?;
+                let run = Run::Place {
+                    at,
+                    scratch: scratch.path(),
+                    mirror: None,
+                };
+                self.run(run, args, env).await
+            }
+            None => self.run(Run::Backend, args, env).await,
+        }
+    }
+
+    // Run git as `run` holds it, with `env` set on top of the fixed
+    // interactive lockout, and wait for it; a failure here is the spawn's,
+    // never git's own exit.
+    pub(crate) async fn run<I, S>(
+        &self, run: Run<'_>, args: I, env: &[(&str, &OsStr)],
+    ) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let command = self.command(run, args, env)?;
+        self.spawn(command)?.wait().await
+    }
+
+    // The command `run` holds git to, its stdin closed and its output
+    // captured, for a caller that rewires a stream before it spawns.
+    pub(crate) fn command<I, S>(
+        &self, run: Run<'_>, args: I, env: &[(&str, &OsStr)],
+    ) -> Result<Command>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = match run {
+            Run::Backend => {
+                let mut command = Command::new(&self.binary);
+                let root = self.host.root();
+                command.current_dir(root);
+                if let Some(ceiling) = root.parent() {
+                    command.env("GIT_CEILING_DIRECTORIES", ceiling);
                 }
-                None => {
-                    if let Some(ceiling) = ceiling(place) {
-                        command.env("GIT_CEILING_DIRECTORIES", ceiling);
+                command
+            }
+            Run::Owned(dir) => {
+                let mut command = Command::new(&self.binary);
+                let mut flag = OsString::from("--git-dir=");
+                flag.push(dir);
+                command.current_dir(dir).arg(flag);
+                command
+            }
+            Run::Place { at, scratch, mirror } => {
+                self.host.check(at)?;
+                let mut command = self.host.command(&self.binary, at, scratch, mirror)?;
+                match self.gitdir(at) {
+                    Some(gitdir) => {
+                        let mut flag = OsString::from("--git-dir=");
+                        flag.push(gitdir);
+                        command.arg(flag);
+                    }
+                    None => {
+                        if let Some(ceiling) = ceiling(at) {
+                            command.env("GIT_CEILING_DIRECTORIES", ceiling);
+                        }
                     }
                 }
+                command
             }
-        }
+        };
+        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         command.args(args);
         for var in SCRUBBED {
             command.env_remove(var);
@@ -109,15 +195,30 @@ impl Client {
         for (key, value) in FIXED.map(|(key, value)| (key, OsStr::new(value))).iter().chain(env) {
             command.env(key, value);
         }
+        Ok(command)
+    }
 
+    // Spawn `command` leading a session of its own, killed when it is
+    // dropped. The command goes with the spawn, and with it every
+    // descriptor it held for the child.
+    pub(crate) fn spawn(&self, command: Command) -> Result<Spawned> {
         let mut command = CommandWrap::from(command);
         command.wrap(KillOnDrop);
         command.wrap(ProcessSession);
         let child = command.spawn().with_context(|| format!("issue spawning `{}`", self.binary))?;
-        let output = Box::into_pin(child.wait_with_output())
+        Ok(Spawned {
+            child,
+            binary: self.binary.clone(),
+        })
+    }
+}
+
+impl Spawned {
+    // Wait for the process and read what it said.
+    pub async fn wait(self) -> Result<Output> {
+        let output = Box::into_pin(self.child.wait_with_output())
             .await
             .with_context(|| format!("issue waiting for `{}`", self.binary))?;
-
         Ok(Output {
             status: output.status,
             stdout: output.stdout,
@@ -146,6 +247,32 @@ fn enter(command: &mut Command, dir: RawFd) {
     unsafe {
         command.pre_exec(move || {
             if libc::fchdir(dir) == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+        });
+    }
+}
+
+// Hand `fds` to the child as its descriptors 3 and 4, the two a `fd::3,4`
+// transport reads and writes. The command holds them until it is spawned,
+// and closes them as it goes.
+#[expect(unsafe_code, reason = "`pre_exec` runs in the forked child")]
+pub fn hand(command: &mut Command, fds: [OwnedFd; 2]) {
+    // SAFETY: `fcntl` and `dup2` are async-signal-safe. Each descriptor is
+    // copied above both targets first, so neither lands on the other.
+    unsafe {
+        command.pre_exec(move || {
+            let mut high = [0; 2];
+            for (slot, fd) in high.iter_mut().zip(&fds) {
+                *slot = libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10);
+                if *slot < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            for (target, fd) in (3..).zip(high) {
+                if libc::dup2(fd, target) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
         });
     }
 }

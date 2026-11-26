@@ -384,6 +384,9 @@ impl VcsClient for Client {
             let repo = Repo::open(&client, &repo, true).await?;
             repo.check_transport_config()?;
             let targets = repo.targets(&remote, true).await?;
+            if targets.is_empty() {
+                return Err(Error::NotFound(remote).into());
+            }
             let full = format!("refs/heads/{label}");
             let commit = client.read_ref(repo.at, &full).await?;
             let commit = commit.ok_or_else(|| Error::NotFound(label.clone()))?;
@@ -400,9 +403,11 @@ impl VcsClient for Client {
                     Target::Local(_) => None,
                 })
                 .collect();
-            if !network.is_empty() {
-                hold.admit(network.iter().map(String::as_str))?;
-            }
+            let hold_pins = if network.is_empty() {
+                Vec::new()
+            } else {
+                hold.admit(network.iter().map(String::as_str))?
+            };
             for target in &targets {
                 let output = match target {
                     Target::Local(_) => {
@@ -418,7 +423,7 @@ impl VcsClient for Client {
                         let mirror = Mirror::open(&client, address).await?;
                         let staging = Staging::lay(&client, &mirror).await?;
                         repo.stage(&staging, &commit).await?;
-                        staging.push(&client, address, &full).await?
+                        staging.push(&client, address, &full, &hold_pins).await?
                     }
                 };
                 if !output.status.success() {
@@ -803,6 +808,9 @@ impl<'a> Repo<'a> {
             let target = Target::resolve(self.client, self.at, address, remote, push).await?;
             target.hold_rewrites(&self.listing, push)?;
             targets.push(target);
+        }
+        if targets.is_empty() {
+            return Err(Error::NotFound(remote.to_owned()).into());
         }
         Ok(targets)
     }

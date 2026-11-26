@@ -172,9 +172,11 @@ impl Staging {
     }
 
     // Push what the fill staged to `url` as `full`, outside the boundary.
-    pub async fn push(&self, client: &Client, url: &OsStr, full: &str) -> Result<Output> {
+    pub async fn push(
+        &self, client: &Client, url: &OsStr, full: &str, hold_pins: &[OsString],
+    ) -> Result<Output> {
         let (protocol, pack) = client.transport_args(false, true);
-        let mut args = owned_args(&self.pins, &[], ["push", "--quiet", &pack, "--"]);
+        let mut args = owned_args(&self.pins, hold_pins, ["push", "--quiet", &pack, "--"]);
         args.extend([url.to_owned(), OsString::from(format!("{STAGED}:{full}"))]);
         client.run(Run::Owned(self.dir.path()), args, &env(&self.pins, protocol)).await
     }

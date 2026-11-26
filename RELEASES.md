@@ -1,5 +1,21 @@
 ## 0.32.1
 
+Unreleased
+
+### Fixed
+
+<!-- Release notes generated using configuration in .github/release.yaml at ceeac11f739088a37292e33150e75c65fb9c5db3 -->
+
+## What's Changed
+* git: hold a lent repository's configuration for a whole operation by @andrewweston in https://github.com/augentic/omnia-backends/pull/192
+
+
+**Full Changelog**: https://github.com/augentic/omnia-backends/compare/v0.32.0...v0.32.1
+
+---
+
+## 0.32.0
+
 Released 2026-11-24
 
 Pairs with omnia 0.38.x.

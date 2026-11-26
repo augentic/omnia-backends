@@ -12,20 +12,31 @@
 //! - Bundle URIs, the repository's own and one an origin advertises.
 //! - Configuration keys whose raw bytes cannot be pinned.
 //! - A bare repository nested inside a sealed repository.
+//! - Local addresses outside the guest's mounts, beneath a read-only one, or
+//!   naming no repository exactly.
+//! - Places whose `.git` file, `commondir`, alternates, or included
+//!   configuration lead outside the mounts, or whose `.git` is swapped for a
+//!   link out once the backend has held it.
+//! - A git that, inside the boundary, tries to write the mirror it reads,
+//!   read a file outside the mounts, and open a socket.
 //!
 //! The guest runs the operations that would trigger each vector. The host
 //! verifies that no marker ran, no data or credentials escaped the place,
 //! no bundle of the host's reached a repository, SSH received only Git's
 //! expected commands, an HTTP host was offered the host's credentials
-//! alone, the enclosing repository was untouched, and valid work still
-//! completed.
+//! alone, the enclosing repository was untouched, no repository outside the
+//! mounts or in the read-only one took a push, the boundary refused git
+//! everything outside it, and valid work still completed. The operator
+//! arguments are the bundling origin's URL, the path of an origin outside
+//! every mount, and an inside origin's URL naming a host, its path
+//! percent-encoded.
 
 #![cfg(target_arch = "wasm32")]
 
 use std::fs;
 
 use omnia_sdk::vcs::{self, CommitId, Workspace};
-use test_programs::{arguments, fails_with};
+use test_programs::{arguments, fails_with, not_found};
 
 omnia_sdk::command::export!(scenario);
 
@@ -42,10 +53,22 @@ const LAZY: &str = "./lazy";
 const BUNDLED: &str = "./bundled";
 const BYTES: &str = "./bytes";
 const INNER: &str = "./outer/inner";
+const HOLDER: &str = "./holder";
+const LEADING_OUT: [&str; 5] = [
+    "./beyond-gitfile",
+    "./beyond-commondir",
+    "./beyond-alternate",
+    "./beyond-include",
+    "./beyond-swap",
+];
+const PROBING: &str = "./beyond-probe";
+const OUTSIDE: &str = "outside the guest's mounts";
 
 async fn scenario() {
     let arguments = arguments();
-    let bundling = arguments.first().expect("the bundling origin's URL is the first argument");
+    let [bundling, outside, encoded] = arguments.as_slice() else {
+        panic!("the bundling, outside, and encoded addresses are the arguments");
+    };
     repo_config_runs_nothing().await;
     a_failed_merge_leaves_no_merge().await;
     a_shaping_repository_is_refused().await;
@@ -55,6 +78,66 @@ async fn scenario() {
     a_clone_takes_no_advertised_bundle(bundling).await;
     an_unnameable_key_is_refused().await;
     an_enclosing_repository_is_not_reached().await;
+    a_local_address_is_held(outside, encoded).await;
+    a_place_leading_out_is_refused().await;
+}
+
+// Each place leads git outside the guest's mounts once the backend has held
+// it, through a `.git` file, a `commondir`, alternates, an included file, or
+// a `.git` swapped for a link out; and the git at the last place tries to
+// leave the boundary itself. The kernel refuses git each time, so the call
+// fails, and nothing outside reaches the guest.
+async fn a_place_leading_out_is_refused() {
+    for path in LEADING_OUT {
+        let sealed = match vcs::open(path).await {
+            Ok(workspace) => workspace.commit("seal".to_owned()).await.map_err(Into::into),
+            Err(error) => Err(error),
+        };
+        assert!(sealed.is_err(), "{path} sealed: {sealed:?}");
+    }
+    let fetched = open(PROBING).await.fetch("served").await;
+    assert!(fetched.is_err(), "the probing fetch ran: {fetched:?}");
+}
+
+// Each local address a transport would dial is placed beneath the guest's
+// mounts and held to the repository it names exactly, before anything is
+// dialled.
+async fn a_local_address_is_held(outside: &str, encoded: &str) {
+    // beneath no mount, through a `.git` file or a link that leads out, or
+    // where any one push URL lies outside
+    let cloned = vcs::clone(outside, "./held-clone", None).await;
+    fails_with(cloned.expect_err("the clone is refused"), "denied", OUTSIDE);
+    let holder = open(HOLDER).await;
+    for remote in ["outside", "linked", "gitfile"] {
+        let fetched = holder.fetch(remote).await.expect_err("the fetch is refused");
+        let pushed = holder.push(remote, "main").await.expect_err("the push is refused");
+        for error in [fetched, pushed] {
+            fails_with(error, "denied", OUTSIDE);
+        }
+    }
+    let split = holder.push("split", "main").await.expect_err("the push is refused");
+    fails_with(split, "denied", OUTSIDE);
+
+    // a read-only mount's origin is fetched from but never pushed to, and a
+    // gitdir holding a `.git` file of its own is fetched from as itself,
+    // which a push cannot be held to
+    holder.fetch("readonly").await.expect("fetch from the read-only origin");
+    let pushed = holder.push("readonly", "main").await.expect_err("the push is refused");
+    fails_with(pushed, "denied", "beneath no writable mount");
+    holder.fetch("planted").await.expect("fetch from the planted repository");
+    let pushed = holder.push("planted", "main").await.expect_err("the push is refused");
+    fails_with(pushed, "denied", "a .git of its own");
+
+    // a mount's root beside a repository of its name, a bundle, and an
+    // address in place of a remote's name are no repository to dial
+    not_found(holder.fetch("rooted").await, "rooted");
+    not_found(holder.fetch("bundle").await, "bundle");
+    not_found(holder.fetch(encoded).await, encoded);
+
+    // a `file://` URL naming a host, its path percent-encoded, reaches the
+    // origin beneath the place
+    let cloned = vcs::clone(encoded, "./encoded", None).await;
+    cloned.expect("clone").expect("a new workspace");
 }
 
 async fn open(path: &str) -> Workspace {

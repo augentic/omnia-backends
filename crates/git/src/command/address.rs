@@ -43,6 +43,7 @@ impl<'a> Address<'a> {
         }
     }
 
+    #[expect(dead_code, reason = "reserved for host-policy expansions beside `target::is_local`")]
     pub const fn is_local(self) -> bool {
         matches!(self, Self::Local)
     }

@@ -1,13 +1,19 @@
 //! What `Client::connect_with` holds the operator's `git` to before any
 //! operation runs: present, no older than the first with
 //! `config --show-scope`, and speaking the C locale whatever the operator's
-//! shell exports.
+//! shell exports. An operator may opt out of the kernel boundary.
 
 mod support;
 
 use std::fs;
 
-use support::{Hermetic, connect};
+use support::{Hermetic, connect, connect_unbounded};
+
+#[tokio::test]
+async fn unbounded() {
+    let git = Hermetic::new();
+    connect_unbounded(git.binary()).await.expect("a client without the boundary");
+}
 
 // The refusal classes read what git says in English; `LC_ALL` outranks the
 // `LANG`, `LANGUAGE`, and `LC_MESSAGES` an operator's shell exports.

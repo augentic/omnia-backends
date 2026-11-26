@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod command;
+mod mirror;
 mod vcs;
 
 use std::collections::BTreeMap;
@@ -10,8 +11,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context as _, Result, ensure};
 use omnia::{Connect, FromEnv};
+use omnia_sandbox::Sandbox;
 use omnia_wasi_vcs::Place;
 use tracing::instrument;
+
+use crate::command::Host;
 
 // First git with `config --show-scope`, which host-policy pins read.
 const MIN_VERSION: (u32, u32) = (2, 26);
@@ -22,6 +26,7 @@ pub struct Client {
     binary: String,
     // Working-copy path to the recorded gitdir `add`. Guests can rewrite `.git` files.
     worktrees: Arc<Mutex<BTreeMap<PathBuf, PathBuf>>>,
+    host: Arc<Host>,
 }
 
 impl Client {
@@ -56,9 +61,10 @@ impl Connect for Client {
 
     #[instrument(name = "Git::connect")]
     async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        let client = Self {
+        let mut client = Self {
             binary: options.binary,
             worktrees: Arc::default(),
+            host: Arc::new(Host::new(options.mirrors.as_deref())?),
         };
 
         // check git version
@@ -74,6 +80,24 @@ impl Connect for Client {
             MIN_VERSION.0,
             MIN_VERSION.1
         );
+
+        // hold every git run for a place to the guest's mounts, unless the
+        // operator chose not to
+        if options.unbounded {
+            tracing::warn!(
+                "GIT_UNBOUNDED is set: git runs without the kernel boundary, so a link a guest \
+                 lays can still lead it out of the guest's mounts"
+            );
+            return Ok(client);
+        }
+        let sandbox = Sandbox::connect(omnia_sandbox::Options::default()).await.context(
+            "this host cannot hold git to the guest's mounts; set GIT_UNBOUNDED to run git \
+             without the kernel boundary",
+        )?;
+        let reach = client.reach().await?;
+        Arc::get_mut(&mut client.host)
+            .context("the backend's host state is shared before connect returns")?
+            .bound(sandbox, reach);
 
         Ok(client)
     }
@@ -115,4 +139,17 @@ pub struct ConnectOptions {
     /// The git to run: a name on `PATH` or a path.
     #[env(from = "GIT_BINARY", default = "git")]
     pub binary: String,
+
+    /// Run git without the kernel boundary, which a host that cannot enforce one requires.
+    ///
+    /// A link a guest lays can then still lead git out of the guest's mounts. The
+    /// backend logs a warning at connect.
+    #[env(from = "GIT_UNBOUNDED", default = "false")]
+    pub unbounded: bool,
+
+    /// Where the backend mirrors network remotes, outside every mount.
+    ///
+    /// A directory of the backend's own when unset, removed with it.
+    #[env(from = "GIT_MIRRORS")]
+    pub mirrors: Option<String>,
 }

@@ -2,30 +2,37 @@
 //! runtime opened, under the host-policy pins and over the frozen copy of the
 //! configuration they were built from, which keep the repository's own
 //! configuration from choosing a program git runs, and what git says read
-//! into the typed error.
+//! into the typed error. Every repository an operation touches, the place's
+//! own and each local one it dials, is held to the guest's mounts first.
 
 mod hold;
 mod policy;
 mod refusal;
+mod target;
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::io;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{self, Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use futures::FutureExt as _;
 use omnia::{FutureResult, Grants};
 use omnia_wasi_vcs::{
     Change, ChangeKind, CloneOptions, Entry, Error, Merged, Place, Rule, VcsClient,
 };
+use tempfile::TempDir;
+use tokio::process::Command;
 
 use self::hold::Hold;
 use self::policy::Resolution;
 use self::refusal::Class;
+use self::target::Target;
 use crate::Client;
-use crate::command::{Frozen, Listing, Output, Pins};
+use crate::command::{Frozen, Listing, Output, Pins, Run};
+use crate::mirror::{Mirror, Staging};
 
 impl VcsClient for Client {
     fn resolve(&self, repo: Place, revision: String) -> FutureResult<String> {
@@ -38,7 +45,7 @@ impl VcsClient for Client {
         tracing::trace!("asking whether {descendant} descends from {ancestor}");
         let client = self.clone();
         async move {
-            let repo = Repo::open(&client, &repo).await?;
+            let repo = Repo::open(&client, &repo, false).await?;
             let ancestor = repo.rev_parse(&ancestor).await?;
             let descendant = repo.rev_parse(&descendant).await?;
             repo.is_ancestor(&ancestor, &descendant).await
@@ -56,7 +63,7 @@ impl VcsClient for Client {
         tracing::trace!("committing {}", at.path().display());
         let client = self.clone();
         async move {
-            let repo = Repo::open(&client, &at).await?;
+            let repo = Repo::open(&client, &at, true).await?;
             if repo.status().await?.is_empty() {
                 return Ok(None);
             }
@@ -74,7 +81,7 @@ impl VcsClient for Client {
         let client = self.clone();
         async move {
             validate_arg(&revision)?;
-            let repo = Repo::open(&client, &at).await?;
+            let repo = Repo::open(&client, &at, true).await?;
             let head = repo.rev_parse(&revision).await?;
             if !repo.begin_merge(&head, &revision).await? {
                 return Ok(Merged {
@@ -91,7 +98,7 @@ impl VcsClient for Client {
         tracing::trace!("reading {base}..{revision} in {}", repo.path().display());
         let client = self.clone();
         async move {
-            let repo = Repo::open(&client, &repo).await?;
+            let repo = Repo::open(&client, &repo, false).await?;
             let range =
                 format!("{}..{}", repo.rev_parse(&base).await?, repo.rev_parse(&revision).await?);
             let args = [
@@ -117,8 +124,14 @@ impl VcsClient for Client {
             if at.dir().exists(".git") {
                 return Err(Error::Exists(display_path(&at)).into());
             }
-            let pins = client.laying(&at).await?;
-            client.create(&at, &pins, ["init", "--quiet"], &[], "HEAD").await
+            let pins = Pins::build(&client.laying(&at).await?);
+            let scratch = client.host.scratch()?;
+            let run = Run::Place {
+                at: &at,
+                scratch: scratch.path(),
+                mirror: None,
+            };
+            client.create(run, &pins, ["init", "--quiet"], &[], "HEAD").await
         }
         .boxed()
     }
@@ -132,7 +145,7 @@ impl VcsClient for Client {
         let client = self.clone();
         async move {
             validate_arg(&revision)?;
-            let repo = Repo::open(&client, &repo).await?;
+            let repo = Repo::open(&client, &repo, true).await?;
             repo.add_worktree(&at, &revision).await?;
 
             // the gitdir git laid the copy with, read while the copy holds
@@ -144,7 +157,7 @@ impl VcsClient for Client {
             // the checkout, over a frozen copy of the configuration as it
             // stands now; a working copy it fails in is removed whole
             let checked = async {
-                let copy = Repo::open(&client, &at).await?;
+                let copy = Repo::open(&client, &at, true).await?;
                 copy.run(["reset", "--hard", "--quiet"], &revision).await
             };
             if let Err(error) = checked.await {
@@ -161,7 +174,7 @@ impl VcsClient for Client {
         tracing::trace!("removing the working copy at {}", at.path().display());
         let client = self.clone();
         async move {
-            Repo::open(&client, &at).await?.remove_worktree().await?;
+            Repo::open(&client, &at, true).await?.remove_worktree().await?;
             client.forget(&at);
             Ok(())
         }
@@ -171,7 +184,7 @@ impl VcsClient for Client {
     fn pending(&self, at: Place) -> FutureResult<Vec<Change>> {
         tracing::trace!("reading what is pending at {}", at.path().display());
         let client = self.clone();
-        async move { Repo::open(&client, &at).await?.status().await }.boxed()
+        async move { Repo::open(&client, &at, false).await?.status().await }.boxed()
     }
 
     fn clone_repo(
@@ -192,55 +205,73 @@ impl VcsClient for Client {
             if occupied {
                 return Err(Error::Exists(display_path(&at)).into());
             }
-            let pins = client.laying(&at).await?;
+            let listing = client.laying(&at).await?;
+            let pins = Pins::build(&listing);
 
-            // the address held to the guest's grants, before anything connects
-            let hold = Hold::new(grants);
+            // what the clone dials, held before anything is fetched
             let address = client.expand_url(&at, &url).await;
-            let redirects = hold.admit([address.as_str()])?;
+            let target = Target::resolve(&client, &at, &address, &url, false).await?;
+            target.hold_rewrites(&listing, false)?;
+            let hold = Hold::new(grants);
+            let hold_pins = if matches!(target, Target::Network(_)) {
+                hold.admit([address.to_string_lossy().as_ref()])?
+            } else {
+                Vec::new()
+            };
 
             // the fetch, into a bare repository the backend owns, so nothing a
-            // guest writes meanwhile is configuration git reads
-            let staging = tempfile::Builder::new()
-                .prefix("omnia-git-")
-                .tempdir()
-                .context("creating a directory to clone into")?;
-            let (protocol, pack) = client.transport_args(&address, false);
+            // guest writes meanwhile is configuration git reads: the remote's
+            // mirror, filled outside the boundary, or a copy of a local
+            // repository, laid inside it
+            let scratch = client.host.scratch()?;
+            let (protocol, pack) = client.transport_args(true, false);
+            let env = [("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))];
+            let mirror = match &target {
+                Target::Network(address) => Some(Mirror::open(&client, address).await?),
+                Target::Local(_) => None,
+            };
+            let run = Run::Place {
+                at: &at,
+                scratch: scratch.path(),
+                mirror: mirror.as_ref().map(Mirror::path),
+            };
+            let source = if let Some(mirror) = &mirror {
+                let output = mirror.fetch(&client, &target.dial()?, true, &hold_pins).await?;
+                if !output.status.success() {
+                    return Err(hold.refuse(&output, refuse(&output, &at, &url, None)).into());
+                }
+                mirror.path().to_path_buf()
+            } else {
+                let staging = scratch.path().join("staging");
+                let dial = target.dial()?;
+                let args = ["clone", "--quiet", "--bare", "--no-local", &pack, "--"]
+                    .map(OsStr::new)
+                    .into_iter()
+                    .chain([dial.as_os_str(), staging.as_os_str()]);
+                client.create(run, &pins, args, &env, &url).await?;
+                staging
+            };
+
+            // the repository laid from it unchecked out, its origin the
+            // address the guest named; depth cuts history, never the labels,
+            // which git's implied --single-branch would
+            target::hold_rewrites(source.as_os_str(), &listing, false)?;
             let depth = options.depth.map(|depth| depth.to_string());
-            let mut args: Vec<&OsStr> = redirects.iter().map(OsString::as_os_str).collect();
-            args.extend(["clone", "--quiet", "--bare", pack.as_str()].map(OsStr::new));
-            // depth cuts history, never the labels: git's implied --single-branch would
+            let mut args = ["clone", "--quiet", "--no-checkout", "--no-local", pack.as_str()]
+                .map(OsStr::new)
+                .to_vec();
             if let Some(depth) = depth.as_deref() {
                 args.extend(["--depth", depth, "--no-single-branch"].map(OsStr::new));
             }
-            args.extend([OsStr::new("--"), OsStr::new(&url), staging.path().as_os_str()]);
-            let env = [("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))];
-            let output = client.lay(&at, &pins, args, &env).await?;
-            if !output.status.success() {
-                return Err(hold.refuse(&output, refuse(&output, &at, &url, None)).into());
-            }
-            let recorded = client.recorded_url(&at, staging.path()).await?;
-
-            // the repository laid from it unchecked out, its origin the URL
-            // the fetch recorded
-            let (protocol, pack) = client.transport_args(&staging.path().to_string_lossy(), false);
-            let args = [
-                OsStr::new("clone"),
-                OsStr::new("--quiet"),
-                OsStr::new("--no-checkout"),
-                OsStr::new(&pack),
-                OsStr::new("--"),
-                staging.path().as_os_str(),
-                OsStr::new("."),
-            ];
-            let env = [("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))];
-            client.create(&at, &pins, args, &env, &url).await?;
-            let args = [OsStr::new("config"), OsStr::new("remote.origin.url"), &recorded];
-            client.create(&at, &pins, args, &[], &url).await?;
+            args.extend([OsStr::new("--"), source.as_os_str(), OsStr::new(".")]);
+            client.create(run, &pins, args, &env, &url).await?;
+            let origin = origin_url(&at, &url)?;
+            let args = [OsStr::new("config"), OsStr::new("remote.origin.url"), &origin];
+            client.create(run, &pins, args, &[], &url).await?;
 
             // the checkout, over a frozen copy of whatever configuration the
             // repository holds by now
-            let repo = Repo::open(&client, &at).await?;
+            let repo = Repo::open(&client, &at, true).await?;
             repo.run(["reset", "--hard", "--quiet"], "HEAD").await?;
             Ok(())
         }
@@ -252,14 +283,44 @@ impl VcsClient for Client {
         let client = self.clone();
         async move {
             validate_arg(&remote)?;
-            let repo = Repo::open(&client, &repo).await?;
+            let repo = Repo::open(&client, &repo, true).await?;
             repo.check_transport_config()?;
-            let urls = repo.urls(&remote, false).await?;
+            let targets = repo.targets(&remote, false).await?;
+            let target = targets.first().ok_or_else(|| Error::NotFound(remote.clone()))?;
             let hold = Hold::new(grants);
-            let mut args = hold.admit([urls[0].as_str()])?;
-            let (protocol, pack) = client.transport_args(&urls[0], false);
-            args.extend(["fetch", "--quiet", &pack, "--", &remote].map(OsString::from));
-            let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))]).await?;
+            let hold_pins = match target {
+                Target::Network(address) => hold.admit([address.to_string_lossy().as_ref()])?,
+                Target::Local(_) => Vec::new(),
+            };
+
+            // a network remote's mirror filled outside the boundary first, the
+            // one repository a network fetch writes to
+            let mirror = match target {
+                Target::Network(address) => {
+                    let mirror = Mirror::open(&client, address).await?;
+                    let output = mirror.fetch(&client, address, false, &hold_pins).await?;
+                    if !output.status.success() {
+                        return Err(hold.refuse(&output, repo.refuse(&output, &remote)).into());
+                    }
+                    Some(mirror)
+                }
+                Target::Local(_) => None,
+            };
+
+            // every branch into the remote's own namespace, by the address
+            // resolved or from the mirror
+            let source = match &mirror {
+                Some(mirror) => mirror.path().as_os_str().to_owned(),
+                None => target.dial()?,
+            };
+            let (protocol, pack) = client.transport_args(true, false);
+            let refspec = format!("+refs/heads/*:refs/remotes/{remote}/*");
+            let args = ["fetch", "--quiet", &pack, "--"]
+                .map(OsStr::new)
+                .into_iter()
+                .chain([source.as_os_str(), OsStr::new(&refspec)]);
+            let env = [("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))];
+            let output = repo.exec_reading(mirror.as_ref().map(Mirror::path), args, &env).await?;
             if !output.status.success() {
                 return Err(hold.refuse(&output, repo.refuse(&output, &remote)).into());
             }
@@ -274,7 +335,7 @@ impl VcsClient for Client {
         async move {
             validate_arg(&name)?;
             validate_arg(&revision)?;
-            let repo = Repo::open(&client, &repo).await?;
+            let repo = Repo::open(&client, &repo, true).await?;
             let head = repo.rev_parse(&revision).await?;
             repo.detach_from(&name).await?;
             repo.run(["branch", "-f", "--", &name, &head], &revision).await?;
@@ -288,6 +349,7 @@ impl VcsClient for Client {
         let client = self.clone();
         async move {
             validate_arg(&name)?;
+            client.hold(&repo, false).await?;
             let full = format!("refs/heads/{name}");
             Ok(client.read_ref(&repo, &full).await?.ok_or(Error::NotFound(name))?)
         }
@@ -300,6 +362,7 @@ impl VcsClient for Client {
         async move {
             validate_arg(&remote)?;
             validate_arg(&name)?;
+            client.hold(&repo, false).await?;
             let full = format!("refs/remotes/{remote}/{name}");
             if let Some(commit) = client.read_ref(&repo, &full).await? {
                 return Ok(commit);
@@ -318,19 +381,56 @@ impl VcsClient for Client {
         async move {
             validate_arg(&remote)?;
             validate_arg(&label)?;
-            let repo = Repo::open(&client, &repo).await?;
+            let repo = Repo::open(&client, &repo, true).await?;
             repo.check_transport_config()?;
-            let urls = repo.urls(&remote, true).await?;
+            let targets = repo.targets(&remote, true).await?;
+            let full = format!("refs/heads/{label}");
+            let commit = client.read_ref(repo.at, &full).await?;
+            let commit = commit.ok_or_else(|| Error::NotFound(label.clone()))?;
+
+            // the label's commit to each address in turn, the first refusal
+            // ending the push: a local repository inside the boundary, and a
+            // network remote from a staging filled from the place, outside it
+            let refspec = format!("{commit}:{full}");
             let hold = Hold::new(grants);
-            let mut args = hold.admit(urls.iter().map(String::as_str))?;
-            let (protocol, pack) = client.transport_args(&urls[0], true);
-            let refspec = format!("refs/heads/{label}:refs/heads/{label}");
-            args.extend(["push", "--quiet", &pack, "--", &remote, &refspec].map(OsString::from));
-            let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))]).await?;
-            if !output.status.success() {
-                let fallback = repo.refuse_push(&output, &remote, &label);
-                return Err(hold.refuse(&output, fallback).into());
+            let network: Vec<String> = targets
+                .iter()
+                .filter_map(|target| match target {
+                    Target::Network(address) => Some(address.to_string_lossy().into_owned()),
+                    Target::Local(_) => None,
+                })
+                .collect();
+            if !network.is_empty() {
+                hold.admit(network.iter().map(String::as_str))?;
             }
+            for target in &targets {
+                let output = match target {
+                    Target::Local(_) => {
+                        let dial = target.dial()?;
+                        let (protocol, pack) = client.transport_args(true, true);
+                        let args = ["push", "--quiet", &pack, "--"]
+                            .map(OsStr::new)
+                            .into_iter()
+                            .chain([dial.as_os_str(), OsStr::new(&refspec)]);
+                        repo.exec(args, &[("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))]).await?
+                    }
+                    Target::Network(address) => {
+                        let mirror = Mirror::open(&client, address).await?;
+                        let staging = Staging::lay(&client, &mirror).await?;
+                        repo.stage(&staging, &commit).await?;
+                        staging.push(&client, address, &full).await?
+                    }
+                };
+                if !output.status.success() {
+                    let fallback = repo.refuse_push(&output, &remote, &label);
+                    return Err(hold.refuse(&output, fallback).into());
+                }
+            }
+
+            // the remote's label as the push left it, which a push by address
+            // does not record
+            let tracking = format!("refs/remotes/{remote}/{label}");
+            repo.run(["update-ref", &tracking, &commit], &label).await?;
             Ok(())
         }
         .boxed()
@@ -340,15 +440,35 @@ impl VcsClient for Client {
 impl Client {
     // A revision naming an index path reads the index, which starts any
     // file-system monitor the repository names, so the forced pins apply.
+    // The one process prints the repository's directories ahead of the
+    // commit, so the commit is read back only once they are held.
     async fn rev_parse(&self, at: &Place, revision: &str) -> Result<String> {
         validate_arg(revision)?;
         let spec = format!("{revision}^{{commit}}");
         let pins = Pins::forced();
         let mut args: Vec<&OsStr> = pins.args().collect();
-        args.extend(REV_PARSE.map(OsStr::new));
+        args.extend(["rev-parse", "--absolute-git-dir", "--git-common-dir"].map(OsStr::new));
+        args.extend(REV_PARSE[1..].iter().map(OsStr::new));
         args.push(OsStr::new(&spec));
-        let output = self.git(Some(at), args, &[]).await?;
+        let mut output = self.git(Some(at), args, &[]).await?;
+        let lines: Vec<_> =
+            output.stdout.split(|&byte| byte == b'\n').map(<[u8]>::to_vec).collect();
+        if let [gitdir, common, rest @ ..] = lines.as_slice() {
+            let (gitdir, common) = dirs(gitdir, common);
+            at.locate(&gitdir, false)?;
+            at.locate(&common, false)?;
+            output.stdout = rest.join(&b'\n');
+        }
         commit_of(&output, revision)
+    }
+
+    // The repository at `at` held to the guest's mounts before anything of
+    // it is read: its gitdir and the common directory it shares each beneath
+    // a mount the guest holds, a writable one where the operation writes.
+    // The gitdir and the common directory, located.
+    async fn hold(&self, at: &Place, write: bool) -> Result<(Place, Place)> {
+        let (gitdir, common) = self.git_dirs(at, "HEAD").await?;
+        Ok((at.locate(&gitdir, write)?, at.locate(&common, write)?))
     }
 
     // The commit the ref at `full` holds, read by its exact path, which
@@ -378,94 +498,85 @@ impl Client {
     // The URL an address reaches as the host's configuration rewrites it
     // (`url.<base>.insteadOf`), for the transport rule; the address as given
     // where git rewrites nothing.
-    async fn expand_url(&self, at: &Place, address: &str) -> String {
+    async fn expand_url(&self, at: &Place, address: &str) -> OsString {
         let output = self.git(Some(at), ["ls-remote", "--get-url", "--", address], &[]).await;
-        expanded(output, address)
+        match output {
+            Ok(output) if output.status.success() => {
+                let url = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+                OsStr::from_bytes(url).to_owned()
+            }
+            _ => OsString::from(address),
+        }
     }
 
     // The gitdir git addresses the repository at `at` through, and the
-    // common directory it shares, both absolute: git prints the common
-    // directory relative only where it is the gitdir itself.
+    // common directory it shares, both absolute.
     async fn git_dirs(&self, at: &Place, missing: &str) -> Result<(PathBuf, PathBuf)> {
         let args = ["rev-parse", "--absolute-git-dir", "--git-common-dir"];
         let output = self.git(Some(at), args, &[]).await?;
         if !output.status.success() {
             return Err(refuse(&output, at, missing, None).into());
         }
-        let mut lines = output
-            .stdout
-            .split(|&byte| byte == b'\n')
-            .map(|line| PathBuf::from(OsStr::from_bytes(line)));
-        let gitdir = lines.next().unwrap_or_default();
-        let common =
-            lines.next().filter(|common| common.is_absolute()).unwrap_or_else(|| gitdir.clone());
-        Ok((gitdir, common))
+        let mut lines = output.stdout.split(|&byte| byte == b'\n');
+        Ok(dirs(lines.next().unwrap_or_default(), lines.next().unwrap_or_default()))
     }
 
-    // The pins a repository is laid at `at` under, read from the host's
-    // configuration alone, since the place holds no repository yet. A working
-    // copy this client laid there before is forgotten first, so the place is
+    // The configuration a repository is laid at `at` under, read from the
+    // host's alone, since the place holds no repository yet. A working copy
+    // this client laid there before is forgotten first, so the place is
     // addressed as itself rather than through a gitdir no longer its own.
-    async fn laying(&self, at: &Place) -> Result<Pins> {
+    async fn laying(&self, at: &Place) -> Result<Listing> {
         self.forget(at);
-        Ok(Pins::build(&Listing::read(self, at).await?))
+        Listing::read(self, at).await
     }
 
-    // Run one step of laying a repository at `at` under `pins`, held to
-    // success, else the typed refusal with `missing` naming what the
-    // repository lacks.
+    // Run one step of laying a repository at the place `run` holds git to,
+    // under `pins`, held to success, else the typed refusal with `missing`
+    // naming what the repository lacks. The work tree is git's to lay.
     async fn create<I, S>(
-        &self, at: &Place, pins: &Pins, args: I, env: &[(&str, &OsStr)], missing: &str,
+        &self, run: Run<'_>, pins: &Pins, args: I, env: &[(&str, &OsStr)], missing: &str,
     ) -> Result<()>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let output = self.lay(at, pins, args, env).await?;
+        let at = run.place().context("a repository is laid at a place")?;
+        let mut full: Vec<OsString> = pins.args().map(OsStr::to_owned).collect();
+        full.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
+        let env: Vec<_> = pins.env().chain(env.iter().copied()).collect();
+        let output = self.run(run, full, &env).await?;
         if output.status.success() {
             Ok(())
         } else {
             Err(refuse(&output, at, missing, None).into())
         }
     }
-
-    // Run one step of laying a repository at `at` under `pins`, and read
-    // what it said, whatever its exit. The work tree is git's to lay.
-    async fn lay<I, S>(
-        &self, at: &Place, pins: &Pins, args: I, env: &[(&str, &OsStr)],
-    ) -> Result<Output>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let mut full: Vec<OsString> = pins.args().map(OsStr::to_owned).collect();
-        full.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
-        let env: Vec<_> = pins.env().chain(env.iter().copied()).collect();
-        self.git(Some(at), full, &env).await
-    }
-
-    // The URL a clone into `staging` recorded for its origin: the address as
-    // given, or the absolute path git resolved a local one to.
-    async fn recorded_url(&self, at: &Place, staging: &Path) -> Result<OsString> {
-        let config = staging.join("config");
-        let args = [
-            OsStr::new("config"),
-            OsStr::new("--file"),
-            config.as_os_str(),
-            OsStr::new("--get"),
-            OsStr::new("remote.origin.url"),
-        ];
-        let output = self.git(Some(at), args, &[]).await?;
-        if !output.status.success() {
-            bail!("{}: the clone recorded no origin: {}", display_path(at), output.stderr.trim());
-        }
-        let url = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
-        Ok(OsStr::from_bytes(url).to_owned())
-    }
 }
 
 // `rev-parse` held to one revision, never an option, whatever it names.
 const REV_PARSE: [&str; 4] = ["rev-parse", "--verify", "--quiet", "--end-of-options"];
+
+// The gitdir and common directory `--absolute-git-dir --git-common-dir`
+// printed, both absolute: git prints the common directory relative only
+// where it is the gitdir itself.
+fn dirs(gitdir: &[u8], common: &[u8]) -> (PathBuf, PathBuf) {
+    let gitdir = PathBuf::from(OsStr::from_bytes(gitdir));
+    let common = PathBuf::from(OsStr::from_bytes(common));
+    let common = if common.is_absolute() { common } else { gitdir.clone() };
+    (gitdir, common)
+}
+
+// The URL a clone records for its origin: the guest's own spelling of a URL,
+// and a plain path made absolute against the place, as git records one.
+fn origin_url(at: &Place, url: &str) -> Result<OsString> {
+    if url.contains("://") || !target::is_local(url) {
+        return Ok(OsString::from(url));
+    }
+    let joined = at.path().join(url);
+    Ok(path::absolute(&joined)
+        .with_context(|| format!("resolving {}", joined.display()))?
+        .into_os_string())
+}
 
 // The commit `REV_PARSE` printed for `revision`. `--quiet` leaves an unknown
 // revision unsaid, so a failure is `not-found` unless git names a missing
@@ -481,14 +592,6 @@ fn commit_of(output: &Output, revision: &str) -> Result<String> {
     .into())
 }
 
-// The URL `ls-remote --get-url` printed, else the address as given.
-fn expanded(output: Result<Output>, address: &str) -> String {
-    match output {
-        Ok(output) if output.status.success() => output.text().trim().to_owned(),
-        _ => address.to_owned(),
-    }
-}
-
 // One repository under one operation's host-policy pins: every command git
 // runs for it reads the pins first and the configuration they were built
 // from after, frozen, so the repository's own configuration cannot choose a
@@ -496,22 +599,37 @@ fn expanded(output: Result<Output>, address: &str) -> String {
 struct Repo<'a> {
     client: &'a Client,
     at: &'a Place,
+    gitdir: Place,
+    listing: Listing,
     pins: Pins,
     frozen: Frozen,
+    scratch: TempDir,
 }
 
 impl<'a> Repo<'a> {
-    async fn open(client: &'a Client, at: &'a Place) -> Result<Self> {
-        let (_, common) = client.git_dirs(at, "HEAD").await?;
+    // Open the repository at `at` for an operation that writes to it where
+    // `write`, held to the guest's mounts first.
+    async fn open(client: &'a Client, at: &'a Place, write: bool) -> Result<Self> {
+        let (gitdir, common) = client.hold(at, write).await?;
         let listing = Listing::read(client, at).await?;
-        let frozen = Frozen::lay(&common, &listing)?;
+        let scratch = client.host.scratch()?;
+        let frozen = Frozen::lay(&common, &listing, scratch.path())?;
         let pins = Pins::build(&listing);
         Ok(Self {
             client,
             at,
+            gitdir,
+            listing,
             pins,
             frozen,
+            scratch,
         })
+    }
+
+    // The operation's own directory, beside the guest's mounts, for what it
+    // stages.
+    fn scratch(&self) -> &Path {
+        self.scratch.path()
     }
 
     // Run git for the repository over the frozen copy and read what it said,
@@ -521,17 +639,45 @@ impl<'a> Repo<'a> {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let frozen = ("GIT_COMMON_DIR", self.frozen.path().as_os_str());
-        let env: Vec<_> = env.iter().copied().chain([frozen]).collect();
-        self.exec_unfrozen(args, &env).await
+        self.exec_reading(None, args, env).await
+    }
+
+    // `exec`, reading `mirror` too where one is named: the one repository
+    // outside the guest's mounts a process for it reads.
+    async fn exec_reading<I, S>(
+        &self, mirror: Option<&Path>, args: I, env: &[(&str, &OsStr)],
+    ) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let command = self.command(mirror, args, &self.frozen_env(env))?;
+        self.client.spawn(command)?.wait().await
     }
 
     // Run git for the repository over its own common directory: only for a
     // command that records or finds that directory by its path, and neither
-    // checks out a file nor reaches a remote. The work tree is the place
-    // itself, since a `core.worktree` the repository set would point git at
-    // any directory on the host, and the pins lead the arguments.
+    // checks out a file nor reaches a remote.
     async fn exec_unfrozen<I, S>(&self, args: I, env: &[(&str, &OsStr)]) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let command = self.command(None, args, env)?;
+        self.client.spawn(command)?.wait().await
+    }
+
+    fn frozen_env<'e>(&'e self, env: &[(&'e str, &'e OsStr)]) -> Vec<(&'e str, &'e OsStr)> {
+        let frozen = ("GIT_COMMON_DIR", self.frozen.path().as_os_str());
+        env.iter().copied().chain([frozen]).collect()
+    }
+
+    // The work tree is the place itself, since a `core.worktree` the
+    // repository set would point git at any directory on the host, and the
+    // pins lead the arguments.
+    fn command<I, S>(
+        &self, mirror: Option<&Path>, args: I, env: &[(&str, &OsStr)],
+    ) -> Result<Command>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -540,7 +686,45 @@ impl<'a> Repo<'a> {
         full.extend(self.pins.args().map(OsStr::to_owned));
         full.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
         let env: Vec<_> = self.pins.env().chain(env.iter().copied()).collect();
-        self.client.git(Some(self.at), full, &env).await
+        let run = Run::Place {
+            at: self.at,
+            scratch: self.scratch(),
+            mirror,
+        };
+        self.client.command(run, full, &env)
+    }
+
+    // Fill `staging` with `commit`: an upload-pack held to the guest's
+    // mounts serves the repository's gitdir over the frozen copy, through a
+    // pipe, to the staging's fetch outside the boundary, so neither side
+    // reads what the other owns. It serves whatever object it is asked for,
+    // since the label may have moved since it was read.
+    async fn stage(&self, staging: &Staging, commit: &str) -> Result<()> {
+        let (from_pack, to_fetch) = io::pipe().context("opening a pipe")?;
+        let (from_fetch, to_pack) = io::pipe().context("opening a pipe")?;
+        let gitdir = path::absolute(self.gitdir.path())
+            .with_context(|| format!("resolving {}", self.gitdir.path().display()))?;
+        let args = [
+            OsStr::new("-c"),
+            OsStr::new("uploadpack.allowAnySHA1InWant=true"),
+            OsStr::new("upload-pack"),
+            OsStr::new("--strict"),
+            gitdir.as_os_str(),
+        ];
+        let mut serve = self.command(None, args, &self.frozen_env(&[]))?;
+        serve.stdin(from_fetch).stdout(to_fetch);
+        let fill = staging.fill(self.client, commit, [from_pack.into(), to_pack.into()])?;
+
+        let serving = self.client.spawn(serve)?;
+        let filling = self.client.spawn(fill)?;
+        let (served, filled) = tokio::join!(serving.wait(), filling.wait());
+        let (served, filled) = (served?, filled?);
+        if filled.status.success() {
+            return Ok(());
+        }
+        let said = [filled.stderr.trim(), served.stderr.trim()].join("\n");
+        let message = format!("{}: cannot stage {commit}: {}", self.display_path(), said.trim());
+        Err(Error::Other(message).into())
     }
 
     // Run git for the repository and hold it to success, else the typed
@@ -573,20 +757,21 @@ impl<'a> Repo<'a> {
         commit_of(&output, revision)
     }
 
-    // How a transport runs — the URL it reaches, the helper that speaks it,
-    // the proxy it crosses, the TLS it trusts — is the host's configuration
-    // to set: a setting the repository made is config no pin can put back, so
-    // a transport operation refuses the repository whole rather than carry
-    // the operator's credentials anywhere or over anything.
+    // How a transport runs — the URL it reaches, the proxy it crosses, the
+    // TLS it trusts — is the host's configuration to set: a setting the
+    // repository made is config no pin can put back, so a transport operation
+    // refuses the repository whole rather than carry the operator's
+    // credentials anywhere or over anything.
     fn check_transport_config(&self) -> Result<()> {
-        let shown = self.display_path();
         if let Some(key) = self.pins.blocked_transport_key() {
+            let shown = self.display_path();
             let message = format!(
                 "{shown}: the repository sets {key}, and how a transport runs is the host's to set"
             );
             return Err(Error::Other(message).into());
         }
         if let Some(key) = self.pins.split_url_key() {
+            let shown = self.display_path();
             let message = format!(
                 "{shown}: the repository sets {key} across lines, which git would dial whole"
             );
@@ -595,24 +780,31 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    // The URLs the remote `remote` reaches as the host's configuration
-    // expands them, never none: a fetch dials the first, and a push dials
-    // every one. A remote is a name the frozen configuration records, so an
-    // address, or a name only `.git/remotes` or `.git/branches` defines, is
-    // `not-found` naming it. A repository with transport settings of its own
-    // was refused before this, so the expansion is the host's alone.
-    async fn urls(&self, remote: &str, push: bool) -> Result<Vec<String>> {
-        let mut args = vec!["remote", "get-url", "--all"];
+    // What a fetch or a push to `remote` dials, every address resolved and
+    // held before any is dialled: the first URL the repository records for
+    // a fetch, and every push URL for a push, each as the host's
+    // configuration expands it. A repository with transport settings of its
+    // own was refused before this, so the expansion is the host's alone. A
+    // name the repository records no remote for, an address included, is
+    // `not-found`.
+    async fn targets(&self, remote: &str, push: bool) -> Result<Vec<Target>> {
+        let mut args = vec!["remote", "get-url"];
         if push {
-            args.push("--push");
+            args.extend(["--push", "--all"]);
         }
         args.extend(["--", remote]);
         let output = self.exec(args, &[]).await?;
-        let urls: Vec<String> = output.text().split_terminator('\n').map(str::to_owned).collect();
-        if !output.status.success() || urls.is_empty() {
+        if !output.status.success() {
             return Err(Error::NotFound(remote.to_owned()).into());
         }
-        Ok(urls)
+        let mut targets = Vec::new();
+        for address in output.stdout.split(|&byte| byte == b'\n').filter(|line| !line.is_empty()) {
+            let address = OsStr::from_bytes(address);
+            let target = Target::resolve(self.client, self.at, address, remote, push).await?;
+            target.hold_rewrites(&self.listing, push)?;
+            targets.push(target);
+        }
+        Ok(targets)
     }
 
     async fn status(&self) -> Result<Vec<Change>> {
@@ -789,8 +981,8 @@ fn refuse(output: &Output, at: &Place, missing: &str, label: Option<&str>) -> Er
         (Class::Exists, _) => Error::Exists(display_path(at)),
         (Class::NotFound, _) => Error::NotFound(missing.to_owned()),
         (Class::Denied, _) => Error::Denied(detail),
-        (Class::Access | Class::Redirected, _) => Error::Access(detail),
         (Class::Diverged, Some(label)) => Error::Diverged(label.to_owned()),
+        (Class::Access | Class::Redirected, _) => Error::Access(detail),
         (Class::Diverged | Class::Other, None) | (Class::Other, Some(_)) => Error::Other(detail),
     }
 }

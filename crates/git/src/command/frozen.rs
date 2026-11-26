@@ -13,9 +13,10 @@
 
 use std::fs;
 use std::os::unix::fs::symlink;
-use std::path::Path;
+use std::path::{self, Path};
 
 use anyhow::{Context as _, Result};
+use omnia_wasi_vcs::Place;
 use tempfile::TempDir;
 
 use super::Listing;
@@ -40,11 +41,12 @@ pub struct Frozen {
 }
 
 impl Frozen {
-    // Lay the copy for the repository whose common directory is `common`.
-    pub fn lay(common: &Path, listing: &Listing) -> Result<Self> {
+    // Lay the copy within the operation's scratch, for the repository whose
+    // common directory, located beneath the guest's mounts, is `common`.
+    pub fn lay(common: &Place, listing: &Listing, within: &Path) -> Result<Self> {
         let dir = tempfile::Builder::new()
-            .prefix("omnia-git-")
-            .tempdir()
+            .prefix("frozen-")
+            .tempdir_in(within)
             .context("creating a frozen configuration")?;
         let root = dir.path();
 
@@ -59,20 +61,23 @@ impl Frozen {
         }
 
         // the repository's reflogs, made now where it has kept none yet, so
-        // the link below leads them into the repository
-        let _ = fs::create_dir(common.join("logs"));
+        // the link below leads them into the repository; a read-only mount's
+        // repository is left as it is
+        if common.writable() {
+            let _ = common.dir().create_dir("logs");
+        }
 
         // every other entry, linked
-        let entries =
-            fs::read_dir(common).with_context(|| format!("reading {}", common.display()))?;
-        for entry in entries {
-            let name = entry.with_context(|| format!("reading {}", common.display()))?.file_name();
+        let shown = common.path().display();
+        let target = path::absolute(common.path()).with_context(|| format!("resolving {shown}"))?;
+        for entry in common.dir().entries().with_context(|| format!("reading {shown}"))? {
+            let name = entry.with_context(|| format!("reading {shown}"))?.file_name();
             let link = root.join(&name);
             if UNLINKED.iter().any(|unlinked| name == *unlinked) || link.symlink_metadata().is_ok()
             {
                 continue;
             }
-            symlink(common.join(&name), &link)
+            symlink(target.join(&name), &link)
                 .with_context(|| format!("linking {}", link.display()))?;
         }
 

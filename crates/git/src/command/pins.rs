@@ -21,14 +21,15 @@
 //! settings do not reach the far side. Local commands carry the same pins,
 //! while remote commands use Git's defaults instead of repository overrides.
 
-use std::env;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+use std::path::Path;
+use std::{env, fmt};
 
 use anyhow::Result;
 use omnia_wasi_vcs::{Error, Place};
 
-use super::Address;
+use super::{Output, Run};
 use crate::Client;
 
 // Keys forced on every operation whatever scope set them: each names a
@@ -77,6 +78,8 @@ const ALLOWED_HTTP_KEYS: [&str; 7] = [
     "version",
 ];
 
+const LISTING: [&str; 4] = ["config", "--show-scope", "--list", "-z"];
+
 // The configuration git applies at one place, every entry labelled with
 // whose it is, in the order git read it.
 #[derive(Debug)]
@@ -89,9 +92,17 @@ impl Listing {
     // pin could be built from it, and the forced set alone would leave
     // every program the repository names to run.
     pub async fn read(client: &Client, at: &Place) -> Result<Self> {
-        let args = ["config", "--show-scope", "--list", "-z"];
-        let output = client.git(Some(at), args, &[]).await?;
-        let shown = at.path().display();
+        let output = client.git(Some(at), LISTING, &[]).await?;
+        Self::parsed(&output, &at.path().display())
+    }
+
+    // Read the configuration of a repository the backend owns at `dir`.
+    pub async fn read_owned(client: &Client, dir: &Path) -> Result<Self> {
+        let output = client.run(Run::Owned(dir), LISTING, &[]).await?;
+        Self::parsed(&output, &dir.display())
+    }
+
+    fn parsed(output: &Output, shown: &impl fmt::Display) -> Result<Self> {
         if !output.status.success() {
             let stderr = output.stderr.trim();
             let message = format!("{shown}: cannot read the repository's configuration: {stderr}");
@@ -109,6 +120,30 @@ impl Listing {
     // The repository's own entries, each key with its value as git wrote it.
     pub fn repo_entries(&self) -> impl Iterator<Item = (&str, Option<&[u8]>)> {
         self.settings.iter().filter(|s| s.is_repo()).map(|s| (s.key.as_str(), s.value.as_deref()))
+    }
+
+    // The rule by which this configuration rewrites `address` where git is
+    // handed it, picked as git picks one: the longest matching
+    // `pushInsteadOf` for a push, else the longest matching `insteadOf`, the
+    // first listed of equal length. None where the address comes back
+    // unchanged.
+    pub fn rewrite(&self, address: &[u8], push: bool) -> Option<&str> {
+        let longest = |name: &str| {
+            self.settings
+                .iter()
+                .rev()
+                .filter_map(|setting| {
+                    let base = setting.key.strip_prefix("url.")?.strip_suffix(name)?;
+                    let prefix =
+                        setting.value.as_deref().filter(|value| address.starts_with(value))?;
+                    Some((setting, base.strip_suffix('.')?, prefix))
+                })
+                .max_by_key(|(_, _, prefix)| prefix.len())
+        };
+        let pushed = if push { longest("pushinsteadof") } else { None };
+        let (setting, base, prefix) = pushed.or_else(|| longest("insteadof"))?;
+        let rewritten = [base.as_bytes(), &address[prefix.len()..]].concat();
+        (rewritten != address).then_some(setting.key.as_str())
     }
 
     // The last host-scope value, as git's own precedence would read it.
@@ -139,9 +174,8 @@ fn os(bytes: &[u8]) -> OsString {
 }
 
 // The `-c` overrides and the environment that hold one repository's
-// operations to host policy, the first setting the repository made of how a
-// transport runs, if any, which no pin can undo, and the first remote URL it
-// set across lines, if any.
+// operations to host policy, and the first setting the repository made of
+// how a transport runs, if any, which no pin can undo.
 #[derive(Debug)]
 pub struct Pins {
     overrides: Vec<OsString>,
@@ -157,8 +191,8 @@ impl Pins {
         // a URL rewrite, an HTTP setting, a proxy, or a remote helper the
         // repository set would carry the operator's credentials anywhere or
         // over anything, and is config no `-c` can put back to unset; the
-        // first is named for the transport operations to refuse the
-        // repository on
+        // first is named for the transport operations to refuse the repository
+        // on
         let blocked_transport_key = settings
             .iter()
             .find(|s| s.is_repo() && s.is_transport_override())
@@ -200,6 +234,16 @@ impl Pins {
         }
     }
 
+    // The pins for a repository the backend owns, a mirror or a staging,
+    // whose one alternate is the backend's own mirror: git lists the
+    // alternate's refs itself, so a staging's fill carries only what the
+    // mirror lacks.
+    pub fn owned(listing: &Listing) -> Self {
+        let mut pins = Self::build(listing);
+        pins.overrides.retain(|pin| pin != "core.alternateRefsCommand=");
+        pins
+    }
+
     // The forced set alone, with no environment held: what a read is held to
     // that reaches no remote, signs nothing, and asks for no credential.
     pub fn forced() -> Self {
@@ -223,14 +267,13 @@ impl Pins {
     }
 
     // The first key the repository itself set of how a transport runs — a
-    // URL rewrite, an HTTP setting, a proxy, a remote helper — as git lists
-    // it.
+    // URL rewrite, an HTTP setting, a proxy — as git lists it.
     pub fn blocked_transport_key(&self) -> Option<&str> {
         self.blocked_transport_key.as_deref()
     }
 
-    // The first remote URL the repository itself set across lines, as git
-    // lists its key.
+    // The first key the repository set holding a remote URL across lines, as
+    // git lists it.
     pub fn split_url_key(&self) -> Option<&str> {
         self.split_url_key.as_deref()
     }
@@ -351,15 +394,15 @@ const LOCAL_PACK_PINS: [&str; 4] = [
 ];
 
 impl Client {
-    // The protocol allow-list and the pack command for a transport over
-    // `address`, the command named so the repository's own
+    // The protocol allow-list and the pack command for a local or a network
+    // transport, the command named so the repository's own
     // `remote.<name>.uploadPack` or `receivePack` — which no `-c` outranks —
     // is never the program the operator's ssh carries to a host: for a
     // local transport, this git wrapped to hold the far side to
     // `LOCAL_PACK_PINS`; for a remote one, git's own default.
-    pub(crate) fn transport_args(&self, address: &str, push: bool) -> (&'static str, String) {
+    pub(crate) fn transport_args(&self, local: bool, push: bool) -> (&'static str, String) {
         let operation = if push { "receive-pack" } else { "upload-pack" };
-        if Address::parse(address).is_local() {
+        if local {
             ("file", self.pack_arg(operation))
         } else {
             ("http:https:ssh", format!("--{operation}=git-{operation}"))
@@ -369,15 +412,19 @@ impl Client {
     // `git -c … <operation>` as one `--upload-pack` or `--receive-pack`
     // argument: the near side's `-c` pins reach no process the far side
     // starts, so its own ride the command. git splits the value with shell
-    // quoting for a local transport, so the binary is single-quoted.
+    // quoting for a local transport, so the binary is single-quoted. An
+    // upload-pack serves the gitdir it is handed alone, never a `.git`
+    // inside it; receive-pack has no such switch.
     fn pack_arg(&self, operation: &str) -> String {
-        let binary = String::from_utf8_lossy(&shell_quote(self.binary.as_bytes())).into_owned();
+        let program = self.host.program(&self.binary).as_os_str().as_bytes();
+        let binary = String::from_utf8_lossy(&shell_quote(program)).into_owned();
         let mut pins = String::new();
         for pin in LOCAL_PACK_PINS {
             pins.push_str(" -c ");
             pins.push_str(pin);
         }
-        format!("--{operation}={binary}{pins} {operation}")
+        let strict = if operation == "upload-pack" { " --strict" } else { "" };
+        format!("--{operation}={binary}{pins} {operation}{strict}")
     }
 }
 

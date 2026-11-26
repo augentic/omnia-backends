@@ -106,7 +106,8 @@ impl Repo<'_> {
             Some(revision) => self.show(revision, path).await?.unwrap_or_default(),
             None => Vec::new(),
         };
-        let mut file = NamedTempFile::new().context("creating a merge temporary")?;
+        let mut file =
+            NamedTempFile::new_in(self.scratch()).context("creating a merge temporary")?;
         file.write_all(&content).context("writing a merge temporary")?;
         Ok(file)
     }

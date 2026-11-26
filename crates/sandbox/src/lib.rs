@@ -7,6 +7,7 @@ mod session;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::net::SocketAddr;
+use std::os::fd::BorrowedFd;
 use std::path::{self, Path, PathBuf};
 use std::sync::Arc;
 use std::{env, fmt, io};
@@ -73,6 +74,8 @@ const STORES: &[&str] = &[
 /// [`Sandbox::connect`] validates the [`Options`] against the host and reads
 /// what a process inherits. [`Sandbox::prepare`] then validates one
 /// session's [`Grant`] and prepares the [`Session`] its processes run in.
+/// [`Sandbox::command`] instead holds one process to [`Bounds`], with no
+/// session and no network.
 pub struct Sandbox {
     options: Options,
     inherited: BTreeMap<OsString, OsString>,
@@ -176,6 +179,45 @@ impl Sandbox {
     /// - the proxy cannot be bound
     pub async fn prepare(&self, workspace: Option<&Path>, grant: &Grant) -> Result<Session> {
         Session::prepare(self, workspace, grant).await
+    }
+
+    /// A command running `program` held to `bounds`, with an empty
+    /// environment.
+    ///
+    /// The process works in `bounds.cwd`, entered by its descriptor before
+    /// `program` runs. The kernel opens to it the system, the program, and
+    /// the roots of `bounds`, each held to what its descriptor opened
+    /// whatever its path reads as later. Beside a [`Session`]'s process:
+    ///
+    /// - it reaches no network, loopback and unix sockets included
+    /// - nothing beneath a root is closed to it, `.git` and `.emery`
+    ///   included
+    /// - it inherits nothing of the host, so its caller sets its whole
+    ///   environment
+    ///
+    /// A bare `program` is resolved against the host's `PATH` as connecting
+    /// read it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when:
+    ///
+    /// - a bare `program` is not on the host's `PATH`
+    /// - the kernel boundary cannot be laid over `bounds`
+    pub fn command(
+        &self, program: impl AsRef<Path>, bounds: &Bounds<'_>,
+    ) -> Result<tokio::process::Command> {
+        let program = session::resolve(program.as_ref(), &self.host_path())?;
+        let mut command = self.kernel.command(&session::Place {
+            dir: bounds.cwd,
+            program: &program,
+            read: bounds.read.iter().copied().map(session::Root::Open).collect(),
+            write: bounds.write.iter().copied().map(session::Root::Open).collect(),
+            workspace: None,
+            network: false,
+        })?;
+        command.env_clear();
+        Ok(command)
     }
 
     /// The [`Access`] a session over `workspace` would run with, before any
@@ -381,6 +423,24 @@ pub struct Grant {
     ///
     /// A value's leading `~/` spells the operator's home.
     pub env: Vec<(String, String)>,
+}
+
+/// What one process [`Sandbox::command`] runs may reach: where it works, and
+/// what it reads and writes.
+///
+/// Each is a descriptor its caller holds open, so the boundary names the
+/// file or directory that was opened, never a path a process could
+/// redirect meanwhile. A root may be a directory, granting all beneath it,
+/// or a file alone.
+#[derive(Debug, Clone, Copy)]
+pub struct Bounds<'a> {
+    /// The directory the process works in, which grants it nothing.
+    pub cwd: BorrowedFd<'a>,
+    /// Files and directories the process reads and executes, beside the
+    /// system's own.
+    pub read: &'a [BorrowedFd<'a>],
+    /// Files and directories the process reads, writes, and executes.
+    pub write: &'a [BorrowedFd<'a>],
 }
 
 /// A [`Grant`] the sandbox refuses: an entry that breaks a rule of

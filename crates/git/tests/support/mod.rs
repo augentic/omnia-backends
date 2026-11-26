@@ -2,11 +2,11 @@
 //! wrapper the backend runs as its `git`, and that same git as the oracle a
 //! scenario reads a repository with.
 //!
-//! The wrapper exports `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM` before
-//! handing over to the `git` on `PATH`, so nothing of the developer's
-//! configuration — identity, signing, hooks, default branch — reaches a
-//! scenario, and the backend is driven through `GIT_BINARY` as a deployment
-//! drives it.
+//! The wrapper exports `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM`, and
+//! clears the identity a shell exports, before handing over to the `git` on
+//! `PATH`, so nothing of the developer's configuration — identity, signing,
+//! hooks, default branch — reaches a scenario, and the backend is driven
+//! through `GIT_BINARY` as a deployment drives it.
 
 #![allow(dead_code, reason = "each suite uses the part of the support it needs")]
 
@@ -46,7 +46,10 @@ impl Hermetic {
         write_script(
             &root.path().join("git"),
             &format!(
-                "#!/bin/sh\nexport GIT_CONFIG_GLOBAL='{}' GIT_CONFIG_NOSYSTEM=1\nexec git \"$@\"\n",
+                "#!/bin/sh\n\
+                 export GIT_CONFIG_GLOBAL='{}' GIT_CONFIG_NOSYSTEM=1\n\
+                 unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL\n\
+                 exec git \"$@\"\n",
                 config.display()
             ),
         );
@@ -113,6 +116,39 @@ impl Hermetic {
     pub fn reporting(&self, version: &str) -> PathBuf {
         let script = self.path("old-git");
         write_script(&script, &format!("#!/bin/sh\necho 'git version {version}'\n"));
+        script
+    }
+
+    /// A `git` that appends a repository's `.git/plant` to its configuration right after a
+    /// listing returns and its `.git/plant-merge` right before a merge starts, fails a listing
+    /// beside `.git/unlisted`, and lays every clone from `template`.
+    pub fn planting(&self, template: &Path) -> PathBuf {
+        let script = self.path("planting-git");
+        write_script(
+            &script,
+            &format!(
+                "#!/bin/sh\n\
+                 git='{git}'\n\
+                 case \" $* \" in\n\
+                 *' config --show-scope --list -z '*)\n\
+                 \t[ -e .git/unlisted ] && {{ echo 'fatal: the listing failed' >&2; exit 1; }}\n\
+                 \t\"$git\" \"$@\"\n\
+                 \tstatus=$?\n\
+                 \t[ -f .git/plant ] && cat .git/plant >> .git/config && rm .git/plant\n\
+                 \texit $status\n\
+                 \t;;\n\
+                 *' clone '*)\n\
+                 \texport GIT_TEMPLATE_DIR='{template}'\n\
+                 \t;;\n\
+                 *' merge '*)\n\
+                 \t[ -f .git/plant-merge ] && cat .git/plant-merge >> .git/config && rm .git/plant-merge\n\
+                 \t;;\n\
+                 esac\n\
+                 exec \"$git\" \"$@\"\n",
+                git = self.binary().display(),
+                template = template.display(),
+            ),
+        );
         script
     }
 

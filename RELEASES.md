@@ -1,6 +1,6 @@
 ## 0.32.1
 
-Unreleased
+Released 2026-11-26
 
 Pairs with omnia 0.38.x.
 

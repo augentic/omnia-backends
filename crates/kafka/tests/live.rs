@@ -26,7 +26,7 @@ use rdkafka::{ClientConfig, Message as _};
 use schema_registry_client::rest::client_config::ClientConfig as RegistryClientConfig;
 use schema_registry_client::rest::models::Schema;
 use schema_registry_client::rest::schema_registry_client::{Client as _, SchemaRegistryClient};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 const RECV_TIMEOUT: Duration = Duration::from_mins(1);
@@ -120,10 +120,12 @@ fn keyed_message(payload: &str, metadata: &[(&str, &str)]) -> Message {
 
 // The host's side of the seam. Every delivery reaches the test with the
 // sender its outcome goes back through; a delivery the test never decides
-// stays with the handler, as a guest that never returns would.
+// stays with the handler, as a guest that never returns would. It stops
+// when the test calls `Consuming::stop`.
 struct Recorder {
     sender: mpsc::UnboundedSender<Delivery>,
     bound: NonZeroUsize,
+    stopped: watch::Receiver<bool>,
 }
 
 impl Handler for Recorder {
@@ -141,6 +143,14 @@ impl Handler for Recorder {
 
     fn max_in_flight(&self) -> NonZeroUsize {
         self.bound
+    }
+
+    fn stopped(&self) -> BoxFuture<'static, ()> {
+        let mut stopped = self.stopped.clone();
+        async move {
+            let _ = stopped.wait_for(|&stop| stop).await;
+        }
+        .boxed()
     }
 }
 
@@ -178,15 +188,29 @@ impl Delivery {
 // returns once it is assigned and a caller can produce.
 struct Consuming {
     deliveries: mpsc::UnboundedReceiver<Delivery>,
+    stop: watch::Sender<bool>,
     task: JoinHandle<Result<()>>,
 }
 
 impl Consuming {
     async fn start(client: &Arc<dyn Endpoint>, bound: NonZeroUsize) -> Self {
         let (sender, deliveries) = mpsc::unbounded_channel();
-        let task = tokio::spawn(client.consume(Arc::new(Recorder { sender, bound })));
+        let (stop, stopped) = watch::channel(false);
+        let task = tokio::spawn(client.consume(Arc::new(Recorder {
+            sender,
+            bound,
+            stopped,
+        })));
         tokio::time::sleep(Duration::from_secs(8)).await;
-        Self { deliveries, task }
+        Self {
+            deliveries,
+            stop,
+            task,
+        }
+    }
+
+    fn stop(&self) {
+        self.stop.send_replace(true);
     }
 
     async fn next(&mut self) -> Result<Delivery> {
@@ -588,6 +612,60 @@ async fn at_least_once() -> Result<()> {
     drop(backend);
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(group_offset(&group, &topic)?, Some(tail), "shutdown keeps the stored offset");
+    Ok(())
+}
+
+// The stop lands with one record in flight and a second waiting behind it on
+// its key. The first completes and commits. The second, and a third published
+// after the stop, are never handed over, so the commit stays before them for
+// the restart to redeliver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live: needs a reachable Kafka broker (KAFKA_BROKERS); run with --run-ignored"]
+async fn stop() -> Result<()> {
+    let topic = unique("omnia.live.stop");
+    create_topic(&topic, 1).await?;
+    let group = unique("omnia-live-stop");
+    let backend = Client::connect_with(options(
+        1,
+        PartitionerScheme::KafkaJs,
+        Some(ConsumerOptions {
+            topics: vec![topic.clone()],
+            group_id: group.clone(),
+        }),
+        None,
+    ))
+    .await?;
+    let client: Arc<dyn Endpoint> = MessagingClient::endpoint(&backend).await?;
+    let mut consuming = Consuming::start(&client, UNBOUNDED).await;
+
+    for payload in ["s0", "s1"] {
+        client.send(topic.clone(), keyed_message(payload, &[("key", "k")])).await?;
+    }
+    let first = consuming.next().await?;
+    assert_eq!(first.payload(), b"s0");
+    assert!(
+        consuming.nothing(Duration::from_secs(1)).await,
+        "the second record waits behind the first"
+    );
+
+    consuming.stop();
+    client.send(topic.clone(), keyed_message("s2", &[("key", "j")])).await?;
+    first.complete(Ok(()));
+    let ended = tokio::time::timeout(RECV_TIMEOUT, &mut consuming.task)
+        .await
+        .context("timed out waiting for the stopped consumer to return")?
+        .context("the consume task joins")?;
+    ended.context("a stopped consumer returns Ok")?;
+    assert!(
+        consuming.nothing(Duration::from_millis(100)).await,
+        "nothing is handed over after the stop"
+    );
+    wait_offset(&group, &topic, 1).await?;
+
+    drop(client);
+    drop(backend);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(group_offset(&group, &topic)?, Some(1), "shutdown keeps the stored offset");
     Ok(())
 }
 

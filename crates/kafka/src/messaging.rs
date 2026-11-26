@@ -23,8 +23,9 @@ impl MessagingClient for crate::Client {
 }
 
 impl Endpoint for crate::Client {
-    // A client consumes once: the loop ends only with a record it could not
-    // deliver, and the process restarts to replay from the committed offset.
+    // A client consumes once: the loop ends at the handler's stop or with a
+    // record it could not deliver, and the next process replays from the
+    // committed offset.
     fn consume(&self, handler: Arc<dyn Handler>) -> FutureResult<()> {
         let client = self.clone();
 

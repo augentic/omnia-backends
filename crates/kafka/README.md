@@ -65,7 +65,9 @@ A guest that passes the error up ends the consumer (below). A guest that handles
 
 ### Failure and shutdown
 
-A record the guest does not handle — its handler returned `Err`, trapped, or timed out, or the host could not load or instantiate a guest for it — ends the consumer, and the process exits non-zero for the orchestrator to restart. The record's offset was never stored, so the restart redelivers it, and everything after it, from the committed offset; a record that fails every time blocks its partition until the guest is fixed. A fatal consumer error (librdkafka has given up on the consumer) ends the consumer the same way. Transient errors are logged and retried by librdkafka. On shutdown the producer is flushed for up to 10 s and the consumer commits what it has stored.
+A record the guest does not handle — its handler returned `Err`, trapped, or timed out, or the host could not load or instantiate a guest for it — ends the consumer, and the process exits non-zero for the orchestrator to restart. The record's offset was never stored, so the restart redelivers it, and everything after it, from the committed offset; a record that fails every time blocks its partition until the guest is fixed. A fatal consumer error (librdkafka has given up on the consumer) ends the consumer the same way. Transient errors are logged and retried by librdkafka.
+
+When the host stops, the consumer pulls no more records and hands the guest none it has not already handed over. It waits for the records the guest holds, then returns. A record it pulled but did not hand over was never done, so the restart redelivers it, and everything after it, from the committed offset. On shutdown the producer is flushed for up to 10 s and the consumer commits what it has stored.
 
 ### Counters
 
@@ -124,6 +126,10 @@ its header names rather than the subject's latest (one failing its own
 schema is dropped). `at_least_once` completes delivered records in various
 orders and checks what is delivered and what is committed, then fails one
 record and checks that the consumer ends with the commit stopped before it.
+`stop` stops the handler with one record in flight and another waiting
+behind it on its key, then checks that the consumer returns once the first
+completes, hands over nothing more, and keeps the commit before the record
+that waited.
 The tests are `#[ignore]`d so they never run in CI; run them explicitly:
 
 ```bash

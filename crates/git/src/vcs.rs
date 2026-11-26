@@ -243,8 +243,7 @@ impl VcsClient for Client {
             repo.check_transport_config()?;
             let address = repo.expand(&remote, false).await;
             let (protocol, pack) = client.transport_args(&address, false);
-            // pruning would rewrite `packed-refs`, which the frozen copy holds as a link
-            let args = ["fetch", "--quiet", "--no-prune", "--no-prune-tags", &pack, "--", &remote];
+            let args = ["fetch", "--quiet", &pack, "--", &remote];
             let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))]).await?;
             if !output.status.success() {
                 return Err(repo.refuse(&output, &remote).into());

@@ -571,7 +571,8 @@ fn dirs(gitdir: &[u8], common: &[u8]) -> (PathBuf, PathBuf) {
     let common = PathBuf::from(OsStr::from_bytes(common));
     let common = if common.is_absolute() {
         common
-    } else if common.as_os_str().is_empty() || matches!(&common, p if p == Path::new(".") || p == Path::new(".git"))
+    } else if common.as_os_str().is_empty()
+        || matches!(&common, p if p == Path::new(".") || p == Path::new(".git"))
     {
         gitdir.clone()
     } else {
@@ -1055,9 +1056,10 @@ const fn kind(index: char, tree: char) -> Option<ChangeKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::dirs;
     use std::ffi::OsStr;
     use std::path::Path;
+
+    use super::dirs;
 
     #[test]
     fn dirs_relative_commondir_joins_gitdir() {

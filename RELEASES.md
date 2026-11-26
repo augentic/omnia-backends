@@ -2,15 +2,27 @@
 
 Unreleased
 
-### Fixed
+Pairs with omnia 0.38.x.
 
-<!-- Release notes generated using configuration in .github/release.yaml at ceeac11f739088a37292e33150e75c65fb9c5db3 -->
+### Security
 
-## What's Changed
-* git: hold a lent repository's configuration for a whole operation by @andrewweston in https://github.com/augentic/omnia-backends/pull/192
-
-
-**Full Changelog**: https://github.com/augentic/omnia-backends/compare/v0.32.0...v0.32.1
+- `omnia-git` holds a lent repository's configuration to host policy for the
+  whole of an `omnia:vcs` operation, not only the git process that lists it
+  ([GHSA-4w2m-vgw9-q54j](https://github.com/augentic/omnia-backends/security/advisories/GHSA-4w2m-vgw9-q54j)).
+  What changes for a deployment:
+  - Each operation reads a checked copy of the repository's configuration
+    from the host's temporary directory (`TMPDIR`, else `/tmp`), so a
+    deployment must never lend that directory to a guest.
+  - The SSH command, the askpass program, the signing programs, and the
+    credential helpers are the operator's on every operation, or none.
+  - An operation whose configuration listing fails is refused.
+  - `fetch` takes no bundle URI and `clone` asks for none. Automatic garbage
+    collection and maintenance never start.
+  - `clone` fetches into the host's temporary directory before it checks the
+    place out. A place that holds anything returns `exists` before anything
+    is fetched.
+  - A working copy whose `add` checkout fails is removed.
+  - `fetch` no longer prunes, so a ref or tag the remote deleted stays.
 
 ---
 

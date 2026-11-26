@@ -1704,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "dotenvy",
@@ -3633,7 +3633,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-azure-blob"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "azure_core",
@@ -3652,7 +3652,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-azure-id"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "azure_core",
@@ -3674,7 +3674,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-azure-table"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "base64ct",
@@ -3695,7 +3695,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-azure-vault"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "azure_core",
@@ -3759,7 +3759,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-cursor"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3791,7 +3791,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-filesystem"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3808,7 +3808,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-genai"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-git"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -3875,7 +3875,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-kafka"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -3907,7 +3907,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-mongodb"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3925,7 +3925,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-nats"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -3945,7 +3945,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-opentelemetry"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -3977,7 +3977,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-postgres"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3998,7 +3998,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-redis"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -4013,7 +4013,7 @@ dependencies = [
 
 [[package]]
 name = "omnia-sandbox"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6315,7 +6315,7 @@ dependencies = [
 
 [[package]]
 name = "test-programs"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "futures",
  "omnia-sdk",

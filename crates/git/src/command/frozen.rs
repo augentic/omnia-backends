@@ -19,10 +19,12 @@ use tempfile::TempDir;
 
 use super::Listing;
 
-// The common files git rewrites by renaming a lock over them, which through
-// a link would replace the link rather than the repository's file. No
-// operation here writes one, so a lock held in its place makes any that
-// tries fail rather than diverge from the repository.
+// The common files git writes through a lock beside them. git takes the lock
+// beside a link's target, so a write to a file the copy links lands in the
+// repository. The copy's own `config` is no link, and neither is a
+// `packed-refs` or `shallow` the repository lacks. A write to one of those
+// would land in the copy and be lost, so a lock held in its place makes the
+// write fail instead.
 const GUARDED: [&str; 3] = ["config", "packed-refs", "shallow"];
 
 #[derive(Debug)]

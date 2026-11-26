@@ -7,9 +7,12 @@
 mod support;
 
 use std::ffi::OsString;
-use std::fs;
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::{fs, thread};
 
 use omnia::ExitStatus;
 use omnia_git::Client;
@@ -195,19 +198,31 @@ async fn vcs_transport() {
     let git = Hermetic::new();
     let (origin, url) = git.bare("origin.git");
     let scratch = scratch();
-    run(&git, &scratch, test_programs::VCS_TRANSPORT, vec![url]).await;
     let at = |name: &str| scratch.path().join(name);
+
+    // a repository that prunes on fetch, holding a packed remote-tracking ref
+    // whose bookmark the origin lacks, so the prune rewrites `packed-refs`
+    let pruned = at("pruned");
+    seed(&git, &pruned, "a.txt");
+    git.git(&pruned, &["add", "-A"]);
+    git.git(&pruned, &["commit", "-qm", "base"]);
+    git.git(&pruned, &["remote", "add", "origin", &url]);
+    git.git(&pruned, &["update-ref", "refs/remotes/origin/emery/gone", "HEAD"]);
+    git.git(&pruned, &["pack-refs", "--all"]);
+    git.git(&pruned, &["config", "--local", "fetch.prune", "true"]);
+
+    run(&git, &scratch, test_programs::VCS_TRANSPORT, vec![url]).await;
 
     // the origin holds the moved label at the first clone's head
     assert_eq!(
         git.git(&origin, &["rev-parse", "emery/rev-1"]),
         git.git(&at("clones/first"), &["rev-parse", "HEAD"])
     );
-    assert_eq!(git.git(&origin, &["log", "-1", "--format=%s", "emery/rev-1"]), "b");
+    assert_eq!(git.git(&origin, &["log", "-1", "--format=%s", "emery/rev-1"]), "c");
 
-    // the shallow clone holds one commit under the label
+    // the shallow clone holds the commit it asked for and the one it fetched
     assert!(at("clones/shallow/.git/shallow").is_file());
-    assert_eq!(git.git(&at("clones/shallow"), &["rev-list", "--count", "origin/emery/rev-1"]), "1");
+    assert_eq!(git.git(&at("clones/shallow"), &["rev-list", "--count", "origin/emery/rev-1"]), "2");
 }
 
 #[tokio::test]
@@ -224,6 +239,7 @@ async fn vcs_hardening() {
     salt.rewriter(&origin);
     salt.proxied();
     let ssh_argv = salt.packer();
+    let asking = salt.asking();
     salt.lazy();
     let bundling = salt.bundling_origin(&bundle);
     salt.bytes();
@@ -265,6 +281,11 @@ async fn vcs_hardening() {
     let argv = fs::read_to_string(&ssh_argv).expect("the host's ssh ran");
     let carried: Vec<_> = argv.lines().filter(|line| line.ends_with(".git'")).collect();
     assert_eq!(carried, ["git-upload-pack '/x.git'", "git-receive-pack '/x.git'"], "{argv}");
+
+    // the asking host was sent its refs request twice: bare, then with the
+    // credentials the host's own helper supplied, `omnia:secret`
+    let refs = "GET /x.git/info/refs?service=git-upload-pack HTTP/1.1";
+    assert_eq!(asking.sent(), [format!("{refs} -"), format!("{refs} Basic b21uaWE6c2VjcmV0")]);
 
     // the host's bundle reached neither the repository that named it nor the
     // clone its origin advertised it to
@@ -614,6 +635,34 @@ impl<'a> Salt<'a> {
         self.host_ssh()
     }
 
+    // A repository whose remote `guarded` is an HTTP host that refuses every
+    // request for want of credentials, with a credential helper of its own for
+    // every URL and one for that host alone, under a host whose own helper for
+    // it answers with credentials; the HTTP host.
+    fn asking(&self) -> Asking {
+        let asking = Asking::start();
+        let repo = self.at("asking");
+        seed(self.git, &repo, "a.txt");
+        self.git.git(&repo, &["add", "-A"]);
+        self.git.git(&repo, &["commit", "-qm", "base"]);
+        self.git.git(&repo, &["remote", "add", "guarded", &format!("{}/x.git", asking.url)]);
+        let helper = self.at("credential-helper");
+        executable(&helper, &touch(&self.markers, "credential-helper"));
+        let scoped = self.at("scoped-credential-helper");
+        executable(&scoped, &touch(&self.markers, "scoped-credential-helper"));
+        let host = self.git.path("host-credential-helper");
+        executable(
+            &host,
+            "#!/bin/sh\ncat > /dev/null\n\
+             [ \"$1\" = get ] && printf 'username=omnia\\npassword=secret\\n'\nexit 0\n",
+        );
+        let scope = format!("credential.{}.helper", asking.url);
+        self.config(&repo, "credential.helper", &helper.display().to_string());
+        self.config(&repo, &scope, &scoped.display().to_string());
+        self.git.host(&scope, &host.display().to_string());
+        asking
+    }
+
     // A partial clone whose promisor remote is an ssh host, under a pack
     // command of the repository's own, missing the one blob a checkout needs.
     fn lazy(&self) {
@@ -822,4 +871,49 @@ impl<'a> Salt<'a> {
         self.git.git(&repo, &["config", "--worktree", "user.name", "Quoted \"Name\" \\ ;# end"]);
         repo
     }
+}
+
+// An HTTP host on a loopback port that refuses every request for want of
+// credentials, and the requests it was sent.
+struct Asking {
+    url: String,
+    sent: Arc<Mutex<Vec<String>>>,
+}
+
+impl Asking {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let url = format!("http://{}", listener.local_addr().expect("the port's address"));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&sent);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                refuse(&stream.expect("a connection"), &record);
+            }
+        });
+        Self { url, sent }
+    }
+
+    // Each request as its request line and the credentials it carried, `-`
+    // for none.
+    fn sent(&self) -> Vec<String> {
+        self.sent.lock().expect("the requests").clone()
+    }
+}
+
+// Every header is read before the answer, since closing a connection with
+// unread input resets it and can lose the answer.
+fn refuse(mut stream: &TcpStream, sent: &Mutex<Vec<String>>) {
+    let mut lines = BufReader::new(stream).lines().map(|line| line.expect("a request line"));
+    let request = lines.next().expect("a request");
+    let head: Vec<String> = lines.take_while(|line| !line.is_empty()).collect();
+    let credentials =
+        head.iter().find_map(|line| line.strip_prefix("Authorization: ")).unwrap_or("-");
+    sent.lock().expect("the requests").push(format!("{request} {credentials}"));
+    stream
+        .write_all(
+            b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"omnia\"\r\n\
+              Content-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .expect("answering the request");
 }

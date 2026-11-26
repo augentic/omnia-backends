@@ -7,6 +7,7 @@
 //! - Worktree settings and an enclosing repository.
 //! - URL rewrites, proxies, and disabled TLS verification.
 //! - SSH, remote pack commands, and a promisor remote.
+//! - Credential helpers, for every URL and for one remote's host alone.
 //! - Bundle URIs, the repository's own and one an origin advertises.
 //! - Configuration keys whose raw bytes cannot be pinned.
 //! - A bare repository nested inside a sealed repository.
@@ -14,8 +15,9 @@
 //! The guest runs the operations that would trigger each vector. The host
 //! verifies that no marker ran, no data or credentials escaped the place,
 //! no bundle of the host's reached a repository, SSH received only Git's
-//! expected commands, the enclosing repository was untouched, and valid
-//! work still completed.
+//! expected commands, an HTTP host was offered the host's credentials
+//! alone, the enclosing repository was untouched, and valid work still
+//! completed.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -32,6 +34,7 @@ const NOIDENT: &str = "./noident";
 const REWRITER: &str = "./rewriter";
 const PROXIED: &str = "./proxied";
 const PACKER: &str = "./packer";
+const ASKING: &str = "./asking";
 const LAZY: &str = "./lazy";
 const BUNDLED: &str = "./bundled";
 const BYTES: &str = "./bytes";
@@ -44,6 +47,7 @@ async fn scenario() {
     a_failed_merge_leaves_no_merge().await;
     a_shaping_repository_is_refused().await;
     a_repository_names_no_pack_program().await;
+    a_repository_names_no_credential_helper().await;
     a_lazy_fetch_reaches_no_command().await;
     a_clone_takes_no_advertised_bundle(bundling).await;
     an_unnameable_key_is_refused().await;
@@ -86,6 +90,16 @@ async fn a_repository_names_no_pack_program() {
     for error in [fetched, pushed] {
         assert_eq!(error.code(), "unavailable", "the host's ssh answered: {error:?}");
     }
+}
+
+// The repository names a credential helper for every URL and one for its
+// remote's host alone. The host's own helper for that host answers the
+// challenge instead, with credentials the remote refuses, and neither of the
+// repository's helpers runs to supply them or to erase them.
+async fn a_repository_names_no_credential_helper() {
+    let fetched = open(ASKING).await.fetch("guarded").await;
+    let refused = fetched.expect_err("the remote refuses the credentials");
+    fails_with(refused, "denied", "Authentication failed");
 }
 
 // The repository's promisor remote is an ssh host, and the pack command the

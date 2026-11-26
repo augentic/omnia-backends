@@ -313,6 +313,7 @@ impl VcsClient for Client {
                 Some(mirror) => mirror.path().as_os_str().to_owned(),
                 None => target.dial()?,
             };
+            target::hold_rewrites(source.as_os_str(), &repo.listing, false)?;
             let (protocol, pack) = client.transport_args(true, false);
             let refspec = format!("+refs/heads/*:refs/remotes/{remote}/*");
             let args = ["fetch", "--quiet", &pack, "--"]
@@ -562,12 +563,20 @@ impl Client {
 const REV_PARSE: [&str; 4] = ["rev-parse", "--verify", "--quiet", "--end-of-options"];
 
 // The gitdir and common directory `--absolute-git-dir --git-common-dir`
-// printed, both absolute: git prints the common directory relative only
-// where it is the gitdir itself.
+// printed: the gitdir absolute; the common absolute, worktree-relative as
+// `.git` where it is the gitdir itself, or relative to the gitdir where a
+// `commondir` file names one.
 fn dirs(gitdir: &[u8], common: &[u8]) -> (PathBuf, PathBuf) {
     let gitdir = PathBuf::from(OsStr::from_bytes(gitdir));
     let common = PathBuf::from(OsStr::from_bytes(common));
-    let common = if common.is_absolute() { common } else { gitdir.clone() };
+    let common = if common.is_absolute() {
+        common
+    } else if common.as_os_str().is_empty() || matches!(&common, p if p == Path::new(".") || p == Path::new(".git"))
+    {
+        gitdir.clone()
+    } else {
+        gitdir.join(common)
+    };
     (gitdir, common)
 }
 
@@ -1041,5 +1050,53 @@ const fn kind(index: char, tree: char) -> Option<ChangeKind> {
         ('?', '?') | ('A', _) => Some(ChangeKind::Added),
         (_, 'D') | ('D', _) => Some(ChangeKind::Deleted),
         _ => Some(ChangeKind::Modified),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dirs;
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    #[test]
+    fn dirs_relative_commondir_joins_gitdir() {
+        let gitdir = b"/work/tree/.git/worktrees/wt";
+        let named = b"../..";
+        let (gitdir, common) = dirs(gitdir, named);
+        assert_eq!(gitdir, Path::new("/work/tree/.git/worktrees/wt"));
+        assert_eq!(common, Path::new("/work/tree/.git/worktrees/wt/../.."));
+    }
+
+    #[test]
+    fn dirs_dot_commondir_is_gitdir() {
+        let gitdir = b"/repo/.git";
+        let (resolved, common) = dirs(gitdir, b".");
+        assert_eq!(resolved, Path::new("/repo/.git"));
+        assert_eq!(common, resolved);
+    }
+
+    #[test]
+    fn dirs_worktree_relative_git_is_gitdir() {
+        let gitdir = b"/repo/.git";
+        let (resolved, common) = dirs(gitdir, b".git");
+        assert_eq!(resolved, Path::new("/repo/.git"));
+        assert_eq!(common, resolved);
+    }
+
+    #[test]
+    fn dirs_absolute_commondir_unchanged() {
+        let gitdir = b"/wt/.git";
+        let shared = b"/shared/.git";
+        let (gitdir, common) = dirs(gitdir, shared);
+        assert_eq!(gitdir, Path::new("/wt/.git"));
+        assert_eq!(common, Path::new("/shared/.git"));
+    }
+
+    #[test]
+    fn dirs_empty_commondir_is_gitdir() {
+        let gitdir = OsStr::new("/only/.git");
+        let (_, common) = dirs(gitdir.as_encoded_bytes(), b"");
+        assert_eq!(common, Path::new("/only/.git"));
     }
 }

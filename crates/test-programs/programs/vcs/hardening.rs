@@ -138,6 +138,10 @@ async fn a_local_address_is_held(outside: &str, encoded: &str) {
     // origin beneath the place
     let cloned = vcs::clone(encoded, "./encoded", None).await;
     cloned.expect("clone").expect("a new workspace");
+
+    // a relative local address is resolved from the repository's place, not
+    // the host's working directory
+    holder.fetch("relative").await.expect("fetch from a relative local address");
 }
 
 async fn open(path: &str) -> Workspace {

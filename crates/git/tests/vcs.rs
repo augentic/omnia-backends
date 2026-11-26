@@ -397,8 +397,8 @@ async fn vcs_hardening() {
         assert_eq!(refs(repo, "refs"), format!("refs/heads/main {commit}"), "{}", repo.display());
     }
     let fetched = format!(
-        "refs/remotes/planted/main {}\nrefs/remotes/readonly/main {}",
-        held.planted, held.readonly_origin
+        "refs/remotes/planted/main {}\nrefs/remotes/readonly/main {}\nrefs/remotes/relative/main {}",
+        held.planted, held.readonly_origin, held.inside
     );
     assert_eq!(refs(&held.holder, "refs/remotes"), fetched);
 
@@ -962,6 +962,7 @@ impl<'a> Salt<'a> {
             ("rooted", readonly.display().to_string()),
             ("bundle", path),
             ("split", inside_url.clone()),
+            ("relative", "../inside.git".to_owned()),
         ] {
             self.git.git(&holder, &["remote", "add", name, &url]);
         }

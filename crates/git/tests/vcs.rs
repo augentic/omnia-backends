@@ -6,11 +6,13 @@
 
 mod support;
 
+use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use omnia::ExitStatus;
+use omnia_git::Client;
 use omnia_test::host::{Backends, Deployment, Scratch, scratch};
 use omnia_wasi_vcs::WasiVcs;
 use support::Hermetic;
@@ -22,7 +24,12 @@ test_programs::foreach_vcs!();
 // Run `program` over the hermetic git with the scratch root as its `.`
 // mount, held to a clean exit.
 async fn run(git: &Hermetic, scratch: &Scratch, program: &str, args: Vec<String>) {
-    let backends = Backends::defaults().await.vcs(git.client().await);
+    run_over(git.client().await, scratch, program, args).await;
+}
+
+// `run`, over a client of the scenario's own.
+async fn run_over(client: Client, scratch: &Scratch, program: &str, args: Vec<String>) {
+    let backends = Backends::defaults().await.vcs(client);
     let status = Deployment::new()
         .guest("guest", program)
         .args(args)
@@ -209,7 +216,8 @@ async fn vcs_hardening() {
     let scratch = scratch();
     let salt = Salt::new(&git, scratch.path());
     let alternates = salt.alternates();
-    let (repo, elsewhere, checked) = salt.hostile_repo(&alternates);
+    let (bundle, bundled) = salt.host_bundle();
+    let (repo, elsewhere, checked) = salt.hostile_repo(&alternates, &bundle);
     salt.checked_out(&checked);
     let origin = salt.hostile_origin(&repo, &alternates);
     let noident = salt.identityless();
@@ -217,17 +225,14 @@ async fn vcs_hardening() {
     salt.proxied();
     let ssh_argv = salt.packer();
     salt.lazy();
+    let bundling = salt.bundling_origin(&bundle);
     salt.bytes();
     let outer = salt.enclosing();
 
-    run(&git, &scratch, test_programs::VCS_HARDENING, vec![]).await;
+    run(&git, &scratch, test_programs::VCS_HARDENING, vec![bundling]).await;
 
     // nothing the repositories salted ran
-    let ran: Vec<_> = fs::read_dir(&salt.markers)
-        .expect("markers")
-        .filter_map(Result::ok)
-        .map(|e| e.file_name())
-        .collect();
+    let ran = salt.ran();
     assert!(ran.is_empty(), "a planted program ran: {ran:?}");
 
     // the commit and the push still landed, the commit holding the place's
@@ -261,12 +266,61 @@ async fn vcs_hardening() {
     let carried: Vec<_> = argv.lines().filter(|line| line.ends_with(".git'")).collect();
     assert_eq!(carried, ["git-upload-pack '/x.git'", "git-receive-pack '/x.git'"], "{argv}");
 
+    // the host's bundle reached neither the repository that named it nor the
+    // clone its origin advertised it to
+    for place in [&repo, &scratch.path().join("bundled")] {
+        let objects =
+            git.git(place, &["cat-file", "--batch-all-objects", "--batch-check=%(objectname)"]);
+        assert!(!objects.contains(&bundled), "the host's bundle reached {}", place.display());
+    }
+
     // the repository with the unnameable key sealed nothing
     assert_eq!(git.git(&scratch.path().join("bytes"), &["rev-list", "--count", "HEAD"]), "1");
 
     // the repository enclosing a lent directory was neither read nor sealed
     assert_eq!(git.git(&outer, &["rev-list", "--count", "HEAD"]), "1");
     assert_eq!(git.git(&outer, &["status", "--porcelain"]), "?? inner/");
+}
+
+#[tokio::test]
+async fn vcs_planted() {
+    let git = Hermetic::new();
+    let scratch = scratch();
+    let salt = Salt::new(&git, scratch.path());
+    let ssh_argv = salt.host_ssh();
+    let (origin, url) = salt.planted_origin();
+    let template = salt.template();
+    salt.planted_ssh();
+    let filtered = salt.planted_filter();
+    salt.planted_add();
+    let merged = salt.planted_merge();
+    let rewritten = salt.planted_rewrite(&origin);
+    let unlisted = salt.unlisted();
+    let faithful = salt.faithful();
+
+    let planting = support::connect(git.planting(&template)).await.expect("the planting git");
+    run_over(planting, &scratch, test_programs::VCS_PLANTED, vec![url]).await;
+
+    // nothing the plants named ran, the merge's included once it landed
+    let ran = salt.ran();
+    assert!(ran.is_empty(), "a planted program ran: {ran:?}");
+    assert!(!merged.join(".git/plant-merge").exists(), "the merge's plant landed");
+
+    // the fetch and the clone over ssh dialled the host's ssh
+    let argv = fs::read_to_string(&ssh_argv).expect("the host's ssh ran");
+    let carried: Vec<_> = argv.lines().filter(|line| line.ends_with(".git'")).collect();
+    assert_eq!(carried, ["git-upload-pack '/x.git'", "git-upload-pack '/x.git'"], "{argv}");
+
+    // the filtered change sealed, the rewritten fetch carried nothing, and
+    // the repository whose listing failed sealed nothing
+    assert_eq!(git.git(&filtered, &["log", "-1", "--format=%s"]), "seal");
+    assert_eq!(git.git(&rewritten, &["for-each-ref", "refs/remotes"]), "");
+    assert_eq!(git.git(&unlisted, &["rev-list", "--count", "HEAD"]), "1");
+
+    // the commit carries the identity git reads from the repository's scopes
+    let ident = git.git(&faithful, &["var", "GIT_AUTHOR_IDENT"]);
+    let identity = ident.rsplitn(3, ' ').nth(2).expect("a name and an email");
+    assert_eq!(git.git(&faithful, &["log", "-1", "--format=%an <%ae>"]), identity);
 }
 
 #[tokio::test]
@@ -351,9 +405,37 @@ impl<'a> Salt<'a> {
         self.git.git(repo, &["config", "--local", key, value]);
     }
 
+    // The programs that recorded themselves running.
+    fn ran(&self) -> Vec<OsString> {
+        fs::read_dir(&self.markers)
+            .expect("markers")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect()
+    }
+
     // The command a repository names to list its alternates' refs.
     fn alternate_refs(&self) -> String {
         format!("touch {}; echo", self.markers.join("alternate-refs").display())
+    }
+
+    // A shell command that only records that it ran, and fails, quoted for a
+    // configuration file, where an unquoted `;` starts a comment.
+    fn marking(&self, name: &str) -> String {
+        format!("\"touch {}; false\"", self.markers.join(name).display())
+    }
+
+    // The host's ssh, which records what it was handed and answers nothing;
+    // the file the record lands in.
+    fn host_ssh(&self) -> PathBuf {
+        let argv = self.git.path("ssh-argv");
+        let ssh = self.git.path("ssh");
+        executable(
+            &ssh,
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nexit 255\n", argv.display()),
+        );
+        self.git.host("core.sshCommand", &ssh.display().to_string());
+        argv
     }
 
     // A sealed repository beside the others, as an alternates line for a
@@ -366,12 +448,25 @@ impl<'a> Salt<'a> {
         format!("{}\n", nested.join(".git/objects").display())
     }
 
+    // A bundle on the host, outside the place, of a commit no repository the
+    // guest holds has; the bundle and the commit.
+    fn host_bundle(&self) -> (PathBuf, String) {
+        let source = self.git.path("host-repo");
+        seed(self.git, &source, "h.txt");
+        self.git.git(&source, &["add", "-A"]);
+        self.git.git(&source, &["commit", "-qm", "host"]);
+        let bundle = self.git.path("host.bundle");
+        let path = bundle.display().to_string();
+        self.git.git(&source, &["bundle", "create", "--quiet", &path, "--all"]);
+        (bundle, self.git.git(&source, &["rev-parse", "HEAD"]))
+    }
+
     // A repository whose own configuration would run a program on the host at
-    // the next checkout, status, commit, fetch, or push, and whose work tree
-    // points at a directory outside the place; with the directory, and with
-    // a working copy of its history, cloned before the salting, for a local
-    // push to land in.
-    fn hostile_repo(&self, alternates: &str) -> (PathBuf, PathBuf, PathBuf) {
+    // the next checkout, status, commit, fetch, or push, would take `bundle`
+    // at the next fetch, and points its work tree at a directory outside the
+    // place; with the directory, and with a working copy of its history,
+    // cloned before the salting, for a local push to land in.
+    fn hostile_repo(&self, alternates: &str, bundle: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let repo = self.at("repo");
         seed(self.git, &repo, "a.txt");
         fs::write(repo.join(".gitattributes"), "* filter=evil\n").expect("the attributes");
@@ -403,6 +498,7 @@ impl<'a> Salt<'a> {
             ("gpg.program", gpg.display().to_string()),
             ("filter.evil.smudge", smudge.display().to_string()),
             ("filter.evil.clean", smudge.display().to_string()),
+            ("fetch.bundleURI", bundle.display().to_string()),
         ] {
             self.config(&repo, key, &value);
         }
@@ -515,14 +611,7 @@ impl<'a> Salt<'a> {
         ] {
             self.config(&packer, key, &format!("touch {}", self.markers.join(marker).display()));
         }
-        let argv = self.git.path("ssh-argv");
-        let ssh = self.git.path("ssh");
-        executable(
-            &ssh,
-            &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nexit 255\n", argv.display()),
-        );
-        self.git.host("core.sshCommand", &ssh.display().to_string());
-        argv
+        self.host_ssh()
     }
 
     // A partial clone whose promisor remote is an ssh host, under a pack
@@ -544,6 +633,27 @@ impl<'a> Salt<'a> {
         let blob = self.git.git(&lazy, &["rev-parse", "HEAD:a.txt"]);
         fs::remove_file(lazy.join(format!(".git/objects/{}/{}", &blob[..2], &blob[2..])))
             .expect("removing the blob");
+    }
+
+    // An origin on the host that advertises `bundle` to a clone as a file
+    // URI, under a host whose own configuration asks a clone for advertised
+    // bundles; the origin's URL.
+    fn bundling_origin(&self, bundle: &Path) -> String {
+        let origin = self.git.path("bundling");
+        seed(self.git, &origin, "a.txt");
+        self.git.git(&origin, &["add", "-A"]);
+        self.git.git(&origin, &["commit", "-qm", "base"]);
+        let uri = format!("file://{}", bundle.display());
+        for (key, value) in [
+            ("uploadpack.advertiseBundleURIs", "true"),
+            ("bundle.version", "1"),
+            ("bundle.mode", "all"),
+            ("bundle.host.uri", uri.as_str()),
+        ] {
+            self.config(&origin, key, value);
+        }
+        self.git.host("transfer.bundleURI", "true");
+        format!("file://{}", origin.display())
     }
 
     // A sealed repository with a bare directory inside it, holding a file,
@@ -577,5 +687,139 @@ impl<'a> Salt<'a> {
             .expect("planting the filter");
         fs::write(bytes.join(".gitattributes"), b"* filter=\xff\n").expect("the attributes");
         fs::write(bytes.join("b.txt"), "b\n").expect("a change to filter");
+    }
+
+    // A sealed repository whose attributes select the filter `evil` for its
+    // one file.
+    fn attributed(&self, name: &str) -> PathBuf {
+        let repo = self.at(name);
+        seed(self.git, &repo, "a.txt");
+        fs::write(repo.join(".gitattributes"), "* filter=evil\n").expect("the attributes");
+        self.git.git(&repo, &["add", "-A"]);
+        self.git.git(&repo, &["commit", "-qm", "base"]);
+        repo
+    }
+
+    // `attributed`, with `plant` for the planting git to append to its
+    // configuration once its first listing returns.
+    fn planted(&self, name: &str, plant: &str) -> PathBuf {
+        let repo = self.attributed(name);
+        fs::write(repo.join(".git/plant"), plant).expect("the plant");
+        repo
+    }
+
+    // A bare origin holding `attributed`'s one commit; its path, and the
+    // `file://` URL a clone reaches it by.
+    fn planted_origin(&self) -> (PathBuf, String) {
+        let seeded = self.attributed("planted-seed");
+        let origin = self.at("planted-origin.git");
+        let (from, to) = (seeded.display().to_string(), origin.display().to_string());
+        self.git.git(self.root, &["clone", "--quiet", "--bare", &from, &to]);
+        let url = format!("file://{}", origin.display());
+        (origin, url)
+    }
+
+    // What the planting git lays a clone's destination from: a configuration
+    // naming the filter `evil` and an ssh command, each recording that it
+    // ran.
+    fn template(&self) -> PathBuf {
+        let template = self.git.path("template");
+        fs::create_dir_all(&template).expect("the template");
+        let program = self.at("template-filter");
+        executable(&program, &filter(&self.markers, "template-filter"));
+        let config = format!(
+            "[filter \"evil\"]\n\tsmudge = {program}\n\tclean = {program}\n[core]\n\tsshCommand = {ssh}\n",
+            program = program.display(),
+            ssh = self.marking("template-ssh"),
+        );
+        fs::write(template.join("config"), config).expect("the template's configuration");
+        template
+    }
+
+    // A repository whose remote `evil` is an ssh host, planted with an ssh
+    // command of its own.
+    fn planted_ssh(&self) {
+        let plant = format!("[core]\n\tsshCommand = {}\n", self.marking("planted-ssh"));
+        let repo = self.planted("planted-ssh", &plant);
+        self.git.git(&repo, &["remote", "add", "evil", "ssh://localhost/x.git"]);
+    }
+
+    // A repository with a change to seal, planted with the clean filter its
+    // attributes select.
+    fn planted_filter(&self) -> PathBuf {
+        let clean = self.at("planted-clean");
+        executable(&clean, &filter(&self.markers, "planted-clean"));
+        let plant = format!("[filter \"evil\"]\n\tclean = {}\n", clean.display());
+        let repo = self.planted("planted-filter", &plant);
+        fs::write(repo.join("b.txt"), "b\n").expect("a change to filter");
+        repo
+    }
+
+    // A repository planted with the smudge filter its attributes select.
+    fn planted_add(&self) {
+        let smudge = self.at("planted-smudge");
+        executable(&smudge, &filter(&self.markers, "planted-smudge"));
+        let plant = format!("[filter \"evil\"]\n\tsmudge = {}\n", smudge.display());
+        self.planted("planted-add", &plant);
+    }
+
+    // A repository whose branch `feature` and `main` each change their own
+    // line of the file its attributes give a merge driver, planted with a
+    // driver that would leave the file in conflict for the planting git to
+    // append once the merge's listing has returned, as the merge starts.
+    fn planted_merge(&self) -> PathBuf {
+        let repo = self.at("planted-merge");
+        seed(self.git, &repo, "a.txt");
+        fs::write(repo.join(".gitattributes"), "m.txt merge=evil\n").expect("the attributes");
+        let lay = |content: &str| fs::write(repo.join("m.txt"), content).expect("the merged file");
+        lay("one\ntwo\nthree\nfour\nfive\n");
+        self.git.git(&repo, &["add", "-A"]);
+        self.git.git(&repo, &["commit", "-qm", "base"]);
+        self.git.git(&repo, &["checkout", "--quiet", "-b", "feature"]);
+        lay("ONE\ntwo\nthree\nfour\nfive\n");
+        self.git.git(&repo, &["commit", "-qam", "feature"]);
+        self.git.git(&repo, &["checkout", "--quiet", "main"]);
+        lay("one\ntwo\nthree\nfour\nFIVE\n");
+        self.git.git(&repo, &["commit", "-qam", "main"]);
+        let plant = format!("[merge \"evil\"]\n\tdriver = {}\n", self.marking("planted-driver"));
+        fs::write(repo.join(".git/plant-merge"), plant).expect("the plant");
+        repo
+    }
+
+    // A repository whose remote `evil` nothing answers, planted with a
+    // rewrite of it onto `origin`, where the protocol rule would then let it
+    // through.
+    fn planted_rewrite(&self, origin: &Path) -> PathBuf {
+        let remote = "https://127.0.0.1:1/x.git";
+        let plant = format!("[url \"{}\"]\n\tinsteadOf = {remote}\n", origin.display());
+        let repo = self.planted("planted-rewrite", &plant);
+        self.git.git(&repo, &["remote", "add", "evil", remote]);
+        repo
+    }
+
+    // A sealed repository with a change to seal, whose listing the planting
+    // git fails.
+    fn unlisted(&self) -> PathBuf {
+        let repo = self.at("unlisted");
+        seed(self.git, &repo, "a.txt");
+        self.git.git(&repo, &["add", "-A"]);
+        self.git.git(&repo, &["commit", "-qm", "base"]);
+        fs::write(repo.join(".git/unlisted"), "").expect("the marker");
+        fs::write(repo.join("b.txt"), "b\n").expect("a change to seal");
+        repo
+    }
+
+    // A repository with a change to seal whose identity is a quoted name in
+    // its worktree's own configuration and an email in a file its
+    // configuration includes.
+    fn faithful(&self) -> PathBuf {
+        let repo = self.at("faithful");
+        seed(self.git, &repo, "a.txt");
+        fs::write(repo.join(".git/identity"), "[user]\n\temail = included@omnia.invalid\n")
+            .expect("the included file");
+        self.config(&repo, "include.path", "identity");
+        self.config(&repo, "extensions.worktreeConfig", "true");
+        self.git.git(&repo, &["config", "--worktree", "user.name", "Quoted \"Name\" \\ ;# end"]);
+        repo
     }
 }

@@ -127,6 +127,11 @@ path = "programs/vcs/hardening.rs"
 crate-type = ["cdylib"]
 
 [[example]]
+name = "vcs_hosts"
+path = "programs/vcs/hosts.rs"
+crate-type = ["cdylib"]
+
+[[example]]
 name = "vcs_journey"
 path = "programs/vcs/journey.rs"
 crate-type = ["cdylib"]

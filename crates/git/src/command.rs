@@ -12,6 +12,7 @@
 //! forks — a credential helper, `ssh`, a merge driver — opens no terminal
 //! and never outlives the operation that started it.
 
+mod address;
 mod frozen;
 mod pins;
 
@@ -27,6 +28,7 @@ use omnia_wasi_vcs::Place;
 use process_wrap::tokio::{CommandWrap, KillOnDrop, ProcessSession};
 use tokio::process::Command;
 
+pub use self::address::Address;
 pub use self::frozen::Frozen;
 pub use self::pins::{Listing, Pins};
 use crate::Client;

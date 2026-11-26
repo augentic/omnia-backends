@@ -4,6 +4,7 @@
 //! configuration from choosing a program git runs, and what git says read
 //! into the typed error.
 
+mod hold;
 mod policy;
 mod refusal;
 
@@ -11,14 +12,16 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{self, Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
 use futures::FutureExt as _;
-use omnia::FutureResult;
+use omnia::{FutureResult, Grants};
 use omnia_wasi_vcs::{
     Change, ChangeKind, CloneOptions, Entry, Error, Merged, Place, Rule, VcsClient,
 };
 
+use self::hold::Hold;
 use self::policy::Resolution;
 use self::refusal::Class;
 use crate::Client;
@@ -171,7 +174,9 @@ impl VcsClient for Client {
         async move { Repo::open(&client, &at).await?.status().await }.boxed()
     }
 
-    fn clone_repo(&self, url: String, at: Place, options: CloneOptions) -> FutureResult<()> {
+    fn clone_repo(
+        &self, url: String, at: Place, options: CloneOptions, grants: Arc<Grants>,
+    ) -> FutureResult<()> {
         tracing::trace!("cloning {url} to {}", at.path().display());
         let client = self.clone();
         async move {
@@ -189,23 +194,31 @@ impl VcsClient for Client {
             }
             let pins = client.laying(&at).await?;
 
+            // the address held to the guest's grants, before anything connects
+            let hold = Hold::new(grants);
+            let address = client.expand_url(&at, &url).await;
+            let redirects = hold.admit([address.as_str()])?;
+
             // the fetch, into a bare repository the backend owns, so nothing a
             // guest writes meanwhile is configuration git reads
             let staging = tempfile::Builder::new()
                 .prefix("omnia-git-")
                 .tempdir()
                 .context("creating a directory to clone into")?;
-            let address = client.expand_url(&at, &url).await;
             let (protocol, pack) = client.transport_args(&address, false);
             let depth = options.depth.map(|depth| depth.to_string());
-            let mut args = ["clone", "--quiet", "--bare", pack.as_str()].map(OsStr::new).to_vec();
+            let mut args: Vec<&OsStr> = redirects.iter().map(OsString::as_os_str).collect();
+            args.extend(["clone", "--quiet", "--bare", pack.as_str()].map(OsStr::new));
             // depth cuts history, never the labels: git's implied --single-branch would
             if let Some(depth) = depth.as_deref() {
                 args.extend(["--depth", depth, "--no-single-branch"].map(OsStr::new));
             }
             args.extend([OsStr::new("--"), OsStr::new(&url), staging.path().as_os_str()]);
             let env = [("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))];
-            client.create(&at, &pins, args, &env, &url).await?;
+            let output = client.lay(&at, &pins, args, &env).await?;
+            if !output.status.success() {
+                return Err(hold.refuse(&output, refuse(&output, &at, &url, None)).into());
+            }
             let recorded = client.recorded_url(&at, staging.path()).await?;
 
             // the repository laid from it unchecked out, its origin the URL
@@ -234,19 +247,21 @@ impl VcsClient for Client {
         .boxed()
     }
 
-    fn fetch(&self, repo: Place, remote: String) -> FutureResult<()> {
+    fn fetch(&self, repo: Place, remote: String, grants: Arc<Grants>) -> FutureResult<()> {
         tracing::trace!("fetching {remote} into {}", repo.path().display());
         let client = self.clone();
         async move {
             validate_arg(&remote)?;
             let repo = Repo::open(&client, &repo).await?;
             repo.check_transport_config()?;
-            let address = repo.expand(&remote, false).await;
-            let (protocol, pack) = client.transport_args(&address, false);
-            let args = ["fetch", "--quiet", &pack, "--", &remote];
+            let urls = repo.urls(&remote, false).await?;
+            let hold = Hold::new(grants);
+            let mut args = hold.admit([urls[0].as_str()])?;
+            let (protocol, pack) = client.transport_args(&urls[0], false);
+            args.extend(["fetch", "--quiet", &pack, "--", &remote].map(OsString::from));
             let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))]).await?;
             if !output.status.success() {
-                return Err(repo.refuse(&output, &remote).into());
+                return Err(hold.refuse(&output, repo.refuse(&output, &remote)).into());
             }
             Ok(())
         }
@@ -295,7 +310,9 @@ impl VcsClient for Client {
         .boxed()
     }
 
-    fn push(&self, repo: Place, remote: String, label: String) -> FutureResult<()> {
+    fn push(
+        &self, repo: Place, remote: String, label: String, grants: Arc<Grants>,
+    ) -> FutureResult<()> {
         tracing::trace!("pushing {label} to {remote} from {}", repo.path().display());
         let client = self.clone();
         async move {
@@ -303,13 +320,16 @@ impl VcsClient for Client {
             validate_arg(&label)?;
             let repo = Repo::open(&client, &repo).await?;
             repo.check_transport_config()?;
-            let address = repo.expand(&remote, true).await;
-            let (protocol, pack) = client.transport_args(&address, true);
+            let urls = repo.urls(&remote, true).await?;
+            let hold = Hold::new(grants);
+            let mut args = hold.admit(urls.iter().map(String::as_str))?;
+            let (protocol, pack) = client.transport_args(&urls[0], true);
             let refspec = format!("refs/heads/{label}:refs/heads/{label}");
-            let args = ["push", "--quiet", &pack, "--", &remote, &refspec];
+            args.extend(["push", "--quiet", &pack, "--", &remote, &refspec].map(OsString::from));
             let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))]).await?;
             if !output.status.success() {
-                return Err(repo.refuse_push(&output, &remote, &label).into());
+                let fallback = repo.refuse_push(&output, &remote, &label);
+                return Err(hold.refuse(&output, fallback).into());
             }
             Ok(())
         }
@@ -393,7 +413,7 @@ impl Client {
 
     // Run one step of laying a repository at `at` under `pins`, held to
     // success, else the typed refusal with `missing` naming what the
-    // repository lacks. The work tree is git's to lay.
+    // repository lacks.
     async fn create<I, S>(
         &self, at: &Place, pins: &Pins, args: I, env: &[(&str, &OsStr)], missing: &str,
     ) -> Result<()>
@@ -401,15 +421,27 @@ impl Client {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut full: Vec<OsString> = pins.args().map(OsStr::to_owned).collect();
-        full.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
-        let env: Vec<_> = pins.env().chain(env.iter().copied()).collect();
-        let output = self.git(Some(at), full, &env).await?;
+        let output = self.lay(at, pins, args, env).await?;
         if output.status.success() {
             Ok(())
         } else {
             Err(refuse(&output, at, missing, None).into())
         }
+    }
+
+    // Run one step of laying a repository at `at` under `pins`, and read
+    // what it said, whatever its exit. The work tree is git's to lay.
+    async fn lay<I, S>(
+        &self, at: &Place, pins: &Pins, args: I, env: &[(&str, &OsStr)],
+    ) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut full: Vec<OsString> = pins.args().map(OsStr::to_owned).collect();
+        full.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
+        let env: Vec<_> = pins.env().chain(env.iter().copied()).collect();
+        self.git(Some(at), full, &env).await
     }
 
     // The URL a clone into `staging` recorded for its origin: the address as
@@ -541,40 +573,46 @@ impl<'a> Repo<'a> {
         commit_of(&output, revision)
     }
 
-    // How a transport runs — the URL it reaches, the proxy it crosses, the
-    // TLS it trusts — is the host's configuration to set: a setting the
-    // repository made is config no pin can put back, so a transport operation
-    // refuses the repository whole rather than carry the operator's
-    // credentials anywhere or over anything.
+    // How a transport runs — the URL it reaches, the helper that speaks it,
+    // the proxy it crosses, the TLS it trusts — is the host's configuration
+    // to set: a setting the repository made is config no pin can put back, so
+    // a transport operation refuses the repository whole rather than carry
+    // the operator's credentials anywhere or over anything.
     fn check_transport_config(&self) -> Result<()> {
+        let shown = self.display_path();
         if let Some(key) = self.pins.blocked_transport_key() {
-            let shown = self.display_path();
             let message = format!(
                 "{shown}: the repository sets {key}, and how a transport runs is the host's to set"
+            );
+            return Err(Error::Other(message).into());
+        }
+        if let Some(key) = self.pins.split_url_key() {
+            let message = format!(
+                "{shown}: the repository sets {key} across lines, which git would dial whole"
             );
             return Err(Error::Other(message).into());
         }
         Ok(())
     }
 
-    // The URL a remote name or address reaches as the host's configuration
-    // expands it, for the transport rule: a remote's own URL, else the
-    // address as `url.<base>.insteadOf` rewrites it. A repository with
-    // transport settings of its own was refused before this, so the
-    // expansion is the host's alone.
-    async fn expand(&self, remote: &str, push: bool) -> String {
-        let mut args = vec!["remote", "get-url"];
+    // The URLs the remote `remote` reaches as the host's configuration
+    // expands them, never none: a fetch dials the first, and a push dials
+    // every one. A remote is a name the frozen configuration records, so an
+    // address, or a name only `.git/remotes` or `.git/branches` defines, is
+    // `not-found` naming it. A repository with transport settings of its own
+    // was refused before this, so the expansion is the host's alone.
+    async fn urls(&self, remote: &str, push: bool) -> Result<Vec<String>> {
+        let mut args = vec!["remote", "get-url", "--all"];
         if push {
             args.push("--push");
         }
         args.extend(["--", remote]);
-        if let Ok(output) = self.exec(args, &[]).await
-            && output.status.success()
-        {
-            return output.text().trim().to_owned();
+        let output = self.exec(args, &[]).await?;
+        let urls: Vec<String> = output.text().split_terminator('\n').map(str::to_owned).collect();
+        if !output.status.success() || urls.is_empty() {
+            return Err(Error::NotFound(remote.to_owned()).into());
         }
-        let output = self.exec(["ls-remote", "--get-url", "--", remote], &[]).await;
-        expanded(output, remote)
+        Ok(urls)
     }
 
     async fn status(&self) -> Result<Vec<Change>> {
@@ -751,7 +789,7 @@ fn refuse(output: &Output, at: &Place, missing: &str, label: Option<&str>) -> Er
         (Class::Exists, _) => Error::Exists(display_path(at)),
         (Class::NotFound, _) => Error::NotFound(missing.to_owned()),
         (Class::Denied, _) => Error::Denied(detail),
-        (Class::Access, _) => Error::Access(detail),
+        (Class::Access | Class::Redirected, _) => Error::Access(detail),
         (Class::Diverged, Some(label)) => Error::Diverged(label.to_owned()),
         (Class::Diverged | Class::Other, None) | (Class::Other, Some(_)) => Error::Other(detail),
     }

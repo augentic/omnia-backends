@@ -4,11 +4,12 @@
 //! The copy is a directory the backend owns, handed to git as
 //! `GIT_COMMON_DIR`. It holds a `config` written from the operation's
 //! listing and a link to every other entry of the repository's common
-//! directory, so objects, refs, and reflogs land in the repository while
-//! what git reads of its configuration is exactly what the pins were built
-//! from. The listing already expanded the repository's includes and its
-//! worktree configuration, so the copy carries their entries and neither
-//! switch, which would send git back to the files a guest can rewrite.
+//! directory but its legacy remote files, so objects, refs, and reflogs land
+//! in the repository while what git reads of its configuration and its
+//! remotes is exactly what the pins were built from. The listing already
+//! expanded the repository's includes and its worktree configuration, so
+//! the copy carries their entries and neither switch, which would send git
+//! back to the files a guest can rewrite.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -26,6 +27,12 @@ use super::Listing;
 // would land in the copy and be lost, so a lock held in its place makes the
 // write fail instead.
 const GUARDED: [&str; 3] = ["config", "packed-refs", "shallow"];
+
+// The files git reads a remote from, beside the configuration, for a name the
+// configuration defines none of. Linked, they would be read live rather than
+// from the listing, so the copy holds neither and a name only they define is
+// no remote.
+const UNLINKED: [&str; 2] = ["remotes", "branches"];
 
 #[derive(Debug)]
 pub struct Frozen {
@@ -61,7 +68,8 @@ impl Frozen {
         for entry in entries {
             let name = entry.with_context(|| format!("reading {}", common.display()))?.file_name();
             let link = root.join(&name);
-            if link.symlink_metadata().is_ok() {
+            if UNLINKED.iter().any(|unlinked| name == *unlinked) || link.symlink_metadata().is_ok()
+            {
                 continue;
             }
             symlink(common.join(&name), &link)

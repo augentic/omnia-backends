@@ -15,7 +15,7 @@ request's own worker grant by the kernel, whichever model answers.
 store the `RegistryClient` acquirer reads before any registry and writes
 what it fetches to); registry acquisition itself, and the local `FsStore`,
 live in `omnia-plugin`. The `omnia` runtime is consumed
-as published crates.io dependencies (currently 0.38.1), declared once under
+as published crates.io dependencies (currently 0.39.0), declared once under
 `[workspace.dependencies]` in the root `Cargo.toml`.
 
 ## Key commands
@@ -178,7 +178,7 @@ so the policy splits into three tiers:
   side of its module (`Spawnable`, the liveness probe and its `libc`) is
   `cfg(test)`, which the binary never is (`test = false`, `bench = false`).
 - The omnia crates are pinned by the single `[workspace.dependencies]`
-  declarations (`omnia = "0.38.1"` and friends); every `omnia-*` must stay
+  declarations (`omnia = "0.39.0"` and friends); every `omnia-*` must stay
   on the same line, so bump them all together, and `cargo update -p omnia-sdk`
   re-locks them as one. They resolve from crates.io: `[patch.crates-io]`
   holds only a commented-out path block for local work against a sibling

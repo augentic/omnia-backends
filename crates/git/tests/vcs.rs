@@ -516,7 +516,7 @@ async fn vcs_hosts() {
     // the operator's ssh dialled the listed host alone, for the clone and
     // for the fetch
     let dials = owned_dials(&git);
-    let carried: Vec<_> = dials.iter().map(|record| record.command()).collect();
+    let carried: Vec<_> = dials.iter().map(Dial::command).collect();
     assert_eq!(carried, ["git-upload-pack '/x.git'", "git-upload-pack '/x.git'"], "{carried:?}");
 
     // the redirecting host was sent the one request its redirect answered

@@ -1,5 +1,6 @@
 //! `VcsClient` over git: one process per operation, run in the place the
-//! runtime opened, under the host-policy pins that keep the repository's own
+//! runtime opened, under the host-policy pins and over the frozen copy of the
+//! configuration they were built from, which keep the repository's own
 //! configuration from choosing a program git runs, and what git says read
 //! into the typed error.
 
@@ -8,9 +9,10 @@ mod refusal;
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::{self, PathBuf};
+use std::os::unix::ffi::OsStrExt as _;
+use std::path::{self, Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use futures::FutureExt as _;
 use omnia::FutureResult;
 use omnia_wasi_vcs::{
@@ -20,7 +22,7 @@ use omnia_wasi_vcs::{
 use self::policy::Resolution;
 use self::refusal::Class;
 use crate::Client;
-use crate::command::{Output, Pins};
+use crate::command::{Frozen, Listing, Output, Pins};
 
 impl VcsClient for Client {
     fn resolve(&self, repo: Place, revision: String) -> FutureResult<String> {
@@ -112,7 +114,8 @@ impl VcsClient for Client {
             if at.dir().exists(".git") {
                 return Err(Error::Exists(display_path(&at)).into());
             }
-            client.create(&at, ["init", "--quiet"], &[], "HEAD").await
+            let pins = client.laying(&at).await?;
+            client.create(&at, &pins, ["init", "--quiet"], &[], "HEAD").await
         }
         .boxed()
     }
@@ -128,8 +131,24 @@ impl VcsClient for Client {
             validate_arg(&revision)?;
             let repo = Repo::open(&client, &repo).await?;
             repo.add_worktree(&at, &revision).await?;
-            let gitdir = client.read_gitdir(&at, &revision).await?;
+
+            // the gitdir git laid the copy with, read while the copy holds
+            // nothing but what `worktree add` wrote; every operation at the
+            // copy is addressed through it from here on
+            let (gitdir, _) = client.git_dirs(&at, &revision).await?;
             client.register(&at, gitdir);
+
+            // the checkout, over a frozen copy of the configuration as it
+            // stands now; a working copy it fails in is removed whole
+            let checked = async {
+                let copy = Repo::open(&client, &at).await?;
+                copy.run(["reset", "--hard", "--quiet"], &revision).await
+            };
+            if let Err(error) = checked.await {
+                repo.drop_worktree(&at).await;
+                client.forget(&at);
+                return Err(error);
+            }
             Ok(())
         }
         .boxed()
@@ -157,16 +176,60 @@ impl VcsClient for Client {
         let client = self.clone();
         async move {
             validate_arg(&url)?;
+
+            // a place holding anything is `exists`, before anything is fetched
+            let occupied = at
+                .dir()
+                .entries()
+                .with_context(|| format!("reading {}", at.path().display()))?
+                .next()
+                .is_some();
+            if occupied {
+                return Err(Error::Exists(display_path(&at)).into());
+            }
+            let pins = client.laying(&at).await?;
+
+            // the fetch, into a bare repository the backend owns, so nothing a
+            // guest writes meanwhile is configuration git reads
+            let staging = tempfile::Builder::new()
+                .prefix("omnia-git-")
+                .tempdir()
+                .context("creating a directory to clone into")?;
             let address = client.expand_url(&at, &url).await;
             let (protocol, pack) = client.transport_args(&address, false);
             let depth = options.depth.map(|depth| depth.to_string());
-            let mut args = vec!["clone", "--quiet", pack.as_str()];
+            let mut args = ["clone", "--quiet", "--bare", pack.as_str()].map(OsStr::new).to_vec();
             // depth cuts history, never the labels: git's implied --single-branch would
             if let Some(depth) = depth.as_deref() {
-                args.extend(["--depth", depth, "--no-single-branch"]);
+                args.extend(["--depth", depth, "--no-single-branch"].map(OsStr::new));
             }
-            args.extend(["--", url.as_str(), "."]);
-            client.create(&at, args, &[("GIT_ALLOW_PROTOCOL", protocol)], &url).await
+            args.extend([OsStr::new("--"), OsStr::new(&url), staging.path().as_os_str()]);
+            let env = [("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))];
+            client.create(&at, &pins, args, &env, &url).await?;
+            let recorded = client.recorded_url(&at, staging.path()).await?;
+
+            // the repository laid from it unchecked out, its origin the URL
+            // the fetch recorded
+            let (protocol, pack) = client.transport_args(&staging.path().to_string_lossy(), false);
+            let args = [
+                OsStr::new("clone"),
+                OsStr::new("--quiet"),
+                OsStr::new("--no-checkout"),
+                OsStr::new(&pack),
+                OsStr::new("--"),
+                staging.path().as_os_str(),
+                OsStr::new("."),
+            ];
+            let env = [("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))];
+            client.create(&at, &pins, args, &env, &url).await?;
+            let args = [OsStr::new("config"), OsStr::new("remote.origin.url"), &recorded];
+            client.create(&at, &pins, args, &[], &url).await?;
+
+            // the checkout, over a frozen copy of whatever configuration the
+            // repository holds by now
+            let repo = Repo::open(&client, &at).await?;
+            repo.run(["reset", "--hard", "--quiet"], "HEAD").await?;
+            Ok(())
         }
         .boxed()
     }
@@ -180,8 +243,9 @@ impl VcsClient for Client {
             repo.check_transport_config()?;
             let address = repo.expand(&remote, false).await;
             let (protocol, pack) = client.transport_args(&address, false);
-            let args = ["fetch", "--quiet", &pack, "--", &remote];
-            let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
+            // pruning would rewrite `packed-refs`, which the frozen copy holds as a link
+            let args = ["fetch", "--quiet", "--no-prune", "--no-prune-tags", &pack, "--", &remote];
+            let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))]).await?;
             if !output.status.success() {
                 return Err(repo.refuse(&output, &remote).into());
             }
@@ -244,7 +308,7 @@ impl VcsClient for Client {
             let (protocol, pack) = client.transport_args(&address, true);
             let refspec = format!("refs/heads/{label}:refs/heads/{label}");
             let args = ["push", "--quiet", &pack, "--", &remote, &refspec];
-            let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", protocol)]).await?;
+            let output = repo.exec(args, &[("GIT_ALLOW_PROTOCOL", OsStr::new(protocol))]).await?;
             if !output.status.success() {
                 return Err(repo.refuse_push(&output, &remote, &label).into());
             }
@@ -255,22 +319,17 @@ impl VcsClient for Client {
 }
 
 impl Client {
-    // `--quiet` leaves an unknown revision unsaid, so a failure here is
-    // `not-found` unless git names a missing repository. `rev-parse` runs no
-    // program the repository chooses, so it needs no pins.
+    // A revision naming an index path reads the index, which starts any
+    // file-system monitor the repository names, so the forced pins apply.
     async fn rev_parse(&self, at: &Place, revision: &str) -> Result<String> {
         validate_arg(revision)?;
         let spec = format!("{revision}^{{commit}}");
-        let args = ["rev-parse", "--verify", "--quiet", "--end-of-options", &spec];
+        let pins = Pins::forced();
+        let mut args: Vec<&OsStr> = pins.args().collect();
+        args.extend(REV_PARSE.map(OsStr::new));
+        args.push(OsStr::new(&spec));
         let output = self.git(Some(at), args, &[]).await?;
-        if output.status.success() {
-            return Ok(output.text().trim().to_owned());
-        }
-        Err(match refusal::classify(&output.stderr) {
-            Class::NotARepository => Error::NotARepository,
-            _ => Error::NotFound(revision.to_owned()),
-        }
-        .into())
+        commit_of(&output, revision)
     }
 
     // The commit the ref at `full` holds, read by its exact path, which
@@ -301,77 +360,156 @@ impl Client {
     // (`url.<base>.insteadOf`), for the transport rule; the address as given
     // where git rewrites nothing.
     async fn expand_url(&self, at: &Place, address: &str) -> String {
-        match self.git(Some(at), ["ls-remote", "--get-url", "--", address], &[]).await {
-            Ok(output) if output.status.success() => output.text().trim().to_owned(),
-            _ => address.to_owned(),
-        }
+        let output = self.git(Some(at), ["ls-remote", "--get-url", "--", address], &[]).await;
+        expanded(output, address)
     }
 
-    // The gitdir git laid the working copy at `at` with, read while the copy
-    // holds nothing but what `worktree add` wrote; every operation at the
-    // copy is addressed through it from here on.
-    async fn read_gitdir(&self, at: &Place, revision: &str) -> Result<PathBuf> {
-        let output = self.git(Some(at), ["rev-parse", "--absolute-git-dir"], &[]).await?;
+    // The gitdir git addresses the repository at `at` through, and the
+    // common directory it shares, both absolute: git prints the common
+    // directory relative only where it is the gitdir itself.
+    async fn git_dirs(&self, at: &Place, missing: &str) -> Result<(PathBuf, PathBuf)> {
+        let args = ["rev-parse", "--absolute-git-dir", "--git-common-dir"];
+        let output = self.git(Some(at), args, &[]).await?;
         if !output.status.success() {
-            return Err(refuse(&output, at, revision, None).into());
+            return Err(refuse(&output, at, missing, None).into());
         }
-        Ok(PathBuf::from(output.text().trim()))
+        let mut lines = output
+            .stdout
+            .split(|&byte| byte == b'\n')
+            .map(|line| PathBuf::from(OsStr::from_bytes(line)));
+        let gitdir = lines.next().unwrap_or_default();
+        let common =
+            lines.next().filter(|common| common.is_absolute()).unwrap_or_else(|| gitdir.clone());
+        Ok((gitdir, common))
     }
 
-    // Run git to make a repository at `at`, held to success, else the typed
-    // refusal with `missing` naming what the repository lacks. The place
-    // holds no repository yet, so the forced pins alone apply and the work
-    // tree is git's to lay; a working copy this client laid there before is
-    // forgotten first, so the place is addressed as itself rather than
-    // through a gitdir no longer its own.
+    // The pins a repository is laid at `at` under, read from the host's
+    // configuration alone, since the place holds no repository yet. A working
+    // copy this client laid there before is forgotten first, so the place is
+    // addressed as itself rather than through a gitdir no longer its own.
+    async fn laying(&self, at: &Place) -> Result<Pins> {
+        self.forget(at);
+        Ok(Pins::build(&Listing::read(self, at).await?))
+    }
+
+    // Run one step of laying a repository at `at` under `pins`, held to
+    // success, else the typed refusal with `missing` naming what the
+    // repository lacks. The work tree is git's to lay.
     async fn create<I, S>(
-        &self, at: &Place, args: I, env: &[(&str, &str)], missing: &str,
+        &self, at: &Place, pins: &Pins, args: I, env: &[(&str, &OsStr)], missing: &str,
     ) -> Result<()>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.forget(at);
-        let pins = Pins::forced();
-        let mut full: Vec<OsString> = pins.args().map(OsString::from).collect();
+        let mut full: Vec<OsString> = pins.args().map(OsStr::to_owned).collect();
         full.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
-        let output = self.git(Some(at), full, env).await?;
+        let env: Vec<_> = pins.env().chain(env.iter().copied()).collect();
+        let output = self.git(Some(at), full, &env).await?;
         if output.status.success() {
             Ok(())
         } else {
             Err(refuse(&output, at, missing, None).into())
         }
     }
+
+    // The URL a clone into `staging` recorded for its origin: the address as
+    // given, or the absolute path git resolved a local one to.
+    async fn recorded_url(&self, at: &Place, staging: &Path) -> Result<OsString> {
+        let config = staging.join("config");
+        let args = [
+            OsStr::new("config"),
+            OsStr::new("--file"),
+            config.as_os_str(),
+            OsStr::new("--get"),
+            OsStr::new("remote.origin.url"),
+        ];
+        let output = self.git(Some(at), args, &[]).await?;
+        if !output.status.success() {
+            bail!("{}: the clone recorded no origin: {}", display_path(at), output.stderr.trim());
+        }
+        let url = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+        Ok(OsStr::from_bytes(url).to_owned())
+    }
+}
+
+// `rev-parse` held to one revision, never an option, whatever it names.
+const REV_PARSE: [&str; 4] = ["rev-parse", "--verify", "--quiet", "--end-of-options"];
+
+// The commit `REV_PARSE` printed for `revision`. `--quiet` leaves an unknown
+// revision unsaid, so a failure is `not-found` unless git names a missing
+// repository.
+fn commit_of(output: &Output, revision: &str) -> Result<String> {
+    if output.status.success() {
+        return Ok(output.text().trim().to_owned());
+    }
+    Err(match refusal::classify(&output.stderr) {
+        Class::NotARepository => Error::NotARepository,
+        _ => Error::NotFound(revision.to_owned()),
+    }
+    .into())
+}
+
+// The URL `ls-remote --get-url` printed, else the address as given.
+fn expanded(output: Result<Output>, address: &str) -> String {
+    match output {
+        Ok(output) if output.status.success() => output.text().trim().to_owned(),
+        _ => address.to_owned(),
+    }
 }
 
 // One repository under one operation's host-policy pins: every command git
-// runs for it reads the pins first, so the repository's own configuration
-// cannot choose a program.
+// runs for it reads the pins first and the configuration they were built
+// from after, frozen, so the repository's own configuration cannot choose a
+// program, whatever a guest writes to it while the operation runs.
 struct Repo<'a> {
     client: &'a Client,
     at: &'a Place,
     pins: Pins,
+    frozen: Frozen,
 }
 
 impl<'a> Repo<'a> {
     async fn open(client: &'a Client, at: &'a Place) -> Result<Self> {
-        let pins = Pins::read(client, at).await?;
-        Ok(Self { client, at, pins })
+        let (_, common) = client.git_dirs(at, "HEAD").await?;
+        let listing = Listing::read(client, at).await?;
+        let frozen = Frozen::lay(&common, &listing)?;
+        let pins = Pins::build(&listing);
+        Ok(Self {
+            client,
+            at,
+            pins,
+            frozen,
+        })
     }
 
-    // Run git for the repository and read what it said, whatever its exit:
-    // the work tree is the place itself, since a `core.worktree` the
-    // repository set would point git at any directory on the host, and the
-    // pins lead the arguments.
-    async fn exec<I, S>(&self, args: I, env: &[(&str, &str)]) -> Result<Output>
+    // Run git for the repository over the frozen copy and read what it said,
+    // whatever its exit.
+    async fn exec<I, S>(&self, args: I, env: &[(&str, &OsStr)]) -> Result<Output>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let frozen = ("GIT_COMMON_DIR", self.frozen.path().as_os_str());
+        let env: Vec<_> = env.iter().copied().chain([frozen]).collect();
+        self.exec_unfrozen(args, &env).await
+    }
+
+    // Run git for the repository over its own common directory: only for a
+    // command that records or finds that directory by its path, and neither
+    // checks out a file nor reaches a remote. The work tree is the place
+    // itself, since a `core.worktree` the repository set would point git at
+    // any directory on the host, and the pins lead the arguments.
+    async fn exec_unfrozen<I, S>(&self, args: I, env: &[(&str, &OsStr)]) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         let mut full = vec![OsString::from("--work-tree=.")];
-        full.extend(self.pins.args().map(OsString::from));
+        full.extend(self.pins.args().map(OsStr::to_owned));
         full.extend(args.into_iter().map(|arg| arg.as_ref().to_owned()));
-        self.client.git(Some(self.at), full, env).await
+        let env: Vec<_> = self.pins.env().chain(env.iter().copied()).collect();
+        self.client.git(Some(self.at), full, &env).await
     }
 
     // Run git for the repository and hold it to success, else the typed
@@ -398,7 +536,10 @@ impl<'a> Repo<'a> {
     }
 
     async fn rev_parse(&self, revision: &str) -> Result<String> {
-        self.client.rev_parse(self.at, revision).await
+        validate_arg(revision)?;
+        let spec = format!("{revision}^{{commit}}");
+        let output = self.exec(REV_PARSE.into_iter().chain([spec.as_str()]), &[]).await?;
+        commit_of(&output, revision)
     }
 
     // How a transport runs — the URL it reaches, the proxy it crosses, the
@@ -433,7 +574,8 @@ impl<'a> Repo<'a> {
         {
             return output.text().trim().to_owned();
         }
-        self.client.expand_url(self.at, remote).await
+        let output = self.exec(["ls-remote", "--get-url", "--", remote], &[]).await;
+        expanded(output, remote)
     }
 
     async fn status(&self) -> Result<Vec<Change>> {
@@ -531,22 +673,25 @@ impl<'a> Repo<'a> {
         Err(Error::Other(format!("cannot label the branch {name} the repository is on")).into())
     }
 
-    // Lay a detached working copy of `revision` at `at`, whose absolute path
-    // is the one path handed to git: a working copy is laid at a path git
-    // records in the repository, which no handle can stand for; the runtime
-    // laid it empty and holds it open meanwhile.
+    // Lay a detached working copy of `revision` at `at`, not yet checked out,
+    // whose absolute path is the one path handed to git: a working copy is
+    // laid at a path git records in the repository, which no handle can
+    // stand for; the runtime laid it empty and holds it open meanwhile. git
+    // records the common directory in the copy too, so this runs over the
+    // repository's own.
     async fn add_worktree(&self, at: &Place, revision: &str) -> Result<()> {
         let destination = path::absolute(at.path())
             .with_context(|| format!("resolving {}", at.path().display()))?;
         let args = [
             OsStr::new("worktree"),
             OsStr::new("add"),
+            OsStr::new("--no-checkout"),
             OsStr::new("--detach"),
             OsStr::new("--"),
             destination.as_os_str(),
             OsStr::new(revision),
         ];
-        let output = self.exec(args, &[]).await?;
+        let output = self.exec_unfrozen(args, &[]).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -554,14 +699,32 @@ impl<'a> Repo<'a> {
         }
     }
 
+    // Best-effort removal of the working copy `add_worktree` laid at `at`.
+    async fn drop_worktree(&self, at: &Place) {
+        let Ok(destination) = path::absolute(at.path()) else { return };
+        let args = [
+            OsStr::new("worktree"),
+            OsStr::new("remove"),
+            OsStr::new("--force"),
+            OsStr::new("--"),
+            destination.as_os_str(),
+        ];
+        let _ = self.exec_unfrozen(args, &[]).await;
+    }
+
     // Remove the working copy, pending changes with it. A copy another
     // process laid is addressed through its `.git` file: a rewritten one
     // leads `worktree remove` to a repository the copy is no working copy of,
     // which refuses rather than removes, and the copy stays for the operator.
+    // git finds the main working tree, which it refuses to remove, through
+    // the common directory, so this runs over the repository's own.
     async fn remove_worktree(&self) -> Result<()> {
-        let shown = self.display_path();
-        self.run(["worktree", "remove", "--force", "."], &shown).await?;
-        Ok(())
+        let output = self.exec_unfrozen(["worktree", "remove", "--force", "."], &[]).await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(self.refuse(&output, &self.display_path()).into())
+        }
     }
 
     fn display_path(&self) -> String {

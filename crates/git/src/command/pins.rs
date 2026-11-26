@@ -7,14 +7,23 @@
 //! - Signing programs, filters, and merge drivers.
 //! - Credential and SSH helpers.
 //!
-//! Command-line configuration takes precedence over repository settings.
-//! Dangerous keys are disabled, while operator settings come only from host
-//! scopes. An operation is refused when a repository key cannot be named
-//! safely as a command-line pin.
+//! An operation lists the repository's configuration once and builds its
+//! pins from that listing. Every later process reads the same listing back
+//! through the frozen copy rather than the repository's own file, which a
+//! guest can rewrite meanwhile. Command-line configuration takes precedence
+//! over the copy: dangerous keys are disabled, and the SSH command,
+//! credential prompt, credential helpers, and signing programs come only
+//! from the operator's environment and host scopes. An operation is refused
+//! when its listing fails, or when a repository key cannot be named safely
+//! as a command-line pin.
 //!
 //! Transport pack commands are pinned separately because near-side `-c`
 //! settings do not reach the far side. Local commands carry the same pins,
 //! while remote commands use Git's defaults instead of repository overrides.
+
+use std::env;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
 use anyhow::Result;
 use omnia_wasi_vcs::{Error, Place};
@@ -23,12 +32,18 @@ use crate::Client;
 
 // Keys forced on every operation whatever scope set them: each names a
 // program git would run on a commit, a merge, a status, a fetch, or a push,
-// and none is wanted from an automated backend. Hooks are reached through
-// `.git/hooks` or `core.hooksPath`, so `/dev/null` sends git to a directory
-// with none; the alternate-refs command, run by a fetch over a repository
-// with alternates and by the far side of a push, is emptied, since git can
-// run no empty command and skips the alternates' refs instead.
-const FORCED: [&str; 8] = [
+// or a source it would read, and none is wanted from an automated backend.
+// Hooks are reached through `.git/hooks` or `core.hooksPath`, so `/dev/null`
+// sends git to a directory with none; the alternate-refs command, run by a
+// fetch over a repository with alternates and by the far side of a push, is
+// emptied, since git can run no empty command and skips the alternates' refs
+// instead. A bundle URI names a file or a URL that git copies into the
+// object directory. A fetch reads one from the repository and a clone takes
+// one the far side advertises, so the fetch's is emptied and the clone asks
+// for none. Automatic garbage collection and maintenance never start: either
+// would outlive the operation, and would rewrite `packed-refs` behind the
+// frozen copy.
+const FORCED: [&str; 12] = [
     "core.hooksPath=/dev/null",
     "core.fsmonitor=false",
     "core.alternateRefsCommand=",
@@ -37,20 +52,17 @@ const FORCED: [&str; 8] = [
     "merge.verifySignatures=false",
     "submodule.recurse=false",
     "fetch.recurseSubmodules=no",
+    "fetch.bundleURI=",
+    "transfer.bundleURI=false",
+    "gc.auto=0",
+    "maintenance.auto=false",
 ];
 
-// Keys naming one program the host may carry for real, as git lowercases
-// them in a listing and as they are pinned: the repository's value gives way
-// to the host's, or to none. Nothing here signs, so a signing program is
-// pinned for whatever path to one a later git may add.
-const HOST_PINNED_KEYS: [(&str, &str); 6] = [
-    ("core.sshcommand", "core.sshCommand"),
-    ("core.askpass", "core.askPass"),
-    ("gpg.program", "gpg.program"),
-    ("gpg.openpgp.program", "gpg.openpgp.program"),
-    ("gpg.x509.program", "gpg.x509.program"),
-    ("gpg.ssh.program", "gpg.ssh.program"),
-];
+// Keys naming a signing program, as git lists them: each is the host's, or
+// none. Nothing here signs, so a signing program is pinned for whatever
+// path to one a later git may add.
+const SIGNING_PROGRAMS: [&str; 4] =
+    ["gpg.program", "gpg.openpgp.program", "gpg.x509.program", "gpg.ssh.program"];
 
 // The `http.*` keys that size or pace a transfer and shape nothing of where
 // it goes or whom it trusts.
@@ -64,42 +76,81 @@ const ALLOWED_HTTP_KEYS: [&str; 7] = [
     "version",
 ];
 
-// The `-c` overrides that hold one repository's operations to host policy,
-// and the first setting the repository made of how a transport runs, if
-// any, which no pin can undo.
+// The configuration git applies at one place, every entry labelled with
+// whose it is, in the order git read it.
 #[derive(Debug)]
-pub struct Pins {
-    pins: Vec<String>,
-    blocked_transport_key: Option<String>,
+pub struct Listing {
+    settings: Vec<Setting>,
 }
 
-impl Pins {
-    // Read the repository's configuration with its scopes and build the
-    // overrides. An unreadable listing leaves the forced set alone to apply.
+impl Listing {
+    // Read the configuration at `at`. A listing that fails is refused: no
+    // pin could be built from it, and the forced set alone would leave
+    // every program the repository names to run.
     pub async fn read(client: &Client, at: &Place) -> Result<Self> {
         let args = ["config", "--show-scope", "--list", "-z"];
         let output = client.git(Some(at), args, &[]).await?;
+        let shown = at.path().display();
         if !output.status.success() {
-            return Ok(Self::forced());
+            let stderr = output.stderr.trim();
+            let message = format!("{shown}: cannot read the repository's configuration: {stderr}");
+            return Err(Error::Other(message).into());
         }
         let settings = parse(&output.stdout).map_err(|key| {
-            let shown = at.path().display();
             let message = format!(
                 "{shown}: the repository sets {key}, which is not UTF-8 and no pin can name"
             );
             Error::Other(message)
         })?;
-        Ok(Self::build(&settings))
+        Ok(Self { settings })
     }
 
-    // The forced set alone: what a place holding no repository yet — an
-    // `init` or a `clone` destination — is held to, having no configuration
-    // of its own to read.
-    pub fn forced() -> Self {
-        Self::build(&[])
+    // The repository's own entries, each key with its value as git wrote it.
+    pub fn repo_entries(&self) -> impl Iterator<Item = (&str, Option<&[u8]>)> {
+        self.settings.iter().filter(|s| s.is_repo()).map(|s| (s.key.as_str(), s.value.as_deref()))
     }
 
-    fn build(settings: &[Setting]) -> Self {
+    // The last host-scope value, as git's own precedence would read it.
+    fn host_value(&self, key: &str) -> Option<&[u8]> {
+        self.settings.iter().rfind(|s| s.is_host() && s.key == key)?.value.as_deref()
+    }
+
+    // The SSH command and credential prompt the operator would get from a
+    // repository that set neither: the environment first, then the host's
+    // configuration, then git's own fallback. git reads each variable before
+    // the key it stands for, so no value of the repository's own applies,
+    // and none is ever emptied, which would leave git no ssh to run.
+    fn operator_env(&self) -> Vec<(&'static str, OsString)> {
+        let ssh = env::var_os("GIT_SSH_COMMAND")
+            .or_else(|| self.host_value("core.sshcommand").map(os))
+            .or_else(|| env::var_os("GIT_SSH").map(|program| os(&shell_quote(program.as_bytes()))))
+            .unwrap_or_else(|| OsString::from("ssh"));
+        let askpass = env::var_os("GIT_ASKPASS")
+            .or_else(|| self.host_value("core.askpass").map(os))
+            .or_else(|| env::var_os("SSH_ASKPASS"))
+            .unwrap_or_default();
+        vec![("GIT_SSH_COMMAND", ssh), ("GIT_ASKPASS", askpass)]
+    }
+}
+
+fn os(bytes: &[u8]) -> OsString {
+    OsStr::from_bytes(bytes).to_owned()
+}
+
+// The `-c` overrides and the environment that hold one repository's
+// operations to host policy, and the first setting the repository made of
+// how a transport runs, if any, which no pin can undo.
+#[derive(Debug)]
+pub struct Pins {
+    overrides: Vec<OsString>,
+    env: Vec<(&'static str, OsString)>,
+    blocked_transport_key: Option<String>,
+}
+
+impl Pins {
+    pub fn build(listing: &Listing) -> Self {
+        let settings = &listing.settings;
+
         // a URL rewrite, an HTTP setting, or a proxy the repository set would
         // carry the operator's credentials anywhere or over anything, and is
         // config no `-c` can put back to unset; the first is named for the
@@ -109,42 +160,54 @@ impl Pins {
             .find(|s| s.is_repo() && s.is_transport_override())
             .map(|s| s.key.clone());
 
-        let mut pins: Vec<String> = FORCED.iter().map(|pin| (*pin).to_owned()).collect();
+        let mut overrides: Vec<OsString> = FORCED.iter().map(OsString::from).collect();
 
-        // an SSH command or a credential prompt the repository set is replaced
-        // by the host's own, or emptied so git falls back to its environment
-        for (key, pin) in HOST_PINNED_KEYS {
-            if repo_set(settings, key) {
-                let host = host_value(settings, key).unwrap_or_default();
-                pins.push(format!("{pin}={host}"));
-            }
+        // a signing program is the host's, or none
+        for key in SIGNING_PROGRAMS {
+            overrides.push(pin(key, Some(listing.host_value(key).unwrap_or_default())));
         }
 
         // a clean, smudge, or merge driver the repository defined is emptied,
-        // so git runs no program and falls back to its built-in merge
+        // so git runs no program: a filter passes content through, and a
+        // merge driver leaves its path in conflict
         for setting in settings.iter().filter(|s| s.is_repo() && s.is_driver()) {
-            pins.push(format!("{}=", setting.key));
+            overrides.push(pin(&setting.key, Some(b"")));
         }
 
-        // every credential helper the repository added is reset and the
-        // host's helpers for the same key re-added, so an operator's auth
-        // survives and a planted helper does not
-        for key in repo_credential_keys(settings) {
-            pins.push(format!("{key}="));
-            for value in host_values(settings, key) {
-                pins.push(format!("{key}={value}"));
-            }
+        // every credential helper is reset, the repository's included, and
+        // the host's are added back in the order git read them, so an
+        // operator's auth survives and a planted helper does not
+        overrides.push(pin("credential.helper", Some(b"")));
+        for setting in settings.iter().filter(|s| s.is_host() && s.is_helper()) {
+            overrides.push(pin(&setting.key, setting.value.as_deref()));
         }
 
         Self {
-            pins,
+            overrides,
+            env: listing.operator_env(),
             blocked_transport_key,
         }
     }
 
+    // The forced set alone, with no environment held: what a read is held to
+    // that reaches no remote, signs nothing, and asks for no credential.
+    pub fn forced() -> Self {
+        Self {
+            overrides: FORCED.iter().map(OsString::from).collect(),
+            env: Vec::new(),
+            blocked_transport_key: None,
+        }
+    }
+
     // `-c <pin>` for each override, to lead a subcommand's arguments.
-    pub fn args(&self) -> impl Iterator<Item = &str> {
-        self.pins.iter().flat_map(|pin| ["-c", pin.as_str()])
+    pub fn args(&self) -> impl Iterator<Item = &OsStr> {
+        self.overrides.iter().flat_map(|pin| [OsStr::new("-c"), pin.as_os_str()])
+    }
+
+    // The variables to set on every process, ahead of what the operation
+    // itself sets.
+    pub fn env(&self) -> impl Iterator<Item = (&str, &OsStr)> {
+        self.env.iter().map(|(key, value)| (*key, value.as_os_str()))
     }
 
     // The first key the repository itself set of how a transport runs — a
@@ -152,6 +215,17 @@ impl Pins {
     pub fn blocked_transport_key(&self) -> Option<&str> {
         self.blocked_transport_key.as_deref()
     }
+}
+
+// `<key>=<value>` as one `-c` argument, or the bare key, which git reads as
+// a key with no value.
+fn pin(key: &str, value: Option<&[u8]>) -> OsString {
+    let mut pin = key.as_bytes().to_vec();
+    if let Some(value) = value {
+        pin.push(b'=');
+        pin.extend_from_slice(value);
+    }
+    OsString::from_vec(pin)
 }
 
 // Where a setting came from, cut to the one distinction that matters: the
@@ -167,7 +241,7 @@ enum Scope {
 struct Setting {
     scope: Scope,
     key: String,
-    value: String,
+    value: Option<Vec<u8>>,
 }
 
 impl Setting {
@@ -204,13 +278,15 @@ impl Setting {
     }
 }
 
-// `config --show-scope --list -z` is `<scope>\0<key>\n<value>\0` per setting;
-// a key holds no newline and a value holds no NUL, so the first `\n` splits
-// the pair and the trailing NUL ends the list. A pin names a key as text, so
-// a repository key in any other bytes — a subsection git lets hold anything
-// but a newline — is the error, spelled as text reads it, since a pin that
-// cannot name it would leave the program it points at running; host keys and
-// every value read lossily, as only a host value is ever pinned back.
+// `config --show-scope --list -z` is `<scope>\0<key>\n<value>\0` per setting,
+// and `<scope>\0<key>\0` for a key with no value at all, which git reads as
+// true where an empty value is false; a key holds no newline and a value no
+// NUL, so the first `\n` splits the pair and the trailing NUL ends the list.
+// A pin names a key as text, so a repository key in any other bytes — a
+// subsection git lets hold anything but a newline — is the error, spelled
+// as text reads it, since a pin that cannot name it would leave the program
+// it points at running. Host keys read lossily; every value is kept as git
+// wrote it, for the frozen copy to write back and a pin to name.
 fn parse(listing: &[u8]) -> Result<Vec<Setting>, String> {
     let mut tokens = listing.split(|&byte| byte == 0);
     let mut settings = Vec::new();
@@ -219,45 +295,18 @@ fn parse(listing: &[u8]) -> Result<Vec<Setting>, String> {
             break;
         }
         let scope = if matches!(scope, b"local" | b"worktree") { Scope::Repo } else { Scope::Host };
-        let split = pair.iter().position(|&byte| byte == b'\n').unwrap_or(pair.len());
-        let (key, value) = (&pair[..split], pair.get(split + 1..).unwrap_or_default());
+        let (key, value) = pair
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or((pair, None), |split| (&pair[..split], Some(pair[split + 1..].to_vec())));
         let key = match str::from_utf8(key) {
             Ok(key) => key.to_owned(),
             Err(_) if scope == Scope::Repo => return Err(String::from_utf8_lossy(key).into_owned()),
             Err(_) => String::from_utf8_lossy(key).into_owned(),
         };
-        settings.push(Setting {
-            scope,
-            key,
-            value: String::from_utf8_lossy(value).into_owned(),
-        });
+        settings.push(Setting { scope, key, value });
     }
     Ok(settings)
-}
-
-fn repo_set(settings: &[Setting], key: &str) -> bool {
-    settings.iter().any(|s| s.is_repo() && s.key == key)
-}
-
-// The last host-scope value, as git's own precedence would read it.
-fn host_value<'a>(settings: &'a [Setting], key: &str) -> Option<&'a str> {
-    settings.iter().rfind(|s| s.is_host() && s.key == key).map(|s| s.value.as_str())
-}
-
-fn host_values<'a>(settings: &'a [Setting], key: &'a str) -> impl Iterator<Item = &'a str> {
-    settings.iter().filter(move |s| s.is_host() && s.key == key).map(|s| s.value.as_str())
-}
-
-// The credential-helper keys the repository set, each once and in order: the
-// top-level list and any per-URL list (`credential.<url>.helper`).
-fn repo_credential_keys(settings: &[Setting]) -> Vec<&str> {
-    let mut keys: Vec<&str> = Vec::new();
-    for setting in settings.iter().filter(|s| s.is_repo() && s.is_helper()) {
-        if !keys.contains(&setting.key.as_str()) {
-            keys.push(&setting.key);
-        }
-    }
-    keys
 }
 
 // What the far side of a local transport is held to, since a repository
@@ -293,7 +342,7 @@ impl Client {
     // starts, so its own ride the command. git splits the value with shell
     // quoting for a local transport, so the binary is single-quoted.
     fn pack_arg(&self, operation: &str) -> String {
-        let binary = shell_quote(&self.binary);
+        let binary = String::from_utf8_lossy(&shell_quote(self.binary.as_bytes())).into_owned();
         let mut pins = String::new();
         for pin in LOCAL_PACK_PINS {
             pins.push_str(" -c ");
@@ -316,6 +365,15 @@ fn is_local(address: &str) -> bool {
     }
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+fn shell_quote(value: &[u8]) -> Vec<u8> {
+    let mut quoted = vec![b'\''];
+    for &byte in value {
+        if byte == b'\'' {
+            quoted.extend_from_slice(b"'\\''");
+        } else {
+            quoted.push(byte);
+        }
+    }
+    quoted.push(b'\'');
+    quoted
 }

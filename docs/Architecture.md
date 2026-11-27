@@ -78,12 +78,12 @@ impl KeyValueClient for Client {
 | `azure-id`      | Azure Managed Identity  | identity                                |
 | `azure-vault`   | Azure Key Vault         | vault                                   |
 | `azure-table`   | Azure Table Storage     | docstore                                |
-| `opentelemetry` | OTEL Collector          | otel                                    |
+| `opentelemetry` | OTEL Collector          | otel (deprecated)                       |
 | `genai`         | LLM provider APIs       | model                                   |
 | `cursor`        | `cursor-sdk-bridge`     | model                                   |
 | `git`           | `git`                   | vcs                                     |
 
-No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; those use Omnia's in-tree defaults. `wasi-vcs` has no in-tree default, so `git` is the one backend a deployment serving it names.
+No backend here implements `wasi-http`, `wasi-config`, or `wasi-websocket`; those use Omnia's in-tree defaults. `opentelemetry` is deprecated, since Omnia's `OtelDefault` sends guest telemetry to the collector the host's own goes to. `wasi-vcs` has no in-tree default, so `git` is the one backend a deployment serving it names.
 
 ### Package store
 

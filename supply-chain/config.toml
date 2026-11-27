@@ -1659,11 +1659,11 @@ version = "0.2.130"
 criteria = "safe-to-deploy"
 
 [[exemptions.wasm-pkg-client]]
-version = "0.16.2"
+version = "0.16.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.wasm-pkg-common]]
-version = "0.16.2"
+version = "0.16.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.wasm-streams]]

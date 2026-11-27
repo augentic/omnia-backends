@@ -89,6 +89,7 @@ omnia-sdk = { version = "0.39.0", default-features = false }
 omnia-test = { version = "0.39.0", default-features = false }
 omnia-wasi-blobstore = "0.39.0"
 omnia-wasi-docstore = "0.39.0"
+omnia-wasi-http = "0.39.0"
 omnia-wasi-identity = { version = "0.39.0", default-features = false }
 omnia-wasi-keyvalue = "0.39.0"
 omnia-wasi-messaging = "0.39.0"
@@ -106,6 +107,7 @@ omnia-sdk = { git = "https://github.com/augentic/omnia" }
 omnia-test = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-docstore = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-http = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-identity = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia" }
 omnia-wasi-messaging = { git = "https://github.com/augentic/omnia" }
@@ -122,6 +124,7 @@ omnia-wasi-vcs = { git = "https://github.com/augentic/omnia" }
 # omnia-test = { path = "../omnia/crates/test" }
 # omnia-wasi-blobstore = { path = "../omnia/crates/wasi-blobstore" }
 # omnia-wasi-docstore = { path = "../omnia/crates/wasi-docstore" }
+# omnia-wasi-http = { path = "../omnia/crates/wasi-http" }
 # omnia-wasi-identity = { path = "../omnia/crates/wasi-identity" }
 # omnia-wasi-keyvalue = { path = "../omnia/crates/wasi-keyvalue" }
 # omnia-wasi-messaging = { path = "../omnia/crates/wasi-messaging" }

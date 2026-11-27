@@ -1,0 +1,60 @@
+# The collector, Jaeger, and Prometheus behind the otel example. See README.md.
+
+services:
+  otelcol:
+    image: otel/opentelemetry-collector-contrib:0.166.0
+    configs:
+      - source: otelcol
+        target: /etc/otelcol-contrib/config.yaml
+    ports:
+      - 4317:4317
+    depends_on: [jaeger, prometheus]
+
+  jaeger:
+    image: jaegertracing/jaeger:2.23.0
+    command: --set=service.telemetry.logs.level=warn
+    ports:
+      - 16686:16686
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-remote-write-receiver
+      - --log.level=warn
+    ports:
+      - 9090:9090
+
+configs:
+  otelcol:
+    content: |
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+
+      processors:
+        # the guest's counters and histograms are delta series, which remote write drops
+        delta_to_cumulative:
+
+      exporters:
+        otlp_grpc/jaeger:
+          endpoint: jaeger:4317
+          tls:
+            insecure: true
+        prometheus_remote_write:
+          http:
+            endpoint: http://prometheus:9090/api/v1/write
+        debug:
+
+      service:
+        pipelines:
+          traces:
+            receivers: [otlp]
+            exporters: [otlp_grpc/jaeger, debug]
+          metrics:
+            receivers: [otlp]
+            processors: [delta_to_cumulative]
+            exporters: [prometheus_remote_write, debug]

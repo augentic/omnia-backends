@@ -35,6 +35,20 @@ Pairs with omnia 0.39.x.
 - `omnia-kafka` hands the host no more records at once than the handler's
   `max_in_flight`, where that is below its own 64.
 
+### Deprecated
+
+- `omnia-opentelemetry`: wire omnia's `OtelDefault` instead. It sends guest
+  telemetry to the collector the host's own telemetry goes to, as the
+  host's `OTEL_EXPORTER_OTLP_*` variables configure it
+  ([omnia#467](https://github.com/augentic/omnia/issues/467)). `Client`
+  remains as `OtelDefault` under its old name:
+  - it no longer dials `http://localhost:4317` when no endpoint is set,
+    and with none, nothing is exported;
+  - it no longer fails the boot when the collector does not answer;
+  - an export the host's queue has no room for answers `unavailable`, and
+    one over 4 MiB `invalid`, where each answered `ok`;
+  - a `grpc_url` passed in code through `ConnectOptions` is ignored.
+
 ---
 
 Release notes for previous releases can be found on the respective release

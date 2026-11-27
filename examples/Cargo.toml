@@ -15,6 +15,15 @@ name = "cursor"
 path = "cursor/runtime.rs"
 
 [[example]]
+name = "otel-wasm"
+path = "otel/guest.rs"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "otel"
+path = "otel/runtime.rs"
+
+[[example]]
 name = "azure_blob"
 path = "azure_blob/main.rs"
 
@@ -36,6 +45,7 @@ omnia-azure-table.workspace = true
 omnia-cursor.workspace = true
 omnia-wasi-blobstore.workspace = true
 omnia-wasi-docstore.workspace = true
+omnia-wasi-http.workspace = true
 omnia-wasi-model.workspace = true
 omnia-wasi-otel.workspace = true
 serde.workspace = true
@@ -44,8 +54,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["json"] }
 futures.workspace = true
-omnia-sdk.workspace = true
+omnia-sdk = { workspace = true, features = ["http"] }
+opentelemetry = { version = "0.33.1", default-features = false, features = ["metrics", "trace"] }
+tracing.workspace = true
 wasip3 = { version = "0.10.0", features = ["http-compat"] }
 wit-bindgen = { version = "0.63.0", features = ["async-spawn"] }
 

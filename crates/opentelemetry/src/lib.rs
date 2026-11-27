@@ -1,59 +1,44 @@
 #![doc = include_str!("../README.md")]
+#![expect(deprecated, reason = "the crate implements the deprecated items it exports")]
 
 mod otel;
 
-use std::fmt::Debug;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use omnia::{Connect, FromEnv};
-use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
-use opentelemetry_proto::tonic::collector::trace::v1::trace_service_client::TraceServiceClient;
-use tonic::transport::Channel;
-use tracing::instrument;
+use omnia_wasi_otel::OtelDefault;
 
-/// OpenTelemetry gRPC backend client for exporting traces and metrics.
-#[derive(Clone)]
-pub struct Client {
-    traces_client: TraceServiceClient<Channel>,
-    metrics_client: MetricsServiceClient<Channel>,
-}
-
-impl Debug for Client {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Client").finish_non_exhaustive()
-    }
-}
+/// The `omnia:otel` backend this crate provided, now [`OtelDefault`] under its
+/// old name.
+///
+/// It sends guest telemetry to the collector the host's own telemetry goes
+/// to, as the host's `OTEL_EXPORTER_OTLP_*` variables configure it. It dials
+/// no collector of its own, so with no endpoint set nothing is exported.
+#[deprecated(
+    since = "0.33.0",
+    note = "wire `omnia_wasi_otel::OtelDefault`, which sends guest telemetry to the host's collector"
+)]
+#[derive(Clone, Debug)]
+pub struct Client(OtelDefault);
 
 impl Connect for Client {
     type ConnectOptions = ConnectOptions;
 
-    #[instrument(name = "OpenTelemetry::connect_with")]
-    async fn connect_with(options: Self::ConnectOptions) -> Result<Self> {
-        tracing::debug!("connecting to OpenTelemetry gRPC endpoint at: {}", options.grpc_url);
-
-        let channel = Channel::from_shared(options.grpc_url)
-            .context("invalid OTEL_EXPORTER_OTLP_ENDPOINT")?
-            .connect()
-            .await
-            .context("failed to connect to OpenTelemetry gRPC endpoint")?;
-
-        let traces_client = TraceServiceClient::new(channel.clone());
-        let metrics_client = MetricsServiceClient::new(channel);
-
-        tracing::info!("connected to OpenTelemetry gRPC endpoint");
-        Ok(Self {
-            traces_client,
-            metrics_client,
-        })
+    async fn connect_with(_options: Self::ConnectOptions) -> Result<Self> {
+        OtelDefault::connect().await.map(Self)
     }
 }
 
-/// Connection options for the OpenTelemetry backend.
+/// Connection options [`Client`] reads from the environment and ignores.
+///
+/// The host's `OTEL_EXPORTER_OTLP_*` variables say where guest telemetry goes.
+#[deprecated(
+    since = "0.33.0",
+    note = "ignored: the host's `OTEL_EXPORTER_OTLP_*` variables say where guest telemetry goes"
+)]
 #[derive(Debug, Clone, FromEnv)]
 #[env(crate = omnia)]
 pub struct ConnectOptions {
-    /// gRPC endpoint URL for the OpenTelemetry Collector: OpenTelemetry's
-    /// own variable, the one the omnia host exports its spans to.
+    /// Ignored, since guest telemetry goes to the host's collector.
     #[env(from = "OTEL_EXPORTER_OTLP_ENDPOINT", default = "http://localhost:4317")]
     pub grpc_url: String,
 }

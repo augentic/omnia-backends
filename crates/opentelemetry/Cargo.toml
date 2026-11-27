@@ -20,12 +20,6 @@ all-features = true
 
 [dependencies]
 anyhow.workspace = true
-futures.workspace = true
 omnia.workspace = true
 omnia-wasi-otel.workspace = true
-opentelemetry-proto = { version = "0.33.1", features = ["gen-tonic"] }
-tonic = "0.14.9"
-tracing.workspace = true
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+opentelemetry-proto = { version = "0.33.1", default-features = false, features = ["gen-tonic-messages", "metrics", "trace"] }

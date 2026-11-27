@@ -18,7 +18,7 @@ MSRV: Rust 1.100. Each release line pairs with a specific omnia line — the cur
 | [`omnia-kafka`](crates/kafka)                 | `wasi-messaging`                                    | Apache Kafka                   |
 | [`omnia-mongodb`](crates/mongodb)             | `wasi-blobstore`                                    | MongoDB                        |
 | [`omnia-nats`](crates/nats)                   | `wasi-messaging`, `wasi-keyvalue`, `wasi-blobstore` | NATS / JetStream               |
-| [`omnia-opentelemetry`](crates/opentelemetry) | `wasi-otel`                                         | OpenTelemetry Collector (gRPC) |
+| [`omnia-opentelemetry`](crates/opentelemetry) | `wasi-otel`                                         | Deprecated: wire omnia's `OtelDefault` |
 | [`omnia-postgres`](crates/postgres)           | `wasi-sql`                                          | PostgreSQL                     |
 | [`omnia-redis`](crates/redis)                 | `wasi-keyvalue`                                     | Redis                          |
 | [`omnia-sandbox`](crates/sandbox)             | —                                                   | Seatbelt, Landlock and seccomp |

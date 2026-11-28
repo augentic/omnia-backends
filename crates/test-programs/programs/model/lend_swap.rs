@@ -10,7 +10,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use omnia_sdk::model::Request;
 use omnia_sdk::wasip3::filesystem::preopens;
@@ -30,7 +30,7 @@ async fn scenario() {
         .map(|(dir, _)| dir)
         .expect("host must mount `.`");
 
-    let swapped = Cell::new(false);
+    let swapped = AtomicBool::new(false);
     let request = Request::builder()
         .messages(vec![user("swap")])
         .tools(vec![tool("swap", "rearrange the mount")])
@@ -39,7 +39,7 @@ async fn scenario() {
     request
         .complete_with(|call| {
             assert_eq!(call.name, "swap");
-            let first = !swapped.replace(true);
+            let first = !swapped.swap(true, Ordering::Relaxed);
             async move {
                 if first {
                     root.rename_at(lend.clone(), root, "held".to_owned())
@@ -55,5 +55,5 @@ async fn scenario() {
         .await
         .expect("the completion runs")
         .expect("the backend answers after the swap");
-    assert!(swapped.get(), "the backend called `swap`");
+    assert!(swapped.load(Ordering::Relaxed), "the backend called `swap`");
 }

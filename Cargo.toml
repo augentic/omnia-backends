@@ -101,22 +101,22 @@ omnia-wasi-vault = "0.39.0"
 omnia-wasi-vcs = "0.39.0"
 
 [patch.crates-io]
-omnia = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-core = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-plugin = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-sdk = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-test = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-docstore = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-http = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-identity = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-messaging = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-model = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-otel = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-sql = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-vault = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
-omnia-wasi-vcs = { git = "https://github.com/augentic/omnia", branch = "workspace-lend" }
+omnia = { git = "https://github.com/augentic/omnia" }
+omnia-core = { git = "https://github.com/augentic/omnia" }
+omnia-plugin = { git = "https://github.com/augentic/omnia" }
+omnia-sdk = { git = "https://github.com/augentic/omnia" }
+omnia-test = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-blobstore = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-docstore = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-http = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-identity = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-keyvalue = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-messaging = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-model = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-otel = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-sql = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-vault = { git = "https://github.com/augentic/omnia" }
+omnia-wasi-vcs = { git = "https://github.com/augentic/omnia" }
 
 # omnia = { path = "../omnia/crates/omnia" }
 # omnia-core = { path = "../omnia/crates/core" }

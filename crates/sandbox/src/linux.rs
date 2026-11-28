@@ -14,8 +14,8 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd as _};
-use std::path::Path;
+use std::os::fd::{AsFd, AsRawFd as _, BorrowedFd};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use landlock::{
@@ -90,6 +90,14 @@ impl Linux {
         place.enter(&mut command)?;
         self.restrain(&mut command, place)?;
         Ok(command)
+    }
+
+    // The path the kernel holds for an open descriptor, symlinks resolved.
+    // The host is non-dumpable, but its own `/proc/self/fd` stays its own.
+    pub fn held_path(fd: BorrowedFd<'_>) -> Result<PathBuf> {
+        let link = format!("/proc/self/fd/{}", fd.as_raw_fd());
+        std::fs::read_link(&link)
+            .with_context(|| format!("reading the path of an open root ({link})"))
     }
 
     // The ruleset over `place` and the filters, applied in the child once it

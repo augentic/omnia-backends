@@ -1,0 +1,4 @@
+{
+  "name": "omnia-backends",
+  "install": "bash .cursor/install.sh"
+}

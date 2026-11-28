@@ -136,11 +136,16 @@ impl Sandbox {
     /// Prepares the [`Session`] a completion's processes run in: their
     /// working directory, their environment, and what `grant` opens to them.
     ///
-    /// The processes work in `workspace`, created and canonicalised, or in a
-    /// private directory when none is given. A workspace at or beneath one
-    /// of the connected `shell_roots` runs with [`Access::Shell`], any other
-    /// workspace with [`Access::Read`], and a private directory with
-    /// [`Access::Private`].
+    /// The processes work in the directory `lend` holds open, or in a private
+    /// directory when none is given:
+    ///
+    /// - A lend is placed where its directory stands as the session is
+    ///   prepared, read from the descriptor and never from a path.
+    /// - A lend at or beneath one of the connected `shell_roots` runs with
+    ///   [`Access::Shell`], any other lend with [`Access::Read`], and a
+    ///   private directory with [`Access::Private`].
+    /// - The processes write a lend only where it is
+    ///   [`writable`](Lend::writable), and a private directory always.
     ///
     /// Their environment is built from nothing:
     ///
@@ -174,11 +179,12 @@ impl Sandbox {
     ///
     /// Returns a plain error where the host failed:
     ///
-    /// - the workspace or the scratch cannot be created
+    /// - the lend cannot be held or placed
+    /// - the scratch cannot be created
     /// - a `read` root cannot be read
     /// - the proxy cannot be bound
-    pub async fn prepare(&self, workspace: Option<&Path>, grant: &Grant) -> Result<Session> {
-        Session::prepare(self, workspace, grant).await
+    pub async fn prepare(&self, lend: Option<Lend<'_>>, grant: &Grant) -> Result<Session> {
+        Session::prepare(self, lend, grant).await
     }
 
     /// A command running `program` held to `bounds`, with an empty
@@ -213,48 +219,41 @@ impl Sandbox {
             program: &program,
             read: bounds.read.iter().copied().map(session::Root::Open).collect(),
             write: bounds.write.iter().copied().map(session::Root::Open).collect(),
-            workspace: None,
+            session: false,
             network: false,
         })?;
         command.env_clear();
         Ok(command)
     }
 
-    /// The [`Access`] a session over `workspace` would run with, before any
-    /// is prepared.
+    /// The [`Access`] a session over `lend` would run with, before any is
+    /// prepared.
     ///
-    /// The workspace is created and canonicalised as [`Sandbox::prepare`]
-    /// does: at or beneath one of the connected `shell_roots` it is
-    /// [`Access::Shell`], elsewhere [`Access::Read`], and none is
-    /// [`Access::Private`].
+    /// The lend is placed as [`Sandbox::prepare`] places it: at or beneath
+    /// one of the connected `shell_roots` it is [`Access::Shell`], elsewhere
+    /// [`Access::Read`], and none is [`Access::Private`].
     ///
     /// # Errors
     ///
-    /// Returns an error when the workspace cannot be created or
-    /// canonicalised.
-    pub async fn access(&self, workspace: Option<&Path>) -> Result<Access> {
-        match workspace {
-            Some(path) => Ok(self.workspace(path).await?.1),
-            None => Ok(Access::Private),
-        }
+    /// Returns an error when the lend cannot be placed.
+    pub async fn access(&self, lend: Option<Lend<'_>>) -> Result<Access> {
+        let Some(lend) = lend else {
+            return Ok(Access::Private);
+        };
+        let cwd = Kernel::held_path(lend.dir).context("placing the lent directory")?;
+        Ok(if self.under_shell_root(&cwd).await { Access::Shell } else { Access::Read })
     }
 
-    // The workspace created and canonical, with what runs in it. A shell
-    // root is resolved again here: one that did not exist at connect may now.
-    pub(crate) async fn workspace(&self, path: &Path) -> Result<(PathBuf, Access)> {
-        tokio::fs::create_dir_all(path)
-            .await
-            .with_context(|| format!("creating {}", path.display()))?;
-        let cwd = tokio::fs::canonicalize(path)
-            .await
-            .with_context(|| format!("canonicalizing {}", path.display()))?;
+    // A shell root is resolved again here: one that did not exist at connect
+    // may now.
+    async fn under_shell_root(&self, path: &Path) -> bool {
         for root in &self.options.shell_roots {
             let root = tokio::fs::canonicalize(root).await.unwrap_or_else(|_| root.clone());
-            if cwd.starts_with(root) {
-                return Ok((cwd, Access::Shell));
+            if path.starts_with(root) {
+                return true;
             }
         }
-        Ok((cwd, Access::Read))
+        false
     }
 
     pub(crate) const fn kernel(&self) -> &Arc<Kernel> {
@@ -383,7 +382,7 @@ impl fmt::Debug for Sandbox {
 /// beyond it is its [`Grant`].
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// Directories a workspace at or beneath which runs with
+    /// Directories a [`Lend`] at or beneath which runs with
     /// [`Access::Shell`].
     ///
     /// Resolved at connect: canonical where the directory exists, absolute
@@ -423,6 +422,20 @@ pub struct Grant {
     ///
     /// A value's leading `~/` spells the operator's home.
     pub env: Vec<(String, String)>,
+}
+
+/// The workspace a backend lends a [`Session`]: a directory its caller holds
+/// open, and whether the session's processes may write it.
+///
+/// The descriptor is the authority. The processes work in the directory it
+/// opened, whatever its path reads as later, so a link laid where the
+/// directory stood leads no process anywhere.
+#[derive(Debug, Clone, Copy)]
+pub struct Lend<'a> {
+    /// The directory the processes work in.
+    pub dir: BorrowedFd<'a>,
+    /// Whether the processes may write the directory, or only read it.
+    pub writable: bool,
 }
 
 /// What one process [`Sandbox::command`] runs may reach: where it works, and

@@ -126,7 +126,9 @@ impl Seatbelt {
     // `sandbox-exec -p <profile> -D<KEY>=<path>.. -- <program>`: the profile
     // names every path through a parameter, so a path holding a quote or a
     // glob character cannot change what it means. A root arrives canonical
-    // or open, read back through `F_GETPATH`; the program is resolved here.
+    // or open, and a session's working directory open, each read back
+    // through `F_GETPATH` as the command is built; the program is resolved
+    // here.
     pub fn command(&self, place: &Place<'_>) -> Result<Command> {
         let program = std::fs::canonicalize(place.program)
             .with_context(|| format!("resolving {}", place.program.display()))?;
@@ -171,7 +173,8 @@ impl Seatbelt {
 
         // a session's working directory kept, and the engine's own directories
         // beneath it closed after its grant
-        if let Some(workspace) = place.workspace {
+        let workspace = if place.session { Some(Self::held_path(place.dir)?) } else { None };
+        if let Some(workspace) = &workspace {
             let cwd = params.add("CWD".to_owned(), workspace);
             let _ = writeln!(
                 profile,
@@ -198,7 +201,7 @@ impl Seatbelt {
             .chain([program.as_path()])
             .chain(read.iter().map(PathBuf::as_path))
             .chain(self.system.iter().map(PathBuf::as_path));
-        let above_cwd = ancestors(place.workspace);
+        let above_cwd = ancestors(workspace.as_deref());
         let mut listed = Vec::new();
         for (index, ancestor) in ancestors(granted).iter().enumerate() {
             let param = params.add(format!("ANCESTOR_{index}"), ancestor);
@@ -236,6 +239,21 @@ impl Seatbelt {
         place.enter(&mut command)?;
         Ok(command)
     }
+
+    // The path the kernel holds for an open descriptor, symlinks resolved.
+    #[expect(unsafe_code, reason = "`F_GETPATH` writes into a caller's buffer")]
+    pub fn held_path(fd: BorrowedFd<'_>) -> Result<PathBuf> {
+        let mut buffer = vec![0_u8; usize::try_from(libc::PATH_MAX).unwrap_or(1024)];
+        // SAFETY: the buffer is `PATH_MAX` bytes, as `F_GETPATH` requires, and
+        // outlives the call.
+        let answered = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
+        if answered == -1 {
+            return Err(io::Error::last_os_error()).context("reading the path of an open root");
+        }
+        let length = buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len());
+        buffer.truncate(length);
+        Ok(PathBuf::from(OsString::from_vec(buffer)))
+    }
 }
 
 impl Root<'_> {
@@ -243,24 +261,9 @@ impl Root<'_> {
     fn path(self) -> Result<PathBuf> {
         match self {
             Self::Path(path) => Ok(path.to_owned()),
-            Self::Open(fd) => held_path(fd),
+            Self::Open(fd) => Seatbelt::held_path(fd),
         }
     }
-}
-
-// The path the kernel holds for an open descriptor, symlinks resolved.
-#[expect(unsafe_code, reason = "`F_GETPATH` writes into a caller's buffer")]
-fn held_path(fd: BorrowedFd<'_>) -> Result<PathBuf> {
-    let mut buffer = vec![0_u8; usize::try_from(libc::PATH_MAX).unwrap_or(1024)];
-    // SAFETY: the buffer is `PATH_MAX` bytes, as `F_GETPATH` requires, and
-    // outlives the call.
-    let answered = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) };
-    if answered == -1 {
-        return Err(io::Error::last_os_error()).context("reading the path of an open root");
-    }
-    let length = buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len());
-    buffer.truncate(length);
-    Ok(PathBuf::from(OsString::from_vec(buffer)))
 }
 
 #[derive(Default)]

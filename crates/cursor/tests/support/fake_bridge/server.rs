@@ -245,8 +245,10 @@ impl Server {
         let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
         let options = &request["options"];
         let api_key = options["apiKey"].as_str().unwrap_or_default();
+        let current_dir = std::env::current_dir().map(|dir| dir.to_string_lossy().into_owned());
         let arg = json!({
             "cwd": options["local"]["cwd"][0],
+            "currentDir": current_dir.unwrap_or_default(),
             "apiKeyPresent": !api_key.is_empty(),
             "env": environment(),
             "granted": granted(),
@@ -514,6 +516,9 @@ impl Server {
             .collect()
             .await
             .map_or_default(http_body_util::Collected::to_bytes);
+        if self.has(&Fault::KillAfterCallback) {
+            kill_self();
+        }
         self.recorder.record(
             Kind::Callback,
             Some(&run.agent),

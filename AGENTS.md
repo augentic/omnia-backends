@@ -215,6 +215,19 @@ In this repository the register is the one `crates/cursor/src/{worker,pool,failu
 
 Never `git commit`, `git push`, open or close a pull request, or delete a branch — in this repository or in any sibling checkout — unless the maintainer lifts this for the session, explicitly and for named work. Leave every change uncommitted in the working tree; the maintainer reviews and commits. No plan or to-do list carries a commit, push, or PR step, and an instruction to complete every step does not override this.
 
+## Issues
+
+An issue is written for the maintainer first and the implementer second. Read the `github-issues` skill, where you have it, before you create, edit or rewrite one. The comment rules under Code style apply to code, not to issue text.
+
+- The glossary is omnia's [docs/glossary.md](https://github.com/augentic/omnia/blob/main/docs/glossary.md).
+- Until 1.0, a vulnerability is a public issue labelled `security`, fixed as an ordinary bug. A private advisory is only for a finding the maintainer chooses to embargo.
+- An issue labelled `breaking`, `cross-repo` or `security`, or one spanning more than one area, is planned locally with the maintainer, never resolved by a cloud agent alone.
+- Conflict files: `Cargo.lock` and `RELEASES.md`. A change that touches one says so in its issue's scope block.
+
+Before you plan an issue with the maintainer, check that its claims still hold on `main`. Where one does not, correct the body so it stays a current statement, and comment on the issue saying what changed and why.
+
+When you implement an issue on your own, check its claims the same way, but never edit it. Tell drift from substance. Drift is a moved line or a renamed private item: note it in the pull request and carry on. Substance is a claim that no longer holds, or a fix that is no longer the best one: comment on the issue saying why and stop, without editing the issue or implementing.
+
 ## Testing
 
 Tests drive the public boundary: a behaviour is asserted through what a user of the product or crate can reach, over scripted doubles rather than a live filesystem, network, or model, never through private internals. A suite below the root survives only for an independent library contract; a unit test only for a branch no public boundary reaches. A test fn names the scenario (`gen_spec`, `no_sources`), never the outcome. Scripted doubles are strict: script exactly the exchanges a run consumes.

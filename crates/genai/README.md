@@ -209,6 +209,14 @@ is killed the same way, the completion ended. A `shell` call where no shell
 was advertised is answered as the model's slip, not the completion's
 failure.
 
+The session holds the lent directory itself, never its path. Every command
+enters it through its open descriptor, and the kernel boundary is laid over
+the same descriptor, so a guest that moves the lend or lays a link at its
+name changes nothing a command reaches. `$WORKSPACE` names where the
+directory stands as the command starts. A lend the guest mounted read-only
+stays read-only to every command, which writes only its scratch. A lend that
+has left every shell root by the time its session opens is `invalid`.
+
 What the shell reaches beyond the lend is the `worker` grant the lend
 carries — the `egress` hosts, `~/` `read` roots, and `env` the guest spells
 per request, as the `omnia-cursor` backend reads them — prepared as the
@@ -378,6 +386,10 @@ shell root:
   the completion's cap outlives killed the same way (`timeout`, one request)
 - two commands sharing one session's `HOME`
 - a shell call with no shell advertised answered as the model's slip
+- a read-only lend whose shell cannot write it
+- a lend the guest moves aside and relinks out of its mount mid-run: the
+  next command writes where the directory now stands, and a write through
+  the old path is refused
 - the refusals: a lend outside the roots, no root configured, and a grant
   the sandbox denies
 

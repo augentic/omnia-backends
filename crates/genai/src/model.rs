@@ -13,13 +13,13 @@
 //! When a request includes a check, each answer goes to [`ToolHost::check`].
 //! A rejection appends the guest's correction and continues the conversation.
 
-use std::path::Path;
+use std::os::fd::AsFd as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use omnia::FutureResult;
 use omnia_sandbox::{Access, Denied, Grant};
-use omnia_wasi_model::{Answer, Error, Format, Limits, ModelClient, Request, ToolHost};
+use omnia_wasi_model::{Answer, Error, Format, Lend, Limits, ModelClient, Request, ToolHost};
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
 
@@ -66,26 +66,25 @@ impl Client {
     async fn stage(
         &self, request: &Request, tool_host: Arc<dyn ToolHost>,
     ) -> anyhow::Result<Conversation> {
-        let workspace = tool_host.local_path();
-        let access = self.access(workspace).await?;
+        let access = self.access(tool_host.lend()).await?;
         let model = self.model(request);
         let prepared = PreparedRequest::translate(request, model, self.max_tokens, access)?;
-        let shell = self.shell(request, access, workspace).await?;
+        let shell = self.shell(request, access, tool_host.lend()).await?;
         let tools =
             Tools::new(tool_host, shell, prepared.declared(), self.limits().max_result_bytes);
         Ok(Conversation::new(self.inner.clone(), prepared, tools, self.budgets))
     }
 
-    async fn access(&self, workspace: Option<&Path>) -> anyhow::Result<Access> {
+    async fn access(&self, lend: Option<&Lend>) -> anyhow::Result<Access> {
         match &self.sandbox {
-            Some(sandbox) => sandbox.access(workspace).await,
-            None if workspace.is_some() => Ok(Access::Read),
+            Some(sandbox) => sandbox.access(lend.map(sandboxed)).await,
+            None if lend.is_some() => Ok(Access::Read),
             None => Ok(Access::Private),
         }
     }
 
     async fn shell(
-        &self, request: &Request, access: Access, workspace: Option<&Path>,
+        &self, request: &Request, access: Access, lend: Option<&Lend>,
     ) -> anyhow::Result<Option<Shell>> {
         let worker = request.grants.worker();
         let (Some(sandbox), Access::Shell) = (&self.sandbox, access) else {
@@ -107,8 +106,22 @@ impl Client {
             read: worker.read.clone(),
             env: worker.env.clone(),
         });
-        let session = sandbox.prepare(workspace, &grant).await.map_err(refusal)?;
+        let session = sandbox.prepare(lend.map(sandboxed), &grant).await.map_err(refusal)?;
+
+        // a lend moved out of every shell root since it was classified opens no shell
+        if session.access() != Access::Shell {
+            let detail = "the workspace is not under a shell root";
+            return Err(Error::Invalid(detail.to_owned()).into());
+        }
         Ok(Some(Shell::new(session, self.shell_timeout)))
+    }
+}
+
+// The lend as the sandbox takes it: the directory itself, never its path.
+fn sandboxed(lend: &Lend) -> omnia_sandbox::Lend<'_> {
+    omnia_sandbox::Lend {
+        dir: lend.dir().as_fd(),
+        writable: lend.writable(),
     }
 }
 

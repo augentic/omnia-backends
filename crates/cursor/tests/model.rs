@@ -8,6 +8,7 @@
 mod support;
 
 use omnia_cursor::ConnectOptions;
+use omnia_test::host::scratch;
 use serde_json::json;
 use support::fake_bridge::{self, Codec, Config, Fault, History as _, Point, Rpc, Spawnable};
 use support::harness::{
@@ -115,6 +116,35 @@ async fn model_lend() {
     let created = log.saw(Rpc::CreateAgent)[0];
     assert_eq!(created.text("cwd"), fake.home().to_string_lossy(), "{}", created.arg);
     assert_eq!(created.arg["tools"], json!(["glob", "grep", "ls", "mcp", "read"]));
+}
+
+// The guest moves its lend, the fake's home, aside and links the name out of
+// the mount during the opening `Send`, and the process dies before it
+// answers. The restart is prepared from the directory the completion holds,
+// not from its name: process 2 works in `held`, its agent is created there,
+// and nothing reaches past the link.
+#[tokio::test]
+async fn model_lend_swap() {
+    let escape = scratch();
+    let config = Config::tool("swap").fault_on(1, Fault::KillAfterCallback);
+    let mut fake = Spawnable::nested(&config, "tree");
+    let client = spawning(&fake, 1).await;
+    let name = escape.path().file_name().expect("a scratch has a name").to_string_lossy();
+    let target = format!("../{name}");
+    run_guest_lending(test_programs::MODEL_LEND_SWAP, &["tree", &target], &client, [fake.outer()])
+        .await;
+    fake.moved("held");
+    await_gone(&fake).await;
+
+    let log = fake.log();
+    let workers = log.workers();
+    assert_eq!(workers.len(), 2, "the completion restarted once: {}", log.summary());
+    let held = fake.home().to_string_lossy();
+    let created = workers[1].saw(Rpc::CreateAgent)[0];
+    assert_eq!(created.text("cwd"), held, "{}", created.arg);
+    assert_eq!(created.text("currentDir"), held, "{}", created.arg);
+    let escaped = std::fs::read_dir(escape.path()).expect("reading the escape").count();
+    assert_eq!(escaped, 0, "nothing passed the link");
 }
 
 #[tokio::test]

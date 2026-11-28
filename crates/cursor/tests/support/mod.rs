@@ -4,8 +4,8 @@
 
 pub mod fake_bridge;
 pub mod harness;
-pub mod local_path_tool_host;
+pub mod tool_host;
 
-pub use local_path_tool_host::{
-    CHECK_WORD, TOOL_SENTINEL, checking_tool_host, local_path_tool_host, no_tool_host,
+pub use tool_host::{
+    CHECK_WORD, TOOL_SENTINEL, checking_tool_host, lending_tool_host, no_tool_host,
 };

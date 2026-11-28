@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::{ExitStatus, Output};
 use std::time::Duration;
 
@@ -35,14 +35,14 @@ impl Shell {
         Self { session, timeout }
     }
 
-    pub fn cwd(&self) -> &Path {
+    pub fn cwd(&self) -> Result<PathBuf> {
         self.session.cwd()
     }
 
     pub async fn run(&self, command: &str) -> Result<Run> {
         let mut process =
             self.session.command("sh").context("resolving `sh` for the shell tool")?;
-        process.args(["-c", command]).env("WORKSPACE", self.cwd());
+        process.args(["-c", command]).env("WORKSPACE", self.cwd()?);
         match process.output(self.timeout).await {
             Ok(output) => Ok(Run {
                 result: render(&output),

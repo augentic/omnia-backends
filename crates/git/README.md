@@ -2,6 +2,10 @@
 
 Git backend for the `omnia:vcs` interface ([`omnia-wasi-vcs`](https://github.com/augentic/omnia/tree/main/crates/wasi-vcs)): every operation runs the operator's own `git` binary in the directory the runtime opened for the guest's location, held by the kernel to the guest's mounts. The child enters that open handle before it executes (`fchdir`), so git works where the runtime resolved the location and never walks a path a guest could redirect meanwhile; the one path git is handed is a working copy's destination for `worktree add`, which git records in the repository. A working copy the backend laid is addressed through the gitdir `add` read back (`--git-dir`), never through the `.git` file at its root, which a guest lent the copy can rewrite.
 
+> **Warning — Pre-release, pre-hardening software.** `omnia-git` is under active development, and it has not yet been hardened or independently audited for security. Its [trust model](#trust) is what the backend is designed to hold, not a proven boundary around a hostile repository or guest. Expect breaking changes before `1.0`.
+>
+> Report a vulnerability privately, as the [security policy](https://github.com/augentic/.github/blob/main/SECURITY.md) describes. Until `1.0`, a confirmed vulnerability is tracked as a public `security` issue and fixed on `main`, with no published advisories, CVEs, or backports.
+
 ## Operations
 
 | Interface | Operation | What runs |

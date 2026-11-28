@@ -2,6 +2,13 @@
 
 Production backend implementations for the [Omnia](https://github.com/augentic/omnia) WASI runtime. Each crate bridges a WASI interface to a concrete service (database, message broker, vault, model provider, etc.), so the same guest `.wasm` that runs against Omnia's in-memory defaults runs unchanged against real infrastructure.
 
+> [!WARNING]
+> **Pre-release, pre-hardening software.** These backends are usable today, but they are still under active development alongside Omnia. Expect breaking changes and check [`RELEASES.md`](RELEASES.md) before upgrading. *Production* here means a real service in place of an in-memory default, not a hardened release.
+>
+> Neither the backends nor the runtime has yet been hardened or independently audited for security, including the process sandbox in [`omnia-sandbox`](crates/sandbox) and the kernel-bounded `git` in [`omnia-git`](crates/git). Do not rely on any of them as the only isolation boundary around hostile code. Read Omnia's [security model](https://github.com/augentic/omnia/blob/main/docs/security-model.md) before running untrusted code.
+>
+> Report a vulnerability [privately through GitHub](https://github.com/augentic/omnia-backends/security/advisories/new), as the [security policy](https://github.com/augentic/.github/blob/main/SECURITY.md) describes. Until `1.0`, a confirmed vulnerability is tracked as a public `security` issue and fixed on `main`, with no published advisories, CVEs, or backports.
+
 MSRV: Rust 1.100. Each release line pairs with a specific omnia line — the current 0.33.x line pairs with omnia 0.39.x (see [RELEASES.md](RELEASES.md)).
 
 ## Crates

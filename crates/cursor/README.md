@@ -9,6 +9,10 @@ Each completion gets its own `cursor-sdk-bridge` process (a *worker*) and a fres
 
 MSRV: Rust 1.100
 
+> **Warning — Pre-release, pre-hardening software.** `omnia-cursor` is under active development, and it has not yet been hardened or independently audited for security. Its workers run under [`omnia-sandbox`](https://github.com/augentic/omnia-backends/tree/main/crates/sandbox), which is pre-hardening too, so do not rely on either as the only boundary around what a model runs. Expect breaking changes before `1.0`.
+>
+> Report a vulnerability privately, as the [security policy](https://github.com/augentic/.github/blob/main/SECURITY.md) describes. Until `1.0`, a confirmed vulnerability is tracked as a public `security` issue and fixed on `main`, with no published advisories, CVEs, or backports.
+
 ## Requirements
 
 - `cursor-sdk-bridge` on `PATH`.

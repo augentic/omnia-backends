@@ -7,6 +7,10 @@ A host process in the model's trust domain, sandboxed. A model backend that runs
 
 MSRV: Rust 1.100
 
+> **Warning — Pre-release, pre-hardening software.** `omnia-sandbox` is under active development, and it has not yet been hardened or independently audited for security. Treat it as one layer of defence, never the only boundary around hostile code, and expect breaking changes before `1.0`. [The Linux posture](#landlock-and-seccomp-linux) names the gaps it leaves today.
+>
+> Report a vulnerability privately, as the [security policy](https://github.com/augentic/.github/blob/main/SECURITY.md) describes. Until `1.0`, a confirmed vulnerability is tracked as a public `security` issue and fixed on `main`, with no published advisories, CVEs, or backports.
+
 ## What a sandboxed process gets
 
 - **A working directory**: the workspace the guest lent, created and canonicalised, or a private directory under the session's scratch when nothing was lent. The child enters the workspace's open directory handle before it executes, so it runs where the workspace resolved and never walks the path again.

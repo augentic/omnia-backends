@@ -78,6 +78,8 @@ pub enum Fault {
     ExitOnCreate(usize),
     /// Two marker lines to stderr, then `SIGKILL` ourselves as the nth `Send` begins.
     KillOnSend(usize),
+    /// `SIGKILL` ourselves once a `CallCustomTool` POST is answered, before recording it.
+    KillAfterCallback,
     /// Open the nth `Send`'s stream, deliver the run id, then reset it.
     ResetStream(usize),
     /// Two marker lines to stderr, then exit with this code before the ready line.
@@ -254,8 +256,10 @@ cfg_select! {
         /// and releases, lent to every completion, and the `cursor-sdk-bridge` link
         /// on this test process's `PATH`.
         pub struct Spawnable {
-            home: tempfile::TempDir,
-            canonical: PathBuf,
+            _dir: tempfile::TempDir,
+            // The directory laid out, canonical: the home, or what holds a nested one.
+            root: PathBuf,
+            home: PathBuf,
         }
 
         impl Spawnable {
@@ -266,26 +270,52 @@ cfg_select! {
             /// Lay out `config` and put the fake first on `PATH`, where the client
             /// finds it; `PATH` is process-wide, so one `Spawnable` per test process
             /// (nextest's one test each).
-            #[expect(unsafe_code, reason = "the client finds the bridge through PATH")]
             pub fn new(config: &Config) -> Self {
-                let home = tempfile::Builder::new()
-                    .prefix("fake-bridge-")
-                    .tempdir()
-                    .expect("a home directory");
+                let dir = Self::dir();
+                let root = std::fs::canonicalize(dir.path()).expect("the home resolves");
+                Self::lay_out(config, &root, &root);
+                Self {
+                    _dir: dir,
+                    home: root.clone(),
+                    root,
+                }
+            }
+
+            /// The fake as [`Self::new`] lays it out, with the home at `lend` inside a
+            /// directory the guest mounts whole and the link beside the home: a guest
+            /// that moves the home leaves the fake on `PATH`.
+            pub fn nested(config: &Config, lend: &str) -> Self {
+                let dir = Self::dir();
+                let root = std::fs::canonicalize(dir.path()).expect("the directory resolves");
+                let home = root.join(lend);
+                std::fs::create_dir(&home).expect("a home directory");
+                Self::lay_out(config, &home, &root);
+                Self {
+                    _dir: dir,
+                    root,
+                    home,
+                }
+            }
+
+            fn dir() -> tempfile::TempDir {
+                tempfile::Builder::new().prefix("fake-bridge-").tempdir().expect("a directory")
+            }
+
+            #[expect(unsafe_code, reason = "the client finds the bridge through PATH")]
+            fn lay_out(config: &Config, home: &Path, bin: &Path) {
                 std::fs::write(
-                    home.path().join(SCRIPT_FILE),
+                    home.join(SCRIPT_FILE),
                     serde_json::to_vec_pretty(config).expect("a config serializes"),
                 )
                 .expect("writing the script");
                 std::os::unix::fs::symlink(
                     env!("CARGO_BIN_EXE_fake-cursor-sdk-bridge"),
-                    home.path().join(BIN_NAME),
+                    bin.join(BIN_NAME),
                 )
                 .expect("linking the fake binary");
-                let canonical = std::fs::canonicalize(home.path()).expect("the home resolves");
-                HOME.set(canonical.clone()).expect("one Spawnable per test process");
+                HOME.set(home.to_path_buf()).expect("one Spawnable per test process");
 
-                let mut path = home.path().as_os_str().to_owned();
+                let mut path = bin.as_os_str().to_owned();
                 if let Some(rest) = std::env::var_os("PATH") {
                     path.push(":");
                     path.push(rest);
@@ -293,13 +323,12 @@ cfg_select! {
                 // SAFETY: set before the test spawns any thread of its own, and read
                 // only by the client's spawns and their children from here on.
                 unsafe { std::env::set_var("PATH", path) };
-                Self { home, canonical }
             }
 
             /// The home, canonical: the working directory of every spawned fake
             /// that was lent it.
             pub fn home(&self) -> &Path {
-                &self.canonical
+                &self.home
             }
 
             /// The home as the guest's [`Self::MOUNT`], for the harness to preopen;
@@ -308,13 +337,28 @@ cfg_select! {
                 omnia::Mount {
                     name: Self::MOUNT.to_owned(),
                     path: HOME.get().expect("a Spawnable stands before any guest runs").clone(),
-                    writable: false,
+                    writable: true,
                 }
+            }
+
+            /// The directory holding a [`Self::nested`] home, as the guest's writable
+            /// `.`.
+            pub fn outer(&self) -> omnia::Mount {
+                omnia::Mount {
+                    name: ".".to_owned(),
+                    path: self.root.clone(),
+                    writable: true,
+                }
+            }
+
+            /// Follow a [`Self::nested`] home to `name`, where the guest moved it.
+            pub fn moved(&mut self, name: &str) {
+                self.home = self.root.join(name);
             }
 
             /// Everything every process recorded so far.
             pub fn log(&self) -> Log {
-                Log::read(&self.home.path().join(LOG_FILE))
+                Log::read(&self.home.join(LOG_FILE))
             }
 
             /// Requests held at `point` right now: parked and not yet released; a run
@@ -364,7 +408,7 @@ cfg_select! {
             }
 
             fn releases_path(&self) -> PathBuf {
-                self.home.path().join(RELEASES_FILE)
+                self.home.join(RELEASES_FILE)
             }
         }
     }

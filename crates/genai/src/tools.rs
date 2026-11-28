@@ -93,7 +93,8 @@ impl Tools {
     // A shell call is answered before the declared names are checked, so one
     // made where no shell was advertised is told so rather than told the names.
     pub async fn call(&self, call: &ToolCall) -> Result<ToolOutcome> {
-        let subject = subject(&call.fn_arguments, self.shell.as_ref().map(Shell::cwd));
+        let cwd = self.shell.as_ref().and_then(|shell| shell.cwd().ok());
+        let subject = subject(&call.fn_arguments, cwd.as_deref());
         tracing::debug!(tool = %call.fn_name, subject = subject.as_deref(), "tool call");
         tracing::trace!(
             target: "omnia_genai::tools",

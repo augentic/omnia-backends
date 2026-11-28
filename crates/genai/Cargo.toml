@@ -37,9 +37,11 @@ tracing.workspace = true
 # server stack stands up the fake OpenAI-compatible provider the `model` and
 # `provider` suites point `ConnectOptions::endpoint` at; `omnia-test` and
 # `test-programs` run the guest components through the runtime; the suites
-# read the `completion` line off a `tracing-subscriber` layer of their own.
+# read the `completion` line off a `tracing-subscriber` layer of their own;
+# the live suite opens the directory it lends through `cap-std`.
 [dev-dependencies]
 bytes.workspace = true
+cap-std.workspace = true
 futures.workspace = true
 http.workspace = true
 http-body-util.workspace = true

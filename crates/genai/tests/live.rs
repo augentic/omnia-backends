@@ -14,17 +14,19 @@
 //! `cargo nextest run -p omnia-genai --run-ignored all` alongside a provider
 //! key such as `OPENAI_API_KEY`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use futures::FutureExt as _;
 use omnia::wasmtime::component::Resource;
 use omnia::{Connect as _, FutureResult};
 use omnia_genai::{Client, ConnectOptions};
 use omnia_wasi_model::{
-    Answer, Budget, DirEntry, Exhausted, Format, Function, Grants, Location, Message,
+    Answer, Budget, DirEntry, Exhausted, Format, Function, Grants, Lend, Location, Message,
     ModelClient as _, Request, Role, Tool, ToolHost, WorkerGrant, WorkspaceGrant,
 };
 use serde_json::Value;
@@ -108,12 +110,13 @@ fn lookup_request() -> Request {
 const SENTINEL: &str = "omega-7734";
 
 // Deterministic in-memory workspace stand-in for the host's `BoundToolHost`:
-// `local_path` reports a resolved lend (which makes the backend advertise
-// `read`/`list`), listing the root reveals `refs.md`, and reading it returns
-// the sentinel. The real cap-std workspace is proved by omnia's ABI tests;
-// here we only need the genai backend to discover, read, and use the file.
+// `lend` reports a lend of an empty directory (which makes the backend
+// advertise `read`/`list`), listing the root reveals `refs.md`, and reading
+// it returns the sentinel. The real cap-std workspace is proved by omnia's
+// ABI tests; here we only need the genai backend to discover, read, and use
+// the file.
 #[derive(Debug)]
-struct LiveWorkspace;
+struct LiveWorkspace(Lend);
 
 impl ToolHost for LiveWorkspace {
     fn call_tool(&self, name: String, _arguments: String) -> FutureResult<Result<String, String>> {
@@ -148,8 +151,8 @@ impl ToolHost for LiveWorkspace {
         async { Err(anyhow::anyhow!("no check was requested")) }.boxed()
     }
 
-    fn local_path(&self) -> Option<&Path> {
-        Some(Path::new("/unused/live-workspace"))
+    fn lend(&self) -> Option<&Lend> {
+        Some(&self.0)
     }
 }
 
@@ -157,7 +160,7 @@ impl ToolHost for LiveWorkspace {
 // prepares a session over it and advertises `shell`; the workspace tools go
 // unused since the prompt asks for the toolchain alone.
 #[derive(Debug)]
-struct LiveShell(PathBuf);
+struct LiveShell(Lend);
 
 impl ToolHost for LiveShell {
     fn call_tool(&self, name: String, _arguments: String) -> FutureResult<Result<String, String>> {
@@ -181,7 +184,7 @@ impl ToolHost for LiveShell {
         async { Err(anyhow::anyhow!("no check was requested")) }.boxed()
     }
 
-    fn local_path(&self) -> Option<&Path> {
+    fn lend(&self) -> Option<&Lend> {
         Some(&self.0)
     }
 }
@@ -195,8 +198,8 @@ fn shell_request() -> Request {
         read: vec!["~/.rustup".to_owned(), "~/.cargo/bin".to_owned()],
         env: vec![("RUSTUP_HOME".to_owned(), "~/.rustup".to_owned())],
     };
-    // HACK: the backend reaches a lend through `ToolHost::local_path` alone,
-    // so a borrow no table holds stands in for the root
+    // HACK: the backend reaches a lend through `ToolHost::lend` alone, so a
+    // borrow no table holds stands in for the root
     let location = Location {
         root: Resource::new_borrow(0),
         subpath: String::new(),
@@ -373,9 +376,11 @@ async fn function_tool() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a provider key (e.g. OPENAI_API_KEY); run with --run-ignored"]
 async fn workspace_tools() -> Result<()> {
+    let scratch = omnia_test::host::scratch();
+    let workspace = LiveWorkspace(lend_of(scratch.path(), false)?);
     let client = Client::connect().await?;
     let answer: Answer =
-        client.complete(workspace_request(), Arc::new(LiveWorkspace)).await.map_err(|e| {
+        client.complete(workspace_request(), Arc::new(workspace)).await.map_err(|e| {
             anyhow::anyhow!("live genai completion failed (is the API key valid?): {e}")
         })?;
 
@@ -404,6 +409,12 @@ async fn workspace_tools() -> Result<()> {
     Ok(())
 }
 
+// A lend of the directory at `path`, opened as the host opens a mount.
+fn lend_of(path: &Path, writable: bool) -> Result<Lend> {
+    let dir = Dir::open_ambient_dir(path, ambient_authority())?;
+    Ok(Lend::new(dir, path.to_path_buf(), writable))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: needs a provider key (e.g. OPENAI_API_KEY) and a Rust toolchain under `~/.rustup`; run with --run-ignored"]
 async fn shell_toolchain() -> Result<()> {
@@ -415,10 +426,10 @@ async fn shell_toolchain() -> Result<()> {
         ..ConnectOptions::load_env()?
     })
     .await?;
-    let answer: Answer =
-        client.complete(shell_request(), Arc::new(LiveShell(tree))).await.map_err(|e| {
-            anyhow::anyhow!("live genai completion failed (is the API key valid?): {e}")
-        })?;
+    let shell = LiveShell(lend_of(&tree, true)?);
+    let answer: Answer = client.complete(shell_request(), Arc::new(shell)).await.map_err(|e| {
+        anyhow::anyhow!("live genai completion failed (is the API key valid?): {e}")
+    })?;
 
     let transcript = answer.transcript.as_ref().expect("genai always records a transcript");
     let shell_turn = transcript

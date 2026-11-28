@@ -17,6 +17,19 @@ to open.
 
 MSRV: Rust 1.100
 
+> **Warning — Pre-release, pre-hardening software.** `omnia-genai` is under
+> active development, and it has not yet been hardened or independently
+> audited for security. Its [`shell`](#the-shell) tool runs under
+> [`omnia-sandbox`](https://github.com/augentic/omnia-backends/tree/main/crates/sandbox),
+> which is pre-hardening too, so do not rely on either as the only boundary
+> around what a model runs. Expect breaking changes before `1.0`.
+>
+> Report a vulnerability privately, as the
+> [security policy](https://github.com/augentic/.github/blob/main/SECURITY.md)
+> describes. Until `1.0`, a confirmed vulnerability is tracked as a public
+> `security` issue and fixed on `main`, with no published advisories, CVEs,
+> or backports.
+
 ## Tools
 
 The chat advertises the request's declared function tools, and beside them:
@@ -196,6 +209,14 @@ is killed the same way, the completion ended. A `shell` call where no shell
 was advertised is answered as the model's slip, not the completion's
 failure.
 
+The session holds the lent directory itself, never its path. Every command
+enters it through its open descriptor, and the kernel boundary is laid over
+the same descriptor, so a guest that moves the lend or lays a link at its
+name changes nothing a command reaches. `$WORKSPACE` names where the
+directory stands as the command starts. A lend the guest mounted read-only
+stays read-only to every command, which writes only its scratch. A lend that
+has left every shell root by the time its session opens is `invalid`.
+
 What the shell reaches beyond the lend is the `worker` grant the lend
 carries — the `egress` hosts, `~/` `read` roots, and `env` the guest spells
 per request, as the `omnia-cursor` backend reads them — prepared as the
@@ -365,6 +386,10 @@ shell root:
   the completion's cap outlives killed the same way (`timeout`, one request)
 - two commands sharing one session's `HOME`
 - a shell call with no shell advertised answered as the model's slip
+- a read-only lend whose shell cannot write it
+- a lend the guest moves aside and relinks out of its mount mid-run: the
+  next command writes where the directory now stands, and a write through
+  the old path is refused
 - the refusals: a lend outside the roots, no root configured, and a grant
   the sandbox denies
 

@@ -14,11 +14,11 @@
 //! lease requests shutdown while keeping its slot and callback route occupied.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use omnia_sandbox::{Grant, Options, Sandbox, Session};
+use omnia_sandbox::{Grant, Lend, Options, Sandbox, Session};
 use omnia_wasi_model::ToolHost;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
@@ -59,8 +59,8 @@ impl Pool {
     }
 
     // The session a worker runs in, held to the sandbox before any slot is taken.
-    pub async fn prepare(&self, workspace: Option<&Path>, grant: &Grant) -> Result<Session> {
-        self.sandbox.prepare(workspace, grant).await
+    pub async fn prepare(&self, lend: Option<Lend<'_>>, grant: &Grant) -> Result<Session> {
+        self.sandbox.prepare(lend, grant).await
     }
 
     // Wait for a slot, in arrival order, then for the worker to run on,

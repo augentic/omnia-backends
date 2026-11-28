@@ -49,6 +49,7 @@ azure_security_keyvault_secrets = "1.0.1"
 azure_storage_blob = "1.1.0"
 base64ct = { version = "1.8.3", features = ["std"] }
 bytes = "1.12.2"
+cap-std = "4.0.3"
 chrono = "0.4.45"
 futures = "0.3.34"
 getrandom = "0.4.3"

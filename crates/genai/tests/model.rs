@@ -53,7 +53,8 @@ fn shelled(roots: Vec<PathBuf>) -> ConnectOptions {
     }
 }
 
-// The `worker` guest over `tree/`, with `grant` and the fake's script.
+// The `worker` guest over a writable `tree/`, with `grant` and the fake's
+// script.
 async fn worker(
     config: Config, scratch: &Scratch, options: ConnectOptions, grant: &[&str],
 ) -> FakeOpenAi {
@@ -61,7 +62,7 @@ async fn worker(
     let client = client_with(&fake, options).await;
     let mut args = grant.to_vec();
     args.push("lend=./tree");
-    run_guest_over(test_programs::MODEL_WORKER, &args, &client, [scratch.mount(false)]).await;
+    run_guest_over(test_programs::MODEL_WORKER, &args, &client, [scratch.mount(true)]).await;
     fake
 }
 
@@ -139,6 +140,59 @@ async fn model_lend_shell() {
     let requests = fake.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].tools(), ["read", "list", "shell"]);
+}
+
+// A read-only lend under a shell root keeps its shell, but the kernel holds
+// the lend read-only to it: a write fails and leaves nothing behind.
+#[tokio::test]
+async fn model_lend_read_only() {
+    let (scratch, roots) = tree();
+    let fake = FakeOpenAi::serve(shell(r#"touch "$WORKSPACE/x""#)).await;
+    let client = client_with(&fake, shelled(roots)).await;
+    run_guest_over(test_programs::MODEL_LEND, &["./tree"], &client, [scratch.mount(false)]).await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].tools(), ["read", "list", "shell"]);
+    let result = requests[1].last("tool").expect("the shell answered");
+    assert!(result.contains("--- exit ---"), "the write fails: {result}");
+    assert!(scratch.read("tree/x").is_none(), "nothing was written");
+}
+
+// The guest moves the lent `tree` aside and links its name out of the mount
+// once the shell is open on it. The shell still works in the directory it
+// was lent: `$WORKSPACE` follows it to `held`, and a write through the stale
+// path is refused rather than landing past the link.
+#[tokio::test]
+async fn model_lend_swap() {
+    let escape = scratch();
+    let (scratch, roots) = tree();
+    let stale = scratch.path().join("tree").join("planted");
+    let command = format!(r#"echo out > "$WORKSPACE/out"; echo planted > '{}'"#, stale.display());
+    let fake = FakeOpenAi::serve(
+        Config::calls([("swap", json!({})), ("shell", json!({ "command": command }))])
+            .answering("done"),
+    )
+    .await;
+    let client = client_with(&fake, shelled(roots)).await;
+    let name = escape.path().file_name().expect("a scratch has a name").to_string_lossy();
+    let target = format!("../{name}");
+    run_guest_over(
+        test_programs::MODEL_LEND_SWAP,
+        &["tree", &target],
+        &client,
+        [scratch.mount(true)],
+    )
+    .await;
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].last("tool").as_deref(), Some("swapped"));
+    let result = requests[2].last("tool").expect("the shell answered");
+    assert!(result.contains("--- exit ---"), "the stale path is refused: {result}");
+    assert_eq!(scratch.read("held/out").as_deref(), Some(b"out\n".as_slice()));
+    let escaped = std::fs::read_dir(escape.path()).expect("reading the escape").count();
+    assert_eq!(escaped, 0, "nothing passed the link");
 }
 
 // A worker grant over a lend under a shell root opens the shell on it: the
@@ -307,7 +361,7 @@ async fn model_shell_capped() {
         test_programs::MODEL_EXPECT_ERROR,
         &["timed out after 1s", "budget", "lend=./tree"],
         &client,
-        [scratch.mount(false)],
+        [scratch.mount(true)],
     )
     .await;
 

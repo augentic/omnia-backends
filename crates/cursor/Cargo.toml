@@ -41,6 +41,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+cap-std.workspace = true
 futures.workspace = true
 libc.workspace = true
 omnia-test = { workspace = true, features = ["host"] }

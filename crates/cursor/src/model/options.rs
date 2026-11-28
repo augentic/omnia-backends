@@ -30,9 +30,10 @@ impl Turn {
             tracing::debug!("request.generation is ignored (CreateAgent has no sampling controls)");
         }
 
-        let cwd = session.cwd().to_str().with_context(|| {
-            format!("working directory {} is not UTF-8", session.cwd().display())
-        })?;
+        let path = session.cwd()?;
+        let cwd = path
+            .to_str()
+            .with_context(|| format!("working directory {} is not UTF-8", path.display()))?;
         let options = agent_options(request, cwd, session.access(), model, api_key)?;
         let operation = AgentOperationOptions {
             cwd: cwd.to_owned(),

@@ -2,7 +2,7 @@
 //! share:
 //!
 //! - a connected [`Sandbox`] over `/bin/sh`
-//! - a session around a workspace, and a script run inside it
+//! - a workspace lent open, a session around it, and a script run inside it
 //! - the egress proxy a session's process is pointed at
 //! - the liveness probes a process-death row ends on
 //! - the log events a row reads back
@@ -10,13 +10,15 @@
 #![allow(dead_code, reason = "each suite uses its own subset")]
 
 use std::fmt::Write as _;
+use std::fs::File;
 use std::net::SocketAddr;
+use std::os::fd::AsFd as _;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use omnia_sandbox::{Child, Command, Denied, Grant, Options, Sandbox, Session};
+use omnia_sandbox::{Child, Command, Denied, Grant, Lend, Options, Sandbox, Session};
 
 /// How long a process may take to be gone once its death was set in motion.
 pub const GONE: Duration = Duration::from_secs(8);
@@ -67,14 +69,31 @@ pub fn probe_outside(workspace: &Path, args: &[&str]) -> std::process::Output {
         .expect("the probe runs on the host")
 }
 
+/// The directory at `path`, created where missing, held open to lend.
+pub fn open(path: &Path) -> File {
+    std::fs::create_dir_all(path).expect("the lent directory");
+    File::open(path).expect("the lent directory opens")
+}
+
+/// A writable [`Lend`] of `dir`.
+pub fn lend(dir: &File) -> Lend<'_> {
+    Lend {
+        dir: dir.as_fd(),
+        writable: true,
+    }
+}
+
 /// A session around `workspace` under `sandbox`, with an empty grant.
 pub async fn session(sandbox: &Sandbox, workspace: Option<&Path>) -> Session {
     granted(sandbox, workspace, &Grant::default()).await
 }
 
 /// A session around `workspace` under `sandbox`, with `grant`.
+///
+/// The workspace is created where missing and lent writable.
 pub async fn granted(sandbox: &Sandbox, workspace: Option<&Path>, grant: &Grant) -> Session {
-    sandbox.prepare(workspace, grant).await.expect("the grant holds")
+    let dir = workspace.map(open);
+    sandbox.prepare(dir.as_ref().map(lend), grant).await.expect("the grant holds")
 }
 
 /// The `Denied` reason `sandbox` refuses `grant` with, around a private directory.

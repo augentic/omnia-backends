@@ -19,7 +19,7 @@ use tokio::fs;
 
 use crate::child::{self, Child};
 use crate::proxy::Proxy;
-use crate::{Grant, Kernel, Sandbox};
+use crate::{Grant, Kernel, Lend, Sandbox};
 
 /// The session a completion's processes run in: where they work, what they
 /// inherit, and what their grant opened.
@@ -33,7 +33,7 @@ pub struct Session(Arc<Inner>);
 
 impl Session {
     pub(crate) async fn prepare(
-        sandbox: &Sandbox, workspace: Option<&Path>, grant: &Grant,
+        sandbox: &Sandbox, lend: Option<Lend<'_>>, grant: &Grant,
     ) -> Result<Self> {
         // `tempfile` has no async API, and one `mkdir` is not worth a blocking thread
         let scratch_dir = tempfile::Builder::new()
@@ -45,19 +45,19 @@ impl Session {
             .with_context(|| format!("canonicalizing {}", scratch_dir.path().display()))?;
 
         // the working directory, lent or private
-        let (cwd, access) = if let Some(path) = workspace {
-            sandbox.workspace(path).await?
+        let (dir, access, writable) = if let Some(lend) = lend {
+            let dir = lend.dir.try_clone_to_owned().context("holding the lent directory")?;
+            (File::from(dir), sandbox.access(Some(lend)).await?, lend.writable)
         } else {
             let cwd = scratch.join("cwd");
             fs::create_dir(&cwd).await.with_context(|| format!("creating {}", cwd.display()))?;
-            (cwd, Access::Private)
+            let dir = fs::File::open(&cwd)
+                .await
+                .with_context(|| format!("opening {}", cwd.display()))?
+                .into_std()
+                .await;
+            (dir, Access::Private, true)
         };
-
-        let dir = fs::File::open(&cwd)
-            .await
-            .with_context(|| format!("opening {}", cwd.display()))?
-            .into_std()
-            .await;
 
         // what the grant opens
         let read = sandbox.read_roots(&grant.read).await?;
@@ -65,8 +65,8 @@ impl Session {
         let env = sandbox.environment(&scratch, proxy.address(), &grant.env)?;
 
         Ok(Self(Arc::new(Inner {
-            cwd,
             access,
+            writable,
             scratch,
             _scratch_dir: scratch_dir,
             dir,
@@ -78,16 +78,33 @@ impl Session {
         })))
     }
 
-    /// The directory the processes work in, canonical.
-    #[must_use]
-    pub fn cwd(&self) -> &Path {
-        &self.0.cwd
+    /// Where the processes' working directory stands now, canonical.
+    ///
+    /// Read from the directory's descriptor at each call, so it follows the
+    /// directory wherever it has moved. It is for messages, and for a program
+    /// told where it works. The processes are bound to the directory itself,
+    /// never to this path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the kernel cannot report the directory's path.
+    pub fn cwd(&self) -> Result<PathBuf> {
+        Kernel::held_path(self.0.dir.as_fd())
     }
 
     /// What the processes may do in their working directory.
     #[must_use]
     pub fn access(&self) -> Access {
         self.0.access
+    }
+
+    /// Whether the processes may write their working directory.
+    ///
+    /// A lend is writable where the backend lent it so. A private directory
+    /// always is.
+    #[must_use]
+    pub fn writable(&self) -> bool {
+        self.0.writable
     }
 
     /// The session's own scratch directory: the processes' `HOME` and
@@ -111,7 +128,9 @@ impl Session {
     /// - The command's environment is the session's and nothing of the
     ///   host's. What the caller adds to it rides.
     /// - The command's working directory is the session's, entered through
-    ///   its open descriptor before `program` runs.
+    ///   its open descriptor before `program` runs. The kernel boundary is
+    ///   laid over that descriptor too, read-only where the session is not
+    ///   [`writable`](Self::writable).
     /// - A bare `program` is resolved against the host's `PATH` as
     ///   connecting read it, never one the grant set. An absent one is
     ///   refused before any spawn, and no grant chooses the program.
@@ -127,12 +146,22 @@ impl Session {
     pub fn command(&self, program: &str) -> Result<Command> {
         let program = resolve(Path::new(program), &self.0.path)?;
 
+        // the working directory by its descriptor, so no path is walked again
+        let cwd = Root::Open(self.0.dir.as_fd());
+        let mut read: Vec<Root<'_>> = self.0.read.iter().map(|root| Root::Path(root)).collect();
+        let mut write = vec![Root::Path(&self.0.scratch)];
+        if self.0.writable {
+            write.push(cwd);
+        } else {
+            read.push(cwd);
+        }
+
         let mut inner = self.0.kernel.command(&Place {
             dir: self.0.dir.as_fd(),
             program: &program,
-            read: self.0.read.iter().map(|root| Root::Path(root)).collect(),
-            write: vec![Root::Path(&self.0.cwd), Root::Path(&self.0.scratch)],
-            workspace: Some(&self.0.cwd),
+            read,
+            write,
+            session: true,
             network: true,
         })?;
 
@@ -149,8 +178,9 @@ impl Session {
 impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Session")
-            .field("cwd", &self.0.cwd)
+            .field("cwd", &self.cwd().ok())
             .field("access", &self.0.access)
+            .field("writable", &self.0.writable)
             .field("scratch", &self.0.scratch)
             .field("read", &self.0.read)
             .field("proxy", &self.0.proxy)
@@ -159,8 +189,8 @@ impl fmt::Debug for Session {
 }
 
 struct Inner {
-    cwd: PathBuf,
     access: Access,
+    writable: bool,
     scratch: PathBuf,
     // Removes the scratch as the last handle is dropped.
     _scratch_dir: TempDir,
@@ -296,8 +326,9 @@ pub struct Place<'a> {
     pub program: &'a Path,
     pub read: Vec<Root<'a>>,
     pub write: Vec<Root<'a>>,
-    // A session's working directory, which its processes never remove, whose
-    // ancestors they list, and whose `.git` and `.emery` are closed to them.
+    // Whether `dir` is a session's working directory, which its processes
+    // never remove, whose ancestors they list, and whose `.git` and `.emery`
+    // are closed to them.
     #[cfg_attr(
         target_os = "linux",
         expect(
@@ -305,7 +336,7 @@ pub struct Place<'a> {
             reason = "Landlock cannot deny beneath a grant, so Linux reads none of it"
         )
     )]
-    pub workspace: Option<&'a Path>,
+    pub session: bool,
     pub network: bool,
 }
 

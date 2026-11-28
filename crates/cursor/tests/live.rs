@@ -19,7 +19,7 @@ use omnia_wasi_model::{
     Request, Role, Schema, Tool, WorkerGrant, WorkspaceGrant,
 };
 use serde_json::{Value, json};
-use support::{CHECK_WORD, TOOL_SENTINEL, checking_tool_host, local_path_tool_host, no_tool_host};
+use support::{CHECK_WORD, TOOL_SENTINEL, checking_tool_host, lending_tool_host, no_tool_host};
 use tracing_subscriber::layer::SubscriberExt as _;
 
 // How long the pool may take to be rid of every process once the answers are
@@ -94,7 +94,7 @@ fn verdict_request() -> Request {
 async fn single_completion() -> Result<()> {
     let client = connect().await?;
     let answer: Answer = client
-        .complete(verdict_request(), local_path_tool_host(temp_workspace("ws")?))
+        .complete(verdict_request(), lending_tool_host(temp_workspace("ws")?)?)
         .await
         .map_err(|e| {
             anyhow::anyhow!("live cursor completion failed (is cursor-sdk-bridge installed?): {e}")
@@ -323,7 +323,7 @@ fn tool_request() -> Request {
 async fn function_tool() -> Result<()> {
     let client = connect().await?;
     let answer: Answer = client
-        .complete(tool_request(), local_path_tool_host(temp_workspace("tool")?))
+        .complete(tool_request(), lending_tool_host(temp_workspace("tool")?)?)
         .await
         .map_err(|e| anyhow::anyhow!("live cursor function-tool completion failed: {e}"))?;
 
@@ -437,7 +437,7 @@ async fn confined_turn() -> Result<()> {
     })
     .await?;
     let answer: Answer = client
-        .complete(verdict_request(), local_path_tool_host(workspace))
+        .complete(verdict_request(), lending_tool_host(workspace)?)
         .await
         .map_err(|e| anyhow::anyhow!("the confined completion failed: {e:#}"))?;
 
@@ -507,8 +507,8 @@ async fn confined_npm_install() -> Result<()> {
         read: vec![],
         env: vec![],
     };
-    // HACK: the backend reaches a lend through `ToolHost::local_path` alone,
-    // so a borrow no table holds stands in for the root
+    // HACK: the backend reaches a lend through `ToolHost::lend` alone, so a
+    // borrow no table holds stands in for the root
     let location = Location {
         root: Resource::new_borrow(0),
         subpath: String::new(),
@@ -519,7 +519,7 @@ async fn confined_npm_install() -> Result<()> {
         worker: Some(worker),
     });
     let answer: Answer = client
-        .complete(request, local_path_tool_host(workspace.clone()))
+        .complete(request, lending_tool_host(workspace.clone())?)
         .await
         .map_err(|e| anyhow::anyhow!("the install completion failed: {e:#}"))?;
 

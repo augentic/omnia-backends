@@ -5,11 +5,12 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::env;
+use std::os::fd::AsFd as _;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use omnia_sandbox::{Access, Grant, Options, Sandbox, Session};
-use support::{BOUND, Captured, connect, proxy_of, run, session, sh};
+use omnia_sandbox::{Access, Grant, Lend, Options, Sandbox, Session};
+use support::{BOUND, Captured, connect, passed, proxy_of, run, session, sh, text};
 use tracing_subscriber::layer::SubscriberExt as _;
 
 const PLANTED: &str = "OMNIA_SANDBOX_PLANTED";
@@ -30,7 +31,9 @@ async fn pwd(session: &Session) -> String {
 
 // What `prepare` runs `workspace` with, which `access` says beforehand.
 async fn access(sandbox: &Sandbox, workspace: Option<&Path>) -> Access {
-    let queried = sandbox.access(workspace).await.expect("the workspace resolves");
+    let dir = workspace.map(support::open);
+    let queried =
+        sandbox.access(dir.as_ref().map(support::lend)).await.expect("the lend is placed");
     let prepared = session(sandbox, workspace).await.access();
     assert_eq!(queried, prepared, "`access` and `prepare` agree on {workspace:?}");
     prepared
@@ -79,11 +82,12 @@ async fn workspace_cwd() {
 
     assert_eq!(session.access(), Access::Read);
     assert!(session.access().is_lent());
-    let cwd = session.cwd().to_owned();
+    assert!(session.writable());
+    let cwd = session.cwd().expect("the working directory has a path");
     assert_eq!(
         cwd,
-        std::fs::canonicalize(workspace.path().join("tree")).expect("the workspace was created"),
-        "the workspace is created and canonical"
+        std::fs::canonicalize(workspace.path().join("tree")).expect("the workspace exists"),
+        "the session works where the lent directory stands, canonical"
     );
     assert_eq!(pwd(&session).await, cwd.to_string_lossy());
 }
@@ -95,10 +99,116 @@ async fn private_cwd() {
 
     assert_eq!(session.access(), Access::Private);
     assert!(!session.access().is_lent());
-    let cwd = session.cwd().to_owned();
+    assert!(session.writable());
+    let cwd = session.cwd().expect("the working directory has a path");
     let scratch = std::fs::canonicalize(session.scratch()).expect("the scratch exists");
     assert!(cwd.starts_with(&scratch), "{} is under the scratch", cwd.display());
     assert_eq!(pwd(&session).await, cwd.to_string_lossy());
+}
+
+// The tree is moved aside, and a link laid at its name, after the backend
+// opened it and before the session is prepared.
+#[tokio::test]
+async fn swap_before_prepare() {
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let swap = Swap::new(workspace.path());
+    let dir = support::open(&swap.tree);
+    swap.swap();
+
+    let sandbox = connect(Options::default()).await;
+    let session = sandbox
+        .prepare(Some(support::lend(&dir)), &Grant::default())
+        .await
+        .expect("the lend holds");
+
+    let held = std::fs::canonicalize(&swap.held).expect("the tree moved aside");
+    assert_eq!(session.cwd().expect("the working directory has a path"), held);
+    assert_eq!(text(&run(&session, "pwd -P").await.stdout), held.to_string_lossy());
+    passed(&run(&session, "echo made > made.txt").await, "writing the working directory");
+    assert!(held.join("made.txt").is_file(), "the write landed in the opened directory");
+    assert!(!swap.escaped(), "a write landed where the link leads");
+}
+
+// A lent `tree`, the path it is moved aside to, and the empty directory a
+// link laid at its name leads to.
+struct Swap {
+    tree: PathBuf,
+    held: PathBuf,
+    escape: PathBuf,
+}
+
+impl Swap {
+    fn new(workspace: &Path) -> Self {
+        let swap = Self {
+            tree: workspace.join("tree"),
+            held: workspace.join("held"),
+            escape: workspace.join("escape"),
+        };
+        std::fs::create_dir(&swap.escape).expect("a directory to escape to");
+        swap
+    }
+
+    fn swap(&self) {
+        std::fs::rename(&self.tree, &self.held).expect("the tree moves aside");
+        std::os::unix::fs::symlink("escape", &self.tree).expect("a link at its name");
+    }
+
+    fn escaped(&self) -> bool {
+        std::fs::read_dir(&self.escape).expect("the escape reads").next().is_some()
+    }
+}
+
+// The same swap after the session was prepared. A command built afterwards
+// is still bound to the opened directory, so a write through the path the
+// session stood at, which now leads through the link, is refused.
+#[tokio::test]
+async fn swap_after_prepare() {
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let swap = Swap::new(workspace.path());
+    let dir = support::open(&swap.tree);
+    let sandbox = connect(Options::default()).await;
+    let session = sandbox
+        .prepare(Some(support::lend(&dir)), &Grant::default())
+        .await
+        .expect("the lend holds");
+    let stale = session.cwd().expect("the working directory has a path").join("planted.txt");
+    swap.swap();
+
+    let held = std::fs::canonicalize(&swap.held).expect("the tree moved aside");
+    assert_eq!(session.cwd().expect("the working directory has a path"), held);
+    let output = run(&session, &format!("echo planted > '{}'", stale.display())).await;
+    assert!(!output.status.success(), "a write through the stale path ran");
+    assert!(!swap.escaped(), "a write landed where the link leads");
+    passed(&run(&session, "echo made > made.txt").await, "writing the working directory");
+    assert!(held.join("made.txt").is_file(), "the write landed in the opened directory");
+}
+
+// The scratch stays the process's own to write.
+#[tokio::test]
+async fn read_only_lend() {
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let tree = workspace.path().join("tree");
+    let dir = support::open(&tree);
+    std::fs::write(tree.join("note.txt"), "kept\n").expect("a file to read");
+    let sandbox = connect(Options::default()).await;
+    let lend = Lend {
+        dir: dir.as_fd(),
+        writable: false,
+    };
+    let session = sandbox.prepare(Some(lend), &Grant::default()).await.expect("the lend holds");
+
+    assert!(!session.writable());
+    let output = run(&session, "cat note.txt").await;
+    passed(&output, "reading the working directory");
+    assert_eq!(text(&output.stdout), "kept");
+    for script in ["echo made > made.txt", "echo changed > note.txt", "rm note.txt", "mkdir made"] {
+        let output = run(&session, script).await;
+        assert!(!output.status.success(), "`{script}` ran in a read-only lend");
+    }
+    assert_eq!(std::fs::read_to_string(tree.join("note.txt")).expect("the note stays"), "kept\n");
+    assert!(!tree.join("made.txt").exists(), "a file was made");
+    assert!(!tree.join("made").exists(), "a directory was made");
+    passed(&run(&session, "echo made > \"$HOME/made.txt\"").await, "writing the scratch");
 }
 
 // --- Shell by location ---
@@ -139,7 +249,7 @@ async fn shell_roots() {
     assert_eq!(
         access(&sandbox, Some(&missing.join("x"))).await,
         Access::Shell,
-        "beneath a root created on prepare"
+        "beneath a root created after connect"
     );
     assert_eq!(
         access(&sandbox, Some(&late_link.join("x"))).await,

@@ -11,7 +11,7 @@ mod observe;
 mod options;
 mod stream;
 
-use std::path::Path;
+use std::os::fd::AsFd as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -20,7 +20,7 @@ use agent::{Agent, Unanswered};
 use anyhow::anyhow;
 use omnia::FutureResult;
 use omnia_sandbox::{Access, Denied, Grant, Session};
-use omnia_wasi_model::{Answer, Error, Format, Limits, ModelClient, Request, ToolHost};
+use omnia_wasi_model::{Answer, Error, Format, Lend, Limits, ModelClient, Request, ToolHost};
 use options::Turn;
 use tracing::field::Empty;
 use tracing::{Instrument, info_span};
@@ -100,7 +100,7 @@ impl Client {
     ) -> anyhow::Result<(Lease, Turn)> {
         let api_key =
             self.api_key.as_deref().ok_or_else(|| anyhow!("CURSOR_API_KEY must be set"))?;
-        let session = self.prepare(request, tool_host.local_path()).await?;
+        let session = self.prepare(request, tool_host.lend()).await?;
         let turn = Turn::prepare(request, &session, self.model(request), api_key)?;
         let lease = self.pool.acquire(&session).await?;
         Ok((lease, turn))
@@ -109,16 +109,14 @@ impl Client {
     // A worker grant needs a shell: a worker reaches beyond its workspace
     // through the commands it runs there, so one over a read-only workspace
     // is the request's fault.
-    async fn prepare(
-        &self, request: &Request, workspace: Option<&Path>,
-    ) -> anyhow::Result<Session> {
+    async fn prepare(&self, request: &Request, lend: Option<&Lend>) -> anyhow::Result<Session> {
         let worker = request.grants.worker();
         let grant = worker.map_or_else(Grant::default, |worker| Grant {
             egress: worker.egress.clone(),
             read: worker.read.clone(),
             env: worker.env.clone(),
         });
-        let session = self.pool.prepare(workspace, &grant).await.map_err(refusal)?;
+        let session = self.pool.prepare(lend.map(sandboxed), &grant).await.map_err(refusal)?;
 
         if worker.is_some() && session.access() != Access::Shell {
             let detail = if session.access().is_lent() {
@@ -130,6 +128,14 @@ impl Client {
         }
 
         Ok(session)
+    }
+}
+
+// The lend as the sandbox takes it: the directory itself, never its path.
+fn sandboxed(lend: &Lend) -> omnia_sandbox::Lend<'_> {
+    omnia_sandbox::Lend {
+        dir: lend.dir().as_fd(),
+        writable: lend.writable(),
     }
 }
 

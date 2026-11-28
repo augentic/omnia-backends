@@ -2,12 +2,14 @@
 //! lend, a `call_tool` responder proving the session round-trip, and a
 //! `check` standing in for the guest's judgement.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use cap_std::ambient_authority;
+use cap_std::fs::Dir;
 use omnia::FutureResult;
-use omnia_wasi_model::{DirEntry, ToolHost};
+use omnia_wasi_model::{DirEntry, Lend, ToolHost};
 use serde_json::json;
 
 /// A unique token returned by the stub session's `lookup` tool.
@@ -17,12 +19,12 @@ pub const TOOL_SENTINEL: &str = "OMNIA-TOOL-SENTINEL-7d21c3aa";
 /// correction turn.
 pub const CHECK_WORD: &str = "quokka";
 
-// Lends an optional path, answers `lookup` with `TOOL_SENTINEL`, and plays
-// the guest's `check`: the first `rejections` candidates are corrected toward
-// `CHECK_WORD`, the rest accepted; every candidate offered is recorded.
+// Lends an optional directory, answers `lookup` with `TOOL_SENTINEL`, and
+// plays the guest's `check`: the first `rejections` candidates are corrected
+// toward `CHECK_WORD`, the rest accepted; every candidate offered is recorded.
 #[derive(Debug)]
 pub struct StubToolHost {
-    path: Option<PathBuf>,
+    lend: Option<Lend>,
     rejections: usize,
     seen: AtomicUsize,
     candidates: Arc<Mutex<Vec<String>>>,
@@ -66,15 +68,15 @@ impl ToolHost for StubToolHost {
         Box::pin(async move { Ok(verdict) })
     }
 
-    fn local_path(&self) -> Option<&Path> {
-        self.path.as_deref()
+    fn lend(&self) -> Option<&Lend> {
+        self.lend.as_ref()
     }
 }
 
-fn stub(path: Option<PathBuf>, rejections: usize) -> (Arc<dyn ToolHost>, Arc<Mutex<Vec<String>>>) {
+fn stub(lend: Option<Lend>, rejections: usize) -> (Arc<dyn ToolHost>, Arc<Mutex<Vec<String>>>) {
     let candidates = Arc::new(Mutex::new(Vec::new()));
     let host = StubToolHost {
-        path,
+        lend,
         rejections,
         seen: AtomicUsize::new(0),
         candidates: Arc::clone(&candidates),
@@ -82,9 +84,11 @@ fn stub(path: Option<PathBuf>, rejections: usize) -> (Arc<dyn ToolHost>, Arc<Mut
     (Arc::new(host), candidates)
 }
 
-/// A tool host that lends `path` as the completion's node-local workspace.
-pub fn local_path_tool_host(path: PathBuf) -> Arc<dyn ToolHost> {
-    stub(Some(path), 0).0
+/// A tool host that lends the directory at `path`, writable, as the
+/// completion's node-local workspace.
+pub fn lending_tool_host(path: PathBuf) -> anyhow::Result<Arc<dyn ToolHost>> {
+    let dir = Dir::open_ambient_dir(&path, ambient_authority())?;
+    Ok(stub(Some(Lend::new(dir, path, true)), 0).0)
 }
 
 /// A tool host with no local tree: the references-only completion shape.
